@@ -7,7 +7,8 @@ use tracedecay_domain::canonical_text::{encode_tagged_lowercase_hex, is_lowercas
 
 use super::{
     CodeGenerationRetentionErrorV1, GenerationDigestVerificationV1,
-    MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, storage,
+    MAX_GENERATION_METADATA_PREFIX_BYTES, SealedGenerationManifestMetadataV1, deferred_if_absent,
+    storage,
 };
 
 const MAX_FORMAT_REVISION_PREFIX_BYTES: usize = 4 * 1024;
@@ -16,7 +17,7 @@ pub(super) fn read_generation_format_revision(
     path: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<u32, CodeGenerationRetentionErrorV1> {
-    let mut file = File::open(path).map_err(storage)?;
+    let mut file = File::open(path).map_err(deferred_if_absent)?;
     let mut prefix = vec![0_u8; MAX_FORMAT_REVISION_PREFIX_BYTES];
     let bytes_read = file.read(&mut prefix).map_err(storage)?;
     crate::hotpath_observe::retention_inspected(bytes_read as u64);
@@ -40,7 +41,7 @@ pub(super) fn read_generation_metadata(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(u32, SealedGenerationManifestMetadataV1, String, u64), CodeGenerationRetentionErrorV1>
 {
-    let mut file = File::open(path).map_err(storage)?;
+    let mut file = File::open(path).map_err(deferred_if_absent)?;
     let size_bytes = file.metadata().map_err(storage)?.len();
     let mut hasher = Sha256::new();
     let mut prefix = Vec::with_capacity(MAX_GENERATION_METADATA_PREFIX_BYTES);

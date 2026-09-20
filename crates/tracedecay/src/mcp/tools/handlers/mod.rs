@@ -13,6 +13,15 @@ mod application_surface;
     clippy::redundant_closure_for_method_calls,
     clippy::uninlined_format_args
 )]
+mod configuration_batch_behavior_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
 mod configuration_dispatch_tests;
 #[cfg(test)]
 #[allow(
@@ -53,6 +62,15 @@ mod dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod graph_search_dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod hook_runtime_behavior_tests;
 pub mod info;
 pub(crate) mod retained_catalog;
 #[cfg(test)]
@@ -82,6 +100,15 @@ mod runtime_generation_census_dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod search_graph_independence_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod stack_snapshot_behavior_tests;
 mod support;
 mod tool_call_support;
 #[cfg(test)]

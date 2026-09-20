@@ -1,12 +1,14 @@
 name: Release
 
+# Dispatched on `master` by release-please after it creates the immutable
+# tag. GitHub Actions caches are scoped by the workflow run ref: a run on a
+# unique tag cannot restore the previous tag's cache, while master can reuse
+# the same target/profile dependency cache across releases.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Existing stable release tag to recover"
+        description: "Stable release tag to build or recover"
         required: true
         type: string
 
@@ -15,22 +17,17 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
   TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  group: release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
   validate-release:
     name: Resolve release source
-    if: >-
-      github.repository == 'ScriptedAlchemy/tracedecay' &&
-      (
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        github.event_name == 'workflow_dispatch'
-      )
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,8 +47,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
 
-      - name: Validate manual stable recovery
-        if: github.event_name == 'workflow_dispatch'
+      - name: Validate stable release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,16 +68,14 @@ jobs:
           [[ "$version" != *-* ]]
           tag="v${version}"
           test "$RELEASE_TAG" = "$tag"
-          test "$GITHUB_REF" = "refs/tags/${tag}"
-          test "$GITHUB_SHA" = "$source_sha"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
-            tag_sha="$(git rev-list -n 1 "$tag")"
-            if [[ "$tag_sha" != "$source_sha" ]]; then
-              echo "::error::${tag} targets ${tag_sha}, not release source ${source_sha}"
-              exit 1
-            fi
+          test "$GITHUB_REF" = "refs/heads/master"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          tag_sha="$(git rev-list -n 1 "$tag")"
+          if [[ "$tag_sha" != "$source_sha" ]]; then
+            echo "::error::${tag} targets ${tag_sha}, not release source ${source_sha}"
+            exit 1
           fi
+          git merge-base --is-ancestor "$source_sha" "$GITHUB_SHA"
           {
             echo "source_sha=${source_sha}"
             echo "source_epoch=${source_epoch}"
@@ -104,6 +98,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$source_sha" \
+            --signer-ref "refs/tags/${tag}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
 
@@ -311,7 +307,10 @@ jobs:
           set -euo pipefail
           bundle="tracedecay-${{ steps.version.outputs.tag }}-${{ matrix.name }}.mcpb"
           rm -rf verify-mcpb
-          python3 -m zipfile -e "$bundle" verify-mcpb
+          # unzip applies the mode bits build-mcpb.py records in the archive,
+          # which is what an MCPB host does. `python3 -m zipfile -e` drops
+          # them, so `test -x` failed on every Unix target with no output.
+          unzip -q "$bundle" -d verify-mcpb
           test -x verify-mcpb/server/tracedecay
           verify-mcpb/server/tracedecay --version
           verify-mcpb/server/tracedecay --help >/dev/null
@@ -381,7 +380,7 @@ jobs:
       always() &&
       needs.validate-release.result == 'success' &&
       (needs.dashboard-assets.result == 'success' || needs.dashboard-assets.result == 'skipped') &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -430,11 +429,15 @@ jobs:
   publish-assets:
     name: Publish release assets
     needs: [validate-release, build, verify-release]
+    # A failed build matrix still publishes every target that did build; the
+    # recovery planner rebuilds only the missing ones. Only a cancelled build
+    # withholds publication. Marking the release latest, refreshing
+    # server.json, and publishing the SDK stay gated on a complete build.
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
       needs.verify-release.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -498,6 +501,8 @@ jobs:
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$SOURCE_SHA" \
+            --signer-ref "refs/tags/${TAG}" \
+            --signer-ref "refs/heads/master" \
             --asset-names retained-asset-names \
             --download-dir retained-assets
           while IFS= read -r asset; do
@@ -509,6 +514,7 @@ jobs:
             fi
           done < retained-asset-names
           if [[ "${{ needs.validate-release.outputs.build_required }}" == "true" ]]; then
+            shopt -s nullglob
             for artifact in new-binaries/tracedecay-*; do
               destination="binaries/$(basename "$artifact")"
               [[ -e "$destination" ]] || cp "$artifact" "$destination"
@@ -517,12 +523,14 @@ jobs:
               destination="mcpbs/$(basename "$artifact")"
               [[ -e "$destination" ]] || cp "$artifact" "$destination"
             done
+            shopt -u nullglob
           fi
           python3 .release-automation/scripts/check-release-artifacts.py \
             --manifest .release-automation/.github/release-targets.json \
             --tag "$TAG" \
             --binaries binaries \
-            --mcpbs mcpbs
+            --mcpbs mcpbs \
+            --allow-missing-targets
           for bundle in mcpbs/*.mcpb; do
             platform="${bundle#mcpbs/tracedecay-"${TAG}"-}"
             platform="${platform%.mcpb}"
@@ -532,14 +540,23 @@ jobs:
               --platform "$platform"
           done
 
+      - name: Count newly built artifacts
+        id: built
+        run: |
+          shopt -s nullglob
+          archives=(new-binaries/tracedecay-*)
+          bundles=(new-mcpbs/*.mcpb)
+          echo "archives=${#archives[@]}" >>"$GITHUB_OUTPUT"
+          echo "bundles=${#bundles[@]}" >>"$GITHUB_OUTPUT"
+
       - name: Attest newly built binary archives
-        if: needs.validate-release.outputs.build_required == 'true'
+        if: steps.built.outputs.archives != '0'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-path: new-binaries/tracedecay-*
 
       - name: Attest newly built MCPBs
-        if: needs.validate-release.outputs.build_required == 'true'
+        if: steps.built.outputs.bundles != '0'
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-path: new-mcpbs/*.mcpb
@@ -586,7 +603,24 @@ jobs:
           for asset in "${assets[@]}"; do
             name="$(basename "$asset")"
             if grep -Fxq "$name" remote-asset-names; then
-              if [[ "$name" != tracedecay-* ]]; then
+              if [[ "$name" == SHA256SUMS ]]; then
+                # A recovery run adds targets, so the new manifest may be a
+                # superset of the published one. Every published line must
+                # survive unchanged; then the superset replaces it.
+                mkdir -p retained-metadata
+                gh release download "$TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir retained-metadata
+                if ! cmp -s "$asset" "retained-metadata/$name"; then
+                  while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    grep -Fxq -- "$line" "$asset" || {
+                      echo "::error::published SHA256SUMS line is not in the new manifest: $line"
+                      exit 1
+                    }
+                  done < "retained-metadata/$name"
+                  gh release upload "$TAG" "$asset" --clobber --repo "${{ github.repository }}"
+                fi
+              elif [[ "$name" != tracedecay-* ]]; then
                 mkdir -p retained-metadata
                 gh release download "$TAG" --repo "${{ github.repository }}" \
                   --pattern "$name" --dir retained-metadata
@@ -600,23 +634,35 @@ jobs:
             fi
           done
 
+          # Verify by name, not by glob: a partial publish may have no .zip
+          # or no .tar.gz yet, and `gh release download --pattern` fails on
+          # an empty match.
           mkdir -p remote-assets/{binaries,mcpbs}
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${TAG}-*.tar.gz" --dir remote-assets/binaries
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${TAG}-*.zip" --dir remote-assets/binaries
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern "tracedecay-${TAG}-*.mcpb" --dir remote-assets/mcpbs
+          gh api "repos/${{ github.repository }}/releases/tags/${TAG}" \
+            --jq '.assets[].name' > remote-asset-names
+          while IFS= read -r name; do
+            case "$name" in
+              tracedecay-"${TAG}"-*.mcpb)
+                gh release download "$TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir remote-assets/mcpbs ;;
+              tracedecay-"${TAG}"-*.tar.gz | tracedecay-"${TAG}"-*.zip)
+                gh release download "$TAG" --repo "${{ github.repository }}" \
+                  --pattern "$name" --dir remote-assets/binaries ;;
+            esac
+          done < remote-asset-names
           python3 .release-automation/scripts/check-release-artifacts.py \
             --manifest .release-automation/.github/release-targets.json \
             --tag "$TAG" \
             --binaries remote-assets/binaries \
-            --mcpbs remote-assets/mcpbs
+            --mcpbs remote-assets/mcpbs \
+            --allow-missing-targets
           .release-automation/scripts/verify-retained-release-assets.sh \
             --tag "$TAG" \
             --repo "${{ github.repository }}" \
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --source-digest "$SOURCE_SHA" \
+            --signer-ref "refs/tags/${TAG}" \
+            --signer-ref "refs/heads/master" \
             --files remote-assets/binaries/* remote-assets/mcpbs/*
 
       - name: Mark stable release as latest

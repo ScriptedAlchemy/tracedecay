@@ -221,10 +221,7 @@ pub fn acquire_shared_or_inherited(operation: &str) -> Result<LifecycleLease> {
 
 fn acquire_shared_or_inherited_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
-    match file
-        .try_lock_shared()
-        .map_err(std::io::Error::from)
-    {
+    match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(LifecycleLease {
             hold: LeaseHold::File(file),
             token: None,
@@ -384,10 +381,7 @@ fn acquire_exclusive_at_with_timeout(
 #[hotpath::measure(label = "runtime_core.lifecycle.acquire_shared")]
 fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
     let mut file = open_lock_file(path)?;
-    match file
-        .try_lock_shared()
-        .map_err(std::io::Error::from)
-    {
+    match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(LifecycleLease {
             hold: LeaseHold::File(file),
             token: None,
@@ -404,10 +398,7 @@ fn acquire_shared_at(path: &Path, operation: &str) -> Result<LifecycleLease> {
 
 fn try_acquire_shared_at(path: &Path, operation: &str) -> Result<SharedLeaseAttempt> {
     let file = open_lock_file(path)?;
-    match file
-        .try_lock_shared()
-        .map_err(std::io::Error::from)
-    {
+    match file.try_lock_shared().map_err(std::io::Error::from) {
         Ok(()) => Ok(SharedLeaseAttempt::Acquired(LifecycleLease {
             hold: LeaseHold::File(file),
             token: None,

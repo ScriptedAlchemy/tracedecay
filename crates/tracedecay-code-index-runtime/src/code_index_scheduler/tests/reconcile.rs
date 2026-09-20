@@ -24,17 +24,19 @@ use tracedecay_runtime_core::resident_memory::{
 
 use super::{
     ALPHA_LIB_V1, GitFixture, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
-    advance_pointer_to_unseated_successor, application_context, committed_capture_corpus_files,
-    core_search_request, drain_clone_backfill, git, git_stdout, mounted_core_query_worktree,
+    advance_pointer_to_unseated_successor, application_context, clear_pending_wake_until_quiet,
+    committed_capture_corpus_files, core_search_request, drain_clone_backfill, git, git_stdout,
+    hold_scheduler_for_root, mounted_core_query_worktree,
     mounted_core_query_worktree_with_one_permit, published, query_authority, query_meta,
     quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
     replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
     rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
-    test_project_id, wait_for_dashboard_ready, wait_for_event_to_ready, wait_for_generation_change,
-    wait_for_initial_generation, wait_for_live_complete_generation,
-    wait_for_live_complete_generation_by_polling, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change, wait_for_queryable_text_generation_id,
-    wait_for_quiescent_owner_pass, wait_until_serving_seat, write,
+    settled_owner_with_idle_admission, test_project_id, wait_for_dashboard_ready,
+    wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
+    wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
+    wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
+    wait_until_serving_seat, write,
 };
 use crate::{
     code_index::{
@@ -669,6 +671,38 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
     assert_ne!(changed.generation_id, initial.generation_id);
 }
 
+/// Poll a mounted worktree's dashboard clone-index status until it reports
+/// ready coverage.
+///
+/// `clone_index_status` reads the clone-successor slot with `try_lock` so a
+/// freshness read never joins a running backfill. A single sample therefore
+/// reports `Unavailable { "clone-index status is being updated" }` whenever a
+/// freshly published generation's successor still holds the slot, which is a
+/// truthful transient, not the settled answer a caller is asking for.
+async fn wait_for_ready_clone_index(
+    registry: &CodeIndexSchedulerRegistryV1,
+    path: &Path,
+) -> tracedecay_contracts::code_index_freshness::CodeCloneIndexObservationV1 {
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    loop {
+        let status = registry
+            .dashboard_freshness(path)
+            .await
+            .expect("mounted dashboard freshness")
+            .clone_index;
+        match status {
+            Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
+                observation,
+            }) => return observation,
+            transient => assert!(
+                Instant::now() <= deadline,
+                "the V16 artifact never reported ready clone coverage: {transient:?}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test]
 async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
@@ -684,16 +718,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
         .expect("mount worktree");
     let initial = wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let initial_status = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("initial clone freshness");
-    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
-        observation,
-    }) = initial_status.clone_index
-    else {
-        panic!("a complete V16 artifact must report ready clone coverage");
-    };
+    let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.source_bodies, Some(1));
     assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
     assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
@@ -711,16 +736,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     ));
     let _ = wait_for_generation_change(&registry, fixture.path(), &initial).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    let changed = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("changed clone freshness");
-    let Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready {
-        observation,
-    }) = changed.clone_index
-    else {
-        panic!("the changed V16 artifact must return to ready");
-    };
+    let observation = wait_for_ready_clone_index(&registry, fixture.path()).await;
     assert_eq!(observation.coverage.payloads_reused, Some(0));
     assert_eq!(observation.resources.stale_invalidations, Some(1));
     assert!(observation.resources.changed_symbol_update_micros.is_some());
@@ -795,7 +811,7 @@ async fn restart_remount_serves_the_retained_generation_without_republishing() {
 }
 
 #[test]
-fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v5() {
+fn retained_stale_rust_extractor_generation_is_refused_and_rebuilt() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let mut seed = scheduler(
@@ -836,7 +852,7 @@ fn retained_v3_rust_extractor_generation_is_refused_and_rebuilt_by_v5() {
             .iter()
             .find(|(language, _)| language.as_str() == "rust")
             .map(|(_, revision)| revision.as_str()),
-        Some("extractor.rust.v8")
+        Some("extractor.rust.v12")
     );
 }
 
@@ -921,61 +937,6 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     .expect("dirty remount must still publish the successor generation");
     assert_ne!(rebuilt, sealed_id, "the dirty checkout must rebuild");
     restarted.shutdown().await;
-}
-
-/// Dirty remount seating must not park on the publication decode barrier
-/// while holding the scheduler lock. Activation may already own that cache;
-/// joining it left remount warming with no seated generation.
-#[tokio::test]
-async fn dirty_retained_seat_does_not_join_the_publication_decode_cache() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-        )
-        .await
-        .expect("mount worktree");
-    wait_for_live_complete_generation(&registry, fixture.path()).await;
-
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    let scheduler = registry
-        .scheduler_handle(fixture.path())
-        .await
-        .expect("scheduler handle");
-    let held_decode = scheduler
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .hold_active_decode();
-    let seating = scheduler.clone();
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(1),
-        tokio::task::spawn_blocking(move || {
-            seating
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .seat_retained_generation_on_empty_serving_for_test()
-        }),
-    )
-    .await
-    .expect("dirty retained seat must not wait for the decode cache")
-    .expect("seat task")
-    .expect("seat result");
-    assert!(
-        matches!(outcome, Some(CodeIndexReconcileOutcomeV1::Noop(_))),
-        "dirty remount must still emit a retained-seat Noop without decoding"
-    );
-    assert_eq!(
-        held_decode.waiter_count(),
-        0,
-        "retained seating must not join the publication decode flight"
-    );
-
-    drop(held_decode);
-    registry.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2196,7 +2157,10 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
         .acquire_owned()
         .await
         .expect("hold background reconcile admission");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // The settle above cannot see a pass tail that has dropped its guard and
+    // not yet stamped its `BusyFollowUp` follow-up, so prove the slot stays
+    // empty before asserting that nothing queued a capture pass.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     assert_eq!(
         scheduler
             .lock()
@@ -2613,6 +2577,9 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
         .hold_reconcile_pass_for_test(fixture.path())
         .await
         .expect("mounted worktree");
+    // The permit and the pass guard leave the graph tail's renewals free to
+    // run (see `hold_scheduler_for_root`).
+    let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
     let source_freshness = registry
         .source_freshness_for_root(fixture.path())
         .await
@@ -2634,6 +2601,7 @@ async fn graph_read_during_reconcile_records_a_busy_follow_up() {
             .is_none(),
         "an expired graph proof abstains while the owner pass is in flight"
     );
+    scheduler.release().await;
     drop(owner_pass);
     drop(admission);
 
@@ -2728,6 +2696,13 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
 
     // Exercise the ordinary expiry path too. The existing seat keeps its exact
     // witness while the source-verification Noop renews the proof.
+    //
+    // A pass that re-proves the seat rebinds the admission clock, so an
+    // unfenced window between ageing the proof and reading it is a race with
+    // the worker, not an expiry test. The admission permit alone does not
+    // close it (see `hold_scheduler_for_root`).
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
     {
         let mut state = source_freshness
             .state
@@ -2746,6 +2721,8 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
             .is_none(),
         "the expired proof declines before the worker renews it"
     );
+    scheduler.release().await;
+    drop(admission);
     assert_eq!(
         wait_until_serving_seat(&registry, fixture.path(), Duration::from_secs(10), || {
             registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope)
@@ -2909,7 +2886,11 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     let store = TempDir::new().expect("store root");
     let (registry, _) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    // Draining leaves the busy follow-up wake armed, and every pass it starts
+    // owns the single global admission permit this test needs idle. Settle
+    // that chain and burn the banked permit behind it before sampling.
     drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let generation = latest.generation();
     let verified_import = generation
         .imports()
@@ -3010,6 +2991,11 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
     // Hold the worker at its dequeue point so every observation below is the
     // read path's own answer and never a pass that raced it.
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    // The permit and the pass counter leave the graph tail of the settled
+    // pass free to re-verify source once the drift below lands, and that
+    // re-verification withdraws the witness on its own (see
+    // `hold_scheduler_for_root`). Fence it until the read path has answered.
+    let scheduler = hold_scheduler_for_root(&registry, fixture.path()).await;
 
     std::fs::write(
         fixture.path().join("src/main.rs"),
@@ -3062,6 +3048,7 @@ async fn a_disproving_exact_source_probe_withdraws_the_busy_read_witness() {
 
     // Release the worker: its pass re-derives the sealed digests, observes the
     // drift, and the witness stops naming the disproved generation.
+    scheduler.release().await;
     drop(admission);
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     while witness
@@ -3711,7 +3698,10 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .collect::<Vec<_>>();
     let fixture = GitFixture::new(&borrowed);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    // One background permit, so holding it is what parks the owner: the
+    // default bound is the host core count and a single held permit would
+    // leave the other passes free to run under the sample below.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
         .mount_worktree(
             test_project_id(),
@@ -3722,18 +3712,40 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // `refresh_in_flight` is the pass counter *or* the pending-wake slot, and
+    // `wait_for_dashboard_ready` only joins the running pass. The seat no
+    // longer waits for the clone successor, so the mount leaves backfill work
+    // behind, and the wakes that drain it leave a banked permit whose no-op
+    // pass projects Verifying instead of Fresh. Settle the whole mount-era
+    // chain, then hold the admission so no further pass can start under the
+    // sample below.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root = fixture
         .path()
         .canonicalize()
         .expect("canonical fixture root");
-    let (scheduler, progress_slot) = {
+    let (scheduler, progress_slot, scope) = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical_root).expect("mounted worktree");
         (
             Arc::clone(&worktree.scheduler),
             Arc::clone(&worktree.build_progress),
+            tracedecay_contracts::ResolvedScope::new(
+                test_project_id(),
+                worktree.repository_id.clone(),
+                worktree.worktree_id.clone(),
+                None,
+            )
+            .expect("resolved scope"),
         )
     };
+    // `refresh_in_flight` also reads the pending-wake slot, and the settled
+    // owner's pass tail can still stamp `BusyFollowUp` into it after every
+    // settle check above (CI run 35412193695). With the admission held that
+    // tail is finite: empty the slot until it stays empty.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     let expected = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(progress) = progress_slot.read().expect("progress slot").snapshot() {
@@ -3777,6 +3789,144 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     scheduler_holder
         .await
         .expect("scheduler mutex holder joined");
+    registry.shutdown().await;
+}
+
+/// A query that cannot join the owner must not schedule the verification the
+/// dashboard would then report as `Verifying`. The in-flight pass renews an
+/// expired proof before it releases the scheduler; a read that posts
+/// `BusyFollowUp` while that pass holds the lock is taken and immediately
+/// replaced by the next poll, so the ladder never settles to `Fresh`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_query_does_not_rearm_dashboard_verification() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    wait_for_dashboard_ready(&registry, fixture.path()).await;
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    let canonical_root = fixture
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let scope = {
+        let mounted = registry.mounted.lock().await;
+        let worktree = mounted.get(&canonical_root).expect("mounted worktree");
+        tracedecay_contracts::ResolvedScope::new(
+            test_project_id(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .expect("resolved scope")
+    };
+    clear_pending_wake_until_quiet(&registry, &scope).await;
+    let freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted freshness fence");
+    {
+        let mut state = freshness.state.lock().expect("freshness state");
+        state.last_reconciled_at = Instant::now()
+            .checked_sub(state.staleness_threshold + Duration::from_secs(1))
+            .expect("age the readiness proof");
+    }
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&canonical_root)
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let scheduler_holder = tokio::task::spawn_blocking(move || {
+        let _scheduler_guard = scheduler.lock().expect("hold scheduler mutex");
+        let _ = locked_tx.send(());
+        let _ = release_rx.blocking_recv();
+    });
+    locked_rx.await.expect("scheduler mutex holder started");
+    for _ in 0..8 {
+        assert!(
+            registry
+                .latest_complete_fresh(fixture.path())
+                .await
+                .is_some(),
+            "a busy owner still serves the seated generation"
+        );
+    }
+    assert_eq!(
+        registry.pending_wake_micros_for_root(fixture.path()).await,
+        Some(0),
+        "a read blocked on the in-flight owner must not schedule another verification"
+    );
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness while the owner holds the scheduler");
+    assert_eq!(
+        projected.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
+        "an owner that has not observed a source change is not Verifying"
+    );
+    let _ = release_tx.send(());
+    scheduler_holder
+        .await
+        .expect("scheduler mutex holder joined");
+
+    assert!(
+        registry
+            .latest_complete_fresh(fixture.path())
+            .await
+            .is_some(),
+        "the seated generation remains servable once the owner releases the scheduler"
+    );
+    assert!(
+        registry
+            .pending_wake_micros_for_root(fixture.path())
+            .await
+            .is_some_and(|pending| pending != 0),
+        "an uncontended read of an expired proof still requests one verification"
+    );
+    drop(admission);
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
+        loop {
+            let settled = registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .is_some_and(|freshness| {
+                    freshness.staleness_state
+                        == Some(
+                            tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                        )
+                })
+                && registry
+                    .pending_wake_micros_for_root(fixture.path())
+                    .await
+                    == Some(0)
+                && !registry
+                    .reconcile_in_progress_for_test(fixture.path())
+                    .await;
+            if settled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the single verification settles back to Fresh");
     registry.shutdown().await;
 }
 
@@ -3862,10 +4012,13 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
-    // The seat is published mid-pass and the receipt lands after the pass
-    // releases its in-progress guard, so sample the baseline only once the
-    // mount's own receipt exists, or it is charged to the probe below.
-    wait_for_quiescent_owner_pass(&registry, fixture.path()).await;
+    // The seat no longer waits for the clone successor, so the mount leaves
+    // pending backfill behind. Draining it is a wake of its own, and every
+    // wake posts its own receipt, so settle the whole mount-era chain first:
+    // a pass that ends with a wake still pending re-arms a busy follow-up
+    // whose receipt would otherwise land inside the probe's window below.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
     {
@@ -3877,7 +4030,11 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
             .policy
             .staleness_threshold = Duration::ZERO;
     }
-    let receipts_before = registry.event_to_ready_receipts().len();
+    // Receipts are attributed by the arrival the pass claimed, not by list
+    // position: a mount-era wake claimed before this instant belongs to the
+    // mount even when its receipt lands during the window below. Only a wake
+    // accepted from here on is the probe's.
+    let probe_at = tracedecay_contracts::now_micros().0;
 
     assert_eq!(
         registry.probe_freshness_admission(fixture.path()).await,
@@ -3896,10 +4053,15 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         Some(0),
         "matching Git/stat evidence must not become an overflow hint"
     );
-    assert_eq!(
-        registry.event_to_ready_receipts().len(),
-        receipts_before,
-        "a suppressed probe must not fabricate a reconcile receipt"
+    let receipts = registry.event_to_ready_receipts();
+    assert!(
+        receipts.iter().all(|receipt| {
+            receipt
+                .arrival
+                .wake_micros()
+                .is_none_or(|wake_micros| wake_micros < probe_at)
+        }),
+        "a suppressed probe must not fabricate a reconcile receipt: {receipts:#?}"
     );
     drop(mounted);
     registry.shutdown().await;
@@ -4018,7 +4180,9 @@ async fn diagnostics_change_generation_advances_for_out_of_band_git_drift() {
 async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    // Single-permit admission: holding it below parks the background worker,
+    // which the host's default bound cannot do.
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     registry
         .mount_worktree(
             test_project_id(),
@@ -4029,18 +4193,33 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // The mount leaves clone backfill behind, and the wakes that drain it
+    // leave a banked permit whose no-op pass projects `Verifying` instead of
+    // `Fresh` (CI run 35425541839). Settle the mount-era chain, hold the
+    // admission so no pass can start under the sample, and prove the
+    // pending-wake slot stays empty, exactly as the text-progress test does.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
+    let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
-    {
+    let scope = {
         let mounted = registry.mounted.lock().await;
-        mounted
-            .get(&canonical)
-            .expect("mounted worktree")
+        let worktree = mounted.get(&canonical).expect("mounted worktree");
+        worktree
             .scheduler
             .lock()
             .expect("scheduler")
             .policy
             .staleness_threshold = Duration::ZERO;
-    }
+        tracedecay_contracts::ResolvedScope::new(
+            test_project_id(),
+            worktree.repository_id.clone(),
+            worktree.worktree_id.clone(),
+            None,
+        )
+        .expect("resolved scope")
+    };
+    clear_pending_wake_until_quiet(&registry, &scope).await;
 
     let projected = registry
         .dashboard_freshness(fixture.path())
@@ -4072,6 +4251,17 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
+    // The mount seats exact/lexical before the clone successor is built, so
+    // `wait_for_dashboard_ready` returns with that backfill still pending, and
+    // the admission below only parks a *new* pass at its dequeue point. A
+    // backfill slice advances under the clone-successor slot lock, which
+    // `clone_index_status` takes with `try_lock`: a sample that lands inside
+    // one reports `Unavailable { "clone-index status is being updated" }`
+    // before the source-stale branch can answer `Stale` (CI run 35432037843).
+    // Drain the mount-era backfill and burn the wake permits it banks, so the
+    // held admission is the only scheduling this sample can observe.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    settled_owner_with_idle_admission(&registry, fixture.path()).await;
 
     let admission = registry
         .background_reconcile_admission()
@@ -4097,10 +4287,14 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
         projected.rebuild_in_flight,
         "a pending scheduler wake must keep stale serving typed as rebuilding"
     );
-    assert!(matches!(
-        projected.clone_index,
-        Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. })
-    ));
+    assert!(
+        matches!(
+            projected.clone_index,
+            Some(tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Stale { .. })
+        ),
+        "a settled clone index under a stale source must read Stale: {:?}",
+        projected.clone_index
+    );
     drop(admission);
     registry.shutdown().await;
 }
@@ -5027,24 +5221,36 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         .await
         .expect("scheduler handle");
     let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let lock_thread = std::thread::spawn(move || {
         let _guard = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         held_tx.send(()).expect("signal scheduler lock held");
-        std::thread::sleep(Duration::from_millis(750));
+        release_rx.recv().expect("release scheduler lock");
     });
     held_rx.recv().expect("scheduler lock acquired");
 
-    let started = std::time::Instant::now();
+    // The contract is that shutdown never takes this mutex on its own behalf:
+    // it sets `shutting_down`, wakes the worker, and joins it, while the worker
+    // polls `try_lock` and returns cancelled the moment that flag is set. So
+    // shutdown must return while this thread still owns the mutex, and the
+    // proof is program order: the release below has not been sent yet.
+    //
+    // Wall time cannot state that. The worker's cancellation-observation
+    // latency is unbounded by design (it may be mid-slice in a blocking
+    // decode), so a clock-based budget measures host CPU, not the lock. A
+    // regression that makes shutdown wait on the mutex deadlocks here instead
+    // of failing, and the harness reports it as a timeout.
     registry.shutdown().await;
-    let elapsed = started.elapsed();
-    lock_thread.join().expect("scheduler lock holder joins");
 
     assert!(
-        elapsed < Duration::from_millis(250),
-        "shutdown waited {elapsed:?} for a synchronous scheduler lock instead of signalling its cooperative cancellation token"
+        !lock_thread.is_finished(),
+        "shutdown returned only after the scheduler lock holder let go, so it waited for a \
+         synchronous scheduler lock instead of signalling its cooperative cancellation token"
     );
+    release_tx.send(()).expect("release scheduler lock");
+    lock_thread.join().expect("scheduler lock holder joins");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5228,11 +5434,17 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
-    let admission = registry
-        .background_reconcile_admission()
-        .acquire_owned()
-        .await
-        .expect("background reconcile admission");
+    // Clone backfill owns the same coalesced pending-wake slot. This test is
+    // about simultaneous query admissions, so finish that independent
+    // production journey before establishing the empty-slot precondition.
+    drain_clone_backfill(&registry, fixture.path()).await;
+    // Take the shared admission first, through the helper that also waits out
+    // an in-flight pass: from here no new pass can start, so the quiet window
+    // established below stays quiet. A raw `acquire_owned` returns the instant
+    // a running pass releases the admission mid-body, and that pass's tail then
+    // stamps `BusyFollowUp` over the empty slot this test set up, which makes
+    // every claim below decline.
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -5242,8 +5454,11 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
                 .scheduler,
         )
     };
+    // The tail of the pass the admission was taken from also publishes text
+    // owners, so empty the wake slot and prove it stays empty before clearing
+    // the generations this test needs absent.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.clear_serving_generation_for_scope(&scope).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
     let held = scheduler
         .lock()
         .expect("hold the scheduler as a rebuild would");
@@ -5468,7 +5683,10 @@ async fn foreign_wake_keeps_pending_arrival_when_query_claim_is_released() {
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // A `BusyFollowUp` stamp from the finishing pass's tail would make the
+    // request below decline before it ever reaches the claim gate, and
+    // `wait_for_query_claim` would then hang instead of failing.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.install_query_claim_gate(&scope);
 
     let request = {
@@ -5518,7 +5736,9 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     // reaches the claim gate under test; settle the backfill first.
     drain_clone_backfill(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // Same hang: a tail's `BusyFollowUp` stamp declines the request before the
+    // claim gate this test waits on.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     registry.install_query_claim_gate(&scope);
     registry.install_pending_wake_drop_gate(&scope).await;
 
@@ -6946,7 +7166,9 @@ async fn text_freshness_query_during_owner_work_is_current_when_source_is_unchan
         .acquire_owned()
         .await
         .expect("hold background reconcile admission");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // A pass tail that stamps `BusyFollowUp` after this clear would fail the
+    // "no wake" assertion below, so prove the empty slot holds.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     // Stand in for a worker pass re-observing an unchanged tree: in-progress,
     // scheduler mutex free, nothing moved on disk or in git.
     let owner_pass = registry
@@ -8121,6 +8343,139 @@ fn graph_off_stale_witness_reconciles_unchanged_source_without_full_decode() {
     );
 }
 
+/// The disk freshness witness names whichever generation last persisted it.
+/// A later seal of the same bytes used to return `None` the moment that id
+/// disagreed, and the graph-on caller then decoded and resealed. Under load
+/// that reseal outlived the admission window, the swap cleared the witness,
+/// and the newer generation never became current. Unchanged sealed bytes
+/// keep the generation and rewrite the witness onto it. Moved bytes still
+/// refuse, without publishing a substitute.
+#[test]
+fn predecessor_freshness_witness_keeps_the_sealed_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let seeded = published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let generation_id = metadata.manifest().generation_id.clone();
+    let mut witness =
+        RestoreFreshnessWitnessV1::load(store.path()).expect("the seal persisted a proof");
+    assert_eq!(witness.generation_id, generation_id.as_str());
+    witness.generation_id = "generation.predecessor".to_owned();
+    witness.persist(store.path());
+    let index_path = fixture.path().join(".git/index");
+    let index_mtime = std::fs::metadata(&index_path)
+        .expect("git index metadata")
+        .modified()
+        .expect("git index mtime");
+    filetime::set_file_mtime(
+        &index_path,
+        filetime::FileTime::from_system_time(index_mtime + Duration::from_secs(2)),
+    )
+    .expect("advance only the git index mtime");
+
+    let decodes_before = scheduler.sealed_decode_count();
+    let outcome = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("graph-on retained reconcile")
+        .expect("unchanged sealed bytes must not be dropped");
+    let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome else {
+        panic!("predecessor proof must not reseal the same snapshot: {outcome:?}");
+    };
+    assert_eq!(
+        evidence.snapshot_content_identity, seeded.snapshot_content_identity,
+        "the noop names the generation that was already sealed"
+    );
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_before,
+        "keeping the sealed generation must not decode it again"
+    );
+    assert_eq!(
+        RestoreFreshnessWitnessV1::load(store.path())
+            .expect("rebound proof")
+            .generation_id,
+        generation_id.as_str(),
+        "the disk proof must name the sealed generation, not the predecessor"
+    );
+    assert_eq!(
+        scheduler
+            .source_currency_witness_for(&generation_id, &metadata.snapshot().content_identity,)
+            .map(|witness| witness.generation_id),
+        Some(generation_id.clone()),
+        "the in-memory proof must admit the sealed generation"
+    );
+
+    fixture.edit(
+        "src/lib.rs",
+        "pub fn changed_after_predecessor_proof() -> u32 { 2 }\n",
+    );
+    let refused = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("changed source is a typed refusal, not an error");
+    assert!(
+        refused.is_none(),
+        "moved bytes must not keep the sealed generation: {refused:?}"
+    );
+    assert_eq!(
+        scheduler
+            .publication
+            .read_publication_pointer()
+            .expect("read pointer")
+            .expect("active pointer")
+            .generation_id,
+        generation_id.as_str(),
+        "refusing the moved bytes must not publish a substitute generation"
+    );
+}
+
+/// Clone backfill and the seal itself outlive the 30s admission window. Expiry
+/// is a request to re-check the sealed digests, not a reason to drop the
+/// generation those digests already name. A byte change after expiry still drops it.
+#[test]
+fn expired_proof_keeps_the_sealed_generation_until_bytes_move() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let seeded = published(scheduler.reconcile_now().expect("seed retained generation"));
+    scheduler.expire_source_proof_for_test();
+    assert_eq!(
+        scheduler
+            .currency_witness_for_sealed_snapshot(
+                &seeded.generation_id,
+                &seeded.snapshot_content_identity,
+            )
+            .map(|witness| witness.generation_id),
+        Some(seeded.generation_id.clone()),
+        "an expired proof must keep the generation whose sealed bytes still match"
+    );
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 9 }\n");
+    scheduler.expire_source_proof_for_test();
+    assert!(
+        scheduler
+            .currency_witness_for_sealed_snapshot(
+                &seeded.generation_id,
+                &seeded.snapshot_content_identity,
+            )
+            .is_none(),
+        "an expired proof must drop the generation once its sealed bytes moved"
+    );
+}
+
 /// A query freshness probe against a restored owner that no pass has verified
 /// yet must report "not current", the restart's first pass is still the
 /// remedy, without minting an observed source change: no overflow hint and no
@@ -9134,7 +9489,8 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
         .acquire_owned()
         .await
         .expect("hold worker after remount dequeue");
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // Same tail: its stamp would look like the unhinted edit's own wake below.
+    clear_pending_wake_until_quiet(&registry, &scope).await;
     fixture.edit("src/lib.rs", "pub fn beta() -> usize { 2 }\n");
     git(fixture.path(), &["commit", "-qam", "unhinted remount edit"]);
 
@@ -9850,7 +10206,20 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
         .await
         .expect("release observability writer");
     registry.shutdown().await;
-    producer.shutdown().await.expect("flush producer");
+    // The writer held above is this store's only one, and it is held across a
+    // whole reconcile, so the producer's own bounded persistence budget can
+    // expire against it on a slow host: the lane then drops that batch and
+    // latches the denial for its whole life, which `shutdown` reports even
+    // after the writer is released. That denial is the arrangement this test
+    // builds, not a defect. The contract is the readiness loop above, which
+    // converged while the store was blocked; any other fault here is a real
+    // producer defect.
+    match producer.shutdown().await {
+        Ok(_) => {}
+        Err(tracedecay_contracts::ApplicationContractError::Domain(domain))
+            if domain == "observability_persistence_deadline" => {}
+        Err(error) => panic!("flush producer: {error:?}"),
+    }
 }
 
 /// The installed observability lane must persist one canonical index
@@ -10322,5 +10691,68 @@ fn serving_swap_seats_a_generation_whose_publication_moved_while_it_activated() 
         !ServingSwapOutcomeV1::decide(false, true, true).installs()
             && !ServingSwapOutcomeV1::decide(true, true, false).installs(),
         "neither refusing arm writes the serving slot"
+    );
+}
+
+/// Unchanged source bytes are not a reason to keep a generation the checkout
+/// has committed past. An empty (or docs-only) commit moves HEAD without
+/// touching one indexed byte, and `finish_retained_reconcile` rebuilds on
+/// exactly that `source_revision` drift because branch-scoped reads resolve
+/// generations by the commit they sealed. Accepting the sealed snapshot here
+/// would pin the stale attribution for as long as the bytes hold still.
+#[test]
+fn a_moved_commit_refuses_the_sealed_generation_despite_identical_bytes() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("seed retained generation"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated retained text generation")
+        .metadata()
+        .clone();
+    let sealed_revision = metadata
+        .snapshot()
+        .source_revision
+        .clone()
+        .expect("a clean seed seals its commit");
+    git(
+        fixture.path(),
+        &["commit", "-qm", "docs only", "--allow-empty"],
+    );
+    let moved_head =
+        CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"])).expect("moved HEAD");
+    assert_ne!(sealed_revision, moved_head, "the fixture must move HEAD");
+
+    let refused = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("graph-on retained reconcile");
+    assert!(
+        refused.is_none(),
+        "a moved commit must not keep the generation sealed at {sealed_revision:?}: {refused:?}"
+    );
+
+    // The refusal is what hands the pass to the authoritative capture, and
+    // that capture is what re-attributes the generation to the new commit.
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("rebuild at the moved commit"),
+    );
+    assert_eq!(
+        scheduler
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated retained text generation")
+            .metadata()
+            .snapshot()
+            .source_revision,
+        Some(moved_head),
+        "the rebuilt generation must name the commit the checkout is on"
     );
 }

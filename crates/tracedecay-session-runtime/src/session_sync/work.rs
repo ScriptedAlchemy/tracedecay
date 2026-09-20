@@ -491,10 +491,7 @@ impl SessionSyncProjectContext {
         request: &SessionSyncRequestV1,
         project_sessions: RegisteredGlobalDbLeaseV1,
     ) -> SessionSyncWorkResult {
-        let history = match service
-            .await_import_history(self, &project_sessions, request)
-            .await
-        {
+        let history = match service.await_import_history(self, request).await {
             Ok(progress) => Some(progress),
             Err(Some(interruption)) => {
                 return SessionSyncWorkResult::Interrupted(interruption);

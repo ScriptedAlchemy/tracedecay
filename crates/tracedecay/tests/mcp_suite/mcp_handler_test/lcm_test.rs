@@ -3,7 +3,11 @@ use crate::common;
 use crate::support::*;
 use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
+use std::sync::Arc;
+#[cfg(feature = "test-transport")]
 use std::time::SystemTime;
+#[cfg(feature = "test-transport")]
+use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
 use tracedecay::test_support::host_admission::LcmLineageFaultForTest;
 #[cfg(feature = "test-transport")]
@@ -61,7 +65,8 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     let (cg, _env) = init_test_project(dir.path()).await;
     let full_text = format!("orchard dispatch {}", "external-payload-body ".repeat(220));
     let projection =
-        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text, 1).await;
+        seed_temporal_lcm_session_message(&cg, "lcm-session", "lcm-message", full_text.clone(), 1)
+            .await;
     let temporal_db = open_active_project_session_db(&cg).await;
     activate_test_temporal_generation(&temporal_db, "lcm-session", vec![projection]).await;
     let db = open_active_project_session_db(&cg).await;
@@ -282,10 +287,21 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "{described_payload}"
     );
     assert_eq!(described_payload["description"]["raw_message_count"], 1);
+    let preview = described_payload["description"]["raw_messages"][0]["content_preview"]
+        .as_str()
+        .expect("describe preview");
     assert!(
-        described_payload["description"]["raw_messages"][0]
-            .get("content_preview")
-            .is_some()
+        preview.starts_with("orchard dispatch"),
+        "describe returned an empty preview: {preview:?}"
+    );
+    assert!(
+        preview.chars().count() < full_text.chars().count(),
+        "describe echoed the full payload body"
+    );
+    assert_eq!(
+        described_payload["description"]["raw_messages"][0]["content_range"]["total_chars"],
+        full_text.chars().count() as u64,
+        "describe must name the captured message length, not the preview stub"
     );
     assert!(
         described_payload["description"]["raw_messages"][0]
@@ -738,9 +754,12 @@ async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
         payload_payload["description"]["external_payload"]["payload_ref"],
         payload_ref
     );
-    assert_eq!(
-        payload_payload["description"]["external_payload"]["content_preview"],
-        ""
+    let payload_preview = payload_payload["description"]["external_payload"]["content_preview"]
+        .as_str()
+        .unwrap_or_else(|| panic!("payload describe preview missing: {payload_payload}"));
+    assert!(
+        payload_preview.contains(payload_ref.as_str()),
+        "payload describe must return the stored placeholder: {payload_preview:?}"
     );
     assert_eq!(payload_payload["grain"], "occurrence");
     assert_eq!(payload_payload["state"], "available");
@@ -2393,6 +2412,371 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
     assert_eq!(payload["lcm"]["payload"]["externalized_count"], 2);
     assert_eq!(payload["lcm"]["payload"]["orphan_file_count"], 0);
     assert_eq!(payload["lcm"]["payload"]["missing_count"], 0);
+}
+
+/// `tracedecay_lcm_status` is the caller-facing census. Each request must
+/// count only the session it was given, leave message bodies out of the
+/// answer, and refuse a parameter the schema does not accept.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn lcm_status_over_mcp_counts_the_requested_session() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    seed_lcm_session_message(
+        &cg,
+        "status-alpha",
+        "status-alpha-message",
+        "alpha orchard body",
+        1,
+    )
+    .await;
+    seed_lcm_session_message(&cg, "status-beta", "status-beta-message", "beta only", 2).await;
+    let db = open_active_project_session_db(&cg).await;
+    let alpha = db
+        .lcm_load_raw_message_for_test("cursor", "status-alpha-message")
+        .await
+        .expect("alpha raw message");
+    db.lcm_insert_summary_node_for_test(
+        HostAdmissionScope::Project,
+        LcmSummaryNodeDraft {
+            provider: "cursor".to_string(),
+            conversation_id: "status-alpha".to_string(),
+            session_id: "status-alpha".to_string(),
+            depth: 0,
+            summary_text: "alpha summary must stay out of status".to_string(),
+            source_refs: vec![LcmSourceRef::RawMessage {
+                store_id: alpha.store_id,
+            }],
+            source_token_count: 20,
+            summary_token_count: 4,
+            source_time_start: Some(1),
+            source_time_end: Some(2),
+            expand_hint: None,
+            metadata_json: None,
+        },
+    )
+    .await
+    .expect("summary should insert");
+    let server = real_mcp_server(cg).await;
+
+    let (alpha_text, alpha_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-alpha"}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&alpha_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "cursor",
+            "session_id": "status-alpha",
+            "raw_message_count": 1,
+            "summary_node_count": 1,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 1,
+            "estimated_tokens": 0,
+            "token_estimate": {
+                "complete": false,
+                "scanned_messages": 0,
+                "next_after_store_id": 0
+            },
+            "dag_nodes": 1,
+            "dag_tokens": 4,
+            "dag_source_tokens": 20,
+            "compression_ratio": "5.0:1",
+            "depth0": {"count": 1, "tokens": 4, "source_tokens": 20},
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{alpha_status}"
+    );
+
+    let (beta_text, beta_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-beta"}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&beta_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "cursor",
+            "session_id": "status-beta",
+            "raw_message_count": 1,
+            "summary_node_count": 0,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 1,
+            "estimated_tokens": 0,
+            "token_estimate": {
+                "complete": false,
+                "scanned_messages": 0,
+                "next_after_store_id": 0
+            },
+            "dag_nodes": 0,
+            "dag_tokens": 0,
+            "dag_source_tokens": 0,
+            "compression_ratio": "0:1",
+            "depth0": null,
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{beta_status}"
+    );
+
+    let (_missing_text, missing_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-missing"}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&missing_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "cursor",
+            "session_id": "status-missing",
+            "raw_message_count": 0,
+            "summary_node_count": 0,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 0,
+            "estimated_tokens": 0,
+            "token_estimate": {"complete": true, "scanned_messages": 0},
+            "dag_nodes": 0,
+            "dag_tokens": 0,
+            "dag_source_tokens": 0,
+            "compression_ratio": "0:1",
+            "depth0": null,
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{missing_status}"
+    );
+
+    let (all_text, all_status) = lcm_status_payload(&server, json!({"provider": "all"})).await;
+    assert_eq!(
+        lcm_status_scope(&all_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": false,
+            "provider": "all",
+            "raw_message_count": 2,
+            "summary_node_count": 1,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 2,
+            "estimated_tokens": 0,
+            "token_estimate": {
+                "complete": false,
+                "scanned_messages": 0,
+                "next_after_store_id": 0
+            },
+            "dag_nodes": 1,
+            "dag_tokens": 4,
+            "dag_source_tokens": 20,
+            "compression_ratio": "5.0:1",
+            "depth0": {"count": 1, "tokens": 4, "source_tokens": 20},
+            "payload_coverage_state": "partial",
+            "payload_coverage_reason": "payload_file_census_requires_deep_status",
+            "integrity_mismatch_count": null,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{all_status}"
+    );
+    assert!(
+        all_status.get("session_id").is_none(),
+        "an unfiltered census must not invent a session id: {all_status}"
+    );
+
+    let (_omitted_text, omitted_provider) = lcm_status_payload(&server, json!({})).await;
+    assert_eq!(omitted_provider["provider"], "all");
+    assert_eq!(omitted_provider["lcm"]["raw_message_count"], 2);
+    assert_eq!(omitted_provider["lcm"]["summary_node_count"], 1);
+
+    let (deep_text, deep_status) = lcm_status_payload(
+        &server,
+        json!({"provider": "cursor", "session_id": "status-alpha", "deep": true}),
+    )
+    .await;
+    assert_eq!(
+        lcm_status_scope(&deep_status),
+        json!({
+            "status": "ok",
+            "authority_outcome": {"state": "ready"},
+            "deep": true,
+            "provider": "cursor",
+            "session_id": "status-alpha",
+            "raw_message_count": 1,
+            "summary_node_count": 1,
+            "external_payload_count": 0,
+            "missing_payload_count": 0,
+            "unreferenced_payload_count": 0,
+            "maintenance_debt_count": 0,
+            "store_messages": 1,
+            "estimated_tokens": 3,
+            "token_estimate": {"complete": true, "scanned_messages": 1},
+            "dag_nodes": 1,
+            "dag_tokens": 4,
+            "dag_source_tokens": 20,
+            "compression_ratio": "5.0:1",
+            "depth0": {"count": 1, "tokens": 4, "source_tokens": 20},
+            "payload_coverage_state": "complete",
+            "payload_coverage_reason": null,
+            "integrity_mismatch_count": 0,
+            "externalized_count": 0,
+            "missing_count": 0,
+            "redaction_enabled": false,
+            "lossy_records": 0,
+            "lifecycle_state_count": 0,
+            "frontier_count": 0,
+            "lifecycle_debt_count": 0,
+            "current_session_id": null,
+            "current_frontier_store_id": null,
+            "last_finalized_session_id": null,
+            "last_finalized_frontier_store_id": null
+        }),
+        "{deep_status}"
+    );
+
+    let rendered = format!("{alpha_text}\n{beta_text}\n{all_text}\n{deep_text}");
+    assert!(
+        !rendered.contains("alpha orchard body"),
+        "status must count the alpha message without returning its body"
+    );
+    assert!(!rendered.contains("beta only"));
+    assert!(!rendered.contains("alpha summary must stay out of status"));
+
+    let rejected = handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_lcm_status",
+        json!({"hermes_home": "/tmp/not-a-profile"}),
+    )
+    .await;
+    assert_eq!(rejected["error"]["code"], -32603);
+    assert_eq!(
+        rejected["error"]["message"],
+        "tool execution failed: config error: unknown parameter `hermes_home` for `tracedecay_lcm_status`"
+    );
+    assert_eq!(rejected["error"]["data"]["tool"], "tracedecay_lcm_status");
+    server.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+async fn lcm_status_payload(server: &Arc<McpServer>, args: Value) -> (String, Value) {
+    let result = handle_real_server_tool_call(server, "tracedecay_lcm_status", args).await;
+    let text = extract_real_server_text(&result).to_owned();
+    let payload = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("tracedecay_lcm_status must return JSON: {error}\n{text}"));
+    (text, payload)
+}
+
+#[cfg(feature = "test-transport")]
+fn lcm_status_scope(payload: &Value) -> Value {
+    let mut scope = json!({
+        "status": payload["status"],
+        "authority_outcome": payload["authority_outcome"],
+        "deep": payload["deep"],
+        "provider": payload["provider"],
+        "raw_message_count": payload["lcm"]["raw_message_count"],
+        "summary_node_count": payload["lcm"]["summary_node_count"],
+        "external_payload_count": payload["lcm"]["external_payload_count"],
+        "missing_payload_count": payload["lcm"]["missing_payload_count"],
+        "unreferenced_payload_count": payload["lcm"]["unreferenced_payload_count"],
+        "maintenance_debt_count": payload["lcm"]["maintenance_debt_count"],
+        "store_messages": payload["lcm"]["store"]["messages"],
+        "estimated_tokens": payload["lcm"]["store"]["estimated_tokens"],
+        "token_estimate": payload["lcm"]["store"]["token_estimate"],
+        "dag_nodes": payload["lcm"]["dag"]["total_nodes"],
+        "dag_tokens": payload["lcm"]["dag"]["total_tokens"],
+        "dag_source_tokens": payload["lcm"]["dag"]["total_source_tokens"],
+        "compression_ratio": payload["lcm"]["dag"]["compression_ratio"],
+        "depth0": payload["lcm"]["dag"]["depths"].get("d0").cloned().unwrap_or(Value::Null),
+        "payload_coverage_state": payload["lcm"]["payload"]["coverage"]["state"],
+        "payload_coverage_reason": payload["lcm"]["payload"]["coverage"]
+            .get("reason")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "integrity_mismatch_count": payload["lcm"]["payload"]["integrity_mismatch_count"],
+        "externalized_count": payload["lcm"]["payload"]["externalized_count"],
+        "missing_count": payload["lcm"]["payload"]["missing_count"],
+        "redaction_enabled": payload["lcm"]["redaction"]["enabled"],
+        "lossy_records": payload["lcm"]["redaction"]["lossy_records"],
+        "lifecycle_state_count": payload["lcm"]["lifecycle"]["lifecycle_state_count"],
+        "frontier_count": payload["lcm"]["lifecycle"]["frontier_count"],
+        "lifecycle_debt_count": payload["lcm"]["lifecycle"]["maintenance_debt_count"],
+        "current_session_id": payload["lcm"]["lifecycle"]["current_session_id"],
+        "current_frontier_store_id": payload["lcm"]["lifecycle"]["current_frontier_store_id"],
+        "last_finalized_session_id": payload["lcm"]["lifecycle"]["last_finalized_session_id"],
+        "last_finalized_frontier_store_id": payload["lcm"]["lifecycle"]["last_finalized_frontier_store_id"]
+    });
+    if let Some(session_id) = payload.get("session_id") {
+        scope
+            .as_object_mut()
+            .expect("scope object")
+            .insert("session_id".to_owned(), session_id.clone());
+    }
+    scope
 }
 
 // Repeated LCM tool calls in one process must reuse the per-process

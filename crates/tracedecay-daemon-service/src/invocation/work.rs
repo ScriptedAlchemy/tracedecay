@@ -44,13 +44,7 @@ pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocat
 
 /// Retryable state for an admitted project whose runtime is still mounting.
 pub(super) fn runtime_mounting_problem(request_id: String) -> DaemonInvocationResponse {
-    application_problem(
-        request_id,
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.surface.unavailable".to_owned(),
-            message: "The project runtime for this operation is still mounting".to_owned(),
-        }),
-    )
+    application_problem(request_id, ApplicationProblem::runtime_mounting())
 }
 
 /// Permanent owner-publication failure. This is not warming: retrying the

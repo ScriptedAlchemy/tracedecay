@@ -26,6 +26,7 @@ members = [
     "crates/tracedecay-host-admission",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
+    "crates/tracedecay-hotpath-guard",
     "crates/tracedecay-lcm",
     "crates/tracedecay-lsp",
     "crates/tracedecay-maintenance",
@@ -63,7 +64,7 @@ resolver = "3"
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
-version = "0.1.0-beta.41"
+version = "0.1.0-beta.47"
 
 [workspace.dependencies]
 # Opt-in profiler, pinned once for the whole workspace. Non-optional on purpose:

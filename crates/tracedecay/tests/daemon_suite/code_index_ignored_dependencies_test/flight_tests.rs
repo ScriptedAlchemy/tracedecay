@@ -1,7 +1,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
-use tracedecay_code_index::production::CodeIndexProductionErrorV1;
+use tracedecay_code_index::production::{
+    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+};
+use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock;
 
 use super::*;
 
@@ -148,13 +151,48 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
 }
 
 fn assert_publication_error(error: CodeIndexSchedulerErrorV1) {
+    let CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(
+        CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail),
+    )) = &error
+    else {
+        panic!(
+            "coalesced failure must stay in the scheduler publication family, not an EISDIR misclass: {error:?}"
+        );
+    };
     assert!(
-        matches!(
-            error,
-            CodeIndexSchedulerErrorV1::Production(CodeIndexProductionErrorV1::Publication(_))
-        ),
-        "coalesced failure must preserve the production publication error family"
+        detail.contains("not a regular file"),
+        "a directory pointer slot is publication corruption, got {detail}"
     );
+    assert!(
+        !detail.contains("Is a directory") && !detail.contains("os error 21"),
+        "publication corruption must not carry the raw EISDIR OS error: {detail}"
+    );
+}
+
+/// Hold the only background permit once no pass is in flight.
+///
+/// Text seating keeps `reconcile_in_progress` after it drops the scheduler
+/// mutex, and that pass can still rename a valid active pointer. A truncated
+/// pointer written in that window is not a closed fault. Occupying the permit
+/// while the owner has not entered its pass stops that rewrite.
+async fn hold_idle_background_admission(
+    registry: &CodeIndexSchedulerRegistryV1,
+) -> tokio::sync::OwnedSemaphorePermit {
+    let admission = registry.background_reconcile_admission();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry.memory_stats().await.reconciling_worktrees == 0
+            && let Ok(permit) = admission.clone().try_acquire_owned()
+            && registry.memory_stats().await.reconciling_worktrees == 0
+        {
+            return permit;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "background reconcile did not go idle before publication fault injection"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -242,6 +280,8 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
     let registry = Arc::new(mount(fixture.path(), &store, 1).await);
     let baseline = latest(&registry, fixture.path()).await;
     let request = request_for(&baseline, "pkg");
+    let idle_admission = hold_idle_background_admission(&registry).await;
+    registry.clear_pending_wake_for_scope(&request.scope).await;
     let hold = SchedulerHold::acquire(&registry, fixture.path()).await;
     let (owner_control, owner_entered) = BlockingNthControl::new(4);
 
@@ -283,8 +323,35 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
             &fixture.path().canonicalize().expect("canonical fixture"),
         );
     let pointer_path = scoped_store.join("active-code-generation-v1.json");
-    let pointer_bytes = std::fs::read(&pointer_path).expect("read active pointer");
-    std::fs::write(&pointer_path, b"{").expect("corrupt active pointer");
+    // Writers rename a temporary over the active pointer while holding the
+    // generation-store lock. A truncated file is not a closed fault: a pass
+    // that already read a valid pointer can rename it back. A directory cannot
+    // be renamed over. Taking the lock first means no writer is mid-transaction
+    // when the slot stops being a regular file.
+    let pointer_bytes = {
+        let store_lock = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(lock) = try_acquire_code_generation_store_lock(&scoped_store)
+                    .expect("generation store lock")
+                {
+                    break lock;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("no generation-store writer is mid-transaction");
+        let pointer_bytes = std::fs::read(&pointer_path).expect("read active pointer");
+        // `rename(2)` replaces a truncated file with a valid pointer. A
+        // directory cannot be renamed over, so the fault stays closed. The
+        // scheduler must report publication corruption, not the EISDIR that
+        // read and rename return for that directory.
+        std::fs::remove_file(&pointer_path).expect("remove active pointer");
+        std::fs::create_dir(&pointer_path).expect("replace active pointer with a directory");
+        drop(store_lock);
+        pointer_bytes
+    };
+    drop(idle_admission);
     owner_control.release();
     hold.release();
 
@@ -300,7 +367,14 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
         .expect_err("follower publication fails closed");
     assert_publication_error(owner_error);
     assert_publication_error(follower_error);
+    assert!(
+        std::fs::symlink_metadata(&pointer_path)
+            .expect("faulted pointer remains")
+            .is_dir(),
+        "publication must not replace a directory pointer it did not observe"
+    );
 
+    std::fs::remove_dir_all(&pointer_path).expect("remove faulted pointer node");
     std::fs::write(pointer_path, pointer_bytes).expect("restore active pointer");
     registry.shutdown().await;
 }

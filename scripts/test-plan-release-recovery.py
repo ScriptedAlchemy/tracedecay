@@ -116,6 +116,20 @@ def main() -> None:
         assert matrix == {"include": [TARGETS["include"][1]]}
         assert retained == sorted((beta_linux, beta_linux_mcpb))
 
+        beta_assets = (
+            beta_linux,
+            beta_linux_mcpb,
+            "tracedecay-beta-v1.2.3-windows.zip",
+            "tracedecay-beta-v1.2.3-windows.mcpb",
+            "SHA256SUMS",
+            "install.sh",
+        )
+        matrix, retained = run(root, beta_assets, profile="beta")
+        assert matrix == {"include": []}
+        assert len(retained) == 4
+
+        run(root, (beta_linux, "install.sh"), profile="beta", success=False)
+
     print("release recovery planner tests passed")
 
 

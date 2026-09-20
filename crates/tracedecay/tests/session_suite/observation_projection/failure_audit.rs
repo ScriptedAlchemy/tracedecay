@@ -767,6 +767,13 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
     );
 }
 
+/// A projected message body that matches neither this binary's rendering nor
+/// the rendering a shipped release wrote is tamper. Profile reopen must name
+/// that disagreement and leave the row untouched. An interrupted write whose
+/// row is still the shipped rendering is a different admission and is not this
+/// case. Provenance identity, digests that match neither the current nor the
+/// stored output, foreign ownership, missing rows, and conflicting session
+/// fields remain hard failures as well.
 #[tokio::test]
 async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-update", "message-audit-update").await;
@@ -786,13 +793,25 @@ async fn projected_message_update_invalidates_audit_and_fails_reopen() {
         .unwrap();
     drop(raw_conn);
 
+    let Err(error) = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await
+    else {
+        panic!("a tampered projected message must fail profile reopen");
+    };
+    let message = error.to_string();
     assert!(
-        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-            .await
-            .is_err()
+        message.contains("projection output rows disagree with deterministic output"),
+        "{message}"
+    );
+    assert!(
+        projected_message_texts(&tmp).await[0].contains("tampered projection body"),
+        "profile reopen rewrote the tampered body instead of refusing it"
     );
 }
 
+/// A vanished projected output is the same hard failure: the convergence
+/// ledger rewrites a shipped rendering it can see, and never inserts a missing
+/// message row, so a store whose projected output disappeared still has to be
+/// named rather than silently admitted.
 #[tokio::test]
 async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-delete", "message-audit-delete").await;

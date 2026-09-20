@@ -595,6 +595,64 @@ fn cancellation_denies_catalog_and_adjacency_reads() {
 }
 
 #[test]
+fn edges_among_induces_only_edges_whose_endpoints_are_both_members() {
+    let reader = reader(&store_for(production_manifest()));
+    let members = [
+        id::<SymbolOccurrenceId>("sym.alpha.run"),
+        id::<SymbolOccurrenceId>("sym.beta.run"),
+        id::<SymbolOccurrenceId>("sym.beta.runner"),
+    ];
+
+    let induced = reader
+        .edges_among(&members, &[], 16, request())
+        .expect("induced edges");
+    assert_eq!(
+        induced
+            .iter()
+            .map(|edge| (
+                edge.from_occurrence.as_str(),
+                edge.to_occurrence.as_str(),
+                edge.kind
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("sym.alpha.run", "sym.beta.run", RelationEdgeKindV1::Calls),
+            ("sym.beta.runner", "sym.beta.run", RelationEdgeKindV1::Uses),
+        ],
+        "canonical edge order, and the gamma caller outside the member set is never induced"
+    );
+
+    let calls_only = reader
+        .edges_among(&members, &[RelationEdgeKindV1::Calls], 16, request())
+        .expect("kind-filtered induced edges");
+    assert_eq!(
+        calls_only.iter().map(|edge| edge.kind).collect::<Vec<_>>(),
+        vec![RelationEdgeKindV1::Calls],
+        "an admitted-kind list drops the Uses edge between the same members"
+    );
+
+    let far_endpoint_outside = reader
+        .edges_among(
+            &[
+                id::<SymbolOccurrenceId>("sym.alpha.run"),
+                id::<SymbolOccurrenceId>("sym.gamma.main"),
+            ],
+            &[],
+            16,
+            request(),
+        )
+        .expect("induced edges");
+    assert_eq!(
+        far_endpoint_outside
+            .iter()
+            .map(|edge| (edge.from_occurrence.as_str(), edge.to_occurrence.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("sym.gamma.main", "sym.alpha.run")],
+        "a seed's edge to a non-member is dropped while its edge from a member is kept"
+    );
+}
+
+#[test]
 fn exhausted_fanout_budget_is_a_typed_refusal() {
     let reader = reader(&store_for(production_manifest()));
     let error = reader

@@ -10,11 +10,12 @@ use std::sync::Arc;
 
 use thiserror::Error;
 use tracedecay_domain::{
-    ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, FusionProfile,
-    PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalContractError, RetrievalCursor,
-    RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId,
+    CalibrationProfileId, ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1,
+    FusionProfile, PrivacyDomainId, QueryDigest, QueryFallbackSubpayload, RetrievalContractError,
+    RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalRequest, RetrieverBatch,
+    RetrieverKind, RetrieverOutcome, ScoreDomainCalibrationV1, ScoreDomainId,
 };
+use tracedecay_temporal_query::ranking::NORMALIZED_SCORE_CEILING_MICROS;
 
 use super::evidence_lanes::{TaskSessionCandidateSelectionV1, TaskSessionLaneEvidenceV1};
 use super::fusion::{
@@ -201,9 +202,17 @@ impl QueryAuthorityV1 {
     }
 
     pub fn task_session_score_domain(&self) -> Result<ScoreDomainId, QueryAuthorityErrorV1> {
-        if self.mode != QueryAuthorityModeV1::Federated {
-            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
+        if self.mode == QueryAuthorityModeV1::Federated {
+            return self.federated_task_session_score_domain();
         }
+        // The shipped authority is the checked-in exact/lexical/graph policy.
+        // TaskSession is not a search lane, so it does not belong in that
+        // profile, but the same mounted keyring can still rank session anchors.
+        ScoreDomainId::new(super::QUERY_TASK_SESSION_SCORE_DOMAIN_V1.to_owned())
+            .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))
+    }
+
+    fn federated_task_session_score_domain(&self) -> Result<ScoreDomainId, QueryAuthorityErrorV1> {
         let calibration = self
             .profile
             .calibrations
@@ -232,11 +241,69 @@ impl QueryAuthorityV1 {
         Ok(domain)
     }
 
-    /// Rank one exact TaskSession expansion with the active evaluated
-    /// federated profile. Unrelated lanes are not represented as successful
-    /// empty batches; this projection retains only the accepted TaskSession
-    /// calibration, weight, score-domain mapping, diversity, cursor key, and
-    /// comparator revision.
+    /// One-lane profile for TaskSession selection.
+    ///
+    /// A federated profile already carries the accepted calibration. The core
+    /// fallback profile does not, and must not: adding the lane there would
+    /// change search cursor identity. The projection lives only on this read.
+    pub(super) fn task_session_ranking_profile(
+        &self,
+    ) -> Result<FusionProfile, QueryAuthorityErrorV1> {
+        let mut profile = self.profile.clone();
+        if profile
+            .calibrations
+            .contains_key(&RetrieverKind::TaskSession)
+        {
+            profile
+                .calibrations
+                .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+            profile
+                .weights_micros
+                .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+            return Ok(profile);
+        }
+        if self.mode == QueryAuthorityModeV1::Federated {
+            return Err(QueryAuthorityErrorV1::InvalidAuthority(
+                "federated profile omits TaskSession calibration".to_owned(),
+            ));
+        }
+        let score_domain = self.task_session_score_domain()?;
+        let calibration_profile_id =
+            CalibrationProfileId::new(super::QUERY_TASK_SESSION_CALIBRATION_V1.to_owned())
+                .map_err(|error| QueryAuthorityErrorV1::InvalidAuthority(error.to_string()))?;
+        profile.calibrations.clear();
+        profile.weights_micros.clear();
+        profile.minimum_calibrated_feature_micros.clear();
+        profile.score_domain_calibrations.clear();
+        profile
+            .calibrations
+            .insert(RetrieverKind::TaskSession, calibration_profile_id.clone());
+        profile
+            .weights_micros
+            .insert(RetrieverKind::TaskSession, 1_000_000);
+        profile.score_domain_calibrations.insert(
+            score_domain.clone(),
+            ScoreDomainCalibrationV1 {
+                calibration_profile_id,
+                score_domain,
+                // TaskSession raw scores are temporal ranking's encoded
+                // tier+within-tier scores, not a [0, 1_000_000] feature. A
+                // narrower range would saturate every ranked anchor to the
+                // same calibrated feature and hand the order to the
+                // source-validity tie-break.
+                raw_min_micros: 0,
+                raw_max_micros: NORMALIZED_SCORE_CEILING_MICROS,
+            },
+        );
+        Ok(profile)
+    }
+
+    /// Rank one exact TaskSession expansion with the mounted query authority.
+    ///
+    /// Unrelated lanes are not represented as successful empty batches. A
+    /// federated profile projects down to its TaskSession calibration. The
+    /// core fallback authority uses the same keyring and comparator without
+    /// folding TaskSession into the search fusion profile.
     pub fn select_task_session(
         &self,
         request: &RetrievalRequest,
@@ -245,17 +312,8 @@ impl QueryAuthorityV1 {
         page_size: usize,
         cursor: Option<&RetrievalCursor>,
     ) -> Result<TaskSessionCandidateSelectionV1, QueryAuthorityErrorV1> {
-        if self.mode != QueryAuthorityModeV1::Federated {
-            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
-        }
         self.validate_request(request)?;
-        let mut profile = self.profile.clone();
-        profile
-            .calibrations
-            .retain(|lane, _| *lane == RetrieverKind::TaskSession);
-        profile
-            .weights_micros
-            .retain(|lane, _| *lane == RetrieverKind::TaskSession);
+        let profile = self.task_session_ranking_profile()?;
         let lane = CompositionLaneInput::new(RetrieverKind::TaskSession, outcome)?;
         let composition = self.kernel.compose_selected_lane(
             &FusionStageInput {

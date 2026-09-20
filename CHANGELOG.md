@@ -5,6 +5,93 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.47](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.46...v0.1.0-beta.47) (2026-09-18)
+
+
+### Bug Fixes
+
+* **cli:** cap repeated completed tool results at three attempts ([77c5504](https://github.com/ScriptedAlchemy/tracedecay/commit/77c55040d6421c1a7ef9e268343fbb6cfdabb9a2))
+* **cli:** cap repeated completed tool results at three attempts ([c857075](https://github.com/ScriptedAlchemy/tracedecay/commit/c8570754ba35bdf06bf1ab5b48dace7cbfe22e5f))
+* **clones:** bound body bytes before tokenizing large literals ([542d28c](https://github.com/ScriptedAlchemy/tracedecay/commit/542d28c4c04c6a074630e9b3ac22e2d878bf9305))
+* **clones:** bound body bytes before tokenizing large literals ([941d908](https://github.com/ScriptedAlchemy/tracedecay/commit/941d908ba92c043c561ff4d69a6f1370ca7c3d41))
+* **code-index:** shrink text builds to available memory headroom ([2a138f6](https://github.com/ScriptedAlchemy/tracedecay/commit/2a138f68d9c7a9eba02a6a1741e09412c62d8bde))
+* **code-index:** shrink text builds to available memory headroom ([0ae9fad](https://github.com/ScriptedAlchemy/tracedecay/commit/0ae9fad50e4daa2ac92e1e51c00fea5b2348132a))
+
+## [0.1.0-beta.46](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.45...v0.1.0-beta.46) (2026-09-18)
+
+
+### Bug Fixes
+
+* **code-index:** never join clone backfill from a freshness read ([b3e3d4a](https://github.com/ScriptedAlchemy/tracedecay/commit/b3e3d4ab7a77a89ed5dab8c6195b027507762190))
+* **code-index:** never join clone backfill from a freshness read ([d86fd22](https://github.com/ScriptedAlchemy/tracedecay/commit/d86fd22b4901d4b209894142fb50683ae673d1a5))
+* **code-index:** preserve deterministic text sizing evidence ([9aae729](https://github.com/ScriptedAlchemy/tracedecay/commit/9aae7293a0139c03e569a88846dfc787514a319f))
+* **code-index:** preserve deterministic text sizing evidence ([8e75b08](https://github.com/ScriptedAlchemy/tracedecay/commit/8e75b0873aeb17a0123d00ecc740471c0c6a31cd))
+* **code-index:** prune nested repositories from the parent source walk ([89384bc](https://github.com/ScriptedAlchemy/tracedecay/commit/89384bcd33184478cc38228413c48ddc0a9368c2))
+* **code-index:** prune nested repositories from the parent source walk ([836c366](https://github.com/ScriptedAlchemy/tracedecay/commit/836c3665c168a92a056bb6381b658a739cd09f36))
+* **code-index:** restore queued rebuild truth and decoded seats ([c3c57ad](https://github.com/ScriptedAlchemy/tracedecay/commit/c3c57addb1e3d309e723f27d983d5be058cf73de))
+* **code-index:** restore queued rebuild truth and decoded seats ([f1c025e](https://github.com/ScriptedAlchemy/tracedecay/commit/f1c025ebe0535d91e2383362f640492d3b30e1bd))
+* **global-db:** name the exact field in a session projection collision ([bfd53c0](https://github.com/ScriptedAlchemy/tracedecay/commit/bfd53c0171aefc6bd23bab0c7a0adbc49dc30270))
+* **global-db:** name the exact field in a session projection collision ([b92d95b](https://github.com/ScriptedAlchemy/tracedecay/commit/b92d95b6b4b545387c9d58b28fdb6c19f400d00d))
+* **global-db:** repair stale projection rows under current provenance ([19ab9f8](https://github.com/ScriptedAlchemy/tracedecay/commit/19ab9f89379c96d4f5b68de8f1e41af6bf06f494))
+* **global-db:** repair stale projection rows under current provenance ([c55058a](https://github.com/ScriptedAlchemy/tracedecay/commit/c55058a3ac4802f9203f7ffd6c1900c0813d6bbc))
+* **global-db:** restore a missing uniquely owned projection session ([905758b](https://github.com/ScriptedAlchemy/tracedecay/commit/905758b38ed1dfd757a89fad17489ee523508907))
+* **global-db:** restore a missing uniquely owned projection session ([b7c9b0d](https://github.com/ScriptedAlchemy/tracedecay/commit/b7c9b0d2b547f147926966fe6245f88afb12ba57))
+* **host-admission:** classify typed session projection collisions ([da8da59](https://github.com/ScriptedAlchemy/tracedecay/commit/da8da5970b998fdd6349d0783eabf9e324a7f421))
+* **host-admission:** classify typed session projection collisions ([582bc92](https://github.com/ScriptedAlchemy/tracedecay/commit/582bc929f638161b62ad9e89b32fb89d41488cae))
+* **lcm:** return unavailable health as the doctor's partial answer ([b2170aa](https://github.com/ScriptedAlchemy/tracedecay/commit/b2170aaf1f7e3ca98df66bded43fedc8bd8bdffc))
+* **lcm:** return unavailable health as the doctor's partial answer ([93b1415](https://github.com/ScriptedAlchemy/tracedecay/commit/93b141560e39bdad57c55e9f4aa35f40369b1f9a))
+* **memory:** apply host reserve before the cgroup service ceiling ([a4cf384](https://github.com/ScriptedAlchemy/tracedecay/commit/a4cf384941ff9d4e113129103a1178ce29ead0ff))
+* **memory:** apply host reserve before the cgroup service ceiling ([74f6c14](https://github.com/ScriptedAlchemy/tracedecay/commit/74f6c149db76883673ee586623bdd119b0929a46))
+* **release:** verify attestations from the master-ref ship workflow ([612a7bd](https://github.com/ScriptedAlchemy/tracedecay/commit/612a7bd9c0ec7af04eca22f71054923798de20e8))
+* **release:** verify attestations from the master-ref ship workflow ([08fac7d](https://github.com/ScriptedAlchemy/tracedecay/commit/08fac7d69e7586ee1496d0b42abfd37ca88d4648))
+
+## [0.1.0-beta.45](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.44...v0.1.0-beta.45) (2026-09-18)
+
+
+### Bug Fixes
+
+* **clones:** bound clone bodies by tokens, not source bytes ([a10c021](https://github.com/ScriptedAlchemy/tracedecay/commit/a10c0211bb02301b2af10aae0bd3389335453936))
+* **clones:** bound clone bodies by tokens, not source bytes ([7f19751](https://github.com/ScriptedAlchemy/tracedecay/commit/7f19751069e154faa427d10fc23775f64683e8fe))
+* **code-index:** move every extractor revision for the clone-body bound ([c7eb62e](https://github.com/ScriptedAlchemy/tracedecay/commit/c7eb62eaea31bfbe707fcf5181b9aa519db75344))
+* **code-index:** move every extractor revision for the clone-body bound ([fe58bba](https://github.com/ScriptedAlchemy/tracedecay/commit/fe58bba408d9a9014030646e0d6b48e52d5f35b3))
+
+
+### Performance Improvements
+
+* **cli:** ship mimalloc in the production feature ([c183290](https://github.com/ScriptedAlchemy/tracedecay/commit/c1832900046af7ec6c79a1def6a08d0e556c69e3))
+* **cli:** ship mimalloc in the production feature ([9981f98](https://github.com/ScriptedAlchemy/tracedecay/commit/9981f9819669d4100006464c5caa54916ae67b81))
+* **release:** run tag builds on master so dependency caches survive ([049289a](https://github.com/ScriptedAlchemy/tracedecay/commit/049289aabe1d6044282adcfacc95467013d0f16a))
+* **release:** run tag builds on master so dependency caches survive ([3ac7ae1](https://github.com/ScriptedAlchemy/tracedecay/commit/3ac7ae16406d8539b32ca58f34628cdf64f95bdc))
+
+## [0.1.0-beta.44](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.43...v0.1.0-beta.44) (2026-09-18)
+
+
+### Bug Fixes
+
+* **clones:** exclude oversized bodies instead of parking the projection ([3d64ef5](https://github.com/ScriptedAlchemy/tracedecay/commit/3d64ef5b2dc1d7be5034ce452e51f069c34b2955))
+* **clones:** exclude oversized bodies instead of parking the projection ([51db8b9](https://github.com/ScriptedAlchemy/tracedecay/commit/51db8b98bb1588286b926245dc94ecabeec02d9d))
+* **release:** upload only the beta archive as the binary artifact ([2f44a63](https://github.com/ScriptedAlchemy/tracedecay/commit/2f44a63aa3f0d19655da74df974037dfbe0503fd))
+* **release:** upload only the beta archive as the binary artifact ([ba2bf3c](https://github.com/ScriptedAlchemy/tracedecay/commit/ba2bf3c49e0dd60fe9ca9ab397be74a5288d3cd4))
+
+## [0.1.0-beta.43](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.42...v0.1.0-beta.43) (2026-09-18)
+
+
+### Bug Fixes
+
+* **release:** publish every target that built instead of none ([de16f23](https://github.com/ScriptedAlchemy/tracedecay/commit/de16f2339080da5f6b17ac941d9414237b882b24))
+* **release:** publish every target that built instead of none ([2c66895](https://github.com/ScriptedAlchemy/tracedecay/commit/2c66895288706d2c1f60cc5f0b7e5de130da9f5a))
+* **release:** verify the MCPB with unzip so the recorded mode survives ([5a032b3](https://github.com/ScriptedAlchemy/tracedecay/commit/5a032b3cfbd9fbd6440f9bc05dcda6f5a735f400))
+* **release:** verify the MCPB with unzip so the recorded mode survives ([8d145b4](https://github.com/ScriptedAlchemy/tracedecay/commit/8d145b4675164c285753a10516126b9562a4e8ee))
+
+## [0.1.0-beta.42](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.41...v0.1.0-beta.42) (2026-09-18)
+
+
+### Performance Improvements
+
+* **daemon:** stop capping glibc malloc arenas in the service unit ([717c223](https://github.com/ScriptedAlchemy/tracedecay/commit/717c223670c4d5bc730c07ed50a5a28681d02c4c))
+* **daemon:** stop capping glibc malloc arenas in the service unit ([4d72053](https://github.com/ScriptedAlchemy/tracedecay/commit/4d72053e770bb8146ceea16f2cdc798bb0765a5e))
+* **release:** take dist acceptance off the beta ship path ([#1587](https://github.com/ScriptedAlchemy/tracedecay/issues/1587)) ([e19b95a](https://github.com/ScriptedAlchemy/tracedecay/commit/e19b95ab05bb959335615506f5cd1c32b8b8285b))
+
 ## [0.1.0-beta.41](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.40...v0.1.0-beta.41) (2026-09-18)
 
 
@@ -1622,6 +1709,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Selection). Published `view=topology` links resolve to `cortex`.
 
 ### Fixed
+
+- *(admission)* `NotApplicable` is a terminal no-op in the shared replay-pass
+  decision. A closed status that leaves the spool unchanged now stops until
+  the next kick instead of entering the retryable backoff arm.
 
 - *(code-index)* the background worker consults the typed publication-authority
   park instead of a loop-local bool, so a park it has not yet observed still

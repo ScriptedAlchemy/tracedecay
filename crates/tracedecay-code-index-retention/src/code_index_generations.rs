@@ -778,6 +778,25 @@ pub fn plan_code_generation_retention_with_verification(
     )
 }
 
+/// A store directory that does not exist yet has nothing to collect. The
+/// sealer creates that directory on open; until then the census is the same
+/// unpublished plan an empty directory with no pointer produces.
+fn unpublished_store_plan(
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+) -> CodeGenerationRetentionPlanV1 {
+    CodeGenerationRetentionPlanV1 {
+        active_generation_id: None,
+        vector_readable_sources: vector_readable_sources.clone(),
+        superseded_generations: Vec::new(),
+        collectable_generations: Vec::new(),
+        collectable_text_artifacts: Vec::new(),
+        collectable_generation_segments: GenerationSegmentCensusV1::NoneFound,
+        text_artifact_inventory_bytes: 0,
+        verification: GenerationDigestVerificationV1::Full,
+        active_pointer: None,
+    }
+}
+
 /// Recover any bounded prior apply, then build the next fully verified
 /// collection unit while preserving the caller's cancellation authority.
 ///
@@ -794,6 +813,30 @@ pub fn prepare_next_code_generation_retention_cancellable(
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
+    // The serving seat can name a generation before the scoped store
+    // directory exists. Cold open creates it inside the worker, so a waiter
+    // that only saw `latest_generation_id` plans against a path canonicalize
+    // reports as `Storage(NotFound)`. That is an unpublished store, the same
+    // typed state as a directory with no pointer. It is not
+    // `GenerationStoreBusy` either. An absent root has no publisher to wait
+    // for and stays absent until the project is first indexed, while the only
+    // production caller turns that deferral into a failed maintenance tick on
+    // the short retry delay, so a never-indexed project would report degraded
+    // on every tick forever. The enumerate-then-open sites below keep the
+    // deferral, where `read_dir` already proved the name existed.
+    match std::fs::metadata(store_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(unpublished_store_plan(vector_readable_sources));
+        }
+        Ok(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "code-generation store '{}' is not a directory",
+                store_root.display()
+            )));
+        }
+        Err(error) => return Err(storage(error)),
     }
     recover_code_generation_retention_cancellable(
         store_root,
@@ -885,6 +928,9 @@ fn plan_code_generation_retention_with_verification_cancellable(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() => {
             None
         }
+        // A pointer is only durable once its generation directory is, so a
+        // live pointer over an absent directory is loss, not a publisher
+        // race, and must stay loud.
         Err(error) => return Err(storage(error)),
     };
     let mut generations = BTreeMap::new();
@@ -1218,7 +1264,7 @@ fn sweep_unreferenced_generation_segments(
                 continue;
             }
             let mut reader = CancellableGenerationManifestReaderV1 {
-                file: File::open(&path).map_err(storage)?,
+                file: File::open(&path).map_err(deferred_if_absent)?,
                 hasher: Sha256::new(),
                 is_cancelled,
                 cancelled: false,
@@ -1281,7 +1327,7 @@ fn sweep_unreferenced_generation_segments(
         if live_segments.contains(&format!("sha256:{digest}")) {
             continue;
         }
-        let metadata = path.symlink_metadata().map_err(storage)?;
+        let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
         if !metadata.file_type().is_file() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "generation segment '{}' is not a regular file",
@@ -1745,7 +1791,27 @@ fn read_active_pointer(
     store_root: &Path,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let path = store_root.join(ACTIVE_POINTER_FILE);
-    let bytes = std::fs::read(&path).map_err(storage)?;
+    // A directory in the pointer slot makes `read(2)` return EISDIR. That is
+    // the same corrupt authority the publication store refuses; do not let the
+    // OS error replace the typed unsafe-state.
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "active code-generation pointer is not a regular file".to_owned(),
+            ));
+        }
+        Err(error) => return Err(storage(error)),
+    }
+    let bytes = std::fs::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::IsADirectory {
+            CodeGenerationRetentionErrorV1::UnsafeState(
+                "active code-generation pointer is not a regular file".to_owned(),
+            )
+        } else {
+            storage(error)
+        }
+    })?;
     serde_json::from_slice(&bytes).map_err(|error| {
         CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "active pointer '{}' is corrupt: {error}",
@@ -2031,6 +2097,19 @@ fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {
 
 fn storage(error: impl std::fmt::Display) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::Storage(error.to_string())
+}
+
+/// A path that is not there yet, or that a peer unlinked after this census
+/// listed it, is not a broken disk. The publisher creates the scope root and
+/// the sealed files under the store lock, then drops that lock; a census that
+/// does not hold the lock can observe the gap. The next tick sees a stable
+/// tree. Every other I/O failure stays a storage error.
+pub(super) fn deferred_if_absent(error: std::io::Error) -> CodeGenerationRetentionErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy
+    } else {
+        storage(error)
+    }
 }
 
 #[cfg(test)]

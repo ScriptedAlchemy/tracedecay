@@ -29,6 +29,6 @@ pub(crate) use state::rearm_queued_projection_retries;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;
 pub(super) use state::{
-    ProjectionOutputAuthority, ProjectionRowsBatch, read_output_authorities,
+    ProjectionOutputAuthority, ProjectionRowsBatch, load_verified_session, read_output_authorities,
     read_projection_rows_batch, resolve_output_projection, verify_projection_rows_from_records,
 };

@@ -8,7 +8,9 @@ use tracedecay_code_index::graph_projection::{
 };
 use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
+use tracedecay_domain::{
+    CanonicalRelationEdgeV1, CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId,
+};
 use tracedecay_graph_db::GraphCancellation;
 
 use super::map_projection_error;
@@ -166,11 +168,20 @@ impl<'a> GraphQueryManager<'a> {
         Ok(CodeGraphSymbolPageV1 { symbols, has_more })
     }
 
+    /// Symbols no indexed relation reaches, narrowed to `path_prefix` before
+    /// `limit` truncates the page.
+    ///
+    /// `path_prefix` scopes what is reported, never what counts as a reference:
+    /// liveness is decided over every indexed symbol, so a call from outside
+    /// the prefix still keeps a symbol inside it alive. Filtering the census
+    /// before the relation scan would drop those incoming edges and report
+    /// live symbols as dead.
     #[hotpath::measure(label = "usecases.graph.dead_code", future = true)]
     pub async fn find_dead_code(
         &self,
         kinds: &[NodeKind],
         include_public: bool,
+        path_prefix: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
         let symbols = hotpath::measure_block!("usecases.graph.dead_code.symbols", {
@@ -224,15 +235,15 @@ impl<'a> GraphQueryManager<'a> {
         let test_annotated = edges
             .iter()
             .filter(|edge| {
-                edge.edge.kind == RelationEdgeKindV1::Annotates
-                    && test_markers.contains(&edge.edge.from_occurrence)
+                edge.kind == RelationEdgeKindV1::Annotates
+                    && test_markers.contains(&edge.from_occurrence)
             })
-            .map(|edge| edge.edge.to_occurrence.clone())
+            .map(|edge| edge.to_occurrence.clone())
             .collect::<HashSet<_>>();
         let live_targets = edges
             .iter()
-            .filter(|edge| edge.edge.kind != RelationEdgeKindV1::Annotates)
-            .map(|edge| edge.edge.to_occurrence.clone())
+            .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
+            .map(|edge| edge.to_occurrence.clone())
             .collect::<HashSet<_>>();
         let kind_filter = kinds.iter().map(NodeKind::as_str).collect::<HashSet<_>>();
         let mut dead = symbols
@@ -241,7 +252,14 @@ impl<'a> GraphQueryManager<'a> {
                 let Some(metadata) = symbol.metadata.as_ref() else {
                     return false;
                 };
-                (kind_filter.is_empty() || kind_filter.contains(metadata.kind.as_str()))
+                symbol
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref())
+                    .is_some_and(|path| {
+                        tracedecay_runtime_core::path_scope::path_matches_scope(path, path_prefix)
+                    })
+                    && (kind_filter.is_empty() || kind_filter.contains(metadata.kind.as_str()))
                     && (include_public || metadata.visibility != "public")
                     && metadata.simple_name != "main"
                     && !metadata.simple_name.starts_with("test")
@@ -343,6 +361,15 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
+        // `symbols_in_logical_file` answers a path this generation never
+        // published with an empty vector by contract, and adjacency refuses an
+        // empty seed list by contract. Without this the seam between the two
+        // turned "no such file here" into a non-retryable invalid request.
+        // `incoming_edges` and `edges_among` below already carry this guard;
+        // this was the one adjacency call site missing it.
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
         let edges = hotpath::measure_block!("usecases.graph.file_neighbors.edges", {
             if incoming {
                 self.reader.callers(
@@ -427,7 +454,10 @@ impl<'a> GraphQueryManager<'a> {
                     &symbols,
                     &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
                 )
-            })?;
+            })?
+            .into_iter()
+            .map(|edge| edge.edge)
+            .collect::<Vec<_>>();
             return Ok(file_adjacency(logical_paths, &symbols, &edges));
         }
         Ok(self
@@ -503,7 +533,8 @@ impl<'a> GraphQueryManager<'a> {
                 .filter(|path| path_is_within(path, prefix))
                 .collect::<HashSet<_>>()
         });
-        let (symbols, edges) = self.health_evidence(logical_paths.as_ref())?;
+        let (symbols, edges, external_test_markers) =
+            self.health_evidence(logical_paths.as_ref())?;
         let metadata = health_symbol_metadata(&symbols)?;
         let mut adjacency = files
             .into_iter()
@@ -511,13 +542,13 @@ impl<'a> GraphQueryManager<'a> {
             .collect::<HashMap<_, _>>();
         for edge in edges.iter().filter(|edge| {
             matches!(
-                edge.edge.kind,
+                edge.kind,
                 RelationEdgeKindV1::Calls | RelationEdgeKindV1::Uses
             )
         }) {
             let (Some((source, _)), Some((target, _))) = (
-                metadata.get(&edge.edge.from_occurrence),
-                metadata.get(&edge.edge.to_occurrence),
+                metadata.get(&edge.from_occurrence),
+                metadata.get(&edge.to_occurrence),
             ) else {
                 continue;
             };
@@ -538,7 +569,12 @@ impl<'a> GraphQueryManager<'a> {
         });
         Ok(VerifiedHealthInputsV1 {
             adjacency,
-            aggregates: fold_health_aggregates(metadata, &edges, path_prefix),
+            aggregates: fold_health_aggregates(
+                metadata,
+                &edges,
+                external_test_markers,
+                path_prefix,
+            ),
         })
     }
 
@@ -561,15 +597,29 @@ impl<'a> GraphQueryManager<'a> {
             ),
             None => None,
         };
-        let (symbols, edges) = self.health_evidence(logical_paths.as_ref())?;
+        let (symbols, edges, external_test_markers) =
+            self.health_evidence(logical_paths.as_ref())?;
         let metadata = health_symbol_metadata(&symbols)?;
-        Ok(fold_health_aggregates(metadata, &edges, path_prefix))
+        Ok(fold_health_aggregates(
+            metadata,
+            &edges,
+            external_test_markers,
+            path_prefix,
+        ))
     }
 
+    /// Health symbols, the induced edge set, and the test markers only the
+    /// scoped `callers` walk can see: its far endpoints legitimately sit
+    /// outside the scoped symbol census, so their marker metadata cannot be
+    /// recovered from `symbols` the way the whole-generation branch's can.
     fn health_evidence(
         &self,
         logical_paths: Option<&HashSet<String>>,
-    ) -> Result<(Vec<CodeGraphSymbolSummaryV1>, Vec<CodeGraphSemanticEdgeV1>)> {
+    ) -> Result<(
+        Vec<CodeGraphSymbolSummaryV1>,
+        Vec<CanonicalRelationEdgeV1>,
+        HashSet<SymbolOccurrenceId>,
+    )> {
         let symbols = hotpath::measure_block!("usecases.graph.health.symbols", {
             match logical_paths {
                 Some(paths) => self
@@ -590,14 +640,31 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
-        let edges = hotpath::measure_block!("usecases.graph.health.edges", {
-            if logical_paths.is_some() {
-                self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
-            } else {
-                self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
-            }
-        })?;
-        Ok((symbols, edges))
+        let (edges, external_test_markers) =
+            hotpath::measure_block!("usecases.graph.health.edges", {
+                if logical_paths.is_some() {
+                    self.incoming_edges(&symbols, &HEALTH_EDGE_KINDS)
+                        .map(|edges| {
+                            let markers = edges
+                                .iter()
+                                .filter(|edge| {
+                                    edge.neighbor.occurrence == edge.edge.from_occurrence
+                                        && edge
+                                            .neighbor
+                                            .metadata
+                                            .as_ref()
+                                            .is_some_and(is_test_marker)
+                                })
+                                .map(|edge| edge.edge.from_occurrence.clone())
+                                .collect();
+                            (edges.into_iter().map(|edge| edge.edge).collect(), markers)
+                        })
+                } else {
+                    self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)
+                        .map(|edges| (edges, HashSet::new()))
+                }
+            })?;
+        Ok((symbols, edges, external_test_markers))
     }
 
     fn incoming_edges(
@@ -627,7 +694,7 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         occurrences: &[SymbolOccurrenceId],
         kinds: &[RelationEdgeKindV1],
-    ) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+    ) -> Result<Vec<CanonicalRelationEdgeV1>> {
         if occurrences.is_empty() {
             return Ok(Vec::new());
         }
@@ -645,7 +712,7 @@ impl<'a> GraphQueryManager<'a> {
 fn file_adjacency(
     logical_paths: HashSet<String>,
     symbols: &[CodeGraphSymbolSummaryV1],
-    edges: &[CodeGraphSemanticEdgeV1],
+    edges: &[CanonicalRelationEdgeV1],
 ) -> HashMap<String, HashSet<String>> {
     let paths = symbols
         .iter()
@@ -662,8 +729,8 @@ fn file_adjacency(
         .collect::<HashMap<_, _>>();
     for edge in edges {
         let (Some(source), Some(target)) = (
-            paths.get(&edge.edge.from_occurrence),
-            paths.get(&edge.edge.to_occurrence),
+            paths.get(&edge.from_occurrence),
+            paths.get(&edge.to_occurrence),
         ) else {
             continue;
         };
@@ -716,35 +783,28 @@ fn fold_health_aggregates(
             &tracedecay_code_index::lineage::LineageSymbolRecordV1,
         ),
     >,
-    edges: &[CodeGraphSemanticEdgeV1],
+    edges: &[CanonicalRelationEdgeV1],
+    external_test_markers: HashSet<SymbolOccurrenceId>,
     path_prefix: Option<&str>,
 ) -> Vec<VerifiedHealthFileAggregateV1> {
     let live_targets = edges
         .iter()
-        .filter(|edge| edge.edge.kind != RelationEdgeKindV1::Annotates)
-        .map(|edge| edge.edge.to_occurrence.clone())
+        .filter(|edge| edge.kind != RelationEdgeKindV1::Annotates)
+        .map(|edge| edge.to_occurrence.clone())
         .collect::<HashSet<_>>();
     let test_markers = metadata
         .iter()
         .filter(|(_, (_, record))| is_test_marker(record))
         .map(|(occurrence, _)| occurrence.clone())
-        .chain(
-            edges
-                .iter()
-                .filter(|edge| {
-                    edge.neighbor.occurrence == edge.edge.from_occurrence
-                        && edge.neighbor.metadata.as_ref().is_some_and(is_test_marker)
-                })
-                .map(|edge| edge.edge.from_occurrence.clone()),
-        )
+        .chain(external_test_markers)
         .collect::<HashSet<_>>();
     let test_annotated = edges
         .iter()
         .filter(|edge| {
-            edge.edge.kind == RelationEdgeKindV1::Annotates
-                && test_markers.contains(&edge.edge.from_occurrence)
+            edge.kind == RelationEdgeKindV1::Annotates
+                && test_markers.contains(&edge.from_occurrence)
         })
-        .map(|edge| edge.edge.to_occurrence.clone())
+        .map(|edge| edge.to_occurrence.clone())
         .collect::<HashSet<_>>();
     let mut by_file = HashMap::<String, VerifiedHealthFileAggregateV1>::new();
     for (occurrence, (file_path, record)) in metadata {
@@ -815,7 +875,7 @@ mod path_scope_tests {
     use std::fmt::Debug;
 
     use tracedecay_code_index::graph_projection::{
-        CodeGraphSemanticEdgeV1, CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
+        CodeGraphSymbolBindingV1, CodeGraphSymbolSummaryV1,
     };
     use tracedecay_code_index::lineage::LineageSymbolRecordV1;
     use tracedecay_domain::{
@@ -875,19 +935,16 @@ mod path_scope_tests {
     fn edge(
         from: &CodeGraphSymbolSummaryV1,
         to: &CodeGraphSymbolSummaryV1,
-    ) -> CodeGraphSemanticEdgeV1 {
-        CodeGraphSemanticEdgeV1 {
-            edge: CanonicalRelationEdgeV1 {
-                from_occurrence: from.occurrence.clone(),
-                to_occurrence: to.occurrence.clone(),
-                kind: RelationEdgeKindV1::Calls,
-                authority: EdgeAuthorityV1::SyntaxExact,
-                evidence_span: SourceSpan {
-                    start_byte: 0,
-                    end_byte: 1,
-                },
+    ) -> CanonicalRelationEdgeV1 {
+        CanonicalRelationEdgeV1 {
+            from_occurrence: from.occurrence.clone(),
+            to_occurrence: to.occurrence.clone(),
+            kind: RelationEdgeKindV1::Calls,
+            authority: EdgeAuthorityV1::SyntaxExact,
+            evidence_span: SourceSpan {
+                start_byte: 0,
+                end_byte: 1,
             },
-            neighbor: from.clone(),
         }
     }
 
@@ -959,18 +1016,272 @@ mod path_scope_tests {
         let mut marker = symbol("symbol.test_marker", "src/outside.rs");
         marker.metadata = Some(marker_record);
         let mut annotation = edge(&marker, &inside);
-        annotation.edge.kind = RelationEdgeKindV1::Annotates;
+        annotation.kind = RelationEdgeKindV1::Annotates;
         let aggregates = fold_health_aggregates(
             HashMap::from([(
                 inside.occurrence.clone(),
                 ("src/scoped/inside.rs".to_owned(), &inside_record),
             )]),
             &[annotation],
+            HashSet::from([marker.occurrence.clone()]),
             Some("src/scoped"),
         );
 
         assert_eq!(aggregates.len(), 1);
         assert_eq!(aggregates[0].function_methods, 1);
         assert_eq!(aggregates[0].dead_function_methods, 0);
+    }
+}
+
+#[cfg(test)]
+mod dead_code_scope_tests {
+    use std::collections::HashMap;
+    use std::fmt::Debug;
+    use std::sync::Arc;
+
+    use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
+    use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+    use tracedecay_contracts::CancellationSignal;
+    use tracedecay_domain::{
+        BoundedSanitizedText, CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkAnchorV1,
+        CodeSearchChunkGrainV1, CodeSearchChunkV1, ComplexityAnalysisV1, EdgeAuthorityV1,
+        FileOccurrenceId, LanguageId, RelationEdgeKindV1, SanitizedCodeFileV1, SensitivityDecision,
+        SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+    };
+    use tracedecay_graph_db::NeverCancelled;
+
+    use super::{CodeGraphInteractiveReader, GraphQueryManager, NodeKind};
+
+    /// One unreferenced function the census should consider dead.
+    struct FixtureSymbol {
+        path: &'static str,
+        name: &'static str,
+    }
+
+    fn fixture_id<T>(value: impl Into<String>) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: Debug,
+    {
+        T::try_from(value.into()).expect("valid fixture identity")
+    }
+
+    fn fixture_digest<T>(ordinal: usize) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: Debug,
+    {
+        fixture_id(format!("sha256:{ordinal:064x}"))
+    }
+
+    /// Publishes `symbols` into an in-memory generation, drawing a `Calls` edge
+    /// for every `(caller, callee)` index pair, and returns a reader over it.
+    fn fixture_reader(
+        symbols: &[FixtureSymbol],
+        calls: &[(usize, usize)],
+    ) -> CodeGraphInteractiveReader {
+        let generation: CodeGenerationId = fixture_id("generation.dead-code-scope.1");
+        let mut files = Vec::new();
+        let mut file_occurrences = HashMap::<&str, FileOccurrenceId>::new();
+        let mut records = Vec::new();
+        let mut chunks = Vec::new();
+        let mut occurrences = Vec::new();
+
+        for (ordinal, fixture) in symbols.iter().enumerate() {
+            let file = file_occurrences
+                .entry(fixture.path)
+                .or_insert_with(|| {
+                    let occurrence: FileOccurrenceId = fixture_id(format!("file.{}", files.len()));
+                    files.push(SanitizedCodeFileV1 {
+                        file_occurrence_id: occurrence.clone(),
+                        logical_path: fixture.path.to_owned(),
+                        language: Some(LanguageId::new("rust").expect("fixture language")),
+                        content_digest: fixture_digest(5_000 + files.len()),
+                        disposition: SnapshotFileDispositionV1::Present,
+                    });
+                    occurrence
+                })
+                .clone();
+            let occurrence: SymbolOccurrenceId = fixture_id(format!("symbol.{ordinal}"));
+            records.push(Arc::new(LineageSymbolRecordV1 {
+                occurrence: occurrence.clone(),
+                identity: fixture_digest(1_000 + ordinal),
+                qualified_name: fixture.name.to_owned(),
+                simple_name: fixture.name.to_owned(),
+                kind: "function".to_owned(),
+                visibility: "private".to_owned(),
+                branches: 0,
+                loops: 0,
+                max_nesting: 0,
+                complexity_analysis: ComplexityAnalysisV1::Complete,
+                line_span: 1,
+                start_line: u32::try_from(ordinal).expect("fixture line") + 1,
+                signature: None,
+                docstring: None,
+                is_async: false,
+                derives: Vec::new(),
+                skip_test_coverage: false,
+                file_identity: fixture_digest(3_000 + ordinal),
+                content_digest: fixture_digest(2_000 + ordinal),
+            }));
+            chunks.push(Arc::new(CodeSearchChunkV1 {
+                id: fixture_id(format!("chunk.{ordinal}")),
+                anchor: CodeSearchChunkAnchorV1 {
+                    generation_id: generation.clone(),
+                    file_occurrence_id: file,
+                    symbol_occurrence_id: Some(occurrence.clone()),
+                    parent_chunk_id: None,
+                    source_span: SourceSpan {
+                        start_byte: ordinal as u64,
+                        end_byte: ordinal as u64 + 1,
+                    },
+                    grain: CodeSearchChunkGrainV1::SymbolBody,
+                    ordinal: u32::try_from(ordinal).expect("fixture ordinal"),
+                },
+                content_digest: fixture_digest(4_000 + ordinal),
+                language_descriptor_revision: fixture_id("language.rust.fixture.v1"),
+                chunker_revision: fixture_id("chunker.fixture.v1"),
+                sanitizer_revision: fixture_id("sanitizer.fixture.v1"),
+                sensitivity: SensitivityDecision {
+                    level: SensitivityLevelV1::Public,
+                    policy_revision: fixture_id("policy.fixture.v1"),
+                },
+                exact_terms: Vec::new(),
+                subtokens: Vec::new(),
+                sanitized_text: BoundedSanitizedText::new("fixture symbol")
+                    .expect("bounded fixture text"),
+            }));
+            occurrences.push(occurrence);
+        }
+
+        let edges = calls
+            .iter()
+            .map(|(caller, callee)| CanonicalRelationEdgeV1 {
+                from_occurrence: occurrences[*caller].clone(),
+                to_occurrence: occurrences[*callee].clone(),
+                kind: RelationEdgeKindV1::Calls,
+                authority: EdgeAuthorityV1::SyntaxExact,
+                evidence_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            })
+            .collect::<Vec<_>>();
+        let index = GenerationSymbolIndexV1::new(generation.clone(), records)
+            .expect("fixture symbol index");
+        let cancellation =
+            CancellationSignal::active("cancel.dead-code-scope").expect("fixture cancellation");
+        let store =
+            HermeticCodeGraphProjectionStore::memory(&cancellation).expect("fixture projection");
+        store
+            .publish_indexed_with_cancellation(
+                &generation,
+                &edges,
+                &chunks,
+                &files,
+                &index,
+                Arc::new(NeverCancelled),
+            )
+            .expect("publish fixture generation");
+        store
+            .verified_store(&generation)
+            .expect("open fixture generation")
+            .interactive_reader_with_cancellation(&generation, Arc::new(NeverCancelled))
+            .expect("fixture reader")
+    }
+
+    fn reported_paths(symbols: &[super::CodeGraphSymbolSummaryV1]) -> Vec<&str> {
+        symbols
+            .iter()
+            .map(|symbol| {
+                symbol
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref())
+                    .expect("reported symbol carries its logical path")
+            })
+            .collect()
+    }
+
+    /// A fixture corpus that sorts ahead of product source used to consume the
+    /// whole page: the limit was applied to the unfiltered census, so no
+    /// `crates/` symbol was ever reported.
+    #[tokio::test]
+    async fn path_prefix_bounds_the_limit_to_the_filtered_symbols() {
+        let reader = fixture_reader(
+            &[
+                FixtureSymbol {
+                    path: "benchmark_data/index-bench/a.rs",
+                    name: "bench_alpha",
+                },
+                FixtureSymbol {
+                    path: "benchmark_data/index-bench/b.rs",
+                    name: "bench_beta",
+                },
+                FixtureSymbol {
+                    path: "crates/product/src/lib.rs",
+                    name: "orphan_gamma",
+                },
+            ],
+            &[],
+        );
+        let manager = GraphQueryManager::new(&reader, Arc::new(NeverCancelled));
+
+        let unscoped = manager
+            .find_dead_code(&[NodeKind::Function], false, None, Some(2))
+            .await
+            .expect("unscoped dead-code census");
+        assert_eq!(
+            reported_paths(&unscoped),
+            vec![
+                "benchmark_data/index-bench/a.rs",
+                "benchmark_data/index-bench/b.rs"
+            ],
+            "an unscoped census keeps reporting the whole graph in path order"
+        );
+
+        let scoped = manager
+            .find_dead_code(&[NodeKind::Function], false, Some("crates"), Some(2))
+            .await
+            .expect("scoped dead-code census");
+        assert_eq!(
+            reported_paths(&scoped),
+            vec!["crates/product/src/lib.rs"],
+            "the prefix must be applied before the limit truncates the page"
+        );
+    }
+
+    /// Scoping the report must not turn an outside caller into no caller.
+    #[tokio::test]
+    async fn path_prefix_does_not_discard_callers_outside_the_prefix() {
+        let reader = fixture_reader(
+            &[
+                FixtureSymbol {
+                    path: "benchmark_data/index-bench/a.rs",
+                    name: "bench_caller",
+                },
+                FixtureSymbol {
+                    path: "crates/product/src/lib.rs",
+                    name: "called_from_the_corpus",
+                },
+                FixtureSymbol {
+                    path: "crates/product/src/orphan.rs",
+                    name: "orphan_delta",
+                },
+            ],
+            &[(0, 1)],
+        );
+        let manager = GraphQueryManager::new(&reader, Arc::new(NeverCancelled));
+
+        let scoped = manager
+            .find_dead_code(&[NodeKind::Function], false, Some("crates"), Some(10))
+            .await
+            .expect("scoped dead-code census");
+
+        assert_eq!(
+            reported_paths(&scoped),
+            vec!["crates/product/src/orphan.rs"],
+            "a symbol called only from outside the prefix is still alive"
+        );
     }
 }

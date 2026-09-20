@@ -878,6 +878,19 @@ impl ObservationSourceCursorV1 {
         }
         Ok(self.byte_offset.cmp(&other.byte_offset))
     }
+
+    /// Whether this cursor already owns `frontier` on the same ordering authority.
+    ///
+    /// Progress is the position. Resume fingerprints are checkpoints, not
+    /// coverage, so two owners of the same bytes can disagree there without
+    /// either being behind the frontier.
+    #[must_use]
+    pub fn reached(&self, frontier: &Self) -> bool {
+        matches!(
+            self.checked_cmp(frontier),
+            Ok(Ordering::Equal | Ordering::Greater)
+        )
+    }
 }
 
 pub const CANONICAL_OBSERVATION_ENVELOPE_VERSION_V1: u16 = 1;

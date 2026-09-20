@@ -96,6 +96,12 @@ export function readSharedCodeCoverage(coverage: SimilarCoverageV1): SharedCodeC
         title: 'Excluded from automatic discovery',
         sentence: `This body is under the ${coverage.minimum_tokens.toLocaleString()}-token minimum, so no family was searched for it. That is an exclusion, not a finding of zero copies.`,
       };
+    case 'excluded_too_large':
+      return {
+        kind: 'excluded',
+        title: 'Excluded from automatic discovery',
+        sentence: `This body is over the automatic ${coverage.maximum_tokens.toLocaleString()}-token or ${coverage.maximum_bytes.toLocaleString()}-byte maximum, so no family was searched for it. That is an exclusion, not a finding of zero copies.`,
+      };
     case 'excluded_incomplete_tokenization':
       return {
         kind: 'excluded',

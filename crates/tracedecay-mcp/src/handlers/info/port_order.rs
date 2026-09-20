@@ -144,8 +144,8 @@ pub async fn handle_port_order(graph: &VerifiedGraphQuery, args: Value) -> Resul
             }
 
             for edge in &edges {
-                let source = edge.edge.from_occurrence.as_str();
-                let target = edge.edge.to_occurrence.as_str();
+                let source = edge.from_occurrence.as_str();
+                let target = edge.to_occurrence.as_str();
                 if !id_set.contains(source) || !id_set.contains(target) {
                     continue;
                 }

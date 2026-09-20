@@ -3,11 +3,20 @@ name: CI
 on:
   push:
     branches: [master, feature/holographic-memory]
-  pull_request:
-    branches: ['**']
-    # `ready_for_review` and `labeled` are what lift a pull request from the
-    # light gates into full CI, so they must start a run.
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  workflow_dispatch:
+    inputs:
+      run_os:
+        description: "Also run macOS and Windows matrices"
+        type: boolean
+        default: false
+      run_hosts:
+        description: "Also run stock host integrations"
+        type: boolean
+        default: false
+      run_perf:
+        description: "Also run hotpath parity"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,33 +42,21 @@ env:
   AST_GREP_VERSION: "0.44.0"
 
 jobs:
-  # Single source of truth for what a run is allowed to spend. Guarded jobs
-  # `needs:`-check this job's outputs instead of each repeating the
-  # expressions, so the policy lives in one place:
-  #
-  # * `run-heavy`: the Linux build/test/lint lane. Pushes always; pull
-  #   requests only when trusted (this repository, or a fork targeting an
-  #   integration branch) and either ready for review or labelled `ci-full`.
-  #   A draft gets the light gates (this job, commit lint, drift, harness)
-  #   and nothing else: with 20 free runner slots, a swarm of drafts each
-  #   spending ~30 jobs per push queued the integration branch for hours.
-  # * `run-os`: the macOS and Windows matrices. Pushes, or a pull request
-  #   labelled `ci-os`. macOS has its own 5-slot cap and Windows shards take
-  #   7 jobs; both verify the same code the Linux lane already covers and
-  #   both run on master after the merge.
-  # * `run-hosts`: stock Hermes / Claude Code / OpenCode integrations.
-  #   Pushes, or a pull request labelled `ci-hosts`.
+  # Manual dispatch is the only PR-head entry point. GitHub queues a
+  # pull_request workflow before evaluating job conditions, and automation
+  # applied every opt-in label to 173 PRs; only removing the trigger prevents
+  # that volume from occupying the account FIFO. A dispatch runs the Linux
+  # lane and may add OS, host, or perf work through explicit inputs. A master
+  # push runs the Linux lane only so release jobs retain runner slots.
   scope-gate:
     name: Scope gate
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: write
     outputs:
       run-heavy: ${{ steps.decide.outputs.run-heavy }}
       run-os: ${{ steps.decide.outputs.run-os }}
       run-hosts: ${{ steps.decide.outputs.run-hosts }}
+      run-perf: ${{ steps.decide.outputs.run-perf }}
       linux-partitions: ${{ steps.linux-partitions.outputs.matrix }}
       macos-groups: ${{ steps.macos-groups.outputs.matrix }}
     steps:
@@ -67,62 +64,36 @@ jobs:
         id: decide
         env:
           EVENT: ${{ github.event_name }}
-          TRUSTED: ${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-          DRAFT: ${{ github.event.pull_request.draft }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          RUN_OS: ${{ inputs.run_os || false }}
+          RUN_HOSTS: ${{ inputs.run_hosts || false }}
+          RUN_PERF: ${{ inputs.run_perf || false }}
         run: |
-          has_label() { [[ " $LABELS " == *" $1 "* ]]; }
-          heavy=false; os=false; hosts=false
-          if [[ $EVENT != pull_request ]]; then
-            heavy=true; os=true; hosts=true
-          elif [[ $TRUSTED == true ]] && { [[ $DRAFT != true ]] || has_label ci-full; }; then
-            heavy=true
-            has_label ci-os && os=true
-            has_label ci-hosts && hosts=true
+          heavy=true
+          os=false
+          hosts=false
+          perf=false
+          if [[ $EVENT == workflow_dispatch ]]; then
+            [[ $RUN_OS == true ]] && os=true
+            [[ $RUN_HOSTS == true ]] && hosts=true
+            [[ $RUN_PERF == true ]] && perf=true
           fi
           {
             echo "run-heavy=$heavy"
             echo "run-os=$os"
             echo "run-hosts=$hosts"
+            echo "run-perf=$perf"
           } >>"$GITHUB_OUTPUT"
-          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts (event=$EVENT draft=${DRAFT:-n/a} labels='$LABELS')"
+          echo "run-heavy=$heavy run-os=$os run-hosts=$hosts run-perf=$perf (event=$EVENT)"
 
       # The Linux and macOS test matrices come from the same manifest the
       # partition jobs select their targets from, so a partition cannot exist
-      # without a job or a job without a partition. The cache prune below
-      # needs `scripts/` too; nothing else is checked out.
+      # without a job or a job without a partition.
       - uses: actions/checkout@v7
         with:
           sparse-checkout: |
             .github/linux-test-partitions.json
             scripts
           sparse-checkout-cone-mode: false
-
-      # Cache entries are restorable only from the ref that saved them, and
-      # the Rust lanes restore by key prefix (newest `v0-rust-<lane>-<env>-`),
-      # so everything a push supersedes on `refs/pull/N/merge` is dead weight
-      # against the 10 GB budget until LRU evicts something live instead
-      # (measured 2026-09-08: 9.6 GB saved per push, every lane rebuilding
-      # cold). This used to be its own workflow run per push; it rides here
-      # because this job already holds a runner for every push. Best effort:
-      # a prune failure must not withhold the run's verdict.
-      - name: Delete the pull request's superseded cache entries
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          MERGE_REF: refs/pull/${{ github.event.pull_request.number }}/merge
-        run: |
-          set -euo pipefail
-          superseded="$(gh api --paginate "repos/$REPO/actions/caches?ref=$MERGE_REF&per_page=100" \
-                          | python3 scripts/prune-superseded-actions-caches.py)"
-          deleted=0
-          for cache in $superseded; do
-            gh api -X DELETE "repos/$REPO/actions/caches/$cache" >/dev/null
-            deleted=$((deleted + 1))
-          done
-          echo "deleted $deleted superseded cache entry(ies) for $MERGE_REF"
 
       - name: Derive the Linux test matrix
         id: linux-partitions
@@ -132,59 +103,13 @@ jobs:
         id: macos-groups
         run: echo "matrix=$(python3 scripts/linux-test-partitions.py macos-matrix)" >> "$GITHUB_OUTPUT"
 
-  # Exercises the checked-out PR head through the CLI against an isolated
-  # daemon (scripts/ci-pr-dogfood-smoke.sh). The binary is the one `debug-cli`
-  # builds from the merge ref: the smoke only needs an executable `tracedecay`,
-  # and building a second one from the head cost a cold
-  # `cargo build -p tracedecay-cli` that never fit this job's budget (runs
-  # 34217290139 and 34231734416: the build was cancelled after 29 minutes
-  # while `debug-cli` finished the same build in 30-31 minutes and published
-  # it).
-  pr-dogfood:
-    name: PR checkout dogfood
-    needs: [scope-gate, debug-cli]
-    if: ${{ github.event_name == 'pull_request' && needs.scope-gate.outputs.run-heavy == 'true' }}
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Fetch the debug CLI built once for this run
-        uses: actions/download-artifact@v4
-        with:
-          name: debug-tracedecay-cli
-          path: target/debug
-      - name: Restore the executable bit the artifact store drops
-        run: chmod +x target/debug/tracedecay
-
-      - name: Test dogfood harnesses
-        run: |
-          python3 scripts/test-check-pr-dogfood-output.py
-          python3 scripts/test-efficiency-scorecard.py
-          python3 scripts/test-pr-dogfood-portability.py
-
-      - name: Initialize checkout and exercise CLI tools
-        run: scripts/ci-pr-dogfood-smoke.sh
-        env:
-          TRACEDECAY_BIN: target/debug/tracedecay
-          TRACEDECAY_DOGFOOD_BASE_REF: ${{ github.event.pull_request.base.sha }}
-          TRACEDECAY_DOGFOOD_HEAD_REF: ${{ github.event.pull_request.head.sha }}
-          TRACEDECAY_DOGFOOD_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
-          TRACEDECAY_DOGFOOD_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
-
-  # One dev-profile `tracedecay` binary for every job that only exercises the
-  # built CLI (`pr-dogfood`, Hermes, Claude Code, OpenCode). Each of those
-  # jobs used to compile the whole workspace itself behind its own cache key,
-  # so a cold cache cost the run several 30-minute builds instead of one and
-  # tripped their timeouts.
+  # One dev-profile `tracedecay` binary for the explicitly requested stock
+  # host integrations. Ordinary Linux validation needs no CLI artifact, so
+  # this build is absent unless `run_hosts=true`.
   debug-cli:
     name: Build debug CLI
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-hosts == 'true' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
@@ -233,10 +158,14 @@ jobs:
         working-directory: benchmark_data/runtime
         run: python3 -m unittest discover -s tests -p 'test_*.py'
 
-  commit-messages:
-    name: Commit Messages
+  # The cheap repository gates in one job: commit lint, cache lineage, the
+  # release guards, and rustfmt. Each used to hold its own ubuntu-latest
+  # runner for a couple of minutes of work; on 20 free slots that is three
+  # queue entries per push doing what one does.
+  gates:
+    name: Repository gates
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -262,111 +191,46 @@ jobs:
           python3 scripts/test-rust-cache-lineage.py
           python3 scripts/check-rust-cache-lineage.py
 
+      # Release guards: drift, safety, installer, PR integrity, bundle check.
+      # Pull requests only; the release PR itself is exempt because it is
+      # the one change allowed to move the version authorities.
+      - name: Check the release guards
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          bash tests/release_drift_check_test.sh
+          bash tests/release_safety_test.sh
+          bash tests/install_script_test.sh
+          bash tests/release_pr_integrity_test.sh
+          bash tests/dashboard_bundle_check_test.sh
+
+      # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
+      # whatever `stable` is on the runner: rustfmt's output changes between
+      # releases (1.98.1 breaks a chain 1.97.1 keeps inline), and
+      # `dtolnay/rust-toolchain@stable` exports `RUSTUP_TOOLCHAIN`, which
+      # overrides the file. Installing through rustup with no override keeps
+      # the pin in one place.
+      - name: Install the repository's pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Test and check dev skill host copies
         run: |
           python3 scripts/test-check-dev-skill-mirrors.py
           python3 scripts/check-dev-skill-mirrors.py check
 
-      - name: Validate PR commit messages
-        if: github.event_name == 'pull_request'
+      # Dispatch admits an integration branch. Judge the commits a merge onto
+      # the default branch would introduce, with the same linter a push uses.
+      # A push still uses the before SHA, so published history is not rejudged.
+      - name: Validate commit messages
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: node scripts/lint-commit-range.mjs --repository "$PWD" "$BASE_SHA" "$HEAD_SHA"
-
-      - name: Validate pushed commit messages
-        if: github.event_name == 'push'
-        env:
+          EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              base_sha="${HEAD_SHA}^"
-            else
-              git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
-              exit 0
-            fi
-          else
-            base_sha="$BEFORE_SHA"
-          fi
-          node scripts/lint-commit-range.mjs --repository "$PWD" "$base_sha" "$HEAD_SHA"
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: scripts/lint-ci-commits.sh
 
-  release-version-drift:
-    name: Release Version Drift
-    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Test release version drift guard
-        run: bash tests/release_drift_check_test.sh
-
-      # The workflow-contract pin scripts were replaced by the safety-guard
-      # assertions (f3b065545) and the dogfood surface was retired (b73a8a396);
-      # this job keeps the guards that protect the shipped release flow.
-      - name: Check release safety guards
-        run: bash tests/release_safety_test.sh
-
-      - name: Test GitHub release installer
-        run: bash tests/install_script_test.sh
-
-      # These two sat unwired: they are the tests for
-      # `scripts/check-release-pr-integrity.sh` and
-      # `scripts/check-dashboard-bundle.py`, both of which CI does run. So the
-      # guards were enforced while the tests proving the guards work were not,
-      # which is the shape that let a `test-transport` target rot until it
-      # stopped compiling. Three of the five `tests/*_test.sh` gates were wired;
-      # these are the other two.
-      - name: Test release PR integrity guard
-        run: bash tests/release_pr_integrity_test.sh
-
-      - name: Test dashboard bundle check
-        run: bash tests/dashboard_bundle_check_test.sh
-
-      - name: Check release version drift
-        run: scripts/check-release-drift.sh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-  # macOS compiles and runs the suite as groups of the Linux partitions
-  # (`macos_groups` in .github/linux-test-partitions.json), one hosted 3-vCPU
-  # `macos-14` job per group, so the lane's wall time is the slowest group
-  # instead of the whole workspace. The single job this replaces built
-  # `--workspace --bins --tests` in 80.2 min and ran the suite in 19.9 min
-  # (run 34303181887; run 34309279328 built for 74.9 min and was cancelled in
-  # its tests at 85 min), about 80 min after every other lane had reported,
-  # so it was the critical path of every pull request run. rust-cache carries
-  # the dependency graph only; the workspace crates compile fresh every run,
-  # and on three cores with ld64 that build is the whole cost.
-  #
-  # A group runs each of its partitions in turn against one target directory
-  # with the selection `linux-test-partition` resolves for it, so
-  # `root-sessions` and `root-journeys`, which select the same packages with
-  # the same feature, compile the chain beneath the root crate once and the
-  # second adds only its own suites. The grouping balances the warm Linux
-  # measurements (run 34309279328, compile + tests in minutes): root-lib
-  # 14.7 + 7.5 alone, since its root chain, library test target and 1675
-  # tests are the floor no split lowers; root-sessions 15.3 + 3.1 with
-  # root-journeys, which adds 2.7 + 2.7 on the shared resolution; runtime
-  # 15.6 + 2.4 with core-storage 10.4 + 1.9; core-contracts 13.9 + 0.6 with
-  # root-dashboard-api 12.7 + 0.8. Every pairing that puts a second partition
-  # beside a root group is heavier than the heaviest of these, and no two of
-  # the other four share a feature resolution, so grouping them differently
-  # saves no compile. At the 3-vCPU floor (compile × 4/3, tests as measured)
-  # the groups come to 28, 31, 40 and 38 min; at the 2× the one macOS
-  # measurement showed (the chain beneath the root crate compiled in 19.0
-  # min against 9.3 on Arm in the runs above) to 38, 43, 57 and 56. The
-  # budgets in the manifest take the 2×, plus the cold-dependency allowance
-  # and headroom the Linux budgets carry, until a hosted run measures the
-  # groups. The account admits five concurrent macOS jobs; a run takes at
-  # most four (`MACOS_GROUP_CAP`) so another run's macOS jobs can start.
   macos-test-partition:
     name: Test macOS ${{ matrix.group }}
     needs: scope-gate
@@ -560,10 +424,14 @@ jobs:
   # `--lib` / `--test <name>` / `--bins` decide what compiles, and a filterset
   # would compile everything and skip at run time. The three root partitions
   # share one package selection (`tracedecay`, `tracedecay-cli`,
-  # `tracedecay-search-eval`) with the root fixture feature, so they resolve
-  # one identical dependency graph and every cargo invocation inside a job
-  # (the test build, the executables the suites spawn) is a cache hit against
-  # it. `scripts/linux-test-partitions.py check` proves, from `cargo
+  # `tracedecay-search-eval`) with the root fixture feature. Journeys also
+  # enable `tracedecay/search-eval`, the only link from the root crate to the
+  # evaluator library. It stays off every other partition: an unconditional
+  # dependency unifies `tracedecay-query/search-eval` into every test
+  # target of the package, and the transport suites then compile the eval-only
+  # lexical projection. Every cargo invocation inside a job (the test build,
+  # the executables the suites spawn) is a cache hit against that job's
+  # resolution. `scripts/linux-test-partitions.py check` proves, from `cargo
   # metadata`, that every test target in the workspace is selected by exactly
   # one partition or listed under `not_run` with a reason, so a new crate or
   # suite cannot fall out of the lane silently; `scope-gate` derives the
@@ -744,7 +612,7 @@ jobs:
   hotpath-parity:
     name: Hotpath parity
     needs: scope-gate
-    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    if: ${{ needs.scope-gate.outputs.run-perf == 'true' }}
     runs-on: ubuntu-24.04-arm
     # 19.5 min for the two builds (hosted, above) + ~1.5 cold registry the
     # chain does not hide + ~1.5 setup + 0.5 test target + 0.5 run ≈ 24 min,
@@ -806,7 +674,7 @@ jobs:
             echo "Linux partition result: ${{ needs.linux-test-partition.result }}"
             exit 1
           fi
-          if [ "${{ needs.hotpath-parity.result }}" != "success" ]; then
+          if [ "${{ needs.hotpath-parity.result }}" != "success" ] && [ "${{ needs.hotpath-parity.result }}" != "skipped" ]; then
             echo "Hotpath parity result: ${{ needs.hotpath-parity.result }}"
             exit 1
           fi
@@ -866,7 +734,12 @@ jobs:
           shared-key: ci-test-full-windows-msvc-lld
           cache-on-failure: true
 
-      # Acceptance tests execute the ordinary evaluator binaries. Match the
+      # Acceptance tests execute the ordinary evaluator binaries, and
+      # `tracedecay/search-eval` is what compiles the suites that check the
+      # CLI receipt against the library. This lane builds `--workspace`, so
+      # the evaluator and `tracedecay-query/search-eval` already resolve here
+      # and the feature adds no compilation; the Linux partitions split the
+      # package selection, which is why it is per-partition there. Match the
       # archive's features and perf profile to reuse dependency artifacts;
       # nextest's archive.include carries the executables to every shard.
       # `--tests` keeps the binaries in the dev-dependency graph the archive
@@ -875,14 +748,14 @@ jobs:
       # lane).
       - name: Build workspace binaries and tests for the Windows test lane
         shell: pwsh
-        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # `--workspace`, not `-p tracedecay-cli`: the package selection decides
       # feature unification, and the narrower one recompiles the code-index
       # and extraction crates in a second configuration (see the Linux lane).
       - name: Build Windows host-CLI test fixture
         shell: pwsh
-        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers
+        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified by the `hotpath-parity` job. Building them here would put a
@@ -893,7 +766,7 @@ jobs:
       # archive alias, so the arguments are spelled out here once.
       - name: Build nextest archive
         shell: pwsh
-        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
+        run: cargo nextest archive --workspace --profile ci --locked --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf --timings --archive-file "$env:RUNNER_TEMP/nextest-archive.tar.zst"
 
       - name: Upload Windows archive build timings
         if: always()
@@ -1169,27 +1042,100 @@ jobs:
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
+          # Lights the hotpath backend without any crate's own hotpath feature.
+          # The two lines above keep them in sync, which hides a type that
+          # forks on the local feature while hotpath::io! expands on the backend.
+          cargo check --workspace --all-targets --features hotpath/hotpath --locked
 
-  fmt:
-    name: Format
+  # The configuration users actually receive. `scripts/resolve-release-source-profile.py`
+  # resolves the release build to `--no-default-features --features production`
+  # on the release profile, and nothing on a push compiled it: `debug-cli` is a
+  # dev-profile binary built only for the stock host integrations, and every
+  # other lane runs the default feature graph. A break confined to the
+  # `production` graph (the mimalloc allocator, the embedded dashboard, the
+  # release profile itself) therefore first appeared while a release was being
+  # cut, which is the most expensive place to find it.
+  #
+  # Compile plus a smoke run, on one target. The packaging battery that sits on
+  # top of this binary (`cargo package`, the extracted-crate rebuild, MCPB, the
+  # MCP stdio checks) stays in distribution-acceptance.yml, which is
+  # dispatch-only and explicitly not a ship gate. This job does not repeat any
+  # of it, and that workflow keeps its own cache lineage.
+  shipped-cli:
+    name: Shipped CLI build (x86_64-linux)
     needs: scope-gate
     if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
+    env:
+      TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
-      # Judge formatting with the toolchain `rust-toolchain.toml` pins, not
-      # whatever `stable` is on the runner. rustfmt's output changes between
-      # releases. 1.98.1 breaks a `.unwrap_or_else(|err| { ... })` chain that
-      # 1.97.1 keeps inline, so a `stable` rustfmt rejects a tree the pinned
-      # rustfmt developers run formats exactly, and every contributor sees a
-      # red lane they cannot reproduce. `dtolnay/rust-toolchain@stable` also
-      # exports `RUSTUP_TOOLCHAIN`, which overrides the toolchain file rather
-      # than deferring to it. Installing through rustup with no override keeps
-      # the pin in one place: the toolchain file, components included.
-      - name: Install the repository's pinned toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo fmt --all -- --check
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      # `production` embeds the dashboard, so the bundle has to exist before
+      # cargo runs. Handing build.rs the digest of this bundle keeps the build
+      # script from shelling out to npm a second time.
+      - name: Build the embedded dashboard bundle
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Pin the embedded bundle for the skip-mode build
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_SKIP_DASHBOARD_BUILD=1" >> "$GITHUB_ENV"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      # rust-toolchain.toml, not floating stable: the release workflows build
+      # this configuration with the pinned compiler, so a push gate on a
+      # different one is not evidence about the same artifact.
+      - name: Resolve pinned toolchain
+        id: pin
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
+        with:
+          toolchain: ${{ steps.pin.outputs.toolchain }}
+          targets: ${{ env.TARGET }}
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      # Dependencies only. The workspace crates are what a push changes, so
+      # caching their release artifacts would re-save the tree every run for a
+      # restore that hits nothing, against the repository's 10 GB budget that
+      # the test lanes' caches are already evicted from.
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-shipped-cli-${{ env.TARGET }}
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Build the shipped binary
+        shell: bash
+        run: |
+          cargo build --package tracedecay-cli --bin tracedecay --release \
+            --target "$TARGET" --no-default-features --features production --locked
+
+      - name: Smoke-run the shipped binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${TARGET}/release/tracedecay"
+          test -x "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
 
   dashboard:
     name: Dashboard
@@ -1314,6 +1260,11 @@ jobs:
           npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
           claude --version
           opencode --version
+
+      - name: Run MCP conformance smoke
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/mcp-conformance-smoke.sh
 
       - name: Run stock Claude Code integration checks
         env:

@@ -17,13 +17,11 @@ pub(super) async fn wait_for_project_open_publication<Publication, Output>(
 where
     Publication: std::future::Future<Output = Result<Output>>,
 {
-    // The bound is a plain deadline: a waiter resumed after it elapsed still
-    // needs one more await, `route_bound_project_server`, before its
-    // publication loop can read the route's terminal state, so an elapsed
-    // deadline preempts a failure that was already recorded and the caller
-    // would see warming for a route that is no longer opening. Callers repair
-    // that with `prefer_recorded_open_failure` against the claim's own watch
-    // channel instead of weakening the bound.
+    // The bound is a plain deadline, measured from the open claim. A waiter
+    // resumed after it elapsed may still be inside `route_bound_project_server`
+    // and would otherwise answer warming for a refusal already on the watch.
+    // Callers repair that with `prefer_recorded_open_failure` against the
+    // claim's own watch channel instead of weakening the bound.
     hotpath::future!(
         tokio::time::timeout_at(deadline, publication),
         label = "daemon.project.open.publication_wait"
@@ -483,7 +481,6 @@ pub(super) async fn portable_project_server_for_request(
     // warm-up runs. The open task remains tracked and continues in the
     // background after this bounded wait expires.
     let mut retry_init = handshake.allow_init;
-    let publication_deadline = tokio::time::Instant::now() + PROJECT_OPEN_REQUEST_DEADLINE;
     loop {
         let claim = Box::pin(begin_portable_project_open(
             lifecycle.clone(),
@@ -499,6 +496,10 @@ pub(super) async fn portable_project_server_for_request(
             project_open_attempts.clone(),
         ))
         .await;
+        // The bound starts here, after the open is claimed. Starting it at
+        // connection arrival let route enrollment spend it, and the request
+        // then answered warming for a refusal already on the watch.
+        let publication_deadline = project_open_publication_deadline(tokio::time::Instant::now());
         let result = match claim {
             ProjectOpenTaskClaim::InFlight(state) => {
                 let recorded = state.clone();

@@ -119,9 +119,12 @@ async fn admit_codex_project_rollouts(
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-) -> Result<bool> {
+) -> Result<CodexRolloutAdmission> {
     let mut budget = max_new_bytes;
     let mut deferred = false;
+    let mut observations_committed = 0_u64;
+    let mut scanned = 0_u64;
+    let mut replayed = 0_u64;
     let mut paths = source.transcript_paths(project_root).into_iter().peekable();
     while let Some(path) = paths.next() {
         let progress =
@@ -136,6 +139,11 @@ async fn admit_codex_project_rollouts(
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?;
         deferred |= progress.source_deferred;
+        observations_committed = observations_committed.saturating_add(progress.frames_persisted);
+        scanned = scanned.saturating_add(1);
+        if progress.resumed && progress.frames_persisted == 0 {
+            replayed = replayed.saturating_add(1);
+        }
         if let Some(remaining) = budget.as_mut() {
             *remaining = remaining.saturating_sub(progress.bytes_consumed);
             if *remaining == 0 {
@@ -144,7 +152,27 @@ async fn admit_codex_project_rollouts(
             }
         }
     }
-    Ok(deferred)
+    Ok(CodexRolloutAdmission {
+        deferred,
+        // Only when every scanned rollout was a pure replay. One rollout with
+        // new frames makes the pass a commit, not a duplicate, and a pass that
+        // scanned nothing has nothing to call durable.
+        exact_duplicate: scanned > 0 && scanned == replayed,
+        observations_committed,
+    })
+}
+
+/// What one Codex rollout admission pass committed, apart from what its own
+/// projection drain later catches. The projection queue is shared per scope
+/// with the project catch-up sweep, which can consume these rows first.
+pub(super) struct CodexRolloutAdmission {
+    pub(super) deferred: bool,
+    /// Every scanned rollout resumed at its stored cursor with nothing new to
+    /// persist, so the transcript was already durable when this pass ran.
+    /// `JsonlObservationAdmissionProgress::resumed` is what separates that from
+    /// an empty source, so a first-ever scan is never called a duplicate.
+    pub(super) exact_duplicate: bool,
+    pub(super) observations_committed: u64,
 }
 
 async fn drain_host_observation_projections(
@@ -642,18 +670,33 @@ pub async fn ingest_transcript_with_cancellation(
         source_deferred,
         lcm_receipt,
         route_admission,
+        observations_committed: route_observations_committed,
+        exact_duplicate: route_exact_duplicate,
+        admission_owns_commit,
     } = capture;
-    let authority_changed = messages_upserted > 0
-        || snapshot_capture
+    let verdict = ingest_commit_verdict(&IngestCommitAccount {
+        admission_owns_commit,
+        observations_committed: route_observations_committed,
+        route_exact_duplicate,
+        messages_upserted,
+        snapshot_messages_upserted: snapshot_capture
             .as_ref()
-            .is_some_and(|capture| capture.stats.messages_upserted > 0)
-        || claude_observation_stats
+            .map_or(0, |capture| capture.stats.messages_upserted),
+        claude_observations_committed: claude_observation_stats
             .as_ref()
-            .is_some_and(|stats| stats.observations_committed > 0 || stats.cursor_advances > 0);
-    let exact_duplicate = !authority_changed
-        && claude_observation_stats
+            .map_or(0, |stats| stats.observations_committed),
+        claude_cursor_advances: claude_observation_stats
             .as_ref()
-            .is_some_and(|stats| stats.observation_duplicates > 0 || stats.cursor_duplicates > 0);
+            .map_or(0, |stats| stats.cursor_advances),
+        claude_observation_duplicates: claude_observation_stats
+            .as_ref()
+            .map_or(0, |stats| stats.observation_duplicates),
+        claude_cursor_duplicates: claude_observation_stats
+            .as_ref()
+            .map_or(0, |stats| stats.cursor_duplicates),
+    });
+    let authority_changed = verdict.authority_changed;
+    let exact_duplicate = verdict.exact_duplicate;
     let deferred_by_byte_cap = source_deferred
         || snapshot_capture
             .as_ref()
@@ -710,6 +753,12 @@ pub async fn ingest_transcript_with_cancellation(
         .await;
         output["hint_outcomes"] = settlement.as_json();
     }
+    // Routes that admit observations directly report what they committed, so a
+    // `messages_upserted: 0` pass is readable without guessing which drainer
+    // won. The snapshot and Claude blocks below own the key for their routes.
+    if route_observations_committed > 0 {
+        output["observations_committed"] = json!(route_observations_committed);
+    }
     if let Some(capture) = snapshot_capture {
         output["observations_committed"] = json!(capture.stats.messages_upserted);
         output["bytes_consumed"] = json!(capture.bytes_consumed);
@@ -729,6 +778,57 @@ pub async fn ingest_transcript_with_cancellation(
         output["source_bytes_scanned"] = json!(stats.source_bytes_scanned);
     }
     Ok(output)
+}
+
+/// The counters a capture route hands the terminal-status assembly.
+///
+/// `admission_owns_commit` routes (Cursor, Codex project) already know whether
+/// they persisted frames. Their projection drain reads a queue the project
+/// catch-up also empties, so `messages_upserted` on those routes is a residual
+/// of that queue, not a second copy of the commit.
+pub(super) struct IngestCommitAccount {
+    pub(super) admission_owns_commit: bool,
+    pub(super) observations_committed: u64,
+    pub(super) route_exact_duplicate: bool,
+    pub(super) messages_upserted: u64,
+    pub(super) snapshot_messages_upserted: u64,
+    pub(super) claude_observations_committed: u64,
+    pub(super) claude_cursor_advances: u64,
+    pub(super) claude_observation_duplicates: u64,
+    pub(super) claude_cursor_duplicates: u64,
+}
+
+pub(super) struct IngestCommitVerdict {
+    pub(super) authority_changed: bool,
+    pub(super) exact_duplicate: bool,
+}
+
+/// Commit status from the route that owns it.
+///
+/// When admission owns the commit, a non-zero drain residual cannot promote a
+/// pass that persisted nothing into `committed`, and a zero drain cannot hide
+/// frames this pass did persist. Routes without an admission tally still read
+/// their own message and duplicate counters.
+pub(super) fn ingest_commit_verdict(account: &IngestCommitAccount) -> IngestCommitVerdict {
+    if account.admission_owns_commit {
+        let authority_changed = account.observations_committed > 0;
+        return IngestCommitVerdict {
+            authority_changed,
+            exact_duplicate: !authority_changed && account.route_exact_duplicate,
+        };
+    }
+    let authority_changed = account.messages_upserted > 0
+        || account.observations_committed > 0
+        || account.snapshot_messages_upserted > 0
+        || account.claude_observations_committed > 0
+        || account.claude_cursor_advances > 0;
+    IngestCommitVerdict {
+        authority_changed,
+        exact_duplicate: !authority_changed
+            && (account.route_exact_duplicate
+                || account.claude_observation_duplicates > 0
+                || account.claude_cursor_duplicates > 0),
+    }
 }
 
 pub(super) fn complete_ingest_admission(

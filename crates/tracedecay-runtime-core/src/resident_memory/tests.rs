@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
 use super::{
-    ProcessResidentMemoryV1, RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1,
-    ResidentMemoryAdmissionFailureV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
-    ResidentMemoryPressureStateV1, ResidentMemoryPressureV1, cgroup_v2_memory_limit_v1,
-    effective_memory_bytes_v1, process_resident_memory_limit_for_system_v1,
-    process_resident_memory_limit_v1,
+    CgroupMemoryCeilingV1, ProcessResidentMemoryV1,
+    RESIDENT_MEMORY_PRESSURE_ADMISSION_FLOOR_BYTES_V1, ResidentMemoryAdmissionFailureV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryPressureStateV1,
+    ResidentMemoryPressureV1, cgroup_service_ceiling_bytes, cgroup_v2_memory_ceiling_v1,
+    effective_memory_bytes_v1, resident_memory_authority_v1,
 };
 
 fn bytes(value: u64) -> NonZeroU64 {
@@ -46,7 +46,8 @@ fn effective_memory_bytes(
 ) -> u64 {
     effective_memory_bytes_v1(
         total_memory_bytes,
-        cgroup_v2_memory_limit_v1(proc_self_cgroup, cgroup_root),
+        cgroup_v2_memory_ceiling_v1(proc_self_cgroup, cgroup_root)
+            .and_then(cgroup_service_ceiling_bytes),
     )
 }
 
@@ -116,14 +117,58 @@ fn root_v2_membership_reads_the_mount_root_ceiling() {
     );
 }
 
+fn hard_ceiling(max_bytes: u64) -> CgroupMemoryCeilingV1 {
+    CgroupMemoryCeilingV1 {
+        max_bytes: Some(max_bytes),
+        high_bytes: None,
+    }
+}
+
 #[test]
 fn configured_override_cannot_exceed_the_cgroup_ceiling() {
     let gib = 1024 * 1024 * 1024;
+    let capped = resident_memory_authority_v1(
+        88 * gib,
+        Some(CgroupMemoryCeilingV1 {
+            max_bytes: Some(30 * gib),
+            high_bytes: Some(26 * gib),
+        }),
+        Some(bytes(64 * gib)),
+    );
 
     assert_eq!(
-        process_resident_memory_limit_v1(88 * gib, Some(30 * gib), Some(bytes(64 * gib))).get(),
-        30 * gib
+        capped.limit_bytes.get(),
+        30 * gib,
+        "an override is capped by memory.max, not by the reclaim line"
     );
+    assert_eq!(capped.reclaim_watermark_bytes, Some(26 * gib));
+}
+
+#[test]
+fn cgroup_service_allowance_is_not_discounted_twice() {
+    let gib = 1024 * 1024 * 1024;
+    let only_high = resident_memory_authority_v1(
+        128 * gib,
+        Some(CgroupMemoryCeilingV1 {
+            max_bytes: None,
+            high_bytes: Some(26 * gib),
+        }),
+        None,
+    );
+    assert_eq!(
+        only_high.limit_bytes.get(),
+        26 * gib,
+        "a lone memory.high is the service ceiling and is not quartered again"
+    );
+    assert_eq!(only_high.reclaim_watermark_bytes, None);
+
+    let small_host = resident_memory_authority_v1(16 * gib, Some(hard_ceiling(30 * gib)), None);
+    assert_eq!(
+        small_host.limit_bytes.get(),
+        12 * gib,
+        "a larger cgroup must not erase the physical-host reserve"
+    );
+    assert_eq!(small_host.reclaim_watermark_bytes, None);
 }
 
 #[test]
@@ -140,7 +185,7 @@ fn unlimited_cgroup_memory_files_keep_host_memory_capacity() {
 }
 
 #[test]
-fn finite_memory_high_below_max_is_the_effective_capacity() {
+fn memory_high_does_not_replace_memory_max_as_the_hard_capacity() {
     let gib = 1024 * 1024 * 1024;
     let (_directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
         Some("0::/trace.slice/daemon.scope\n"),
@@ -149,8 +194,13 @@ fn finite_memory_high_below_max_is_the_effective_capacity() {
     );
     assert_eq!(
         effective_memory_bytes(88 * gib, &proc_self_cgroup, &cgroup_root),
-        24 * gib
+        30 * gib,
+        "memory.max is the kernel kill line"
     );
+    let ceiling = cgroup_v2_memory_ceiling_v1(&proc_self_cgroup, &cgroup_root).expect("cgroup");
+    let authority = resident_memory_authority_v1(88 * gib, Some(ceiling), None);
+    assert_eq!(authority.limit_bytes.get(), 30 * gib);
+    assert_eq!(authority.reclaim_watermark_bytes, Some(24 * gib));
 }
 
 #[test]
@@ -173,6 +223,89 @@ fn finite_ancestor_limit_bounds_an_unlimited_process_cgroup() {
     drop(directory);
 }
 
+/// The slice owns `memory.max` and the service owns `memory.high`.
+///
+/// On a 128 GiB host those are 30 GiB and 26 GiB. RSS at 24 GiB is still under
+/// the reclaim line, so the authority admits growth instead of latching at a
+/// percentage of a ceiling the operator never set.
+#[test]
+fn slice_max_and_service_high_keep_the_reclaim_band_usable() {
+    let gib = 1024 * 1024 * 1024;
+    let (directory, proc_self_cgroup, cgroup_root) = cgroup_fixture(
+        Some("0::/trace.slice/daemon.scope\n"),
+        Some("max\n"),
+        Some(&format!("{}\n", 26 * gib)),
+    );
+    fs::write(
+        cgroup_root.join("trace.slice/memory.max"),
+        format!("{}\n", 30 * gib),
+    )
+    .expect("ancestor memory.max fixture");
+    fs::write(cgroup_root.join("trace.slice/memory.high"), "max\n")
+        .expect("ancestor memory.high fixture");
+
+    let ceiling = cgroup_v2_memory_ceiling_v1(&proc_self_cgroup, &cgroup_root).expect("cgroup");
+    let detected = resident_memory_authority_v1(128 * gib, Some(ceiling), None);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
+        detected.limit_bytes,
+        detected.reclaim_watermark_bytes,
+    ));
+    let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        detected.limit_bytes,
+        Arc::clone(&pressure),
+    ));
+
+    assert_eq!(detected.limit_bytes.get(), 30 * gib);
+    assert_eq!(pressure.high_watermark_bytes(), 26 * gib);
+    assert_eq!(
+        pressure.low_watermark_bytes(),
+        23_264_406_186,
+        "hysteresis stays at 750/900 of memory.high, not 75% of memory.max"
+    );
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(22 * gib)
+            .is_over_budget()
+    );
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(24 * gib)
+            .is_over_budget(),
+        "rss under memory.high is not over budget"
+    );
+    authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "text-build"),
+            bytes(3 * gib),
+        )
+        .expect("the process authority admits a 3 GiB reservation at 24 GiB RSS");
+
+    // Text-artifact admission spends the band down to the reclaim line, never
+    // down to memory.max: `text_artifact_admitted_build_budget` subtracts the
+    // same watermark headroom it charges, so its growth budget reduces to
+    // `high_watermark - observed`. At 24 GiB observed that is 2 GiB, clearing
+    // the 1536 MiB builder floor. The 90%-of-26 GiB watermark left 0 and
+    // deadlocked the replacement build.
+    let headroom = detected
+        .limit_bytes
+        .get()
+        .saturating_sub(pressure.high_watermark_bytes());
+    let available_for_growth = detected
+        .limit_bytes
+        .get()
+        .saturating_sub(24 * gib)
+        .saturating_sub(headroom);
+    assert_eq!(available_for_growth, 2 * gib);
+    assert!(available_for_growth >= 1536 * 1024 * 1024);
+
+    assert!(
+        pressure
+            .publish_observed_resident_bytes(26 * gib)
+            .is_over_budget()
+    );
+    drop(directory);
+}
+
 #[test]
 fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
     let mib = 1024 * 1024;
@@ -181,17 +314,26 @@ fn low_effective_cgroup_ceiling_engages_measured_pressure_before_the_cap() {
         Some("134217728\n"),
         Some("100663296\n"),
     );
-    let effective = effective_memory_bytes(8 * 1024 * mib, &proc_self_cgroup, &cgroup_root);
-    let limit = process_resident_memory_limit_for_system_v1(effective);
-    let pressure = Arc::new(ResidentMemoryPressureV1::new(limit));
+    let ceiling = cgroup_v2_memory_ceiling_v1(&proc_self_cgroup, &cgroup_root).expect("cgroup");
+    let detected = resident_memory_authority_v1(8 * 1024 * mib, Some(ceiling), None);
+    let pressure = Arc::new(ResidentMemoryPressureV1::with_reclaim_line(
+        detected.limit_bytes,
+        detected.reclaim_watermark_bytes,
+    ));
     let authority = Arc::new(ProcessResidentMemoryV1::with_pressure(
-        limit,
+        detected.limit_bytes,
         Arc::clone(&pressure),
     ));
 
-    assert_eq!(effective, 96 * mib);
-    assert_eq!(limit.get(), 72 * mib);
-    assert!(pressure.high_watermark_bytes() < effective);
+    assert_eq!(detected.limit_bytes.get(), 128 * mib);
+    assert_eq!(pressure.high_watermark_bytes(), 96 * mib);
+    assert!(pressure.high_watermark_bytes() < detected.limit_bytes.get());
+    assert!(
+        !pressure
+            .publish_observed_resident_bytes(95 * mib)
+            .is_over_budget(),
+        "rss below memory.high is still under the hard ceiling"
+    );
     assert!(
         pressure
             .publish_observed_resident_bytes(pressure.high_watermark_bytes())
@@ -333,6 +475,57 @@ fn reservation_tracks_exact_identity_and_releases_on_drop() {
 
     drop(lexical_reservation);
     assert_eq!(authority.snapshot().used_bytes, 0);
+}
+
+#[test]
+fn transfer_keeps_retained_bytes_when_a_new_admission_cannot() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let build = key(
+        "project-a",
+        "worktree-a",
+        "generation-a",
+        "code-text-artifact-build",
+    );
+    let reader = key(
+        "project-a",
+        "worktree-a",
+        "generation-a",
+        "code-text-artifact-reader",
+    );
+    let mut held = authority
+        .reserve(build.clone(), bytes(80))
+        .expect("build reservation");
+    let _neighbor = authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "graph"),
+            bytes(20),
+        )
+        .expect("neighbor fills the ceiling");
+    let denied = authority
+        .reserve(reader.clone(), bytes(30))
+        .expect_err("a fresh reader admission does not fit beside the held build charge");
+    assert!(matches!(
+        denied,
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling { .. }
+    ));
+
+    held.transfer_component(reader.component, 30)
+        .expect("the held charge moves without a new admission");
+    assert_eq!(held.key(), &reader);
+    assert_eq!(held.reserved_bytes(), 30);
+    let snapshot = authority.snapshot();
+    assert_eq!(snapshot.used_bytes, 50);
+    assert_eq!(snapshot.charge_for(&build), 0);
+    assert_eq!(snapshot.charge_for(&reader), 30);
+
+    let grown = held.transfer_component(reader.component, 40);
+    assert!(grown.is_err(), "a transfer cannot grow the held charge");
+    assert_eq!(held.reserved_bytes(), 30);
+    assert_eq!(authority.snapshot().charge_for(&reader), 30);
+
+    drop(held);
+    assert_eq!(authority.snapshot().used_bytes, 20);
+    assert_eq!(authority.snapshot().charge_for(&reader), 0);
 }
 
 #[test]

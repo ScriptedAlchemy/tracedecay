@@ -54,10 +54,11 @@ pub fn default_workload_path(repo_root: &Path) -> PathBuf {
     repo_root.join(WORKLOAD_RELATIVE)
 }
 
-/// Validate the byte-pinned packaged workload.
+/// Validate the packaged workload identity.
 ///
 /// Ordinary developer comparisons may use an explicit workload; this default
-/// fixture is the one whose digest the package pins.
+/// fixture is the one whose input digest the package pins. Ranking receipts
+/// are checked separately and are not part of that identity.
 pub fn validate_default_workload() -> Result<DirectWorkloadSummaryV1, SearchEvalError> {
     let assets = packaged_assets::materialize()?;
     validate_direct_workload(assets.root(), Some(&assets.workload_path()))

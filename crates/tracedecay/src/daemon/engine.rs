@@ -680,9 +680,10 @@ impl DaemonEngine {
             // warm-up runs. The open task remains tracked and continues in the
             // background after this bounded wait expires.
             let mut retry_init = handshake.allow_init;
-            let publication_deadline = tokio::time::Instant::now() + PROJECT_OPEN_REQUEST_DEADLINE;
             loop {
                 let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
+                let publication_deadline =
+                    project_open_publication_deadline(tokio::time::Instant::now());
                 let result = match claim {
                     ProjectOpenTaskClaim::InFlight(state) => {
                         let recorded = state.clone();

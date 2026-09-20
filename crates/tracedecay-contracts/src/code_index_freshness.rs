@@ -213,6 +213,8 @@ pub struct CodeCloneIndexCoverageV1 {
     pub hot_posting_rows_skipped: Option<u64>,
     /// Bodies excluded because they are below the automatic-discovery minimum.
     pub excluded_too_small_bodies: Option<u64>,
+    /// Bodies excluded because they exceed the automatic-discovery token maximum.
+    pub excluded_too_large_bodies: Option<u64>,
     /// Bodies excluded because conservative tokenization was incomplete.
     pub excluded_incomplete_tokenization_bodies: Option<u64>,
     /// Eligible bodies whose rename normalization is partial.

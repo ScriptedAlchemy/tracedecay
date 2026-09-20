@@ -521,6 +521,25 @@ impl CodeIndexSchedulerRegistryV1 {
             })
     }
 
+    /// The pending-wake slot for one exact mounted root, in unix micros; `0`
+    /// means no wake is outstanding. A pass that ends while a wake is already
+    /// pending re-arms a busy follow-up whose receipt lands later, so a test
+    /// pinning wake or receipt accounting needs this as well as
+    /// `reconcile_in_progress_for_test`.
+    #[cfg(test)]
+    pub(crate) async fn pending_wake_micros_for_root(&self, project_root: &Path) -> Option<u64> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted.get(&project_root).map(|worktree| {
+            worktree
+                .pending_wake
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .micros
+        })
+    }
+
     /// The exact-source currency witness for one mounted root, so tests can
     /// stage the unproven-seat state a restart restore leaves behind.
     #[cfg(test)]
@@ -533,6 +552,21 @@ impl CodeIndexSchedulerRegistryV1 {
         mounted
             .get(&project_root)
             .map(|worktree| Arc::clone(&worktree.serving_source_witness))
+    }
+
+    /// One mounted root's scheduler mutex, the lock every step that renews the
+    /// source proof must hold, so a test can age that proof and read it back
+    /// without a pass tail re-proving it in between.
+    #[cfg(test)]
+    pub(crate) async fn scheduler_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<std::sync::Mutex<super::super::CodeIndexWorktreeSchedulerV1>>> {
+        let project_root = project_root.canonicalize().ok()?;
+        let mounted = self.mounted.lock().await;
+        mounted
+            .get(&project_root)
+            .map(|worktree| Arc::clone(&worktree.scheduler))
     }
 
     /// The shared source-freshness fence for one mounted root, so tests can
