@@ -7,7 +7,7 @@ use tree_sitter::{Node as TsNode, Tree};
 
 use crate::common::{ExtractionState, local_node_id};
 use crate::complexity::{POWERSHELL_COMPLEXITY, count_complexity};
-use crate::traversal::find_direct_child_by_kind;
+use crate::traversal::{find_descendant_by_kind, find_direct_child_by_kind};
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
     Visibility, generate_node_id,
@@ -173,12 +173,12 @@ impl PowerShellExtractor {
             return;
         };
 
-        let Some(cast) = Self::find_descendant_by_kind(left, "cast_expression") else {
+        let Some(cast) = find_descendant_by_kind(left, "cast_expression") else {
             return;
         };
 
         // The variable is a child of the cast_expression.
-        let Some(var_node) = Self::find_descendant_by_kind(cast, "variable") else {
+        let Some(var_node) = find_descendant_by_kind(cast, "variable") else {
             return;
         };
 
@@ -385,32 +385,6 @@ impl PowerShellExtractor {
                 }
             }
         }
-    }
-
-    /// Find the first descendant of a node with a given kind (recursive DFS).
-    fn find_descendant_by_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
-        let mut stack = vec![node];
-        while let Some(current) = stack.pop() {
-            if current.kind() == kind {
-                return Some(current);
-            }
-            // Push children via cursor (O(N) per node) and reverse so the
-            // first child pops first. Previous revision used `current.child(i)`
-            // in a `for i in (0..N).rev()` loop, which is O(N²) per node
-            // because `child(i)` walks sibling links from index 0.
-            let start = stack.len();
-            let mut cursor = current.walk();
-            if cursor.goto_first_child() {
-                loop {
-                    stack.push(cursor.node());
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-            }
-            stack[start..].reverse();
-        }
-        None
     }
 
     /// Build the final `ExtractionResult` from the accumulated state.

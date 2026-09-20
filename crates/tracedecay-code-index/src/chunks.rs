@@ -606,7 +606,16 @@ impl DeterministicCodeChunker {
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
-        self.build_file_artifacts(file, batch, descriptor, cancellation)
+        let mut clone_build = ClonePayloadBuildContextV1::new(None);
+        self.build_file_artifacts_with_parse(
+            file,
+            batch,
+            descriptor,
+            None,
+            self.sensitivity_level,
+            cancellation,
+            &mut clone_build,
+        )
     }
 
     /// Index one receipt-bound file and return the opaque capability required
@@ -1133,28 +1142,6 @@ impl CodeChunker for DeterministicCodeChunker {
 }
 
 impl DeterministicCodeChunker {
-    /// Build all parser-backed file artifacts. The legacy chunk-only port
-    /// delegates here so chunk, lineage, and graph evidence are always
-    /// derived from the same bounded parser result.
-    fn build_file_artifacts(
-        &self,
-        file: &ReceiptBoundCodeFileV1,
-        batch: &ExtractionBatchV1,
-        descriptor: &LanguageDescriptorV1,
-        cancellation: &dyn ExtractionCancellation,
-    ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
-        let mut clone_build = ClonePayloadBuildContextV1::new(None);
-        self.build_file_artifacts_with_parse(
-            file,
-            batch,
-            descriptor,
-            None,
-            self.sensitivity_level,
-            cancellation,
-            &mut clone_build,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn build_file_artifacts_with_parse(
         &self,

@@ -2034,11 +2034,6 @@ impl LatestCompleteCodeIndexV1 {
     pub fn lexical(&self) -> &[Arc<tracedecay_domain::CodeSearchChunkV1>] {
         self.generation.chunks().chunks()
     }
-
-    #[cfg(test)]
-    pub fn graph_edges(&self) -> &[tracedecay_domain::CanonicalRelationEdgeV1] {
-        self.generation.edges()
-    }
 }
 
 impl LatestCodeTextGenerationV1 {

@@ -6,10 +6,10 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::local_node_id;
+use crate::common::{ExtractionState, local_node_id};
 use crate::types::{
-    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
-    Visibility, generate_node_id,
+    ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
+    generate_node_id,
 };
 use crate::{
     common::{clean_c_comment, docstring_from_preceding_comments, extract_call_expression_sites},
@@ -20,63 +20,7 @@ use crate::{
 /// Extracts code graph nodes and edges from C source files using tree-sitter.
 pub struct CExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState<'s> {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: &'s [u8],
-    timestamp: u64,
-}
-
 impl<'s> ExtractionState<'s> {
-    fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = crate::common::unix_timestamp_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment. Prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
-
-    /// Borrowed text of a tree-sitter node, sliced straight from the source.
-    fn node_str(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
-
     /// Source slice from `node.start_byte()` up to `end_byte`.
     fn text_before(&self, node: TsNode<'_>, end_byte: usize) -> &str {
         let start = node.start_byte();
@@ -256,13 +200,13 @@ impl CExtractor {
         if let Some(declarator) = find_descendant_by_kind(node, "function_declarator") {
             // The function name is the identifier child of the function_declarator
             if let Some(ident) = find_direct_child_by_kind(declarator, "identifier") {
-                return Some(state.node_str(ident));
+                return Some(state.node_text(ident));
             }
             // Could also be inside a pointer_declarator -> function_declarator
             if let Some(ident) = find_direct_child_by_kind(declarator, "parenthesized_declarator") {
                 // For function pointer patterns, try finding identifier deeper
                 if let Some(inner_ident) = find_descendant_by_kind(ident, "identifier") {
-                    return Some(state.node_str(inner_ident));
+                    return Some(state.node_text(inner_ident));
                 }
             }
         }
@@ -311,7 +255,7 @@ impl CExtractor {
         let name = Self::extract_function_name(state, node).unwrap_or("<anonymous>");
         let signature = Some(
             state
-                .node_str(node)
+                .node_text(node)
                 .trim()
                 .trim_end_matches(';')
                 .trim()
@@ -384,7 +328,7 @@ impl CExtractor {
 
         let signature = Some(
             state
-                .node_str(node)
+                .node_text(node)
                 .trim()
                 .trim_end_matches(';')
                 .trim()
@@ -448,24 +392,24 @@ impl CExtractor {
         if let Some(init_decl) = find_direct_child_by_kind(node, "init_declarator") {
             // The identifier is the first child of init_declarator
             if let Some(ident) = find_direct_child_by_kind(init_decl, "identifier") {
-                return Some(state.node_str(ident));
+                return Some(state.node_text(ident));
             }
             // Could be a pointer declarator: `int *x = NULL;`
             if let Some(ptr_decl) = find_direct_child_by_kind(init_decl, "pointer_declarator")
                 && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
             {
-                return Some(state.node_str(ident));
+                return Some(state.node_text(ident));
             }
         }
         // Direct identifier child (e.g., `int x;`)
         if let Some(ident) = find_direct_child_by_kind(node, "identifier") {
-            return Some(state.node_str(ident));
+            return Some(state.node_text(ident));
         }
         // Pointer declarator without init (e.g., `char *name;`)
         if let Some(ptr_decl) = find_direct_child_by_kind(node, "pointer_declarator")
             && let Some(ident) = find_direct_child_by_kind(ptr_decl, "identifier")
         {
-            return Some(state.node_str(ident));
+            return Some(state.node_text(ident));
         }
         None
     }
