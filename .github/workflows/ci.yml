@@ -1042,6 +1042,10 @@ jobs:
         run: |
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
+          # Lights the hotpath backend without any crate's own hotpath feature.
+          # The two lines above keep them in sync, which hides a type that
+          # forks on the local feature while hotpath::io! expands on the backend.
+          cargo check --workspace --all-targets --features hotpath/hotpath --locked
 
   # The configuration users actually receive. `scripts/resolve-release-source-profile.py`
   # resolves the release build to `--no-default-features --features production`
