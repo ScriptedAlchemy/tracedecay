@@ -276,14 +276,10 @@ fn effect_problem(error: WorkAttemptEffectStorageErrorV1) -> ApplicationProblem 
 }
 
 fn invalid_holder_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-attempt-effect.invalid-holder".to_owned(),
-            message: "The Work attempt effect lifecycle time is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(SafeDiagnostic {
+        code: "application.work-attempt-effect.invalid-holder".to_owned(),
+        message: "The Work attempt effect lifecycle time is invalid.".to_owned(),
+    })
 }
 
 #[cfg(test)]

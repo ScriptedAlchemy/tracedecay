@@ -295,14 +295,12 @@ impl OperationEventError {
             Self::InvalidContext(_)
             | Self::InvalidProgress
             | Self::InvalidTerminal(_)
-            | Self::InvalidTestRunEvent => ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
+            | Self::InvalidTestRunEvent => {
+                ApplicationProblem::invalid_request(SafeDiagnostic::new(
                     "operation_event.invalid_request",
                     "The operation-event request is invalid",
-                )?,
-                retry: RetryDirective::Never,
-                legal_actions: vec![LegalAction::CorrectRequest],
-            },
+                )?)
+            }
             // Idempotency facts: the identity or terminal receipt is already
             // published, so the client re-reads current state instead of
             // retrying the same publish.

@@ -16,9 +16,9 @@ use tracedecay_contracts::multi_root::{
     MultiRootApplicationOperation, multi_root_executable_binding_registry,
 };
 use tracedecay_contracts::{
-    ApplicationProblem, AuthorizedScopeSet, LegalAction, MultiRootExecuteRequestV1,
-    MultiRootQueryPageV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
-    MultiRootScopeSetReadRequestV1, RequestId, RetryDirective, SafeDiagnostic,
+    ApplicationProblem, AuthorizedScopeSet, MultiRootExecuteRequestV1, MultiRootQueryPageV1,
+    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
+    RequestId, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -208,11 +208,7 @@ fn invalid_request_response(request_id: RequestId) -> Response {
     };
     tracedecay_api::adapter_problem_response(
         request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic,
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        ApplicationProblem::invalid_request(diagnostic),
     )
 }
 

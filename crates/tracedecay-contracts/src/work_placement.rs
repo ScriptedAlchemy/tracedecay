@@ -366,14 +366,10 @@ fn contract_problem(error: WorkPlacementContractError) -> ApplicationProblem {
             "application.work-placement.non-monotonic",
             "The Work placement transition is older than the published state.",
         ),
-        _ => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "application.work-placement.invalid-placement".to_owned(),
-                message: "The Work placement command or stored state is invalid.".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        _ => ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: "application.work-placement.invalid-placement".to_owned(),
+            message: "The Work placement command or stored state is invalid.".to_owned(),
+        }),
     }
 }
 

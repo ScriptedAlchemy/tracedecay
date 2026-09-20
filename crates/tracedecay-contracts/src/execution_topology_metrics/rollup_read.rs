@@ -10,7 +10,7 @@ use crate::observability::{
     ObservabilityFuture, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
 };
 use crate::work::work_authority;
-use crate::{ApplicationProblem, RequestAdmission, RequestContext, RetryDirective};
+use crate::{ApplicationProblem, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic};
 
 use super::projection::TELEMETRY_DROP_EVENT_KIND_V1;
 use super::rollup::{
@@ -20,7 +20,7 @@ use super::rollup::{
     canonical_execution_topology_rollup_fragment_bytes,
     project_execution_topology_fragments_with_boundaries,
 };
-use super::support::{invalid_problem, unavailable_model, unavailable_model_with_state_at};
+use super::support::{unavailable_model, unavailable_model_with_state_at};
 use super::{
     EXECUTION_TOPOLOGY_CAPABILITY_ID_V1, EXECUTION_TOPOLOGY_EVENT_KINDS_V1,
     EXECUTION_TOPOLOGY_USE_CASE_ID_V1, ExecutionMetricUnavailableV1,
@@ -227,16 +227,18 @@ where
 
 fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), ApplicationProblem> {
     if request.horizon.until_micros <= request.horizon.since_micros {
-        return Err(invalid_problem(
-            "application.execution-topology-rollup.invalid-horizon",
-            "The execution topology metrics horizon must end after it starts.",
-        ));
+        return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: ("application.execution-topology-rollup.invalid-horizon").to_owned(),
+            message: ("The execution topology metrics horizon must end after it starts.")
+                .to_owned(),
+        }));
     }
     if request.max_events == 0 || request.max_events > MAX_EXECUTION_TOPOLOGY_EVENTS_V1 {
-        return Err(invalid_problem(
-            "application.execution-topology-rollup.invalid-event-budget",
-            "The execution topology metrics event budget must be between 1 and 10000.",
-        ));
+        return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: ("application.execution-topology-rollup.invalid-event-budget").to_owned(),
+            message: ("The execution topology metrics event budget must be between 1 and 10000.")
+                .to_owned(),
+        }));
     }
     Ok(())
 }
@@ -251,16 +253,16 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
 
 fn authorize(context: &RequestContext) -> Result<(), ApplicationProblem> {
     let capability = CapabilityId::new(EXECUTION_TOPOLOGY_CAPABILITY_ID_V1).map_err(|_| {
-        invalid_problem(
-            "application.execution-topology-rollup.invalid-authority",
-            "The execution topology metrics authority is unavailable.",
-        )
+        ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: ("application.execution-topology-rollup.invalid-authority").to_owned(),
+            message: ("The execution topology metrics authority is unavailable.").to_owned(),
+        })
     })?;
     let use_case = UseCaseId::new(EXECUTION_TOPOLOGY_USE_CASE_ID_V1).map_err(|_| {
-        invalid_problem(
-            "application.execution-topology-rollup.invalid-authority",
-            "The execution topology metrics authority is unavailable.",
-        )
+        ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: ("application.execution-topology-rollup.invalid-authority").to_owned(),
+            message: ("The execution topology metrics authority is unavailable.").to_owned(),
+        })
     })?;
     if context.allows(&capability, &use_case) {
         Ok(())

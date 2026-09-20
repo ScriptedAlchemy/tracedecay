@@ -661,14 +661,12 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     };
     assert_eq!(
         problem,
-        tracedecay_contracts::ApplicationProblem::InvalidRequest {
-            diagnostic: tracedecay_contracts::SafeDiagnostic {
+        tracedecay_contracts::ApplicationProblem::invalid_request(
+            tracedecay_contracts::SafeDiagnostic {
                 code: "work.invalid_graph_operation".to_owned(),
                 message: "The Work graph request is invalid".to_owned(),
-            },
-            retry: tracedecay_contracts::RetryDirective::Never,
-            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-        },
+            }
+        ),
         "an unroutable admission is a request to correct, not an authority to retry"
     );
 }

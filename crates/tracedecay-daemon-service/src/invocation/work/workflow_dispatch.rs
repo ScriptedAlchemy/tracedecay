@@ -247,11 +247,7 @@ pub(crate) async fn execute_workflow_application(
                 {
                     return DaemonInvocationResponse::application_problem(
                         request_id,
-                        tracedecay_contracts::ApplicationProblem::InvalidRequest {
-                            diagnostic,
-                            retry: tracedecay_contracts::RetryDirective::Never,
-                            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-                        },
+                        tracedecay_contracts::ApplicationProblem::invalid_request(diagnostic),
                     );
                 }
                 complete_workflow_read(

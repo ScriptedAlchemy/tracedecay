@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tracedecay_contracts::multi_root::MultiRootApplicationOperation;
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
-    CancellationSignal, Deadline, LegalAction, MultiRootExecuteRequestV1,
+    CancellationSignal, Deadline, MultiRootExecuteRequestV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetReadRequestV1, ProblemOwningLayer, RequestId,
     ResultContractRef, RetryDirective, SafeDiagnostic,
 };
@@ -236,14 +236,10 @@ fn invalid_request(
     problem_result(
         operation,
         request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "multi_root.invalid_request".to_owned(),
-                message: "The multi-root application request is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: "multi_root.invalid_request".to_owned(),
+            message: "The multi-root application request is invalid".to_owned(),
+        }),
     )
 }
 
@@ -271,14 +267,10 @@ fn problem_result(
 fn daemon_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
     match problem {
         DaemonInvocationProblem::InvalidRequest | DaemonInvocationProblem::UnsupportedRevision => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "multi_root.invalid_request".to_owned(),
-                    message: "The multi-root application request is invalid".to_owned(),
-                },
-                retry: RetryDirective::Never,
-                legal_actions: vec![LegalAction::CorrectRequest],
-            }
+            ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "multi_root.invalid_request".to_owned(),
+                message: "The multi-root application request is invalid".to_owned(),
+            })
         }
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)

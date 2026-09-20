@@ -5,9 +5,9 @@ use std::collections::BTreeSet;
 use tracedecay_domain::{TaskId, WorkTopologyPolicyV1, configuration::TopologyConcurrencyPolicyV1};
 
 use crate::work::work_authority;
-use crate::{ApplicationProblem, RequestContext};
+use crate::{ApplicationProblem, RequestContext, SafeDiagnostic};
 
-use super::{WorkAttemptService, WorkAttemptStoragePort, invalid_problem, storage_problem};
+use super::{WorkAttemptService, WorkAttemptStoragePort, storage_problem};
 
 /// Maximum prospective task identities in one exact capacity census.
 pub const MAX_WORK_ATTEMPT_CAPACITY_TASKS: usize = u16::MAX as usize;
@@ -151,8 +151,8 @@ where
 }
 
 fn capacity_query_problem() -> ApplicationProblem {
-    invalid_problem(
-        "application.work-attempt.invalid-capacity-query",
-        "Capacity task identities must be strictly sorted, unique, and within the batch bound.",
-    )
+    ApplicationProblem::invalid_request(SafeDiagnostic {
+        code: ("application.work-attempt.invalid-capacity-query").to_owned(),
+        message: ("Capacity task identities must be strictly sorted, unique, and within the batch bound.").to_owned(),
+    })
 }

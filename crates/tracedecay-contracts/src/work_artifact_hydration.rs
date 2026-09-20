@@ -22,7 +22,7 @@ use crate::work_attempt::{
     WorkAttemptListCursorV1, WorkAttemptStorageError, WorkAttemptTopologyBindingV1,
     WorkAttemptTopologyStateV1,
 };
-use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
+use crate::{ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic};
 
 /// One page of attempt rows joined with their sealed evidence records, in the
 /// same stable task/run/attempt identity order as the attempt list, read
@@ -149,10 +149,11 @@ where
         topology: impl FnOnce(&WorkAuthority) -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
     ) -> Result<WorkArtifactHydrationV1, ApplicationProblem> {
         if request.page_size == 0 || request.page_size > MAX_WORK_ATTEMPT_LIST_PAGE_SIZE {
-            return Err(invalid_problem(
-                "application.work-artifact-hydration.invalid-page-size",
-                "The Work artifact hydration page size must be between 1 and 1000.",
-            ));
+            return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: ("application.work-artifact-hydration.invalid-page-size").to_owned(),
+                message: ("The Work artifact hydration page size must be between 1 and 1000.")
+                    .to_owned(),
+            }));
         }
         let authority = work_authority(context)?;
         // Two distinct resources hide inside one hydration: the topology
@@ -278,15 +279,4 @@ fn page_contract_problem() -> ApplicationProblem {
         code: "application.work-artifact-hydration.page-inconsistent".to_owned(),
         message: "The Work attempt storage returned an inconsistent hydration page.".to_owned(),
     })
-}
-
-fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
 }

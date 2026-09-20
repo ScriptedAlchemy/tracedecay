@@ -275,7 +275,10 @@ where
             || u64::try_from(scan_deadline.0.saturating_sub(scan_started_at.0))
                 .map_or(true, |duration| duration > MAX_WORK_LEAK_SCAN_MICROS_V1)
         {
-            return Err(invalid_problem());
+            return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work-leak.invalid".to_owned(),
+                message: "The Work leak adjudication request is invalid.".to_owned(),
+            }));
         }
         let authority = work_authority(context)?;
         if let Some(receipt) = self
@@ -303,12 +306,22 @@ where
         }
         let canonical_input_digest =
             canonical_sha256(&(LEAK_INPUT_DIGEST_DOMAIN, &command, &evidence, scan_deadline))
-                .map_err(|_| invalid_problem())?;
+                .map_err(|_| {
+                    ApplicationProblem::invalid_request(SafeDiagnostic {
+                        code: "application.work-leak.invalid".to_owned(),
+                        message: "The Work leak adjudication request is invalid.".to_owned(),
+                    })
+                })?;
         let revision = command
             .expected_revision
             .unwrap_or(0)
             .checked_add(1)
-            .ok_or_else(invalid_problem)?;
+            .ok_or_else(|| {
+                ApplicationProblem::invalid_request(SafeDiagnostic {
+                    code: "application.work-leak.invalid".to_owned(),
+                    message: "The Work leak adjudication request is invalid.".to_owned(),
+                })
+            })?;
         self.storage
             .compare_and_record_leak(
                 &authority,
@@ -339,17 +352,6 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
         RequestAdmission::Admitted => Ok(()),
         RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
         RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
-}
-
-fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-leak.invalid".to_owned(),
-            message: "The Work leak adjudication request is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
     }
 }
 

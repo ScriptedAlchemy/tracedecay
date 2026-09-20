@@ -5,8 +5,8 @@ use tracedecay_api::{
     WorkflowOperation,
 };
 use tracedecay_contracts::{
-    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, LegalAction,
-    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ProblemOwningLayer,
+    RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, DaemonInvocationError, InvocationCancellationPolicy,
@@ -388,14 +388,10 @@ where
             tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => match problem {
                 tracedecay_daemon_protocol::DaemonInvocationProblem::InvalidRequest
                 | tracedecay_daemon_protocol::DaemonInvocationProblem::UnsupportedRevision => {
-                    ApplicationProblem::InvalidRequest {
-                        diagnostic: SafeDiagnostic {
+                    ApplicationProblem::invalid_request(SafeDiagnostic {
                             code: problem_code("invalid_request"),
                             message: format!("The {family} application request is invalid"),
-                        },
-                        retry: RetryDirective::Never,
-                        legal_actions: vec![LegalAction::CorrectRequest],
-                    }
+                        })
                 }
                 tracedecay_daemon_protocol::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)

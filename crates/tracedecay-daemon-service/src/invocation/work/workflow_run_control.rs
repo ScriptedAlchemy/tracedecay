@@ -7,8 +7,8 @@ use std::sync::atomic::AtomicBool;
 
 use tracedecay_application::work::workflow_topology::WorkflowTopologyError;
 use tracedecay_contracts::{
-    ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic,
-    WorkflowCatalogAdmissionError, WorkflowCoordinationError, WorkflowRunStoragePort,
+    ApplicationProblem, RequestContext, SafeDiagnostic, WorkflowCatalogAdmissionError,
+    WorkflowCoordinationError, WorkflowRunStoragePort,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
@@ -447,11 +447,7 @@ pub(super) fn workflow_coordination_application_problem(
         | WorkflowCoordinationError::DefinitionNotFound
         | WorkflowCoordinationError::AuthorityUnavailable(_) => return None,
     };
-    Some(ApplicationProblem::InvalidRequest {
-        diagnostic,
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    })
+    Some(ApplicationProblem::invalid_request(diagnostic))
 }
 
 pub(super) fn workflow_run_storage_problem(

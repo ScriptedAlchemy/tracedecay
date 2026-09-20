@@ -7,6 +7,26 @@ use super::{
 };
 
 #[test]
+fn invalid_request_offers_correction_and_never_retries() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.invalid-request".to_owned(),
+        message: "The request is invalid.".to_owned(),
+    };
+    let problem = ApplicationProblem::invalid_request(diagnostic.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        }
+    );
+    assert_eq!(problem.safe_message(), "The request is invalid.");
+    assert_eq!(problem.reason_code(), "application.invalid-request");
+}
+
+#[test]
 fn reset_required_is_a_distinct_non_retryable_terminal() {
     let problem = ApplicationProblem::reset_required(
         SafeDiagnostic::new("store.reset_required", "The store must be reset.")

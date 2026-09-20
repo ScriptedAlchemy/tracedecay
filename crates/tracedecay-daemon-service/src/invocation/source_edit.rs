@@ -40,14 +40,10 @@ pub(super) async fn execute_source_edit(
         Err(_) => {
             return application_problem(
                 request_id,
-                ApplicationProblem::InvalidRequest {
-                    diagnostic: tracedecay_contracts::SafeDiagnostic {
-                        code: "source_edit.invalid_request_id".to_owned(),
-                        message: "The source-edit request id is invalid".to_owned(),
-                    },
-                    retry: RetryDirective::Never,
-                    legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-                },
+                ApplicationProblem::invalid_request(tracedecay_contracts::SafeDiagnostic {
+                    code: "source_edit.invalid_request_id".to_owned(),
+                    message: "The source-edit request id is invalid".to_owned(),
+                }),
             );
         }
     };
@@ -94,14 +90,10 @@ pub(super) async fn execute_source_edit_reconcile(
         Err(_) => {
             return application_problem(
                 request_id,
-                ApplicationProblem::InvalidRequest {
-                    diagnostic: tracedecay_contracts::SafeDiagnostic {
-                        code: "source_edit.invalid_request_id".to_owned(),
-                        message: "The source-edit request id is invalid".to_owned(),
-                    },
-                    retry: RetryDirective::Never,
-                    legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-                },
+                ApplicationProblem::invalid_request(tracedecay_contracts::SafeDiagnostic {
+                    code: "source_edit.invalid_request_id".to_owned(),
+                    message: "The source-edit request id is invalid".to_owned(),
+                }),
             );
         }
     };
@@ -148,14 +140,10 @@ pub(super) async fn execute_source_edit_rollback(
         Err(_) => {
             return application_problem(
                 request_id,
-                ApplicationProblem::InvalidRequest {
-                    diagnostic: tracedecay_contracts::SafeDiagnostic {
-                        code: "source_edit.invalid_request_id".to_owned(),
-                        message: "The source-edit request id is invalid".to_owned(),
-                    },
-                    retry: RetryDirective::Never,
-                    legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-                },
+                ApplicationProblem::invalid_request(tracedecay_contracts::SafeDiagnostic {
+                    code: "source_edit.invalid_request_id".to_owned(),
+                    message: "The source-edit request id is invalid".to_owned(),
+                }),
             );
         }
     };
@@ -189,15 +177,11 @@ fn map_source_edit_error(
         SourceEditOwnerError::NotAuthorized => concealed_application_problem(request_id),
         SourceEditOwnerError::InvalidContract => application_problem(
             request_id,
-            ApplicationProblem::InvalidRequest {
-                diagnostic: tracedecay_contracts::SafeDiagnostic {
-                    code: "source_edit.invalid_request".to_owned(),
-                    message: "The source-edit request does not match its invocation contract"
-                        .to_owned(),
-                },
-                retry: RetryDirective::Never,
-                legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-            },
+            ApplicationProblem::invalid_request(tracedecay_contracts::SafeDiagnostic {
+                code: "source_edit.invalid_request".to_owned(),
+                message: "The source-edit request does not match its invocation contract"
+                    .to_owned(),
+            }),
         ),
         SourceEditOwnerError::Cancelled => {
             application_problem(request_id, ApplicationProblem::cancelled_before_admission())

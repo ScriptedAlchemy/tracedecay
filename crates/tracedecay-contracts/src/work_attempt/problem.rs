@@ -40,10 +40,10 @@ pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProb
 }
 
 pub(super) fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {
-    invalid_problem(
-        "application.work-attempt.invalid-transition",
-        "The Work attempt command or stored state is invalid.",
-    )
+    ApplicationProblem::invalid_request(SafeDiagnostic {
+        code: ("application.work-attempt.invalid-transition").to_owned(),
+        message: ("The Work attempt command or stored state is invalid.").to_owned(),
+    })
 }
 
 pub(super) fn not_found_problem() -> ApplicationProblem {
@@ -73,17 +73,6 @@ pub(super) fn denied_problem(code: &str, message: &str) -> ApplicationProblem {
         },
         retry: RetryDirective::AfterRevalidate,
         legal_actions: vec![LegalAction::Refresh],
-    }
-}
-
-pub(super) fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
     }
 }
 

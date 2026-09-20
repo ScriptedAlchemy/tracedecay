@@ -29,17 +29,13 @@ impl ApplicationKind {
     }
 
     pub(crate) fn invalid_request(self) -> ApplicationProblem {
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: format!("invalid_{}_request", self.1),
-                message: format!(
-                    "The {} request does not match its operation contract",
-                    self.0
-                ),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        }
+        ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: format!("invalid_{}_request", self.1),
+            message: format!(
+                "The {} request does not match its operation contract",
+                self.0
+            ),
+        })
     }
 
     pub(crate) fn daemon_problem(self, problem: DaemonInvocationProblem) -> ApplicationProblem {

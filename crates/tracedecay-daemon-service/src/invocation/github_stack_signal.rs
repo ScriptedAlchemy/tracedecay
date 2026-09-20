@@ -194,13 +194,8 @@ fn github_stack_signal_evidence(
 }
 
 fn invalid_github_stack_signal_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "invalid_github_stack_signal_expand_request".to_owned(),
-            message: "The GitHub stack signal request does not match its operation contract"
-                .to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(SafeDiagnostic {
+        code: "invalid_github_stack_signal_expand_request".to_owned(),
+        message: "The GitHub stack signal request does not match its operation contract".to_owned(),
+    })
 }

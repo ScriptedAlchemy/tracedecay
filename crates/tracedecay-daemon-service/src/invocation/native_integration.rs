@@ -911,15 +911,10 @@ fn stack_coordinator_contract_error(
 /// its operation contract, or whose bounded authority receipt cannot be
 /// minted from the values the request supplied.
 fn invalid_native_integration_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "invalid_native_integration_request".to_owned(),
-            message: "The native-integration request does not match its operation contract"
-                .to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(SafeDiagnostic {
+        code: "invalid_native_integration_request".to_owned(),
+        message: "The native-integration request does not match its operation contract".to_owned(),
+    })
 }
 
 /// Mint the request context and authority for exactly one native-integration

@@ -857,14 +857,12 @@ pub(super) fn operation_event_problem(
         OperationEventError::InvalidContext(_)
         | OperationEventError::InvalidProgress
         | OperationEventError::InvalidTerminal(_)
-        | OperationEventError::InvalidTestRunEvent => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
+        | OperationEventError::InvalidTestRunEvent => {
+            ApplicationProblem::invalid_request(SafeDiagnostic {
                 code: "operation_event.invalid_request".to_owned(),
                 message: "The operation-event request is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+            })
+        }
         // Idempotency facts: the identity or terminal receipt is already
         // published, so the client re-reads current state instead of retrying
         // the same publish.

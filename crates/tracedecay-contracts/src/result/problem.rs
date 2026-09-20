@@ -688,6 +688,15 @@ impl ApplicationProblem {
         }
     }
 
+    /// Invalid request the caller can correct. Never retries.
+    pub fn invalid_request(diagnostic: SafeDiagnostic) -> Self {
+        Self::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        }
+    }
+
     pub fn cancelled_before_admission() -> Self {
         Self::Cancelled {
             stage: CancellationStage::BeforeAdmission,

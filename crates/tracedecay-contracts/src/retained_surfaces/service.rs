@@ -532,14 +532,12 @@ pub fn retained_surface_execution_problem(
         RetainedSurfaceExecutionErrorV1::StructuralRefusal(refusal) => {
             structural_refusal_problem(refusal)
         }
-        RetainedSurfaceExecutionErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
-            diagnostic: diagnostic(
+        RetainedSurfaceExecutionErrorV1::InvalidRequest => {
+            ApplicationProblem::invalid_request(diagnostic(
                 "application.retained.invalid-request",
                 "The retained operation request is invalid.",
-            ),
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+            ))
+        }
         RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
@@ -753,11 +751,7 @@ fn structural_refusal_problem(refusal: RetainedStructuralRefusalV1) -> Applicati
             "The authorized session scope exceeds the cursor manifest byte limit. Narrow the session scope.",
         ),
     };
-    ApplicationProblem::InvalidRequest {
-        diagnostic,
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(diagnostic)
 }
 
 fn diagnostic(code: &'static str, message: &'static str) -> SafeDiagnostic {

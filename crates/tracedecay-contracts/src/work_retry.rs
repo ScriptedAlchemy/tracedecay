@@ -378,13 +378,26 @@ where
     ) -> Result<WorkRetryAttemptOutcomeV1, ApplicationProblem> {
         admit(context, restarted_at)?;
         if !command.validate() {
-            return Err(invalid_problem());
+            return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work-retry.invalid".to_owned(),
+                message: "The Work retry command is invalid.".to_owned(),
+            }));
         }
         let authority = work_authority(context)?;
-        let input_digest = canonical_sha256(&(RETRY_INPUT_DIGEST_DOMAIN, &command))
-            .map_err(|_| invalid_problem())?;
+        let input_digest =
+            canonical_sha256(&(RETRY_INPUT_DIGEST_DOMAIN, &command)).map_err(|_| {
+                ApplicationProblem::invalid_request(SafeDiagnostic {
+                    code: "application.work-retry.invalid".to_owned(),
+                    message: "The Work retry command is invalid.".to_owned(),
+                })
+            })?;
         let product_digest = canonical_sha256(&(WORK_PRODUCT_RETRY_INPUT_DIGEST_DOMAIN, &command))
-            .map_err(|_| invalid_problem())?;
+            .map_err(|_| {
+                ApplicationProblem::invalid_request(SafeDiagnostic {
+                    code: "application.work-retry.invalid".to_owned(),
+                    message: "The Work retry command is invalid.".to_owned(),
+                })
+            })?;
         let product =
             current_work_product_attempt_graph(&self.storage, context, binding, restarted_at)?;
         if let Some(replayed) = self
@@ -474,7 +487,10 @@ where
         )
         .map_err(retry_receipt_problem)?;
         if receipt.canonical_input_digest != input_digest {
-            return Err(invalid_problem());
+            return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work-retry.invalid".to_owned(),
+                message: "The Work retry command is invalid.".to_owned(),
+            }));
         }
         let draft = accepted_attempt_draft(
             &product,
@@ -672,7 +688,12 @@ where
         .execution()
         .cancellation_generation()
         .checked_add(1)
-        .ok_or_else(invalid_problem)?;
+        .ok_or_else(|| {
+            ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work-retry.invalid".to_owned(),
+                message: "The Work retry command is invalid.".to_owned(),
+            })
+        })?;
     let envelope = WorkExecutionEnvelopeV1::new(
         identity.clone(),
         binding.clone(),
@@ -692,13 +713,22 @@ where
     let epoch = storage
         .next_fence_epoch(authority)
         .map_err(storage_problem)?;
-    let lease_digest =
-        canonical_sha256(&(RETRY_LEASE_DOMAIN, &identity)).map_err(|_| invalid_problem())?;
+    let lease_digest = canonical_sha256(&(RETRY_LEASE_DOMAIN, &identity)).map_err(|_| {
+        ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: "application.work-retry.invalid".to_owned(),
+            message: "The Work retry command is invalid.".to_owned(),
+        })
+    })?;
     let lease_id = WorkLeaseId::new(format!(
         "work-retry-lease:{}",
         lease_digest.as_str().trim_start_matches("sha256:")
     ))
-    .map_err(|_| invalid_problem())?;
+    .map_err(|_| {
+        ApplicationProblem::invalid_request(SafeDiagnostic {
+            code: "application.work-retry.invalid".to_owned(),
+            message: "The Work retry command is invalid.".to_owned(),
+        })
+    })?;
     let lease = WorkLeaseFenceV1::new(
         lease_id,
         WorkFenceEpochV1::new(epoch).map_err(contract_problem)?,
@@ -797,17 +827,6 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
-fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-retry.invalid".to_owned(),
-            message: "The Work retry command is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
-}
-
 fn retry_receipt_problem(_error: ApplicationContractError) -> ApplicationProblem {
     ApplicationProblem::unavailable(SafeDiagnostic {
         code: "application.work-retry.receipt-unavailable".to_owned(),
@@ -887,7 +906,10 @@ fn effect_storage_problem(error: WorkAttemptEffectStorageErrorV1) -> Application
 }
 
 fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {
-    invalid_problem()
+    ApplicationProblem::invalid_request(SafeDiagnostic {
+        code: "application.work-retry.invalid".to_owned(),
+        message: "The Work retry command is invalid.".to_owned(),
+    })
 }
 
 #[cfg(test)]

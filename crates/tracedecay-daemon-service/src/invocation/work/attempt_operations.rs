@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use tracedecay_application::observability::BoundedObservabilityProducerV1;
 use tracedecay_contracts::{
-    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline, LegalAction,
-    RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryDirective,
-    RetryWorkAttemptCommandV1, SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1,
+    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline,
+    RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryWorkAttemptCommandV1,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1,
     WorkSynthesisAttemptV1, WorkflowArtifactStorePort,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1, WorkAttemptV1};
@@ -26,14 +26,10 @@ use super::{
 };
 
 fn consume_synthesis_bytes(remaining: &mut u64, bytes: u64) -> Result<(), ApplicationProblem> {
-    *remaining = remaining.checked_sub(bytes).ok_or_else(|| ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
+    *remaining = remaining.checked_sub(bytes).ok_or_else(|| ApplicationProblem::invalid_request(SafeDiagnostic {
             code: "application.work-synthesis.source-context-oversized".to_owned(),
             message: "The synthesis instructions and source payloads exceed the admitted protocol byte bound.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    })?;
+        }))?;
     Ok(())
 }
 

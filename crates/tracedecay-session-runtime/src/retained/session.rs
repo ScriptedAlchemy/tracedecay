@@ -488,13 +488,7 @@ impl MessageSearchInput {
                     RetainedSurfaceExecutionErrorV1::InvalidRequest,
                     |diagnostic| {
                         RetainedSurfaceExecutionErrorV1::ApplicationProblem(
-                            tracedecay_contracts::ApplicationProblem::InvalidRequest {
-                                diagnostic,
-                                retry: tracedecay_contracts::RetryDirective::Never,
-                                legal_actions: vec![
-                                    tracedecay_contracts::LegalAction::CorrectRequest,
-                                ],
-                            },
+                            tracedecay_contracts::ApplicationProblem::invalid_request(diagnostic),
                         )
                     },
                 )

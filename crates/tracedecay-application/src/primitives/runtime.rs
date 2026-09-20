@@ -989,11 +989,9 @@ fn session_structural_refusal_problem(
             "The request exceeds its admitted session retrieval budget.",
         ),
     };
-    Ok(ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic::new(code, message)?,
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    })
+    Ok(ApplicationProblem::invalid_request(SafeDiagnostic::new(
+        code, message,
+    )?))
 }
 
 const fn session_budget_diagnostic_code(stage: SessionRetrievalBudgetStageV1) -> &'static str {

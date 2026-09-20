@@ -203,9 +203,19 @@ where
         admit(context, command.occurred_at)?;
         let authority = work_authority(context)?;
         let command = command.canonicalized();
-        command.validate().map_err(|_| invalid_problem())?;
+        command.validate().map_err(|_| {
+            ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work.duplicate-adjudication.invalid".to_owned(),
+                message: "The duplicate Work adjudication is invalid.".to_owned(),
+            })
+        })?;
         let canonical_input_digest =
-            work_duplicate_adjudication_input_digest(&command).map_err(|_| invalid_problem())?;
+            work_duplicate_adjudication_input_digest(&command).map_err(|_| {
+                ApplicationProblem::invalid_request(SafeDiagnostic {
+                    code: "application.work.duplicate-adjudication.invalid".to_owned(),
+                    message: "The duplicate Work adjudication is invalid.".to_owned(),
+                })
+            })?;
         let outcome = self
             .storage
             .compare_and_record_duplicate_adjudication(
@@ -243,7 +253,10 @@ where
         admit(context, occurred_at)?;
         let authority = work_authority(context)?;
         if request.first_attempt == request.second_attempt {
-            return Err(invalid_problem());
+            return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work.duplicate-adjudication.invalid".to_owned(),
+                message: "The duplicate Work adjudication is invalid.".to_owned(),
+            }));
         }
         let (first_attempt, second_attempt) = if request.first_attempt <= request.second_attempt {
             (&request.first_attempt, &request.second_attempt)
@@ -261,7 +274,12 @@ where
             command_id,
             occurred_at,
         )
-        .map_err(|_| invalid_problem())
+        .map_err(|_| {
+            ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work.duplicate-adjudication.invalid".to_owned(),
+                message: "The duplicate Work adjudication is invalid.".to_owned(),
+            })
+        })
     }
 
     /// Classifies useful attempts only with a complete exact pair matrix at
@@ -281,7 +299,10 @@ where
         if attempts.len() > MAX_WORK_DUPLICATE_CLASSIFICATION_ATTEMPTS_V1
             || attempts.windows(2).any(|pair| pair[0] == pair[1])
         {
-            return Err(invalid_problem());
+            return Err(ApplicationProblem::invalid_request(SafeDiagnostic {
+                code: "application.work.duplicate-adjudication.invalid".to_owned(),
+                message: "The duplicate Work adjudication is invalid.".to_owned(),
+            }));
         }
         let receipts = self
             .storage
@@ -407,17 +428,6 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
         RequestAdmission::Admitted => Ok(()),
         RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
         RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
-}
-
-fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work.duplicate-adjudication.invalid".to_owned(),
-            message: "The duplicate Work adjudication is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
     }
 }
 
