@@ -14,6 +14,7 @@ mod protocol_test;
 mod retrieve_behavior_test;
 pub(crate) mod support;
 mod unused_imports_test;
+mod workflow_create;
 mod workflow_delete_test;
 
 // Backwards-compatible path for `crate::mcp_server_test::…` consumers.
