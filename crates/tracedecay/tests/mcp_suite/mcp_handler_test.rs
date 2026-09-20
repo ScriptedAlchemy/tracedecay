@@ -12,6 +12,8 @@ mod affected_tests_test;
 mod ast_grep_rewrite_behavior_test;
 mod automation_run_list_behavior_test;
 mod automation_runs_test;
+#[cfg(feature = "test-transport")]
+mod body_behavior_test;
 mod bounded_analysis_test;
 mod branch_diff_behavior_test;
 #[cfg(feature = "test-transport")]
@@ -25,14 +27,21 @@ mod configuration_unset_test;
 mod constructors_behavior_test;
 mod context_behavior_test;
 mod context_test;
+mod coupling_test;
 mod dependency_depth_test;
 mod dependency_hint_test;
 mod derives_test;
 mod diagnose_test;
 #[cfg(feature = "test-transport")]
+mod distribution_test;
+#[cfg(feature = "test-transport")]
 mod edit_test;
 #[cfg(feature = "test-transport")]
 mod expand_query_behavior;
+#[cfg(feature = "test-transport")]
+mod fact_store_get_test;
+#[cfg(feature = "test-transport")]
+mod fact_store_related_test;
 mod fact_store_remove_behavior_test;
 #[cfg(feature = "test-transport")]
 mod fact_store_update_behavior_test;
