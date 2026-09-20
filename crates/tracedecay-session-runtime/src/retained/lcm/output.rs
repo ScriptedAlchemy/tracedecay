@@ -15,9 +15,8 @@ use tracedecay_contracts::retained_surfaces::{
     TemporalFreshnessV1, TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1,
 };
 use tracedecay_domain::{
-    CompactContextLineageEdgeV1, HydrationStateV1, SessionSourceCoverageIntervalV1,
-    SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1, SessionSourceCoverageV1,
-    TemporalModeV1, ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1,
+    CompactContextLineageEdgeV1, SessionSourceCoverageIntervalV1, SessionSourceCoverageV1,
+    ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1,
 };
 use tracedecay_lcm::contracts::{
     LcmContentRange, LcmDataFreshness, LcmDescribeResponse, LcmExpandResponse, LcmRawMessage,
@@ -74,7 +73,7 @@ pub(super) fn temporal_fields(value: SessionTemporalMetadataView) -> LcmTemporal
             .map(|item| TemporalOmissionV1 {
                 rank: item.rank,
                 anchor: item.anchor.as_str().to_owned(),
-                reason: hydration(item.reason),
+                reason: HydrationStateResultV1::from(item.reason),
             })
             .collect(),
         next_cursor: value.cursor,
@@ -88,7 +87,7 @@ fn source_coverage(value: SessionSourceCoverageV1) -> RetainedSourceCoverageV1 {
         committed_frontier: value.committed_frontier().value(),
         target_watermark: value.target_watermark().value(),
         request: SessionCoverageRequestV1 {
-            mode: coverage_mode(value.request().mode()),
+            mode: SessionCoverageModeV1::from(value.request().mode()),
         },
         covered_intervals: value
             .covered_intervals()
@@ -102,8 +101,8 @@ fn source_coverage(value: SessionSourceCoverageV1) -> RetainedSourceCoverageV1 {
             .cloned()
             .map(coverage_interval)
             .collect(),
-        state: coverage_state(value.state()),
-        reason: coverage_reason(value.reason()),
+        state: SessionCoverageStateV1::from(value.state()),
+        reason: SessionCoverageReasonV1::from(value.reason()),
     }
 }
 
@@ -123,54 +122,6 @@ fn closed_interval(value: tracedecay_domain::ClosedUtcIntervalV1) -> ClosedUtcIn
     ClosedUtcIntervalV1 {
         from_inclusive: value.from_inclusive().map(|value| value.0),
         through_inclusive: value.through_inclusive().map(|value| value.0),
-    }
-}
-
-const fn coverage_mode(value: TemporalModeV1) -> SessionCoverageModeV1 {
-    match value {
-        TemporalModeV1::Current => SessionCoverageModeV1::Current,
-        TemporalModeV1::AsOf { cutoff } => SessionCoverageModeV1::AsOf { cutoff: cutoff.0 },
-        TemporalModeV1::Evolution => SessionCoverageModeV1::Evolution,
-        TemporalModeV1::Forensic => SessionCoverageModeV1::Forensic,
-    }
-}
-
-const fn coverage_state(value: SessionSourceCoverageStateV1) -> SessionCoverageStateV1 {
-    match value {
-        SessionSourceCoverageStateV1::Fresh => SessionCoverageStateV1::Fresh,
-        SessionSourceCoverageStateV1::Stale => SessionCoverageStateV1::Stale,
-        SessionSourceCoverageStateV1::Partial => SessionCoverageStateV1::Partial,
-        SessionSourceCoverageStateV1::Locked => SessionCoverageStateV1::Locked,
-        SessionSourceCoverageStateV1::Redacted => SessionCoverageStateV1::Redacted,
-        SessionSourceCoverageStateV1::RetentionWithheld => {
-            SessionCoverageStateV1::RetentionWithheld
-        }
-        SessionSourceCoverageStateV1::Unavailable => SessionCoverageStateV1::Unavailable,
-    }
-}
-
-fn coverage_reason(value: &SessionSourceCoverageReasonV1) -> SessionCoverageReasonV1 {
-    match value {
-        SessionSourceCoverageReasonV1::CaughtUp => SessionCoverageReasonV1::CaughtUp,
-        SessionSourceCoverageReasonV1::ProjectionBehindSource { lag } => {
-            SessionCoverageReasonV1::ProjectionBehindSource { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::SourceBehindTarget { lag } => {
-            SessionCoverageReasonV1::SourceBehindTarget { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag,
-            source_lag,
-        } => SessionCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag: *projection_lag,
-            source_lag: *source_lag,
-        },
-        SessionSourceCoverageReasonV1::Locked => SessionCoverageReasonV1::Locked,
-        SessionSourceCoverageReasonV1::Redacted => SessionCoverageReasonV1::Redacted,
-        SessionSourceCoverageReasonV1::RetentionWithheld => {
-            SessionCoverageReasonV1::RetentionWithheld
-        }
-        SessionSourceCoverageReasonV1::Unavailable => SessionCoverageReasonV1::Unavailable,
     }
 }
 
@@ -362,7 +313,7 @@ pub(super) fn expansion(value: LcmExpandResponse) -> LcmExpansionV1 {
             .into_iter()
             .map(|source| LcmExpandedSourceV1 {
                 source_ref: source_ref(source.source_ref),
-                state: hydration(source.state),
+                state: HydrationStateResultV1::from(source.state),
                 content: source.content,
                 content_range: source.content_range.map(content_range),
                 content_truncated: source.content_truncated,
@@ -454,7 +405,7 @@ pub(super) fn expand_query_result(
                     kind: page.kind,
                     node_id: page.node_id,
                     source_ref: page.source_ref.map(source_ref),
-                    state: page.state.map(hydration),
+                    state: page.state.map(HydrationStateResultV1::from),
                     next_content_offset: page.next_content_offset,
                     has_more: page.has_more,
                 })
@@ -593,19 +544,6 @@ fn rebuild_synthesis_user_prompt(result: &mut LcmExpandQueryResultV1) {
     };
     let prompt = result.prompt.as_deref().unwrap_or_default();
     synthesis.user = format!("QUESTION:\n{prompt}\n\nEXPANDED CONTEXT:\n{context}");
-}
-
-pub(super) const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
-    match value {
-        HydrationStateV1::Available => HydrationStateResultV1::Available,
-        HydrationStateV1::RetainedButUnavailable => HydrationStateResultV1::RetainedButUnavailable,
-        HydrationStateV1::Redacted => HydrationStateResultV1::Redacted,
-        HydrationStateV1::Deleted => HydrationStateResultV1::Deleted,
-        HydrationStateV1::RetentionExpired => HydrationStateResultV1::RetentionExpired,
-        HydrationStateV1::Unauthorized => HydrationStateResultV1::Unauthorized,
-        HydrationStateV1::Locked => HydrationStateResultV1::Locked,
-        HydrationStateV1::UnverifiableLegacy => HydrationStateResultV1::UnverifiableLegacy,
-    }
 }
 
 const fn storage_kind(value: LcmStorageKind) -> LcmStorageKindV1 {
