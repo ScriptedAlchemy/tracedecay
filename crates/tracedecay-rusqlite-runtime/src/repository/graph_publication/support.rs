@@ -1447,7 +1447,7 @@ mod dependency_batch_tests {
         }
     }
 
-    fn context(suffix: &str) -> GraphPublicationOperationContextV1<'static> {
+    pub(super) fn context(suffix: &str) -> GraphPublicationOperationContextV1<'static> {
         let cancellation = RuntimeCancellationIdentityV1 {
             cancellation_id: RuntimeCancellationIdV1::new(format!("cancellation.{suffix}"))
                 .unwrap(),
@@ -2054,5 +2054,85 @@ mod dependency_batch_tests {
         assert_eq!(batched, vec![first_tombstone, second_tombstone]);
 
         transaction.rollback().unwrap();
+    }
+}
+
+/// Coverage for how [`acquire_within_begin_budget`] answers each acquisition
+/// failure, driven by an injected attempt rather than a live store.
+///
+/// A real reader worker crash or a saturated lane is not reproducible on
+/// demand, so the attempt closure stands in for the exact-SQL call. What is
+/// under test is the decision the helper returns, which is what routes a
+/// caller to the deferred writer lane or to an error.
+#[cfg(test)]
+mod begin_acquire_tests {
+    use std::cell::Cell;
+
+    use super::dependency_batch_tests::context;
+    use super::*;
+
+    #[test]
+    fn a_failed_reader_surfaces_instead_of_deferring() {
+        let context = context("begin-acquire.failed-reader");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::ReaderUnavailable(
+                "reader worker failed: worker closed".to_owned(),
+            ))
+        });
+
+        assert_eq!(
+            outcome,
+            Err(GraphPublicationStoreErrorV1::Infrastructure),
+            "a reader that failed must reach the caller, not be answered by a \
+             deferred read on the writer lane"
+        );
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a failed reader is a final answer, so it is never retried"
+        );
+    }
+
+    #[test]
+    fn writer_backpressure_through_the_whole_budget_defers() {
+        let context = context("begin-acquire.writer-backpressure");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::Busy)
+        });
+
+        assert_eq!(
+            outcome,
+            Ok(None),
+            "backpressure that outlasts the budget leaves the caller to route \
+             around it"
+        );
+        assert!(
+            attempts.get() > 1,
+            "the budget spans more than one attempt, so a queue refusal that \
+             returns at once is retried while the window lasts"
+        );
+    }
+
+    #[test]
+    fn backpressure_that_clears_inside_the_budget_acquires() {
+        let context = context("begin-acquire.backpressure-clears");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                return Err(ExactSqlError::Busy);
+            }
+            Ok(7_u8)
+        });
+
+        assert_eq!(outcome, Ok(Some(7)));
+        assert_eq!(attempts.get(), 3);
     }
 }
