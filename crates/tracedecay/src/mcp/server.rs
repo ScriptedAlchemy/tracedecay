@@ -19,7 +19,9 @@ pub(crate) use tracedecay_code_index_runtime::code_index_scheduler::{
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT, CodeIndexConvergenceParkedV1,
 };
-use tracedecay_contracts::request_identity::McpConnectionIdentityAuthority;
+use tracedecay_contracts::request_identity::{
+    McpConnectionIdentityAuthority, mcp_connection_request_key as application_surface_request_id,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_host_admission::TerminalReason;
@@ -1499,33 +1501,8 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
     }
 }
 
-fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    tracedecay_contracts::request_identity::mcp_connection_request_id(id, connection_scope)
-        .map(|request_id| request_id.as_str().to_owned())
-}
-
 #[cfg(test)]
 mod cancel_candidate_journey;
-
-#[cfg(test)]
-mod application_surface_request_id_tests {
-    use serde_json::json;
-
-    use super::application_surface_request_id;
-
-    #[test]
-    fn request_id_hash_preserves_json_rpc_id_type() {
-        let numeric = application_surface_request_id(&json!(1), "connection").unwrap();
-        let string = application_surface_request_id(&json!("1"), "connection").unwrap();
-
-        assert_ne!(numeric, string);
-        assert_eq!(
-            numeric,
-            application_surface_request_id(&json!(1), "connection").unwrap()
-        );
-        assert!(application_surface_request_id(&json!(null), "connection").is_none());
-    }
-}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

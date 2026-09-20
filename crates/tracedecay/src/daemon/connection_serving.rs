@@ -478,14 +478,14 @@ impl DaemonWorkDeliveryDescriptorV1 {
                         | WorkApplicationOutcomeV1::CancelAttempt(outcome),
                     ..
                 },
-            ) => application_outcome_payload(outcome).is_some(),
+            ) => outcome.payload().is_some(),
             (
                 DaemonWorkDeliveryKindV1::ArtifactPage,
                 DaemonInvocationOutcome::WorkApplication {
                     outcome: WorkApplicationOutcomeV1::HydrateArtifacts(outcome),
                     ..
                 },
-            ) => application_outcome_payload(outcome).is_some_and(|hydration| {
+            ) => outcome.payload().is_some_and(|hydration| {
                 matches!(
                     hydration,
                     tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
@@ -566,7 +566,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
             return Vec::new();
         };
         let Some(tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }) =
-            application_outcome_payload(outcome)
+            outcome.payload()
         else {
             return Vec::new();
         };
@@ -574,16 +574,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
             .iter()
             .map(|attempt| attempt.identity.clone())
             .collect()
-    }
-}
-
-fn application_outcome_payload<T>(
-    outcome: &tracedecay_contracts::ApplicationOutcome<T>,
-) -> Option<&T> {
-    match outcome {
-        tracedecay_contracts::ApplicationOutcome::Evidence(result) => result.payload.as_ref(),
-        tracedecay_contracts::ApplicationOutcome::Preview(result) => result.payload.as_ref(),
-        tracedecay_contracts::ApplicationOutcome::Effect(result) => result.payload.as_ref(),
     }
 }
 

@@ -819,7 +819,7 @@ async fn configured_upload_enabled(project_path: &Path) -> tracedecay_domain::er
     let envelope =
         result.result.map_err(
             |problem| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{}: {}", problem.problem.code, problem.problem.message),
+                message: problem.problem.summary(),
             },
         )?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
