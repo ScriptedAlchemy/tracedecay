@@ -76,13 +76,11 @@ pub use session_reflector::{
     SessionReflectorAutomationRun, run_session_reflector_with_backend,
     run_session_reflector_with_backend_and_retrieval,
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
-    run_session_reflector_with_backend_for_retained_settlement,
 };
 pub use skill_writer::{
     SkillWriterAutomationOptions, SkillWriterAutomationRun, run_skill_writer_with_backend,
     run_skill_writer_with_backend_and_retrieval,
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
-    run_skill_writer_with_backend_for_retained_settlement,
 };
 pub(crate) use user_evidence_preflight::run_user_session_reflector_with_backend_and_retrieval;
 
@@ -370,27 +368,6 @@ pub async fn run_combined_review_with_backend_and_retrieval(
             reflector_guard: None,
             skill_guard: None,
         },
-    )
-    .await
-}
-
-pub async fn run_combined_review_with_backend_for_retained_settlement(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: CombinedReviewAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> RetainedCombinedReviewRun {
-    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
-    run_combined_review_with_backend_and_retrieval_for_retained_settlement(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
-        options,
-        run_control,
     )
     .await
 }

@@ -138,28 +138,6 @@ pub async fn run_skill_writer_with_backend(
     .await
 }
 
-/// Runs one already-admitted retained application effect without publishing
-/// its ledger terminal ahead of outer settlement. The retained settlement
-/// authority must bind and publish the returned exact record.
-pub async fn run_skill_writer_with_backend_for_retained_settlement(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-) -> RetainedAutomationRun<SkillWriterAutomationRun> {
-    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
-    run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
-        options,
-    )
-    .await
-}
-
 /// Retained-settlement variant that preserves the caller's canonical session
 /// retrieval authority instead of silently reopening the production route.
 pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
