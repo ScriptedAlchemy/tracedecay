@@ -16,7 +16,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::curation::unpersisted_rejected_parts;
 use super::session_reflector::{default_include_recent_sessions, default_recent_sessions_limit};
-use super::user_evidence_preflight::preflight_user_skill_writer_evidence;
 use super::*;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,28 +137,6 @@ pub async fn run_skill_writer_with_backend(
     .await
 }
 
-/// Runs one already-admitted retained application effect without publishing
-/// its ledger terminal ahead of outer settlement. The retained settlement
-/// authority must bind and publish the returned exact record.
-pub async fn run_skill_writer_with_backend_for_retained_settlement(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-) -> RetainedAutomationRun<SkillWriterAutomationRun> {
-    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
-    run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
-        options,
-    )
-    .await
-}
-
 /// Retained-settlement variant that preserves the caller's canonical session
 /// retrieval authority instead of silently reopening the production route.
 pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
@@ -241,66 +218,6 @@ async fn run_skill_writer_with_backend_and_retrieval_publication(
     .await
 }
 
-pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
-    host_io: HostIo,
-    profile_root: &std::path::Path,
-    session_registry: Arc<dyn ProfileRuntime>,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
-    mut options: SkillWriterAutomationOptions,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    options.profile_root = Some(profile_root.to_path_buf());
-    let sessions_db = session_registry.profile_sessions().await?;
-    let authority = profile_curation_authority(
-        session_registry.as_ref(),
-        "automation:skill-writer",
-        configuration_revision_id,
-    )?;
-    let prebuilt_evidence =
-        match preflight_user_skill_writer_evidence(retrieval, config, options.clone()).await? {
-            Some(SkillWriterEvidenceOutcome::Ready(bundle)) => Some(bundle),
-            Some(SkillWriterEvidenceOutcome::Skipped {
-                reason,
-                evidence_hash,
-            }) => {
-                let run = AgentTaskRunContext::new(
-                    user_automation_root(profile_root),
-                    sessions_db.clone(),
-                    options.run_id.clone(),
-                    "skill_writer",
-                    options.trigger,
-                    config,
-                    AgentTaskKind::SkillWriter,
-                );
-                return Ok(rejected_skill_writer_run(
-                    &run,
-                    config,
-                    reason,
-                    evidence_hash,
-                ));
-            }
-            None => None,
-        };
-    run_skill_writer_for_store(
-        SkillWriterStoreRuntime {
-            host_io,
-            dashboard_root: user_automation_root(profile_root),
-            sessions_db,
-            analytics_project_root: None,
-            analytics_db: None,
-            authority,
-        },
-        retrieval,
-        config,
-        backend,
-        options,
-        prebuilt_evidence,
-    )
-    .await
-}
-
 pub(super) struct SkillWriterStoreRuntime<'a> {
     pub(super) host_io: HostIo,
     pub(super) dashboard_root: PathBuf,
@@ -310,30 +227,7 @@ pub(super) struct SkillWriterStoreRuntime<'a> {
     pub(super) authority: CurationApplyAuthorityV1,
 }
 
-pub(super) async fn run_skill_writer_for_store(
-    runtime: SkillWriterStoreRuntime<'_>,
-    retrieval: &dyn AutomationSessionRetrieval,
-    config: &AutomationConfig,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-    prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    run_skill_writer_for_store_with_publication(
-        runtime,
-        retrieval,
-        config,
-        backend,
-        options,
-        prebuilt_evidence,
-        AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
-        },
-    )
-    .await
-}
-
-// The single funnel every skill-writer entry point (project, user, retained
+// The single funnel every skill-writer entry point (project and retained
 // settlement) flows through: one static run-lifetime span in the futures lane
 // so suspension and cancellation of long runs stay visible.
 #[hotpath::measure(future = true, label = "automation.run.skill_writer")]

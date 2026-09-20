@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 use url::{Host, Url};
 
+use super::job_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(crate) fn validate_url(raw: &str) -> Result<()> {
@@ -393,12 +394,6 @@ fn host_header(url: &Url) -> Result<String> {
     } else {
         Ok(host)
     }
-}
-
-fn job_error<T>(message: &str) -> Result<T> {
-    Err(TraceDecayError::Config {
-        message: message.to_string(),
-    })
 }
 
 #[cfg(test)]

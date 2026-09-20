@@ -1,10 +1,10 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
+    CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1, SessionId,
 };
@@ -12,8 +12,8 @@ use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatc
 
 use crate::git_facts::append_diff_and_pull_request_facts;
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
-    parse_cursor_human_timestamp,
+    ObservationRecordParseErrorV1, parse::canonical_message_role,
+    parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex, parse_cursor_human_timestamp,
 };
 
 pub fn normalize_cursor_observation(
@@ -565,16 +565,6 @@ pub fn cursor_projected_message_id(
         base
     };
     ObservationId::new(message_id).map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-}
-
-fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
 }
 
 fn canonical_native_observation_id(

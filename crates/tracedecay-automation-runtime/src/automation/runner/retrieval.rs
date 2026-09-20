@@ -6,9 +6,8 @@ use super::evidence::{
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::path::Path;
 #[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -788,12 +787,6 @@ pub(super) fn unavailable_automation_retrieval(
     })
 }
 
-pub(super) async fn production_user_automation_retrieval(
-    _profile_root: &Path,
-) -> Box<dyn AutomationSessionRetrieval> {
-    unavailable_automation_retrieval("session_evidence_retrieval_unavailable")
-}
-
 #[cfg(test)]
 mod authority_tests {
     use tempfile::tempdir;
@@ -880,46 +873,6 @@ mod authority_tests {
             &brain,
             &other_profile,
             Some(&project),
-        ));
-    }
-
-    #[tokio::test]
-    async fn convenience_retrieval_does_not_create_a_profile_session_database() {
-        let directory = tempdir().expect("temporary profile");
-        let database_path = directory.path().join("user-sessions.db");
-        assert!(!database_path.exists());
-
-        let retrieval = production_user_automation_retrieval(directory.path()).await;
-
-        assert!(!database_path.exists());
-        assert!(matches!(
-            retrieval
-                .retrieve(
-                    SessionTemporalQuery::new(
-                        SessionId::new("session.automation.test").expect("session id"),
-                        None,
-                        "test",
-                        None,
-                        TemporalModeV1::Forensic,
-                        RetrievalGrainV1::LogicalMessage,
-                        1,
-                        DiversityLimits {
-                            per_logical_message: 1,
-                            per_turn: 1,
-                            per_session: 1,
-                            per_source: 1,
-                            per_evidence_role: 1,
-                        },
-                        ContextBudget {
-                            max_bytes: 1024,
-                            max_tokens: 256,
-                            estimator_version: AUTOMATION_SESSION_ESTIMATOR_VERSION.to_string(),
-                        },
-                    )
-                    .expect("bounded query"),
-                )
-                .await,
-            AutomationTemporalRetrieval::Rejected("session_evidence_retrieval_unavailable")
         ));
     }
 
@@ -1021,20 +974,6 @@ mod authority_tests {
         assert_eq!(
             typed_reject_reason(project_retrieval.as_ref()).await,
             "session_evidence_retrieval_unavailable"
-        );
-    }
-
-    #[tokio::test]
-    async fn path_only_user_convenience_never_fabricates_empty_hits() {
-        let directory = tempdir().expect("temporary profile");
-        let retrieval = production_user_automation_retrieval(directory.path()).await;
-        assert_eq!(
-            typed_reject_reason(retrieval.as_ref()).await,
-            "session_evidence_retrieval_unavailable"
-        );
-        assert!(
-            !directory.path().join("user-sessions.db").exists(),
-            "path-only convenience must not invent a session database"
         );
     }
 }

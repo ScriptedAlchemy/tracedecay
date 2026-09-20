@@ -7,12 +7,13 @@ use tracedecay_domain::{ActorId, FactOwnerV1, SessionId};
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_policy::CurationApplyAuthorityV1;
 
-use super::super::session_reflector::run_session_reflector_for_store;
+use super::super::session_reflector::run_session_reflector_for_store_with_publication;
 use super::super::*;
 use crate::automation::backend::{AgentTaskBackend, AgentTaskRequest, AgentTaskResponse};
 use crate::automation::config::{
     AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
 };
+use crate::automation::lifecycle::AutomationRunLedgerPublication;
 use crate::automation::run_ledger::AutomationRunStatus;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_session_memory::session::SessionTemporalQuery;
@@ -124,7 +125,7 @@ async fn scheduled_disabled_session_reflector_reads_no_evidence_and_runs_no_back
     let control = run_control();
     let authority = curation_authority();
 
-    let run = run_session_reflector_for_store(
+    let run = run_session_reflector_for_store_with_publication(
         directory.path().join("automation"),
         sessions.profile_database_arc(),
         &retrieval,
@@ -138,6 +139,8 @@ async fn scheduled_disabled_session_reflector_reads_no_evidence_and_runs_no_back
             run_id: Some("run.early-gate.session-reflector".to_owned()),
             ..SessionReflectorAutomationOptions::default()
         },
+        None,
+        AutomationRunLedgerPublication::Immediate,
         None,
     )
     .await
