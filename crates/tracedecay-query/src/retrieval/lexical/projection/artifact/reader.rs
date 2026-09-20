@@ -24,11 +24,10 @@ use tracedecay_code_index::clones::{
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
-    ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
-    FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, SourceSpan,
-    SymbolOccurrenceId, canonical_sha256,
+    CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
+    CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
+    ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_private_fs::open_private_file;
 
@@ -58,16 +57,17 @@ use super::{
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
+    CodeCandidateBindingV1, ExactTermPostingReadPort, LexicalPostingReadPort,
     RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, contract_error, lane_candidate_cap,
     retrieval_checkpoint,
 };
 
 use super::super::{
     ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1,
-    LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1, bm25_score_micros,
-    exact_matches, field_weight_millis, fuzzy_distance_bound, matches_phrase, normalize_lexical,
-    retrieval_anchor, score_lexical_row,
+    LexicalIndexedRow, LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1,
+    bm25_score_micros, exact_matches, field_weight_millis, fuzzy_distance_bound,
+    lexical_lane_binding, lexical_lane_candidate, matches_phrase, normalize_lexical,
+    score_lexical_row,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
@@ -106,6 +106,20 @@ impl LexicalFieldTextV1 for ArtifactRowV1 {
 
     fn symbol_documentation(&self) -> Option<&str> {
         self.symbol_documentation.as_deref()
+    }
+}
+
+impl LexicalIndexedRow for ArtifactRowV1 {
+    fn chunk_id(&self) -> &CodeSearchChunkId {
+        &self.id
+    }
+
+    fn anchor(&self) -> &CodeSearchChunkAnchorV1 {
+        &self.anchor
+    }
+
+    fn language_descriptor_revision(&self) -> &LanguageDescriptorRevision {
+        &self.language_descriptor_revision
     }
 }
 
@@ -2196,9 +2210,10 @@ impl<'a> ArtifactQueryV1<'a> {
                 score,
                 row,
             } = entry;
-            let mut candidate = candidate(
-                self.receipt,
+            let mut candidate = lexical_lane_candidate(
                 &row,
+                self.receipt.freshness(),
+                self.receipt.repository_id().cloned(),
                 RetrieverKind::Lexical,
                 self.metadata.lexical_retriever_revision.clone(),
                 request.score_domain.clone(),
@@ -2206,7 +2221,7 @@ impl<'a> ArtifactQueryV1<'a> {
             )?;
             candidate.ordinal_rank = ordinal as u32;
             let evidence = LexicalLaneEvidence {
-                binding: binding(&row, &candidate, score.matched_kinds),
+                binding: lexical_lane_binding(&row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
                 matched_whole_terms: score.matched_whole_terms,
                 matched_subtokens: score.matched_subtokens,
@@ -2304,9 +2319,10 @@ impl<'a> ArtifactQueryV1<'a> {
                 .map(|literal| request.literals[*literal].clone())
                 .collect::<Vec<_>>();
             let row = self.row(document)?;
-            let mut candidate = candidate(
-                self.receipt,
+            let mut candidate = lexical_lane_candidate(
                 &row,
+                self.receipt.freshness(),
+                self.receipt.repository_id().cloned(),
                 RetrieverKind::ExactLiteral,
                 self.metadata.exact_retriever_revision.clone(),
                 self.metadata.exact_score_domain.clone(),
@@ -2314,7 +2330,7 @@ impl<'a> ArtifactQueryV1<'a> {
             )?;
             candidate.ordinal_rank = ordinal as u32;
             let evidence = ExactLaneEvidence {
-                binding: binding(&row, &candidate, matched_kinds),
+                binding: lexical_lane_binding(&row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
             };
@@ -2890,65 +2906,6 @@ impl LexicalStatsCacheV1 {
             .filter(|(field, _)| **field != LexicalFieldV1::Subtoken)
             .map(|(_, frequencies)| frequencies.get(term).copied().unwrap_or_default())
             .fold(0usize, usize::saturating_add)
-    }
-}
-
-fn candidate(
-    receipt: &VerifiedCodeLexicalArtifactV1,
-    row: &ArtifactRowV1,
-    retriever: RetrieverKind,
-    retriever_revision: ComponentRevision,
-    score_domain: ScoreDomainId,
-    exact_admission_proof: Option<ExactAdmissionProof>,
-) -> Result<CompactCandidate, RetrievalPortError> {
-    let lane = retriever.as_str();
-    let chunk_id = row.id.as_str();
-    let generation = row.anchor.generation_id.as_str();
-    let evidence_id = row.anchor.symbol_occurrence_id.as_ref().map_or_else(
-        || format!("code-chunk:{chunk_id}"),
-        |symbol| format!("code-symbol:{}", symbol.as_str()),
-    );
-    Ok(CompactCandidate {
-        anchor_id: retrieval_anchor(evidence_id.clone())?,
-        logical_evidence_id: LogicalEvidenceId::new(evidence_id).map_err(contract_error)?,
-        source_occurrence_id: SourceOccurrenceId::new(format!(
-            "code-chunk:{generation}:{chunk_id}"
-        ))
-        .map_err(contract_error)?,
-        file_occurrence_id: Some(row.anchor.file_occurrence_id.clone()),
-        source_namespace: receipt.freshness().source_namespace.clone(),
-        repository_id: receipt.repository_id().cloned(),
-        session_or_thread_id: None,
-        logical_copy_cluster_id: None,
-        logical_copy_evidence_anchor: None,
-        evidence_role: EvidenceRole::Primary,
-        retriever,
-        retriever_revision,
-        score_domain,
-        raw_score: FixedPointScore::ZERO,
-        ordinal_rank: 0,
-        exact_admission_proof,
-        retriever_evidence_anchor: retrieval_anchor(format!("code-lexical:{lane}:{chunk_id}"))?,
-        freshness: receipt.freshness().clone(),
-    })
-}
-
-fn binding(
-    row: &ArtifactRowV1,
-    candidate: &CompactCandidate,
-    matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
-) -> CodeCandidateBindingV1 {
-    CodeCandidateBindingV1 {
-        candidate_anchor: candidate.anchor_id.clone(),
-        occurrence: CodeOccurrenceRefV1 {
-            generation: row.anchor.generation_id.clone(),
-            file: row.anchor.file_occurrence_id.clone(),
-            symbol: row.anchor.symbol_occurrence_id.clone(),
-            chunk: Some(row.id.clone()),
-        },
-        language_descriptor_revision: row.language_descriptor_revision.clone(),
-        matched_term_kinds,
-        source_occurrence: candidate.source_occurrence_id.clone(),
     }
 }
 

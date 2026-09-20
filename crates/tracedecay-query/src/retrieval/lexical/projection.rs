@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1;
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-    CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ExactFieldV1,
-    ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId, LanguageDescriptorRevision,
-    RepositoryId, RetrievalAnchorId, ScoreDomainId, SourceFreshness, exact_search_canonical,
-    split_subtokens, technical_tokens, validate_code_logical_path,
+    CodeSearchChunkId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
+    ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
+    FileOccurrenceId, FixedPointScore, LanguageDescriptorRevision, LogicalEvidenceId, RepositoryId,
+    RetrievalAnchorId, RetrieverKind, ScoreDomainId, SourceFreshness, SourceOccurrenceId,
+    exact_search_canonical, split_subtokens, technical_tokens, validate_code_logical_path,
 };
 
 use super::{
@@ -16,7 +17,9 @@ use super::{
     normalize_lexical,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneRequest};
-use crate::retrieval::ports::{RetrievalPortError, contract_error};
+use crate::retrieval::ports::{
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError, contract_error,
+};
 
 mod artifact;
 #[cfg(feature = "search-eval")]
@@ -655,6 +658,87 @@ impl LexicalFieldTextV1 for ProjectedChunkV1 {
 
     fn symbol_documentation(&self) -> Option<&str> {
         self.symbol_documentation.as_deref()
+    }
+}
+
+/// Row identity shared by the in-memory projection and the artifact reader.
+trait LexicalIndexedRow {
+    fn chunk_id(&self) -> &CodeSearchChunkId;
+    fn anchor(&self) -> &CodeSearchChunkAnchorV1;
+    fn language_descriptor_revision(&self) -> &LanguageDescriptorRevision;
+}
+
+impl LexicalIndexedRow for ProjectedChunkV1 {
+    fn chunk_id(&self) -> &CodeSearchChunkId {
+        &self.id
+    }
+
+    fn anchor(&self) -> &CodeSearchChunkAnchorV1 {
+        &self.anchor
+    }
+
+    fn language_descriptor_revision(&self) -> &LanguageDescriptorRevision {
+        &self.language_descriptor_revision
+    }
+}
+
+fn lexical_lane_candidate(
+    row: &impl LexicalIndexedRow,
+    freshness: &SourceFreshness,
+    repository_id: Option<RepositoryId>,
+    retriever: RetrieverKind,
+    retriever_revision: ComponentRevision,
+    score_domain: ScoreDomainId,
+    exact_admission_proof: Option<ExactAdmissionProof>,
+) -> Result<CompactCandidate, RetrievalPortError> {
+    let lane = retriever.as_str();
+    let chunk_id = row.chunk_id().as_str();
+    let generation = row.anchor().generation_id.as_str();
+    let evidence_id = row.anchor().symbol_occurrence_id.as_ref().map_or_else(
+        || format!("code-chunk:{chunk_id}"),
+        |symbol| format!("code-symbol:{}", symbol.as_str()),
+    );
+    Ok(CompactCandidate {
+        anchor_id: retrieval_anchor(evidence_id.clone())?,
+        logical_evidence_id: LogicalEvidenceId::new(evidence_id).map_err(contract_error)?,
+        source_occurrence_id: SourceOccurrenceId::new(format!(
+            "code-chunk:{generation}:{chunk_id}"
+        ))
+        .map_err(contract_error)?,
+        file_occurrence_id: Some(row.anchor().file_occurrence_id.clone()),
+        source_namespace: freshness.source_namespace.clone(),
+        repository_id,
+        session_or_thread_id: None,
+        logical_copy_cluster_id: None,
+        logical_copy_evidence_anchor: None,
+        evidence_role: EvidenceRole::Primary,
+        retriever,
+        retriever_revision,
+        score_domain,
+        raw_score: FixedPointScore::ZERO,
+        ordinal_rank: 0,
+        exact_admission_proof,
+        retriever_evidence_anchor: retrieval_anchor(format!("code-lexical:{lane}:{chunk_id}"))?,
+        freshness: freshness.clone(),
+    })
+}
+
+fn lexical_lane_binding(
+    row: &impl LexicalIndexedRow,
+    candidate: &CompactCandidate,
+    matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
+) -> CodeCandidateBindingV1 {
+    CodeCandidateBindingV1 {
+        candidate_anchor: candidate.anchor_id.clone(),
+        occurrence: CodeOccurrenceRefV1 {
+            generation: row.anchor().generation_id.clone(),
+            file: row.anchor().file_occurrence_id.clone(),
+            symbol: row.anchor().symbol_occurrence_id.clone(),
+            chunk: Some(row.chunk_id().clone()),
+        },
+        language_descriptor_revision: row.language_descriptor_revision().clone(),
+        matched_term_kinds,
+        source_occurrence: candidate.source_occurrence_id.clone(),
     }
 }
 

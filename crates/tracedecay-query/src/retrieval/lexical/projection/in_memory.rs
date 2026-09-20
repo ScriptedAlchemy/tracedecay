@@ -11,11 +11,9 @@ use std::time::{Duration, Instant};
 use roaring::RoaringBitmap;
 use tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
-    ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1,
-    FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
-    SymbolOccurrenceId,
+    CodeGenerationId, CodeSearchChunkV1, ExactFieldV1, ExactTechnicalTermV1,
+    ExtractionAdmittedChunkV1, FreshnessCompatibilityV1, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, SymbolOccurrenceId,
 };
 
 use super::super::{
@@ -26,13 +24,13 @@ use super::{
     CodeLexicalProjectionMetadataV1, ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1,
     LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1, ProjectedChunkV1,
     bm25_score_micros, canonical_projected_exact_term, exact_field_for_kind, exact_matches,
-    field_weight_millis, fuzzy_distance_bound, matches_phrase, normalize_lexical,
-    normalized_search_text, retrieval_anchor, score_lexical_row,
+    field_weight_millis, fuzzy_distance_bound, lexical_lane_binding, lexical_lane_candidate,
+    matches_phrase, normalize_lexical, normalized_search_text, score_lexical_row,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
-    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, contract_error, retrieval_checkpoint,
+    ExactTermPostingReadPort, LexicalPostingReadPort, RETRIEVAL_CANDIDATE_BATCH_SIZE,
+    RetrievalPortError, contract_error, retrieval_checkpoint,
 };
 
 mod postings;
@@ -863,15 +861,17 @@ impl CodeLexicalProjectionAdapterV1 {
                 excluded += 1;
                 continue;
             }
-            let candidate = self.candidate(
+            let candidate = lexical_lane_candidate(
                 row,
+                &self.metadata.freshness,
+                self.metadata.repository_id.clone(),
                 RetrieverKind::Lexical,
                 self.metadata.lexical_retriever_revision.clone(),
                 request.score_domain.clone(),
                 None,
             )?;
             let evidence = LexicalLaneEvidence {
-                binding: self.binding(row, &candidate, score.matched_kinds),
+                binding: lexical_lane_binding(row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
                 matched_whole_terms: score.matched_whole_terms,
                 matched_subtokens: score.matched_subtokens,
@@ -1019,66 +1019,6 @@ impl CodeLexicalProjectionAdapterV1 {
             )
         })
     }
-
-    fn candidate(
-        &self,
-        row: &ProjectedChunkV1,
-        retriever: RetrieverKind,
-        retriever_revision: ComponentRevision,
-        score_domain: ScoreDomainId,
-        exact_admission_proof: Option<tracedecay_domain::ExactAdmissionProof>,
-    ) -> Result<CompactCandidate, RetrievalPortError> {
-        let lane = retriever.as_str();
-        let chunk_id = row.id.as_str();
-        let generation = row.anchor.generation_id.as_str();
-        let evidence_id = row.anchor.symbol_occurrence_id.as_ref().map_or_else(
-            || format!("code-chunk:{chunk_id}"),
-            |symbol| format!("code-symbol:{}", symbol.as_str()),
-        );
-        Ok(CompactCandidate {
-            anchor_id: retrieval_anchor(evidence_id.clone())?,
-            logical_evidence_id: LogicalEvidenceId::new(evidence_id).map_err(contract_error)?,
-            source_occurrence_id: SourceOccurrenceId::new(format!(
-                "code-chunk:{generation}:{chunk_id}"
-            ))
-            .map_err(contract_error)?,
-            file_occurrence_id: Some(row.anchor.file_occurrence_id.clone()),
-            source_namespace: self.metadata.freshness.source_namespace.clone(),
-            repository_id: self.metadata.repository_id.clone(),
-            session_or_thread_id: None,
-            logical_copy_cluster_id: None,
-            logical_copy_evidence_anchor: None,
-            evidence_role: EvidenceRole::Primary,
-            retriever,
-            retriever_revision,
-            score_domain,
-            raw_score: FixedPointScore::ZERO,
-            ordinal_rank: 0,
-            exact_admission_proof,
-            retriever_evidence_anchor: retrieval_anchor(format!("code-lexical:{lane}:{chunk_id}"))?,
-            freshness: self.metadata.freshness.clone(),
-        })
-    }
-
-    fn binding(
-        &self,
-        row: &ProjectedChunkV1,
-        candidate: &CompactCandidate,
-        matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
-    ) -> CodeCandidateBindingV1 {
-        CodeCandidateBindingV1 {
-            candidate_anchor: candidate.anchor_id.clone(),
-            occurrence: CodeOccurrenceRefV1 {
-                generation: row.anchor.generation_id.clone(),
-                file: row.anchor.file_occurrence_id.clone(),
-                symbol: row.anchor.symbol_occurrence_id.clone(),
-                chunk: Some(row.id.clone()),
-            },
-            language_descriptor_revision: row.language_descriptor_revision.clone(),
-            matched_term_kinds,
-            source_occurrence: candidate.source_occurrence_id.clone(),
-        }
-    }
 }
 
 impl LexicalPostingReadPort for CodeLexicalProjectionAdapterV1 {
@@ -1142,15 +1082,17 @@ where
                 .iter()
                 .map(|ordinal| request.literals[*ordinal].clone())
                 .collect::<Vec<_>>();
-            let candidate = self.projection.candidate(
+            let candidate = lexical_lane_candidate(
                 row,
+                &self.projection.metadata.freshness,
+                self.projection.metadata.repository_id.clone(),
                 RetrieverKind::ExactLiteral,
                 self.projection.metadata.exact_retriever_revision.clone(),
                 self.projection.metadata.exact_score_domain.clone(),
                 Some(proof.clone()),
             )?;
             let evidence = ExactLaneEvidence {
-                binding: self.projection.binding(row, &candidate, matched_kinds),
+                binding: lexical_lane_binding(row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
             };
