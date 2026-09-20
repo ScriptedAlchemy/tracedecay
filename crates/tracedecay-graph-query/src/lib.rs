@@ -32,8 +32,6 @@ pub use projection::{
     request_graph_cancellation,
 };
 pub use queries::{FileAdjacencyScan, GraphQueryManager, VerifiedHealthFileAggregateV1};
-#[cfg(any(test, feature = "test-helpers"))]
-pub use verified_query::admitted_verified_graph_query_port;
 pub use verified_query::{
     AdmittedVerifiedGraphQueryPort, VerifiedGraphQuery, VerifiedGraphQueryFuture,
     VerifiedGraphQueryPort, VerifiedGraphQueryRequest,

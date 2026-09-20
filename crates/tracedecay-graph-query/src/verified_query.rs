@@ -115,15 +115,6 @@ impl VerifiedGraphQueryPort for AdmittedVerifiedGraphQueryPort {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
-#[must_use]
-pub fn admitted_verified_graph_query_port(
-    admission: Arc<dyn CodeGraphReadAdmissionPort>,
-    projection: Arc<dyn CodeGraphProjectionReadPort>,
-) -> Arc<dyn VerifiedGraphQueryPort> {
-    admitted_verified_graph_query_port_with_source(admission, projection, None)
-}
-
 #[must_use]
 pub fn admitted_verified_graph_query_port_with_source(
     admission: Arc<dyn CodeGraphReadAdmissionPort>,
@@ -223,24 +214,14 @@ impl VerifiedGraphQuery {
     #[hotpath::skip]
     async fn await_bound<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.refuse_if_bound_closed()?;
-        match run_deadline_signal_interruptible(
+        let result = await_graph_port_wait(
             self.request_context.deadline(),
             &self.live_cancellation,
             future,
         )
-        .await
-        {
-            Ok(result) => {
-                self.refuse_if_bound_closed()?;
-                result
-            }
-            Err(RequestInterruption::Cancelled) => Err(map_code_graph_read_runtime_error(
-                super::CodeGraphReadError::Cancelled,
-            )),
-            Err(RequestInterruption::DeadlineExceeded) => Err(map_code_graph_read_runtime_error(
-                super::CodeGraphReadError::TimedOut,
-            )),
-        }
+        .await?;
+        self.refuse_if_bound_closed()?;
+        result
     }
 
     pub fn project_root(&self) -> Result<&Path> {
@@ -581,7 +562,7 @@ impl VerifiedGraphQuery {
         max_relations: usize,
     ) -> Result<HashSet<String>> {
         self.refuse_if_bound_closed()?;
-        let (symbols, scoped) = match logical_paths {
+        let symbols = match logical_paths {
             Some(requested) => {
                 let mut symbols = Vec::new();
                 for path in requested {
@@ -602,7 +583,7 @@ impl VerifiedGraphQuery {
                     }
                     symbols.append(&mut in_file);
                 }
-                (symbols, true)
+                symbols
             }
             None => {
                 let page = self.symbols_page(None, max_symbols)?;
@@ -611,7 +592,7 @@ impl VerifiedGraphQuery {
                         "verified test-attribution census exceeded its symbol budget",
                     ));
                 }
-                (page.symbols, false)
+                page.symbols
             }
         };
         let mut paths = HashMap::new();
@@ -631,7 +612,7 @@ impl VerifiedGraphQuery {
                 test_markers.insert(symbol.occurrence.clone());
             }
         }
-        if scoped {
+        if logical_paths.is_some() {
             if test_markers.is_empty() {
                 return Ok(HashSet::new());
             }
@@ -645,7 +626,6 @@ impl VerifiedGraphQuery {
                 .into_iter()
                 .flatten()
                 .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
-                .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
                 .collect());
         }
         let occurrences = symbols
@@ -661,7 +641,6 @@ impl VerifiedGraphQuery {
             .into_iter()
             .filter(|edge| test_markers.contains(&edge.from_occurrence))
             .filter_map(|edge| paths.get(&edge.to_occurrence).cloned())
-            .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
             .collect())
     }
 }

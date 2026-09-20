@@ -118,10 +118,6 @@ pub async fn compute_verified_health_snapshot(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Task 2: Gini Coefficient
-// ---------------------------------------------------------------------------
-
 /// Computes the Gini coefficient for a slice of non-negative values.
 /// Returns 0.0 for empty slices, single-element slices, or all-zero slices.
 /// Result is in \[0.0, 1.0\] where 0.0 = perfect equality.
@@ -167,10 +163,6 @@ pub fn gini_label(gini: f64) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Task 3: Tarjan's SCC / Acyclicity Score
-// ---------------------------------------------------------------------------
-
 /// Computes the acyclicity score for a directed graph.
 /// Uses Tarjan's SCC algorithm. Score = 1.0 - (`edges_in_nontrivial_SCCs` / `total_edges`).
 /// Returns (score, `number_of_edges_in_cycles`).
@@ -213,10 +205,6 @@ pub fn acyclicity_score<S1: BuildHasher, S2: BuildHasher>(
     (score, edges_in_cycles)
 }
 
-// ---------------------------------------------------------------------------
-// Task 4: Dependency Depth
-// ---------------------------------------------------------------------------
-
 /// A chain entry representing a file and the longest dependency chain reaching it.
 pub struct DepthChain {
     pub file: String,
@@ -242,7 +230,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     adj: &HashMap<String, HashSet<String, S2>, S1>,
     limit: usize,
 ) -> DepthResult {
-    // Collect all nodes
     let mut all_nodes: HashSet<String> = adj.keys().cloned().collect();
     for targets in adj.values() {
         all_nodes.extend(targets.iter().cloned());
@@ -264,7 +251,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         (file_count as f64).log2().ceil() as usize
     };
 
-    // Step 1: Run Tarjan's SCC, map each node to its SCC index
     let sccs = tarjan_scc(adj);
     let mut node_to_scc: HashMap<String, usize> = HashMap::new();
     for (idx, scc) in sccs.iter().enumerate() {
@@ -273,7 +259,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Step 2: Build DAG over SCC indices
     let scc_count = sccs.len();
     let mut scc_adj: HashMap<usize, HashSet<usize>> = HashMap::new();
     for (src, targets) in adj {
@@ -286,7 +271,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Step 3: Kahn's algorithm for topological sort
     let mut in_degree = vec![0usize; scc_count];
     for targets in scc_adj.values() {
         for &tgt in targets {
@@ -309,7 +293,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Step 4: DP for longest path with predecessor tracking
     let mut dist = vec![0usize; scc_count];
     let mut pred = vec![usize::MAX; scc_count];
 
@@ -324,7 +307,7 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Step 5: Rank every SCC before applying the response limit. Reconstructing
+    // Rank every SCC before applying the response limit. Reconstructing
     // only the selected chains keeps small-limit callers proportional to their
     // requested result count.
     let max_depth = dist.iter().copied().max().unwrap_or(0);
@@ -340,7 +323,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
     for scc_idx in ranked_sccs {
         let depth = dist[scc_idx];
 
-        // Reconstruct the chain by walking predecessors.
         let mut chain_sccs: Vec<usize> = Vec::new();
         let mut cur = scc_idx;
         loop {
@@ -353,7 +335,6 @@ pub fn dependency_depth<S1: BuildHasher, S2: BuildHasher>(
         }
         chain_sccs.reverse();
 
-        // Map SCC indices back to representative file names.
         let chain: Vec<String> = chain_sccs.iter().map(|&si| sccs[si][0].clone()).collect();
 
         let mut scc_files = sccs[scc_idx].clone();
@@ -464,10 +445,6 @@ pub fn depth_score(max_depth: usize, ideal_depth: usize) -> f64 {
     (ideal_depth as f64 / max_depth as f64).min(1.0)
 }
 
-// ---------------------------------------------------------------------------
-// Task 5: Modularity Score
-// ---------------------------------------------------------------------------
-
 /// Estimates modularity by removing hub nodes and counting connected components.
 /// Hub nodes = files with (fan\_in + fan\_out) > mean + 2\*stddev.
 /// Score = 1.0 - (1.0 / component\_count), clamped to \[0, 1\].
@@ -480,18 +457,12 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
         return (1.0, 0);
     }
 
-    // Collect all nodes
     let mut all_nodes: HashSet<String> = adj.keys().cloned().collect();
     for targets in adj.values() {
         all_nodes.extend(targets.iter().cloned());
     }
     hotpath::gauge!("usecases.graph.modularity.nodes_total").inc(all_nodes.len() as u64);
 
-    if all_nodes.is_empty() {
-        return (1.0, 0);
-    }
-
-    // Build undirected connectivity count per node (fan_in + fan_out)
     let mut connectivity: HashMap<&str, usize> = HashMap::new();
     for node in &all_nodes {
         connectivity.insert(node.as_str(), 0);
@@ -503,7 +474,6 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Compute mean and stddev
     let n = connectivity.len() as f64;
     let values: Vec<f64> = connectivity.values().map(|&v| v as f64).collect();
     let mean = values.iter().sum::<f64>() / n;
@@ -511,14 +481,12 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     let stddev = variance.sqrt();
     let threshold = mean + 2.0 * stddev;
 
-    // Identify hub nodes
     let hubs: HashSet<&str> = connectivity
         .iter()
         .filter(|&(_, &v)| v as f64 > threshold)
         .map(|(&k, _)| k)
         .collect();
 
-    // Build undirected graph without hubs
     let non_hub_nodes: Vec<&str> = all_nodes
         .iter()
         .map(String::as_str)
@@ -552,7 +520,6 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
         }
     }
 
-    // Count connected components via BFS
     let mut visited: HashSet<&str> = HashSet::new();
     let mut components = 0;
 
@@ -579,10 +546,6 @@ pub fn modularity_score<S1: BuildHasher, S2: BuildHasher>(
     let score = (1.0 - 1.0 / components as f64).clamp(0.0, 1.0);
     (score, components)
 }
-
-// ---------------------------------------------------------------------------
-// Task 6: Composite Health Score
-// ---------------------------------------------------------------------------
 
 /// All five health dimensions, each in \[0.0, 1.0\].
 #[derive(Debug, Clone)]
