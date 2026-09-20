@@ -384,10 +384,16 @@ declare -a staged_root_assets=(
   "tests/fixtures"
   "scripts/run-session-temporal-benchmark.sh"
 )
+# A package directory may already carry its own entry at the destination path,
+# as `crates/tracedecay/tests/fixtures` does. `cp -a` merges a directory into
+# an existing directory of the same name, which would leave the package-local
+# asset a superset of the root one. Clear the destination so the staged asset
+# is exactly the root snapshot the assertion below demands.
 for asset in "${staged_root_assets[@]}"; do
   [[ -e "$staged/$asset" ]] ||
     die "product package asset is missing from the staged source tree: $asset"
   mkdir -p -- "$staged_product/$(dirname -- "$asset")"
+  rm -rf -- "$staged_product/$asset"
   cp -a -- "$staged/$asset" "$staged_product/$(dirname -- "$asset")/"
 done
 
@@ -404,6 +410,7 @@ for asset in "${staged_cli_assets[@]}"; do
   [[ -e "$staged/$asset" ]] ||
     die "CLI package asset is missing from the staged source tree: $asset"
   mkdir -p -- "$staged_cli_crate/$(dirname -- "$asset")"
+  rm -rf -- "$staged_cli_crate/$asset"
   cp -a -- "$staged/$asset" "$staged_cli_crate/$(dirname -- "$asset")/"
 done
 
