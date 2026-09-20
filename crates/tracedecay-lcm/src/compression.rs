@@ -13,7 +13,7 @@ use super::compression_decision::{
     CondensationDecision, CondensationDecisionInput, OverflowRecoveryCapInput,
     PreflightDecisionInput,
 };
-use super::compression_policy::is_policy_anchor_role;
+use super::compression_policy::{is_policy_anchor_role, source_token_count};
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
 use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
@@ -2638,13 +2638,6 @@ fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
         "content": summary.summary_text,
         "lcm_summary_node_id": summary.node_id,
     })
-}
-
-fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
-    backlog
-        .iter()
-        .map(|message| crate::lcm_budget_tokens(&message.content))
-        .sum::<i64>()
 }
 
 fn debt_for_deferred_backlog(deferred_backlog: &[LcmRawMessage]) -> Vec<LcmMaintenanceDebt> {
