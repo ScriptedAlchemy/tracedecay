@@ -11,7 +11,7 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ManifestDigest, RetrieverCoverage, SymbolOccurrenceId, canonical_sha256};
 
-use super::format::VerifiedCodeLexicalArtifactV1;
+use super::format::{VerifiedCodeLexicalArtifactV1, contract_number};
 use super::reader::{CloneArtifactCursorPositionV1, CloneArtifactCursorV1, CloneArtifactPageV1};
 use super::schema::LexicalArtifactLayoutV1;
 use super::{CodeLexicalArtifactErrorV1, sqlite_error};
@@ -730,10 +730,6 @@ fn interrupt(
     } else {
         false
     }
-}
-
-fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
-    CodeLexicalArtifactErrorV1::Contract(error.to_string())
 }
 
 #[cfg(test)]

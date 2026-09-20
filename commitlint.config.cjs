@@ -12,6 +12,7 @@ const allowedTypes = [
   "style",
   "simplify",
   "test",
+  "simplify",
 ];
 
 module.exports = {
