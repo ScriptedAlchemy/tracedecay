@@ -207,6 +207,40 @@ fn symbol_line_order(left: &Value, right: &Value) -> std::cmp::Ordering {
         .then_with(|| name(left).cmp(&name(right)))
 }
 
+/// Markdown lists symbols in occurrence-id order, which hashes the temp
+/// repository. The header is compared literally and the entries as a sorted
+/// set, each entry being its bullet line plus the indented signature line.
+fn outline_parts(markdown: &str) -> (String, Vec<String>) {
+    let mut header = String::new();
+    let mut entries: Vec<String> = Vec::new();
+    for line in markdown.lines() {
+        if line.starts_with("- **") {
+            entries.push(line.to_owned());
+        } else if let Some(entry) = entries.last_mut().filter(|_| line.starts_with("  ")) {
+            entry.push('\n');
+            entry.push_str(line);
+        } else {
+            header.push_str(line);
+            header.push('\n');
+        }
+    }
+    entries.sort();
+    (header, entries)
+}
+
+fn assert_markdown_outline(response: &Value, expected: &str, footer: &[&str]) {
+    let texts = content_texts(response);
+    let (outline, rest) = texts
+        .split_first()
+        .unwrap_or_else(|| panic!("missing outline text: {response}"));
+    assert_eq!(
+        outline_parts(outline),
+        outline_parts(expected),
+        "{response}"
+    );
+    assert_eq!(rest, footer, "{response}");
+}
+
 fn assert_rpc_error(response: &Value, code: i64, message: &str) {
     assert!(
         response.get("result").is_none_or(Value::is_null),
@@ -422,10 +456,10 @@ async fn indexed_file_outline_is_the_symbol_map() {
     assert_json_payload(&absolute_outline, &root, both.clone());
 
     let markdown = call_outline(&server, json!({"file": "src/utils.rs"})).await;
-    assert_eq!(
-        content_texts(&markdown),
-        vec![UTILS_MARKDOWN, "\ntracedecay_metrics: before=42 after=54",],
-        "{markdown}"
+    assert_markdown_outline(
+        &markdown,
+        UTILS_MARKDOWN,
+        &["\ntracedecay_metrics: before=42 after=54"],
     );
 
     // `kinds` filters the indexed map and leaves the ast-grep attachment whole.
