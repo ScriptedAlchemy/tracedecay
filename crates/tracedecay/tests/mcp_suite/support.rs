@@ -13,8 +13,6 @@ use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
-use std::process::Command;
-#[cfg(feature = "test-transport")]
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -371,6 +369,14 @@ pub(crate) struct ProductionCompositionFixture {
     _isolation: TestTempDir,
 }
 
+/// `git init`, stage everything, and commit. Identity, hooks, and gc come
+/// from the shared fixture git config so each suite does not fork its own.
+pub(crate) fn commit_worktree(project: &Path, message: &str) {
+    crate::common::fixture::git_run(project, &["init", "-q"]);
+    crate::common::fixture::git_run(project, &["add", "."]);
+    crate::common::fixture::git_run(project, &["commit", "-qm", message]);
+}
+
 #[cfg(feature = "test-transport")]
 pub(crate) async fn production_composition_fixture() -> ProductionCompositionFixture {
     production_composition_fixture_with_sources(fixture::write_indexed_fixture_sources).await
@@ -387,32 +393,7 @@ pub(crate) async fn production_composition_fixture_with_sources(
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).expect("production composition project");
     write_sources(&project_root);
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(&project_root)
-        .status()
-        .expect("git init");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(&project_root)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production composition fixture",
-        ])
-        .current_dir(&project_root)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit must succeed");
+    commit_worktree(&project_root, "production composition fixture");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         vec![project_root.clone()],
@@ -441,32 +422,7 @@ pub(crate) async fn init_production_source_edit_project(
     let isolation_root = project_root
         .parent()
         .expect("source-edit project has an isolation parent");
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(project_root)
-        .status()
-        .expect("git init source-edit fixture");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(project_root)
-        .status()
-        .expect("git add source-edit fixture");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "source edit fixture",
-        ])
-        .current_dir(project_root)
-        .status()
-        .expect("git commit source-edit fixture");
-    assert!(commit.success(), "git commit must succeed");
+    commit_worktree(project_root, "source edit fixture");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation_root,
         [project_root.to_path_buf()],
@@ -1839,11 +1795,6 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
 }
 
 #[cfg(feature = "test-transport")]
-pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> Arc<HostAdmissionTestRuntimeV1> {
-    open_active_project_session_db(cg).await
-}
-
-#[cfg(feature = "test-transport")]
 pub(crate) async fn lcm_raw_store_id(cg: &TraceDecay, message_id: &str) -> i64 {
     lcm_raw_store_id_for_provider(cg, "cursor", message_id).await
 }
@@ -1854,7 +1805,7 @@ pub(crate) async fn lcm_raw_store_id_for_provider(
     provider: &str,
     message_id: &str,
 ) -> i64 {
-    project_lcm_conn(cg)
+    open_active_project_session_db(cg)
         .await
         .lcm_load_raw_message_for_test(provider, message_id)
         .await

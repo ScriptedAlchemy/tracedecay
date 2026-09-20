@@ -4,7 +4,6 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
@@ -27,35 +26,6 @@ fn write_dependency_declaration(project: &Path, module: &str, declarations: &str
     .unwrap();
 }
 
-fn initialize_git_repository(project: &Path) {
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(project)
-        .status()
-        .expect("git init dependency-hint fixture");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(project)
-        .status()
-        .expect("git add dependency-hint fixture");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "dependency hint fixture",
-        ])
-        .current_dir(project)
-        .status()
-        .expect("git commit dependency-hint fixture");
-    assert!(commit.success(), "git commit must succeed");
-}
-
 async fn scoped_dependency_hint_fixture(
     scope_prefix: &str,
     write_sources: impl FnOnce(&Path),
@@ -64,7 +34,7 @@ async fn scoped_dependency_hint_fixture(
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     write_sources(&project_root);
-    initialize_git_repository(&project_root);
+    commit_worktree(&project_root, "dependency hint fixture");
     let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
         isolation.path(),
         [project_root.clone()],

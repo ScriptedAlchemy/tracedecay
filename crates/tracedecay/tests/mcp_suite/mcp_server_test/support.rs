@@ -404,10 +404,3 @@ pub(crate) fn analytics_metadata(event: &tracedecay_global_db::AnalyticsEventRec
     )
     .expect("analytics event metadata is JSON")
 }
-
-// ---------------------------------------------------------------------------
-// Repository setup used by routed hook journeys.
-// ---------------------------------------------------------------------------
-pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
-    crate::common::fixture::git_run(project, args);
-}

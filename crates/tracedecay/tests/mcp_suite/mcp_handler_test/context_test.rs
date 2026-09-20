@@ -3,7 +3,6 @@
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
-use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_mcp::ToolResult;
@@ -49,32 +48,7 @@ async fn setup_scoped_production_project(scope_prefix: &str) -> ScopedProduction
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     crate::fixture::write_indexed_fixture_sources(&project_root);
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(&project_root)
-        .status()
-        .unwrap();
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(&project_root)
-        .status()
-        .unwrap();
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "scoped production context fixture",
-        ])
-        .current_dir(&project_root)
-        .status()
-        .unwrap();
-    assert!(commit.success(), "git commit must succeed");
+    commit_worktree(&project_root, "scoped production context fixture");
     let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
         isolation.path(),
         [project_root.clone()],

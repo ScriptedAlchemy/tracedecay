@@ -7,13 +7,13 @@
 //! cancelled in the store. Missing, unknown, and stale handles, and an
 //! unmounted profile refresh authority, are typed refusals.
 
-use crate::support::{GLOBAL_DB_ENV_LOCK, GlobalDbEnvGuard, HomeEnvGuard, extract_text};
 #[cfg(feature = "test-transport")]
-use crate::{common, fixture};
+use crate::common::fixture::git_run as git;
+#[cfg(feature = "test-transport")]
+use crate::fixture;
+use crate::support::{GLOBAL_DB_ENV_LOCK, GlobalDbEnvGuard, HomeEnvGuard, extract_text};
 use serde_json::{Value, json};
 use std::path::Path;
-#[cfg(feature = "test-transport")]
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "test-transport")]
@@ -211,16 +211,6 @@ async fn production_call(
         .result
         .unwrap_or_else(|| panic!("{tool} returned a transport error: {:?}", response.error));
     tool_envelope(&result)
-}
-
-#[cfg(feature = "test-transport")]
-fn git(project: &Path, args: &[&str]) {
-    let status = Command::new(common::git_program())
-        .args(args)
-        .current_dir(project)
-        .status()
-        .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
-    assert!(status.success(), "git {args:?} failed: {status}");
 }
 
 /// The production MCP server answers cancel the way an agent calls it:

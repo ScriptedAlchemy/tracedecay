@@ -1,3 +1,4 @@
+use crate::common::fixture::git_run as git;
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
