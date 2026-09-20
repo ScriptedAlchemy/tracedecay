@@ -262,7 +262,7 @@ async fn run_multi_root_execute() {
         .open_project_server(&beta_handshake)
         .await
         .expect("register beta project");
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    tokio::time::timeout(std::time::Duration::from_mins(1), async {
         loop {
             if engine
                 .invocation
