@@ -13,8 +13,9 @@ use super::super::{
     exact_field_for_kind, normalized_search_text,
 };
 use super::format::{
-    ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, encode_exact_field,
-    encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt, ngram_page_digest,
+    ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, contract_number,
+    encode_exact_field, encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt,
+    hash_bytes, ngram_page_digest,
 };
 use super::postings::{NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams};
 use super::row_codec::{RowDictionaryTableV1, encode_artifact_row};
@@ -645,16 +646,6 @@ fn hash_blob(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifac
     hash_bytes(hasher, value)
 }
 
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
-    hasher.update(
-        u64::try_from(bytes.len())
-            .map_err(contract_number)?
-            .to_le_bytes(),
-    );
-    hasher.update(bytes);
-    Ok(())
-}
-
 fn import_integrity_digest(
     canonical: &[u8],
     evidence: &[u8],
@@ -957,8 +948,4 @@ fn prepared_charge_overflow() -> CodeLexicalArtifactErrorV1 {
     CodeLexicalArtifactErrorV1::Contract(
         "prepared lexical page retained-byte charge overflowed".to_owned(),
     )
-}
-
-fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
-    CodeLexicalArtifactErrorV1::Contract(error.to_string())
 }

@@ -34,9 +34,10 @@ use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, RECEIPT_RESERVATION_BYTES,
     SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11,
     VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt, artifact_digest,
-    decode_padded_receipt, decode_padded_receipt_with_control, finish_base_section_receipt_fold,
-    initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
-    section_names, verify_artifact_table_layout, verify_required_artifact_indexes,
+    contract_number, decode_padded_receipt, decode_padded_receipt_with_control,
+    finish_base_section_receipt_fold, hash_bytes, initial_base_section_receipt_fold,
+    metadata_digest, new_verified_receipt, padded_receipt, section_names,
+    verify_artifact_table_layout, verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{
@@ -6496,16 +6497,6 @@ fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexica
     Ok(())
 }
 
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
-    hasher.update(
-        u64::try_from(bytes.len())
-            .map_err(contract_number)?
-            .to_le_bytes(),
-    );
-    hasher.update(bytes);
-    Ok(())
-}
-
 fn read_receipt(
     connection: &Connection,
 ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
@@ -6829,10 +6820,6 @@ fn require_integrity(
         return Err(CodeLexicalArtifactErrorV1::Corrupt(result));
     }
     Ok(())
-}
-
-fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
-    CodeLexicalArtifactErrorV1::Contract(error.to_string())
 }
 
 #[cfg(test)]
