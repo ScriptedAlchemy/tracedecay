@@ -15,8 +15,13 @@ use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{ResolvedDaemonConnection, client_connection};
 use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
+pub(crate) use tracedecay_daemon_protocol::connection::{
+    DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
+    is_transient_daemon_connect_error,
+};
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
-use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, tool_request_deadline};
+pub use tracedecay_daemon_protocol::daemon_tool_response_bound;
+use tracedecay_daemon_protocol::tool_request_deadline;
 
 #[cfg(unix)]
 use super::unavailable_error;
@@ -25,28 +30,6 @@ use super::{
     JsonRpcRequest, JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
     TraceDecayError, error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
-
-/// Bounded grace a client keeps reading for *after* the caller's request
-/// deadline has elapsed.
-///
-/// The request deadline belongs to the daemon: it is what admission measures
-/// and what the retained owners settle against, and its whole purpose is to
-/// produce a typed terminal, a `PartialEffect` carrying a committed receipt, a
-/// typed timeout, rather than silence. Bounding the client's *read* by that
-/// same instant made every one of those terminals unobservable through this
-/// transport: the client abandoned the connection moments before the envelope
-/// it had asked for arrived and reported "outcome may be unknown" while the
-/// outcome was already on the wire. The read bound must therefore outlive the
-/// request deadline; this is by how much. It bounds only a dead or wedged
-/// daemon, never the request.
-/// The local read bound for a request whose caller deadline is `request_deadline`.
-pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> {
-    request_deadline
-        .checked_add(DAEMON_TOOL_RESPONSE_GRACE)
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "daemon tool response bound exceeds the supported monotonic range".to_string(),
-        })
-}
 
 /// The caller's request deadline as an absolute wall-clock instant, for the
 /// wire.
@@ -64,17 +47,6 @@ fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain:
             .saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
     )
 }
-
-/// How long daemon clients keep retrying a failed connect before giving up.
-///
-/// An explicit restart, or an update of a service that was already running,
-/// briefly unlinks the socket before the replacement binds it. Connects in
-/// that bounded window fail with `NotFound` or `ConnectionRefused`. Long-lived
-/// MCP sessions (Cursor's `tracedecay serve` stdio proxy) reconnect per request
-/// so a live session can ride out replacement without surfacing a hard
-/// JSON-RPC error. This grace does not start an intentionally held service.
-pub(crate) const DAEMON_RESTART_GRACE: Duration = Duration::from_secs(8);
-pub(crate) const DAEMON_RESTART_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// How long a liveness probe waits for the daemon endpoint to accept a
 /// connection before the in-flight request is declared unreachable.
@@ -188,27 +160,6 @@ pub(crate) fn default_available_socket_path() -> Result<PathBuf> {
     {
         current_daemon_connection()?;
         Ok(socket_path)
-    }
-}
-
-pub(crate) fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::WouldBlock
-    )
-}
-
-pub(crate) fn is_saturated_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
-    kind == std::io::ErrorKind::WouldBlock
-}
-
-pub(crate) fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
-    if is_saturated_daemon_connect_error(kind) {
-        "The daemon is up but not accepting connections, likely overloaded. Retry shortly, or check `tracedecay daemon status`."
-    } else {
-        "The daemon may be restarting (e.g. after `tracedecay update`). Retry shortly, or check `tracedecay daemon status`."
     }
 }
 
@@ -442,7 +393,7 @@ pub async fn call_tool(
 /// Calls a daemon tool with `deadline` as the *caller's request deadline*.
 ///
 /// The deadline is sent to the daemon, which enforces it; the local read runs
-/// on that deadline plus [`DAEMON_TOOL_RESPONSE_GRACE`] so a deadline-elapsed
+/// on that deadline plus [`tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE`] so a deadline-elapsed
 /// typed terminal is read rather than raced.
 pub async fn call_tool_within(
     socket_path: &Path,
