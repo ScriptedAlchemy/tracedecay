@@ -8,7 +8,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::runner::ServicePlatform;
 use super::{
     DaemonServiceSpec, LAUNCHD_PLIST_NAME, SERVICE_TEMP_SEQUENCE, home_for_service_env,
-    plist_xml_escape, plist_xml_unescape, windows_task,
+    windows_task, xml_escape, xml_unescape,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,38 +332,38 @@ pub(super) fn remote_tls_from_service_unit(
 }
 
 pub(super) fn socket_path_from_launchd_plist(plist: &str) -> Option<PathBuf> {
-    let program_arguments_start = plist.find("<key>ProgramArguments</key>")?;
-    let arguments_text = &plist[program_arguments_start..];
-    let array_start = arguments_text.find("<array>")? + "<array>".len();
-    let after_array_start = &arguments_text[array_start..];
-    let array_end = after_array_start.find("</array>")?;
-    let array_text = &after_array_start[..array_end];
-    let strings = plist_string_values(array_text);
-
+    let strings = launchd_program_arguments(plist).ok()??;
     socket_path_from_args(strings.iter().map(String::as_str))
 }
 
 pub(super) fn remote_tls_from_launchd_plist(
     plist: &str,
 ) -> Result<Option<crate::RemoteBrainTlsConfig>> {
+    let Some(strings) = launchd_program_arguments(plist)? else {
+        return Ok(None);
+    };
+    remote_tls_from_args(strings.iter().map(String::as_str))
+}
+
+fn launchd_program_arguments(plist: &str) -> Result<Option<Vec<String>>> {
     let Some(program_arguments_start) = plist.find("<key>ProgramArguments</key>") else {
         return Ok(None);
     };
     let arguments_text = &plist[program_arguments_start..];
-    let array_start = arguments_text
-        .find("<array>")
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "installed launchd daemon service has malformed program arguments".to_string(),
-        })?
-        + "<array>".len();
-    let after_array_start = &arguments_text[array_start..];
-    let array_end = after_array_start
-        .find("</array>")
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "installed launchd daemon service has malformed program arguments".to_string(),
-        })?;
-    let strings = plist_string_values(&after_array_start[..array_end]);
-    remote_tls_from_args(strings.iter().map(String::as_str))
+    let Some(array_relative) = arguments_text.find("<array>") else {
+        return Err(malformed_launchd_program_arguments());
+    };
+    let after_array_start = &arguments_text[array_relative + "<array>".len()..];
+    let Some(array_end) = after_array_start.find("</array>") else {
+        return Err(malformed_launchd_program_arguments());
+    };
+    Ok(Some(plist_string_values(&after_array_start[..array_end])))
+}
+
+fn malformed_launchd_program_arguments() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "installed launchd daemon service has malformed program arguments".to_string(),
+    }
 }
 
 pub(super) fn launchd_plist_env_value(plist: &str, name: &str) -> Option<String> {
@@ -374,7 +374,7 @@ pub(super) fn launchd_plist_env_value(plist: &str, name: &str) -> Option<String>
     let dict_end = after_dict_start.find("</dict>")?;
     let dict_text = &after_dict_start[..dict_end];
 
-    let key_tag = format!("<key>{}</key>", plist_xml_escape(name));
+    let key_tag = format!("<key>{}</key>", xml_escape(name));
     let key_end = dict_text.find(&key_tag)? + key_tag.len();
     plist_string_values(&dict_text[key_end..])
         .into_iter()
@@ -390,7 +390,7 @@ fn plist_string_values(text: &str) -> Vec<String> {
         let Some(end) = after_start.find("</string>") else {
             break;
         };
-        values.push(plist_xml_unescape(&after_start[..end]));
+        values.push(xml_unescape(&after_start[..end]));
         remaining = &after_start[end + "</string>".len()..];
     }
     values
