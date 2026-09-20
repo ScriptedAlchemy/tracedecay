@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
@@ -24,6 +23,7 @@ SUITE_DIR = Path(__file__).resolve().parent
 if str(SUITE_DIR) not in sys.path:
     sys.path.insert(0, str(SUITE_DIR))
 
+from outcomes import utc_now
 from runner import READ_EFFECTS, SweepError, load_manifest, tool_policy
 
 
@@ -65,10 +65,6 @@ class WholeRunDeadline:
 
     def expired(self) -> bool:
         return self.remaining_s() == 0.0
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def catalog_entries(manifest: dict[str, Any]) -> list[dict[str, str]]:
@@ -466,7 +462,7 @@ def run(args: argparse.Namespace) -> int:
     """Run discovery first, then isolated mutation journeys, always emitting final artifacts."""
     deadline = WholeRunDeadline(args.whole_run_deadline_ms)
     report: dict[str, Any] = {
-        "schema_version": 1, "phase": "aggregate", "started_at": _utc_now(), "entries": [],
+        "schema_version": 1, "phase": "aggregate", "started_at": utc_now(), "entries": [],
         "summary": {"discovered": 0, "completed": 0, "failed": 0, "cancelled": 0},
     }
     phases: list[PhaseResult] = []
@@ -505,8 +501,8 @@ def run(args: argparse.Namespace) -> int:
         report["fatal"] = str(error)
         report["fatal_problem_code"] = "tool_sweep.orchestration_failed"
     finally:
-        report["started_at"] = report.get("started_at", _utc_now())
-        report["finished_at"] = _utc_now()
+        report["started_at"] = report.get("started_at", utc_now())
+        report["finished_at"] = utc_now()
         report["phases"] = [phase.value() for phase in phases]
         write_final_report(args.out, report)
     return 0 if "fatal" not in report and report["summary"]["failed"] == 0 and report["summary"]["cancelled"] == 0 else 1

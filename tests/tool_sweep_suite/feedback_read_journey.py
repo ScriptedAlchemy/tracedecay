@@ -17,7 +17,7 @@ import time
 
 from journeys import _application_payload
 from orchestrator import _phase_environment, _terminate
-from outcomes import objects
+from outcomes import decode_json_stdout, objects
 from runner import MOUNT_RETRY_BUDGET_S, MOUNT_RETRY_DELAY_S, McpClient
 
 MISSING = "feedback_journey_missing_symbol"
@@ -30,10 +30,7 @@ def write(out: Path, name: str, value: object) -> None:
 
 def command(args: list[str], project: Path, out: Path, name: str) -> dict:
     result = subprocess.run(args, cwd=project, capture_output=True, text=True, timeout=180)
-    try:
-        stdout = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        stdout = result.stdout
+    stdout = decode_json_stdout(result.stdout)
     row = dict(command=args, exit_code=result.returncode, stdout=stdout, stderr=result.stderr)
     write(out, name, row)
     return row

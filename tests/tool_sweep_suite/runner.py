@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
@@ -52,6 +51,7 @@ from outcomes import (
     response_problem_code,
     response_handle,
     text_blocks,
+    utc_now,
 )
 
 def response_row(
@@ -244,10 +244,6 @@ def load_manifest(path: Path) -> dict[str, Any]:
     if value != canonical:
         raise SweepError("catalog manifest does not match its canonical negotiated surface")
     return canonical
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class McpClient:
@@ -2863,7 +2859,7 @@ def run_phase(args: argparse.Namespace) -> int:
     report: dict[str, Any] = {
         "schema_version": 1,
         "phase": args.phase,
-        "started_at": _utc_now(),
+        "started_at": utc_now(),
         "entries": [],
         "summary": {"discovered": 0, "completed": 0, "failed": 0, "cancelled": 0},
     }
@@ -2956,7 +2952,7 @@ def run_phase(args: argparse.Namespace) -> int:
             client.close()
         report["entries"] = sorted(report["entries"], key=lambda row: (row["kind"], row["name"]))
         report["summary"] = _phase_summary(report["entries"])
-        report["finished_at"] = _utc_now()
+        report["finished_at"] = utc_now()
         _write_phase_report(args.out, report)
     return 0 if "fatal" not in report and report["summary"]["failed"] == 0 else 1
 
