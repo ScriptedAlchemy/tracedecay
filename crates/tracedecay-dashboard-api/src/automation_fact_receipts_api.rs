@@ -6,8 +6,7 @@ use serde_json::{Value, json};
 
 use super::util::{JsonQuery, coerce_limit, http_detail};
 use super::{DashboardState, RequestControl};
-use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
-use crate::read_model::DashboardDomainStateV1;
+use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_response};
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactReceipt, AutomaticFactState, list_automatic_fact_receipts,
@@ -55,15 +54,7 @@ pub async fn list(
         list_automatic_fact_receipts(&memory, receipt_state, limit, &fact_read_control(&control))
             .await;
     if let Some(state) = request_terminal_state(&control) {
-        let (code, detail) = terminal_read_code(state);
-        return (
-            if state == DashboardDomainStateV1::TimedOut {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::REQUEST_TIMEOUT
-            },
-            Json(json!({"detail": detail, "code": code})),
-        );
+        return terminal_read_response(state);
     }
     match result {
         Ok(receipts) => {
@@ -107,15 +98,7 @@ pub async fn view(
     };
     let result = load_automatic_fact_receipt(&memory, &id, &fact_read_control(&control)).await;
     if let Some(state) = request_terminal_state(&control) {
-        let (code, detail) = terminal_read_code(state);
-        return (
-            if state == DashboardDomainStateV1::TimedOut {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::REQUEST_TIMEOUT
-            },
-            Json(json!({"detail": detail, "code": code})),
-        );
+        return terminal_read_response(state);
     }
     match result {
         Ok(Some(receipt)) => (StatusCode::OK, Json(receipt_payload(&receipt))),
