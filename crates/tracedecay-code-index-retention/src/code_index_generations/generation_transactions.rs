@@ -17,11 +17,8 @@ use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, is_lowercase_hex};
 
 use super::graph_replay_release;
-use super::journal::{
-    BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
-};
+use super::journal::{BoundedJournalSpec, journal_path};
 use super::locking::{CodeGenerationStoreLockV1, try_acquire_code_generation_store_lock};
-use super::receipt_store;
 use super::receipt_store::ReceiptStoreSpec;
 use super::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionGenerationV1,
@@ -32,14 +29,15 @@ use super::{
     sync_directory, total_bytes, validate_generation_file, write_active_pointer,
 };
 
-const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<CodeGenerationRetentionTransactionV1> =
-    BoundedJournalSpec {
-        file_name: TRANSACTION_FILE,
-        max_bytes: MAX_TRANSACTION_BYTES,
-        label: "retention transaction",
-        write_context: "code-generation-retention-transaction",
-        validate: validate_transaction,
-    };
+pub(super) const GENERATION_TRANSACTION_JOURNAL: BoundedJournalSpec<
+    CodeGenerationRetentionTransactionV1,
+> = BoundedJournalSpec {
+    file_name: TRANSACTION_FILE,
+    max_bytes: MAX_TRANSACTION_BYTES,
+    label: "retention transaction",
+    write_context: "code-generation-retention-transaction",
+    validate: validate_transaction,
+};
 
 pub(super) const GENERATION_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     directory: RECEIPTS_DIRECTORY,
@@ -56,19 +54,6 @@ pub(super) fn transaction_stage_root(
     store_root
         .join(QUARANTINE_DIRECTORY)
         .join(&receipt.receipt_digest)
-}
-
-pub(super) fn persist_transaction(
-    store_root: &Path,
-    transaction: &CodeGenerationRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    persist_journal(store_root, &GENERATION_TRANSACTION_JOURNAL, transaction)
-}
-
-pub(super) fn load_transaction(
-    store_root: &Path,
-) -> Result<Option<CodeGenerationRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
-    load_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn validate_transaction(
@@ -138,30 +123,6 @@ pub(super) fn validate_transaction(
         ));
     }
     Ok(())
-}
-
-pub(super) fn receipt_is_durable(
-    store_root: &Path,
-    receipt: &CodeGenerationRetentionReceiptV1,
-) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    receipt_store::receipt_is_durable(
-        store_root,
-        &GENERATION_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
-}
-
-pub(super) fn write_receipt(
-    store_root: &Path,
-    receipt: &CodeGenerationRetentionReceiptV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    receipt_store::write_receipt(
-        store_root,
-        &GENERATION_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
 }
 
 #[hotpath::measure(label = "usecases.retention.stage")]
@@ -953,10 +914,6 @@ pub(super) fn ensure_transaction_liveness(
         ));
     }
     Ok(())
-}
-
-pub(super) fn clear_transaction(store_root: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
-    clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn remove_empty_stage_root(
