@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use crate::{LcmCompressionResponse, LcmError, schema};
 
@@ -682,21 +682,7 @@ pub async fn next_candidate(
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
-    let failure_count = u32::try_from(row.get::<i64>(5)?).map_err(|error| {
-        LcmError::Db(format!(
-            "invalid LCM summary convergence failure count: {error}"
-        ))
-    })?;
-    Ok(Some(LcmSummaryConvergenceCandidate {
-        provider: row.get(0)?,
-        session_id: row.get(1)?,
-        newest_raw_store_id: row.get(2)?,
-        protection_frontier_store_id: row.get(3)?,
-        attempted_raw_store_id: row.get(4)?,
-        failure_count,
-        raw_revision_generation: row.get(6)?,
-        stale_from_store_id: row.get(7)?,
-    }))
+    Ok(Some(convergence_candidate_from_row(&row)?))
 }
 
 pub async fn candidate_for_session(
@@ -719,12 +705,16 @@ pub async fn candidate_for_session(
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
+    Ok(Some(convergence_candidate_from_row(&row)?))
+}
+
+fn convergence_candidate_from_row(row: &Row) -> Result<LcmSummaryConvergenceCandidate, LcmError> {
     let failure_count = u32::try_from(row.get::<i64>(5)?).map_err(|error| {
         LcmError::Db(format!(
             "invalid LCM summary convergence failure count: {error}"
         ))
     })?;
-    Ok(Some(LcmSummaryConvergenceCandidate {
+    Ok(LcmSummaryConvergenceCandidate {
         provider: row.get(0)?,
         session_id: row.get(1)?,
         newest_raw_store_id: row.get(2)?,
@@ -733,7 +723,7 @@ pub async fn candidate_for_session(
         failure_count,
         raw_revision_generation: row.get(6)?,
         stale_from_store_id: row.get(7)?,
-    }))
+    })
 }
 
 pub async fn record_current_protection_progress(
