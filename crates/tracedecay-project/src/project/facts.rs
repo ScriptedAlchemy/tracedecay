@@ -23,15 +23,14 @@ impl TraceDecay {
             &self.db_path(),
             &self.store_layout.graph_db_path,
         ) {
-            Ok(ProjectMemoryDbHandle::Active(&self.db))
-        } else {
-            let database = if self.read_only {
-                self.open_project_store_db_read_only()?
-            } else {
-                self.open_project_store_db()?
-            };
-            Ok(ProjectMemoryDbHandle::Owned(Box::new(database)))
+            return Ok(ProjectMemoryDbHandle::Active(&self.db));
         }
+        let database = if self.read_only {
+            self.open_project_store_db_read_only()?
+        } else {
+            self.open_project_store_db()?
+        };
+        Ok(ProjectMemoryDbHandle::Owned(Box::new(database)))
     }
 
     /// Resolves the project-memory owner and database into one owner-bound
