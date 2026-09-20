@@ -501,12 +501,7 @@ mod tests {
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
     const TREE: &str = "89abcdef0123456789abcdef0123456789abcdef";
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn evidence() -> RepositoryEvidenceV1 {
         RepositoryEvidenceV1::new(

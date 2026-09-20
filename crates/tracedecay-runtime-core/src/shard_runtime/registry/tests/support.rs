@@ -15,13 +15,7 @@ use tracedecay_store::{
 
 use super::super::*;
 
-pub(super) fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+pub(super) use tracedecay_domain::test_fixtures::id;
 
 /// Host-absolute fixture path: store locators require `Path::is_absolute`,
 /// which a bare `/...` literal fails on Windows, where the same fixture is

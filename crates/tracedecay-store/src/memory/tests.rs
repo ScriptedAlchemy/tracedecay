@@ -16,12 +16,7 @@ use super::*;
 
 mod add_material;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String, Error = DomainError>,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
     FactId::derive(

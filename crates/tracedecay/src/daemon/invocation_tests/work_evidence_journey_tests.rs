@@ -30,13 +30,7 @@ use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_session_memory::context::{BranchId, ProfileId, SessionRootId, SessionStoreId};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("Work evidence journey identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 use tracedecay_domain::test_fixtures::digest;
 

@@ -758,13 +758,7 @@ mod tests {
             .expect("valid digest")
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn repository() -> RepositoryId {
         id("repository.fixture")

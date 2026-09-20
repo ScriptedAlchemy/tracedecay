@@ -27,13 +27,7 @@ use tracedecay_domain::{
     canonical_sha256, derive_git_topology_anchor_id,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture id is canonical")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture oid is canonical")

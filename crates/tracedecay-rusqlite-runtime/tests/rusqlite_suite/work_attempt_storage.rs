@@ -45,13 +45,7 @@ use common::fixture_abs_root;
 use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use work_registered_store::RegisteredWorkStore;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 use tracedecay_domain::test_fixtures::digest;
 

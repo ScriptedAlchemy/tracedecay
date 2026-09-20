@@ -478,13 +478,7 @@ mod tests {
         GraphWatermark, NeverCancelled, ProjectionReplacement, SourceGeneration,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid test identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn relation_projection() -> SessionRelationProjection {
         SessionRelationProjection {

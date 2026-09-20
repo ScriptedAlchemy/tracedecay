@@ -224,13 +224,7 @@ impl GitIndexPolicyRecheckPort for TestPolicy {
     }
 }
 
-pub fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture identity")
-}
+pub use tracedecay_domain::test_fixtures::id;
 
 pub use tracedecay_domain::test_fixtures::digest;
 

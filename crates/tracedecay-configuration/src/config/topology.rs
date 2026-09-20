@@ -63,13 +63,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture id is canonical")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn topology_key() -> SettingKey {
         SettingKey::new(WORK_TOPOLOGY_POLICY_SETTING_KEY).unwrap()

@@ -188,13 +188,7 @@ async fn count(
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn root_revision() -> ConfigurationRevisionRecordV1 {
     let snapshot = resolve_configuration(&ConfigurationRegistry::core().unwrap(), &[])

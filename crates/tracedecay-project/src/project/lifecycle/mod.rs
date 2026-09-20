@@ -896,12 +896,7 @@ mod tests {
         tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
         tracedecay_contracts::context_scout::ContextScoutAddressV1,
     ) {
-        fn id<T: TryFrom<String>>(value: &str) -> T
-        where
-            T::Error: std::fmt::Debug,
-        {
-            T::try_from(value.to_owned()).unwrap()
-        }
+        use tracedecay_domain::test_fixtures::id;
 
         let observed_at = UtcMicros(10);
         let project_id = id::<tracedecay_domain::ProjectId>("project.scout.fixture");

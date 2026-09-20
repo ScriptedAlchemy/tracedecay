@@ -8,13 +8,7 @@ use tracedecay_code_extraction::parsed_extraction::{
 };
 use tracedecay_domain::*;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Display,
-{
-    T::try_from(value.to_owned()).unwrap_or_else(|error| panic!("{value}: {error}"))
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn bash_overlay(version: i64, content: &str) -> ParseDocumentIdentity {
     ParseDocumentIdentity::SessionOverlay {

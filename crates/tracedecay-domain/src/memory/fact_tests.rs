@@ -3,9 +3,7 @@ use crate::observation::{SanitizerDispositionV1, SensitivityV1};
 use crate::research::SanitizationReceiptRefV1;
 use serde_json::json;
 
-fn id<T: TryFrom<String, Error = DomainError>>(value: &str) -> T {
-    T::try_from(value.to_owned()).unwrap()
-}
+use crate::test_fixtures::id;
 
 fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
     FactId::derive(

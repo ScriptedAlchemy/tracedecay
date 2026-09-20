@@ -465,13 +465,7 @@ mod tests {
         WorkTopologyGenerationRefV1,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn attempt(name: &str) -> WorkAttemptIdentityV1 {
         WorkAttemptIdentityV1::new(

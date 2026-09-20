@@ -537,13 +537,7 @@ mod tests {
         absolute_temp_root.join(name)
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("canonical fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     #[test]
     fn profile_memory_has_a_distinct_mutable_wire_identity() {

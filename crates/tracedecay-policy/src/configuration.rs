@@ -156,13 +156,7 @@ mod tests {
     use super::*;
     use tracedecay_domain::configuration::ConfigurationGrantReceiptId;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     use tracedecay_domain::test_fixtures::digest;
 

@@ -155,13 +155,7 @@ impl EdgeAuthorityV1 {
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn descriptor() -> LanguageDescriptorV1 {
         LanguageDescriptorV1 {

@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fmt;
 use std::sync::Mutex;
 
 use schemars::schema_for;
@@ -19,13 +18,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 const CAPABILITY: &str = "capability.multi-root.query";
 const USE_CASE: &str = "use-case.multi-root.query";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 use tracedecay_domain::test_fixtures::digest;
 

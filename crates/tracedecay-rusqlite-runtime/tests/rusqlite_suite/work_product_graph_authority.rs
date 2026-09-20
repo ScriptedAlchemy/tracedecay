@@ -43,13 +43,7 @@ const REPOSITORY: &str = "repository.work-product.fixture";
 /// `occurred_at`, so a projection is never asked to describe its own future.
 const PROJECTED_AT: UtcMicros = UtcMicros(400);
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 use tracedecay_domain::test_fixtures::digest;
 

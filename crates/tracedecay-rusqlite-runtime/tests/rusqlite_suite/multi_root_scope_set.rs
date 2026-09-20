@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fmt;
 use std::path::PathBuf;
 
 use rusqlite::{Connection, Savepoint};
@@ -139,13 +138,7 @@ fn registered_locator(binding: &StoreRuntimeBindingV1) -> VerifiedStoreLocatorV1
     )
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 use tracedecay_domain::test_fixtures::digest;
 

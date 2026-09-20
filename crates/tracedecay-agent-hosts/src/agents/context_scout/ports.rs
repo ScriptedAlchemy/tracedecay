@@ -1165,12 +1165,7 @@ mod tests {
         (temporary, database)
     }
 
-    fn id<T: TryFrom<String>>(value: &str) -> T
-    where
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn configuration(
         revision: &str,

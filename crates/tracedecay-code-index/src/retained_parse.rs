@@ -640,13 +640,7 @@ mod tests {
     };
     use tracedecay_domain::RepositoryDirtyStateV1;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid test identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn identity() -> ParseDocumentIdentity {
         ParseDocumentIdentity::Repository {
