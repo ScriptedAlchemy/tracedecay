@@ -17,8 +17,8 @@ use tracedecay_contracts::{
     native_integration_surface_operation,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    UtcMicros, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    ActorId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId,
+    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_mcp::McpTransport;
 use tracedecay_runtime_core::git::try_git_program;

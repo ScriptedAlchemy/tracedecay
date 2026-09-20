@@ -23,8 +23,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::ConfigurationValueV1;
 use tracedecay_domain::feedback::FeedbackContentIdentityV1;
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ManifestDigest, ProjectId, RefId, RetrievalAnchorId,
-    TemporalModeV1,
+    CodeGenerationId, ComponentVersion, ProjectId, RefId, RetrievalAnchorId, TemporalModeV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 

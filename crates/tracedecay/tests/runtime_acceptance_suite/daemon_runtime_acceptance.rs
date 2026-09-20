@@ -24,8 +24,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId, TemporalModeV1,
-    UtcMicros,
+    CodeGenerationId, ComponentVersion, RefId, RetrievalAnchorId, TemporalModeV1, UtcMicros,
 };
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,

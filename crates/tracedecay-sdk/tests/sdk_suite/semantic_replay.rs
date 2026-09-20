@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -343,34 +343,8 @@ fn application_run_record_count(profile: &Path, run_id: &str) -> usize {
         .count()
 }
 
-fn production_binary() -> PathBuf {
-    let path = std::env::var_os("TRACEDECAY_TEST_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../../target/debug/tracedecay"));
-    fs::canonicalize(&path)
-        .unwrap_or_else(|error| panic!("missing production daemon {}: {error}", path.display()))
-}
-
-fn isolated(command: &mut Command, home: &Path, profile: &Path) {
-    command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TRACEDECAY_DATA_DIR", profile)
-        .env("TRACEDECAY_GLOBAL_DB", profile.join("global.db"))
-        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
-}
-
-fn run(command: &mut Command) -> Vec<u8> {
-    let output = command.output().expect("run subprocess");
-    assert!(
-        output.status.success(),
-        "command failed: {}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
+use crate::isolated_profile::apply_isolated_profile_env as isolated;
+use crate::{production_binary, run};
 
 fn wait_for_authority(child: &mut Child, path: &Path, prior_epoch: Option<u64>) -> Value {
     let deadline = Instant::now() + Duration::from_secs(15);

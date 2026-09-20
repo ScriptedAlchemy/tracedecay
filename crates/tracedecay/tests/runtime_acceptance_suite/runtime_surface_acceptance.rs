@@ -58,8 +58,7 @@ use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
-    WorktreeId,
+    ActorId, CommitId, LocatorDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_domain::{

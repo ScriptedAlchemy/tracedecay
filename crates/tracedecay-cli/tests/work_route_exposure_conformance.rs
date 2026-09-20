@@ -36,6 +36,7 @@
 
 #[path = "../../tracedecay/tests/common/mod.rs"]
 mod common;
+use common::{EnvVarGuard, apply_isolated_profile_env, run_ok};
 
 #[path = "work_route_exposure_conformance/work_evidence.rs"]
 mod work_evidence;
@@ -45,7 +46,6 @@ mod work_evidence;
 mod work_task_session;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -90,35 +90,6 @@ const UNKNOWN_PROJECT_ID: &str = "project.route-exposure-conformance-unknown";
 
 /// Guards against a malformed schema cycle producing an unbounded instance.
 const MAX_SCHEMA_DEPTH: usize = 32;
-
-/// Restores a process environment variable when the guard drops.
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        // Every test in this binary pins the environment through
-        // `ProductionDaemon::start`, which holds the shared env lock for the
-        // fixture's whole life, so no other thread reads the environment while
-        // it is being pinned.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 /// A live daemon over a registered project under a throwaway profile, plus the
 /// credentials it published for its own HTTP application endpoint.
@@ -410,28 +381,8 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
 
 fn isolated(home: &Path, profile: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    apply_isolated_profile_env(&mut command, home, profile);
     command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env(USER_DATA_DIR_ENV, profile)
-        .env(GLOBAL_DB_ENV, profile.join("global.db"))
-        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
-    command
-}
-
-fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
-    assert!(
-        output.status.success(),
-        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
 }
 
 fn wait_for_authority(daemon: &mut Child, path: &Path) -> Value {

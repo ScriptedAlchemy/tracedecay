@@ -39,6 +39,7 @@
 //! product call.
 
 use crate::common;
+use crate::common::run_ok;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -257,20 +258,6 @@ fn isolated_command(home: &Path) -> Command {
     let mut command = common::tracedecay_command_with_home(home);
     command.env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
     command
-}
-
-fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
-    assert!(
-        output.status.success(),
-        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
 }
 
 fn wait_for_http_authority(path: &Path) -> Value {
