@@ -1,5 +1,6 @@
 #![cfg(feature = "test-transport")]
 
+mod diff_context_behavior;
 mod gini;
 mod graph_readiness;
 mod hotspots;
