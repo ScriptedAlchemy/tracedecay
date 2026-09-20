@@ -12,6 +12,7 @@ use super::backend::{
     BackendRetryPolicy, classify_agent_task_error_message, run_agent_task_with_retry_report,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+use super::job_error;
 use super::job_webhook;
 use super::lifecycle::{
     AutomationRunLedgerPublication, AutomationRunSettlementGuard, RetainedAutomationRun,
@@ -23,7 +24,9 @@ use super::run_ledger::{
     AutomationTrigger, append_or_reuse_scheduler_diagnostic, append_run_record,
     latest_record_by_canonical_completion, load_run_ledger_task_summary,
 };
-use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
+use super::scheduler::{
+    AutomationSchedule, AutomationTaskLock, cron_is_due, elapsed_secs, parse_schedule,
+};
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -445,13 +448,6 @@ fn latest_terminal_job_record<'a>(
                 AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
             )
     }))
-}
-
-fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
-    if now_secs < completed_at {
-        return 0;
-    }
-    (now_secs - completed_at) as u64
 }
 
 /// Executes one user job through the automation backend, delivering its
@@ -1051,12 +1047,6 @@ async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Resu
         stdout.trim_end(),
         JOB_COMMAND_OUTPUT_CAP_CHARS,
     ))
-}
-
-fn job_error<T>(message: &str) -> Result<T> {
-    Err(TraceDecayError::Config {
-        message: message.to_string(),
-    })
 }
 
 #[cfg(test)]

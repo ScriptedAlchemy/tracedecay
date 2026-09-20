@@ -52,3 +52,16 @@ pub fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::Tr
         message: message.into(),
     }
 }
+
+pub(crate) fn job_error<T>(message: &str) -> tracedecay_domain::errors::Result<T> {
+    Err(config_error(message))
+}
+
+pub(crate) fn normalized_non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}

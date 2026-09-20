@@ -10,6 +10,7 @@ use tracedecay_store::{
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
 };
 
+use super::normalized_non_empty;
 use crate::automation::lifecycle::AutomationRunControl;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::memory::MemoryApplication;
@@ -560,11 +561,3 @@ fn quarantined_fact_with_validation(
     }))
 }
 
-fn normalized_non_empty(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}

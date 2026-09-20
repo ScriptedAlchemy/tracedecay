@@ -811,7 +811,7 @@ fn parse_started_at(record: &AutomationRunLedgerRecord) -> Result<i64> {
     canonical_record_started_at_seconds(record, &format!("run '{}' started_at", record.run_id))
 }
 
-fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
+pub(crate) fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
     if now_secs < completed_at {
         return 0;
     }
