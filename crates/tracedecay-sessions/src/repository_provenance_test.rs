@@ -31,6 +31,12 @@ impl GitFixture {
             tracedecay_runtime_core::git::try_git_program()
                 .expect("absolute git executable should resolve"),
         )
+        // Git 2.47+ detaches `maintenance run --auto` after a commit and holds
+        // `.git/objects/maintenance.lock` while it runs, which lands in one
+        // git-dir fingerprint and vanishes before the next. The read-only
+        // capture test compares those fingerprints, so the fixture must not
+        // write either.
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .current_dir(self.path())
         .output()
