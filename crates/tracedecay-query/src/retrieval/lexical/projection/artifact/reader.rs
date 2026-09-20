@@ -64,16 +64,15 @@ use crate::retrieval::ports::{
 };
 
 use super::super::{
-    ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS, FuzzyExpansionsV1,
-    FuzzyQueryGroupV1, LexicalFieldTextV1, LexicalRowScoreV1, LiteralProofCacheV1,
-    PHRASE_SCORE_MILLIS, PreparedLexicalQueryV1, add_score, bm25_score_micros, collect_term_kinds,
+    ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1,
+    LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1, bm25_score_micros,
     exact_matches, field_weight_millis, fuzzy_distance_bound, matches_phrase, normalize_lexical,
-    normalized_field_text, proximity_count, retrieval_anchor, substring_count,
+    retrieval_anchor, score_lexical_row,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalSpellingVariantV1, MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
-    admit_candidate_sources, candidate_admission_outcome, field_admitted,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
+    candidate_admission_outcome, field_admitted,
 };
 
 impl LexicalFieldTextV1 for ArtifactRowV1 {
@@ -2166,7 +2165,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     &phrase_frequencies,
                     &stats,
                     &frequencies,
-                )?;
+                );
                 let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
                     return Ok(());
                 };
@@ -2785,155 +2784,21 @@ impl<'a> ArtifactQueryV1<'a> {
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
         frequencies: &LexicalTermFrequenciesV1,
-    ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
+    ) -> LexicalRowScoreV1 {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
-            self.score_row_inner(row, prepared, fuzzy, phrase_frequencies, stats, frequencies)
+            score_lexical_row(
+                row,
+                &row.exact_terms,
+                prepared,
+                fuzzy,
+                phrase_frequencies,
+                |field, term| term_frequency(frequencies, field, term),
+                |field, term| stats.document_frequency(field, term),
+                |field, term_frequency, document_frequency| {
+                    self.term_score_with_df(field, term_frequency, row, document_frequency, stats)
+                },
+            )
         })
-    }
-
-    fn score_row_inner(
-        &self,
-        row: &ArtifactRowV1,
-        prepared: &PreparedLexicalQueryV1<'_>,
-        fuzzy: &FuzzyExpansionsV1,
-        phrase_frequencies: &BTreeMap<String, usize>,
-        stats: &LexicalStatsCacheV1,
-        frequencies: &LexicalTermFrequenciesV1,
-    ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
-        let mut field_scores = BTreeMap::new();
-        let mut matched_whole_terms = BTreeSet::new();
-        let mut matched_subtokens = BTreeSet::new();
-        let mut matched_phrases = BTreeSet::new();
-        let mut matched_proximities = BTreeSet::new();
-        let mut spelling_variants = BTreeSet::new();
-        let mut matched_kinds = BTreeSet::new();
-        let mut typo_recovery_applied = false;
-        for field in row.field_lengths.keys() {
-            if *field != LexicalFieldV1::Subtoken {
-                for (query_term, normalized) in &prepared.whole_terms {
-                    let exact_tf = term_frequency(frequencies, *field, normalized);
-                    if exact_tf > 0 {
-                        add_score(
-                            &mut field_scores,
-                            *field,
-                            self.term_score(*field, normalized, exact_tf, row, stats),
-                        );
-                        matched_whole_terms.insert((*query_term).to_owned());
-                        collect_term_kinds(&row.exact_terms, normalized, &mut matched_kinds);
-                    }
-                    if let Some(expansions) = fuzzy.by_query.get(*query_term) {
-                        for expansion in expansions {
-                            let tf = term_frequency(frequencies, *field, expansion);
-                            if tf == 0 {
-                                continue;
-                            }
-                            let score = self
-                                .term_score(*field, expansion, tf, row, stats)
-                                .saturating_mul(FUZZY_SCORE_MILLIS)
-                                / 1_000;
-                            add_score(&mut field_scores, *field, score);
-                            matched_whole_terms.insert((*query_term).to_owned());
-                            spelling_variants.insert(LexicalSpellingVariantV1 {
-                                query: (*query_term).to_owned(),
-                                alternative: expansion.clone(),
-                            });
-                            typo_recovery_applied = true;
-                            collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
-                        }
-                    }
-                }
-            } else {
-                for (subtoken, normalized) in &prepared.subtokens {
-                    let tf = term_frequency(frequencies, *field, normalized);
-                    if tf > 0 {
-                        add_score(
-                            &mut field_scores,
-                            *field,
-                            self.term_score(*field, normalized, tf, row, stats),
-                        );
-                        matched_subtokens.insert((*subtoken).to_owned());
-                    }
-                }
-            }
-        }
-        for (phrase, normalized) in &prepared.phrases {
-            for field in row.field_lengths.keys() {
-                let Some(text) = normalized_field_text(row, *field) else {
-                    continue;
-                };
-                let tf = substring_count(&text, normalized);
-                if tf == 0 {
-                    continue;
-                }
-                let score = self
-                    .term_score_with_df(
-                        *field,
-                        tf,
-                        row,
-                        phrase_frequencies
-                            .get(normalized)
-                            .copied()
-                            .unwrap_or_default(),
-                        stats,
-                    )
-                    .saturating_mul(PHRASE_SCORE_MILLIS)
-                    / 1_000;
-                add_score(&mut field_scores, *field, score);
-                matched_phrases.insert((*phrase).to_owned());
-            }
-        }
-        for proximity in &prepared.proximities {
-            for field in row.field_lengths.keys() {
-                let Some(text) = normalized_field_text(row, *field) else {
-                    continue;
-                };
-                let tf = proximity_count(&text, &proximity.terms, proximity.original.maximum_gap);
-                if tf == 0 {
-                    continue;
-                }
-                let score = self
-                    .term_score_with_df(*field, tf, row, 1, stats)
-                    .saturating_mul(PHRASE_SCORE_MILLIS)
-                    / 1_000;
-                add_score(&mut field_scores, *field, score);
-                matched_proximities.insert(proximity.original.clone());
-            }
-        }
-        let echo_penalty_applied =
-            !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
-        if echo_penalty_applied {
-            for score in field_scores.values_mut() {
-                *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
-            }
-        }
-        Ok(LexicalRowScoreV1 {
-            field_scores: field_scores.into_iter().collect(),
-            matched_whole_terms: matched_whole_terms.into_iter().collect(),
-            matched_subtokens: matched_subtokens.into_iter().collect(),
-            matched_phrases: matched_phrases.into_iter().collect(),
-            matched_proximities: matched_proximities.into_iter().collect(),
-            spelling_variants: spelling_variants.into_iter().collect(),
-            matched_kinds: matched_kinds.into_iter().collect(),
-            typo_recovery_applied,
-            echo_penalty_applied,
-        })
-    }
-
-    fn term_score(
-        &self,
-        field: LexicalFieldV1,
-        term: &str,
-        term_frequency: usize,
-        row: &ArtifactRowV1,
-        stats: &LexicalStatsCacheV1,
-    ) -> u64 {
-        self.term_score_with_df(
-            field,
-            term_frequency,
-            row,
-            stats.document_frequency(field, term),
-            stats,
-        )
     }
 
     fn term_score_with_df(

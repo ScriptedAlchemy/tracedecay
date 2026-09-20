@@ -761,6 +761,131 @@ fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, 
         .or_insert(score);
 }
 
+/// Shared exact/fuzzy/phrase/proximity scoring for the in-memory projection
+/// and the artifact reader. Callers supply term frequencies and BM25 inputs;
+/// the loop, fuzzy discount, phrase boost, and echo penalty stay one place.
+fn score_lexical_row(
+    row: &impl LexicalFieldTextV1,
+    exact_terms: &[ExactTechnicalTermV1],
+    prepared: &PreparedLexicalQueryV1<'_>,
+    fuzzy: &FuzzyExpansionsV1,
+    phrase_document_frequencies: &BTreeMap<String, usize>,
+    mut term_frequency: impl FnMut(LexicalFieldV1, &str) -> usize,
+    mut document_frequency: impl FnMut(LexicalFieldV1, &str) -> usize,
+    mut bm25: impl FnMut(LexicalFieldV1, usize, usize) -> u64,
+) -> LexicalRowScoreV1 {
+    let mut field_scores = BTreeMap::new();
+    let mut matched_whole_terms = BTreeSet::new();
+    let mut matched_subtokens = BTreeSet::new();
+    let mut matched_phrases = BTreeSet::new();
+    let mut matched_proximities = BTreeSet::new();
+    let mut spelling_variants = BTreeSet::new();
+    let mut matched_kinds = BTreeSet::new();
+    let mut typo_recovery_applied = false;
+    for field in row.field_lengths().keys().copied() {
+        if field != LexicalFieldV1::Subtoken {
+            for (query_term, normalized) in &prepared.whole_terms {
+                let exact_tf = term_frequency(field, normalized);
+                if exact_tf > 0 {
+                    add_score(
+                        &mut field_scores,
+                        field,
+                        bm25(field, exact_tf, document_frequency(field, normalized)),
+                    );
+                    matched_whole_terms.insert((*query_term).to_owned());
+                    collect_term_kinds(exact_terms, normalized, &mut matched_kinds);
+                }
+                if let Some(expansions) = fuzzy.by_query.get(*query_term) {
+                    for expansion in expansions {
+                        let fuzzy_tf = term_frequency(field, expansion);
+                        if fuzzy_tf == 0 {
+                            continue;
+                        }
+                        let score = bm25(field, fuzzy_tf, document_frequency(field, expansion))
+                            .saturating_mul(FUZZY_SCORE_MILLIS)
+                            / 1_000;
+                        add_score(&mut field_scores, field, score);
+                        matched_whole_terms.insert((*query_term).to_owned());
+                        spelling_variants.insert(LexicalSpellingVariantV1 {
+                            query: (*query_term).to_owned(),
+                            alternative: expansion.clone(),
+                        });
+                        typo_recovery_applied = true;
+                        collect_term_kinds(exact_terms, expansion, &mut matched_kinds);
+                    }
+                }
+            }
+        } else {
+            for (subtoken, normalized) in &prepared.subtokens {
+                let tf = term_frequency(field, normalized);
+                if tf > 0 {
+                    add_score(
+                        &mut field_scores,
+                        field,
+                        bm25(field, tf, document_frequency(field, normalized)),
+                    );
+                    matched_subtokens.insert((*subtoken).to_owned());
+                }
+            }
+        }
+    }
+    for (phrase, normalized) in &prepared.phrases {
+        for field in row.field_lengths().keys().copied() {
+            let Some(text) = normalized_field_text(row, field) else {
+                continue;
+            };
+            let tf = substring_count(&text, normalized);
+            if tf == 0 {
+                continue;
+            }
+            let score = bm25(
+                field,
+                tf,
+                phrase_document_frequencies
+                    .get(normalized)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+            .saturating_mul(PHRASE_SCORE_MILLIS)
+                / 1_000;
+            add_score(&mut field_scores, field, score);
+            matched_phrases.insert((*phrase).to_owned());
+        }
+    }
+    for proximity in &prepared.proximities {
+        for field in row.field_lengths().keys().copied() {
+            let Some(text) = normalized_field_text(row, field) else {
+                continue;
+            };
+            let tf = proximity_count(&text, &proximity.terms, proximity.original.maximum_gap);
+            if tf == 0 {
+                continue;
+            }
+            let score = bm25(field, tf, 1).saturating_mul(PHRASE_SCORE_MILLIS) / 1_000;
+            add_score(&mut field_scores, field, score);
+            matched_proximities.insert(proximity.original.clone());
+        }
+    }
+    let echo_penalty_applied =
+        !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text().trim();
+    if echo_penalty_applied {
+        for score in field_scores.values_mut() {
+            *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
+        }
+    }
+    LexicalRowScoreV1 {
+        field_scores: field_scores.into_iter().collect(),
+        matched_whole_terms: matched_whole_terms.into_iter().collect(),
+        matched_subtokens: matched_subtokens.into_iter().collect(),
+        matched_phrases: matched_phrases.into_iter().collect(),
+        matched_proximities: matched_proximities.into_iter().collect(),
+        spelling_variants: spelling_variants.into_iter().collect(),
+        matched_kinds: matched_kinds.into_iter().collect(),
+        typo_recovery_applied,
+        echo_penalty_applied,
+    }
+}
+
 fn field_weight_millis(field: LexicalFieldV1) -> u64 {
     match field {
         LexicalFieldV1::SymbolName => 4_000,
