@@ -122,14 +122,14 @@ pub fn canonical_json_bytes_and_sha256<T: Serialize>(
 /// Decode a stored JSON payload and require its canonical digest to match the
 /// column that was persisted with it. Journal rows use this so a rewritten
 /// payload cannot reuse another row's digest.
-pub fn decode_with_canonical_digest<T>(payload: &str, stored_digest: &str) -> Result<T, ()>
+pub fn decode_with_canonical_digest<T>(payload: &str, stored_digest: &str) -> Option<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    let value: T = serde_json::from_str(payload).map_err(|_| ())?;
+    let value: T = serde_json::from_str(payload).ok()?;
     match canonical_sha256(&value) {
-        Ok(digest) if digest.as_str() == stored_digest => Ok(value),
-        _ => Err(()),
+        Ok(digest) if digest.as_str() == stored_digest => Some(value),
+        _ => None,
     }
 }
 

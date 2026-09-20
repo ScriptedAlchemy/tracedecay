@@ -31,7 +31,7 @@ fn decode_event(
     stored_digest: &str,
 ) -> Result<WorkflowRunEvent, WorkflowRunStorageError> {
     tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
-        .map_err(|_| WorkflowRunStorageError::InvalidHistory)
+        .ok_or(WorkflowRunStorageError::InvalidHistory)
 }
 
 fn history_tx(

@@ -40,10 +40,7 @@ fn quiesced_guard() -> QuiescedDaemonLifecycle {
 }
 
 #[cfg(unix)]
-#[path = "../../../../tests/support/isolated_profile.rs"]
-mod isolated_profile;
-#[cfg(unix)]
-use isolated_profile::EnvVarGuard;
+use super::isolated_profile::EnvVarGuard;
 
 #[cfg(unix)]
 fn serve_initialize_identity(

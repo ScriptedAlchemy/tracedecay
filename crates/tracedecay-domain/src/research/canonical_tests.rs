@@ -21,8 +21,8 @@ fn decode_with_canonical_digest_accepts_matching_payload_and_rejects_tamper() {
     let decoded: Value =
         decode_with_canonical_digest(&payload, digest.as_str()).expect("matching digest");
     assert_eq!(decoded, value);
-    assert!(decode_with_canonical_digest::<Value>(&payload, "sha256:dead").is_err());
-    assert!(decode_with_canonical_digest::<Value>("{", digest.as_str()).is_err());
+    assert!(decode_with_canonical_digest::<Value>(&payload, "sha256:dead").is_none());
+    assert!(decode_with_canonical_digest::<Value>("{", digest.as_str()).is_none());
 }
 
 #[test]

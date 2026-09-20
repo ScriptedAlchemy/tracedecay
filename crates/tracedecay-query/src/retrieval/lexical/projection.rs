@@ -866,6 +866,7 @@ fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, 
 /// Shared exact/fuzzy/phrase/proximity scoring for the in-memory projection
 /// and the artifact reader. Callers supply term frequencies and BM25 inputs;
 /// the loop, fuzzy discount, phrase boost, and echo penalty stay one place.
+#[allow(clippy::too_many_arguments)]
 fn score_lexical_row(
     row: &impl LexicalFieldTextV1,
     exact_terms: &[ExactTechnicalTermV1],

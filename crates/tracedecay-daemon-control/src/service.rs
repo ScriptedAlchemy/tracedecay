@@ -18,6 +18,12 @@ mod runner;
 mod unit_file;
 mod windows_task;
 
+/// Declared once for the whole module: both test children below need the
+/// shared harness, and loading the same file as two modules is a clippy error.
+#[cfg(test)]
+#[path = "../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;

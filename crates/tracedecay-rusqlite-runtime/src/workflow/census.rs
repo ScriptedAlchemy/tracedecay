@@ -24,7 +24,7 @@ fn decode_census(
 ) -> Result<WorkflowFanOutCensusV1, WorkflowFanOutCensusError> {
     let census: WorkflowFanOutCensusV1 =
         tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
-            .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
+            .ok_or(WorkflowFanOutCensusError::InvalidHistory)?;
     census
         .validate()
         .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
@@ -114,7 +114,7 @@ fn projection_through_tx(
             let stored_digest =
                 sql_text(&row.values, 1).ok_or(WorkflowFanOutCensusError::InvalidHistory)?;
             tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
-                .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)
+                .ok_or(WorkflowFanOutCensusError::InvalidHistory)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let projection = WorkflowRunProjection::rebuild(&history)

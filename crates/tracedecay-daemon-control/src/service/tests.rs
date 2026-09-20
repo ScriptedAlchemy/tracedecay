@@ -22,9 +22,7 @@ use tracedecay_runtime_core::config::{
 
 const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
-#[path = "../../../../tests/support/isolated_profile.rs"]
-mod isolated_profile;
-use isolated_profile::EnvVarGuard;
+use super::isolated_profile::EnvVarGuard;
 
 #[cfg(target_os = "linux")]
 fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {

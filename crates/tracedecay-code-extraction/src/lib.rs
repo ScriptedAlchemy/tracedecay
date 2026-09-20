@@ -365,6 +365,15 @@ pub struct LanguageRegistry {
     by_extension: HashMap<String, usize>,
 }
 
+/// Required by `clippy::new_without_default` for the argument-less `new`
+/// below, so this is API surface the lint owns rather than an uncalled entry
+/// point a dead-surface pass may drop.
+impl Default for LanguageRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LanguageRegistry {
     /// Creates a new registry with all built-in language extractors.
     pub fn new() -> Self {

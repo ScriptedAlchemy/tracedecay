@@ -97,7 +97,7 @@ pub async fn list(State(state): State<DashboardState>) -> ApiResult {
 #[hotpath::measure(label = "dashboard_api.jobs.create", future = true)]
 pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
     let body = serde_json::from_value::<CreateJobBody>(body)
-        .map_err(|err| json_error(StatusCode::BAD_REQUEST, &format!("invalid job: {err}")))?;
+        .map_err(|err| json_error(StatusCode::BAD_REQUEST, format!("invalid job: {err}")))?;
     let now = current_timestamp();
     let job = AutomationJob {
         id: match body.id {
@@ -117,7 +117,7 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
         updated_at: now,
         extra: BTreeMap::new(),
     };
-    validate_job(&job).map_err(|err| json_error(StatusCode::BAD_REQUEST, &err.to_string()))?;
+    validate_job(&job).map_err(|err| json_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     let job_for_write = job.clone();
     let result = super::automation_run_service::execute_dashboard_automation_write(
         &state,
@@ -141,7 +141,7 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
     if result["conflict"] == true {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
-            &format!("job '{}' already exists", job.id),
+            format!("job '{}' already exists", job.id),
         ));
     }
     Ok(Json(json!({ "job": job })))
@@ -162,12 +162,8 @@ pub async fn update(
     AxumPath(job_id): AxumPath<String>,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<PatchJobBody>(body).map_err(|err| {
-        json_error(
-            StatusCode::BAD_REQUEST,
-            &format!("invalid job patch: {err}"),
-        )
-    })?;
+    let patch = serde_json::from_value::<PatchJobBody>(body)
+        .map_err(|err| json_error(StatusCode::BAD_REQUEST, format!("invalid job patch: {err}")))?;
     let job_id_for_write = job_id.clone();
     let result = super::automation_run_service::execute_dashboard_automation_write(
         &state,
@@ -300,7 +296,7 @@ async fn load_job_or_404(
     state: &DashboardState,
     job_id: &str,
 ) -> std::result::Result<AutomationJob, JsonError> {
-    validate_job_id(job_id).map_err(|err| json_error(StatusCode::BAD_REQUEST, &err.to_string()))?;
+    validate_job_id(job_id).map_err(|err| json_error(StatusCode::BAD_REQUEST, err.to_string()))?;
     match find_job(&state.dashboard_root, job_id).await {
         Ok(Some(job)) => Ok(job),
         Ok(None) => Err(not_found(job_id)),

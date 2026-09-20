@@ -98,7 +98,7 @@ impl WorkflowSqliteAuthority {
         };
         let definition: WorkflowDefinition =
             tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
-                .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
+                .ok_or(WorkflowSqliteAuthorityBuildError::ResetRequired)?;
         if definition.definition_id() != definition_id
             || definition.definition_version() != definition_version
         {
@@ -276,7 +276,7 @@ fn decode_definition_source_row(
         return Err(definition_authority_unavailable());
     };
     tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
-        .map_err(|_| definition_authority_unavailable())
+        .ok_or_else(definition_authority_unavailable)
 }
 
 fn definition_authority_unavailable() -> WorkflowDefinitionAuthorityError {

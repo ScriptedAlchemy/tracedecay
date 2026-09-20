@@ -306,9 +306,7 @@ pub(super) async fn init_sibling_registered_fixture(
     (graph, sibling)
 }
 
-#[path = "../../../../../../tests/support/isolated_profile.rs"]
-mod isolated_profile;
-use isolated_profile::EnvVarGuard;
+use crate::isolated_profile::EnvVarGuard;
 
 pub(super) struct SelectorEnv {
     _home: EnvVarGuard,

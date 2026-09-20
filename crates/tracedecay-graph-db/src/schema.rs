@@ -830,6 +830,12 @@ fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
     })
 }
 
+fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
+    GraphDbError::Corrupt {
+        message: format!("invalid persisted {description}: {error}"),
+    }
+}
+
 #[cfg(test)]
 mod graph_stable_identity_tests {
     use super::graph_stable_identity;
@@ -844,11 +850,5 @@ mod graph_stable_identity_tests {
             graph_stable_identity("symbol", "occ"),
             graph_stable_identity("symbolo", "cc")
         );
-    }
-}
-
-fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
-    GraphDbError::Corrupt {
-        message: format!("invalid persisted {description}: {error}"),
     }
 }

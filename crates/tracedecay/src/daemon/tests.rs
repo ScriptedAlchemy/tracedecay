@@ -299,9 +299,7 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     engine
 }
 
-#[path = "../../../../tests/support/isolated_profile.rs"]
-mod isolated_profile;
-use isolated_profile::EnvVarGuard;
+use crate::isolated_profile::EnvVarGuard;
 
 /// Pins the codex app-server launcher to a path that cannot exist so any
 /// automation tick reached during the test fails with the typed spawn error
