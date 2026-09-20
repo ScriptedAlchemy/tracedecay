@@ -9,14 +9,14 @@ use schemars::JsonSchema;
 use tracedecay_domain::{GitIndexPreviewV1, GitIndexTransactionReceiptV1};
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
-    LifecycleClass, PrivacyClass, ProfileId, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    TerminalState, TerminalStateContract, UseCaseId,
+    CancellationContract, CapabilityId, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableSchemaAuthority, LifecycleClass, PrivacyClass, ProfileId, RevalidationContract,
+    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
+    StreamingContract, TerminalStateContract, UseCaseId,
 };
 
+use super::effect_surface::{cancellation_points, deadline_behavior, terminal_states};
 use crate::capability_manifest::{
     ApplicationCapabilityManifestInput, application_capability_manifest,
 };
@@ -339,52 +339,6 @@ fn capability(
             required_features: Vec::new(),
         },
     )?)
-}
-
-fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
-    if effect.is_effect() {
-        vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeEffect,
-            CancellationPoint::EffectInFlight,
-            CancellationPoint::AfterCommit,
-        ]
-    } else {
-        vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeRead,
-            CancellationPoint::DuringRead,
-        ]
-    }
-}
-
-fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
-    if effect.is_effect() {
-        DeadlineBehavior::ReturnEffectReceipt
-    } else {
-        DeadlineBehavior::ReturnOperationReceipt
-    }
-}
-
-fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
-    if effect.is_effect() {
-        vec![
-            TerminalState::Completed,
-            TerminalState::Cancelled,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::EffectUnknown,
-            TerminalState::Partial,
-        ]
-    } else {
-        vec![
-            TerminalState::Completed,
-            TerminalState::Cancelled,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::Partial,
-        ]
-    }
 }
 
 fn handler_descriptor(

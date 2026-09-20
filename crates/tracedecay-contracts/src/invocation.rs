@@ -246,11 +246,6 @@ impl ApplicationRequest {
     }
 
     #[hotpath::skip]
-    pub const fn is_stream(&self) -> bool {
-        matches!(self, Self::OperationEvents { .. })
-    }
-
-    #[hotpath::skip]
     pub const fn is_cancellation(&self) -> bool {
         matches!(self, Self::OperationCancel { .. })
     }

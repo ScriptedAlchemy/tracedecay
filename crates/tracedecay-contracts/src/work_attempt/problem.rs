@@ -7,19 +7,19 @@ use super::WorkAttemptStorageError;
 pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     match error {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkAttemptStorageError::AttemptConflict => conflict_problem(
+        WorkAttemptStorageError::AttemptConflict => ApplicationProblem::conflict(
             "application.work-attempt.identity-conflict",
             "The Work attempt identity was already used with different content.",
         ),
-        WorkAttemptStorageError::RunAdmissionConflict => conflict_problem(
+        WorkAttemptStorageError::RunAdmissionConflict => ApplicationProblem::conflict(
             "application.work-attempt.run-admission-conflict",
             "The Work attempt differs from this run's first admitted deadline or topology.",
         ),
-        WorkAttemptStorageError::ReservationFenced => conflict_problem(
+        WorkAttemptStorageError::ReservationFenced => ApplicationProblem::conflict(
             "application.work-attempt.reservation-fenced",
             "The Work run control authority fenced new attempt reservations.",
         ),
-        WorkAttemptStorageError::FenceConflict => conflict_problem(
+        WorkAttemptStorageError::FenceConflict => ApplicationProblem::conflict(
             "application.work-attempt.fence-conflict",
             "The Work attempt lease fence changed after this transition was prepared.",
         ),
@@ -40,7 +40,7 @@ pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProb
 }
 
 pub(super) fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {
-    invalid_problem(
+    ApplicationProblem::invalid_request(
         "application.work-attempt.invalid-transition",
         "The Work attempt command or stored state is invalid.",
     )
@@ -67,28 +67,6 @@ pub(super) fn list_page_contract_problem() -> ApplicationProblem {
 
 pub(super) fn denied_problem(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
-}
-
-pub(super) fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
-}
-
-pub(super) fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
         diagnostic: SafeDiagnostic {
             code: code.to_owned(),
             message: message.to_owned(),

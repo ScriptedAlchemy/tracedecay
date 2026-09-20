@@ -39,10 +39,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
-};
+use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum WorkRunControlStorageError {
@@ -304,7 +301,7 @@ where
         command: PauseWorkRunCommand,
     ) -> Result<WorkRunControlTransitionReceiptV1, ApplicationProblem> {
         hotpath::measure_block!("application.work.run_control.pause", {
-            admit(context, command.occurred_at)?;
+            ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
             let authority = work_authority(context)?;
             let frontier = self
                 .storage
@@ -399,7 +396,7 @@ where
         command: ResumeWorkRunCommand,
     ) -> Result<WorkRunControlTransitionReceiptV1, ApplicationProblem> {
         hotpath::measure_block!("application.work.run_control.resume", {
-            admit(context, command.occurred_at)?;
+            ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
             let authority = work_authority(context)?;
             let frontier = self
                 .storage
@@ -409,7 +406,7 @@ where
             let current = frontier.control.clone().ok_or_else(|| {
                 // A run that was never paused has nothing to resume, and
                 // answering "resumed" would be a false receipt.
-                conflict_problem(
+                ApplicationProblem::conflict(
                     "application.work-run-control.not-paused",
                     "The Work run has no published control state to resume.",
                 )
@@ -501,7 +498,7 @@ where
                     // are indistinguishable from an idle one.
                     hotpath::gauge!("application.work.run_control.reservation.denied_paused")
                         .inc(1u64);
-                    Err(conflict_problem(
+                    Err(ApplicationProblem::conflict(
                         "application.work-run-control.paused",
                         "The Work run is paused, so no new attempt reservation is admitted.",
                     ))
@@ -583,14 +580,6 @@ fn check_expected(
     }
 }
 
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
-}
-
 fn storage_problem(error: WorkRunControlStorageError) -> ApplicationProblem {
     match error {
         WorkRunControlStorageError::NotFoundOrNotAuthorized => not_found_problem(),
@@ -606,15 +595,15 @@ fn storage_problem(error: WorkRunControlStorageError) -> ApplicationProblem {
 
 fn contract_problem(error: WorkRunControlContractError) -> ApplicationProblem {
     match error {
-        WorkRunControlContractError::AlreadyPaused => conflict_problem(
+        WorkRunControlContractError::AlreadyPaused => ApplicationProblem::conflict(
             "application.work-run-control.already-paused",
             "The Work run is already paused.",
         ),
-        WorkRunControlContractError::NotPaused => conflict_problem(
+        WorkRunControlContractError::NotPaused => ApplicationProblem::conflict(
             "application.work-run-control.not-paused",
             "The Work run is not paused.",
         ),
-        WorkRunControlContractError::NonMonotonicTransition => conflict_problem(
+        WorkRunControlContractError::NonMonotonicTransition => ApplicationProblem::conflict(
             "application.work-run-control.non-monotonic",
             "The Work run control transition is older than the published state.",
         ),
@@ -685,7 +674,7 @@ fn invalid_open_interval_durable_problem() -> ApplicationProblem {
 }
 
 fn authority_conflict_problem() -> ApplicationProblem {
-    conflict_problem(
+    ApplicationProblem::conflict(
         "application.work-run-control.authority-conflict",
         "The Work run control authority version changed after this command was prepared.",
     )
@@ -693,15 +682,4 @@ fn authority_conflict_problem() -> ApplicationProblem {
 
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-}
-
-fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
 }

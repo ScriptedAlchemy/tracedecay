@@ -55,6 +55,18 @@ fn has_minified_suffix(path: &str) -> bool {
     path.rfind(".min.").is_some_and(|idx| idx + 5 < path.len())
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
+}
+
+fn default_thirty_day_retention() -> Option<u64> {
+    Some(30)
+}
+
 /// Default glob-pattern exclude list for [`TraceDecayConfig::default`].
 ///
 /// Built from [`GENERATED_DIR_SEGMENTS`] (both the `segment/**` root form
@@ -117,7 +129,7 @@ pub struct TraceDecayConfig {
     /// Whether to track call-site locations for edges.
     pub track_call_sites: bool,
     /// Whether to respect `.gitignore` rules when scanning files.
-    #[serde(default = "default_git_ignore")]
+    #[serde(default = "default_true")]
     pub git_ignore: bool,
     /// Whether a cold `tracedecay_diagnostics` call prewarms in the background
     /// (detached dependency build + immediate `warming` status) instead of
@@ -128,7 +140,7 @@ pub struct TraceDecayConfig {
     /// Whether the persistent native code graph may activate for this project.
     /// Disabling it leaves exact and lexical retrieval available and reports
     /// graph capability as unavailable.
-    #[serde(default = "default_native_graph_activation")]
+    #[serde(default = "default_true")]
     pub native_graph_activation: bool,
     /// Index-freshness auto-sync settings (git-metadata watcher, serve-stale,
     /// branch lifecycle). Absent in older `config.json` files, so defaulted.
@@ -140,20 +152,6 @@ pub struct TraceDecayConfig {
     pub telemetry: TelemetryConfig,
 }
 
-fn default_git_ignore() -> bool {
-    true
-}
-
-fn default_native_graph_activation() -> bool {
-    true
-}
-
-fn default_sync_auto_watch() -> bool {
-    false
-}
-fn default_sync_watch_linked_worktrees() -> bool {
-    false
-}
 fn default_sync_watch_debounce_ms() -> u64 {
     2000
 }
@@ -163,14 +161,8 @@ fn default_sync_watch_max_delay_ms() -> u64 {
 fn default_sync_watch_max_projects() -> usize {
     32
 }
-fn default_sync_read_refresh() -> bool {
-    true
-}
 fn default_sync_read_cooldown_secs() -> u64 {
     30
-}
-fn default_sync_session_start_sync() -> bool {
-    true
 }
 fn default_sync_session_start_stale_threshold_secs() -> u64 {
     600
@@ -190,25 +182,11 @@ fn default_sync_branch_gc_days() -> u64 {
 fn default_sync_orphan_db_gc_days() -> u64 {
     7
 }
-fn default_sync_auto_init() -> bool {
-    true
-}
-fn default_sync_auto_track_pr_branches() -> bool {
-    false
-}
 fn default_sync_auto_track_pr_poll_secs() -> u64 {
     300
 }
 fn default_retention_interval_hours() -> u64 {
     24
-}
-
-fn default_orphan_store_gc_days() -> Option<u64> {
-    Some(30)
-}
-
-fn default_incident_debris_retention_days() -> Option<u64> {
-    Some(30)
 }
 
 fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
@@ -230,11 +208,11 @@ pub struct RetentionConfig {
     pub observation: tracedecay_global_db::observation::retention::ObservationRetentionConfig,
     /// Orphan profile-sharded store collection window (days). `None` disables
     /// the sweep; the Doctor surface still reports findings read-only.
-    #[serde(default = "default_orphan_store_gc_days")]
+    #[serde(default = "default_thirty_day_retention")]
     pub orphan_store_gc_days: Option<u64>,
     /// Retention window for quarantined recovery/corruption artifacts (days).
     /// `None` disables collection while Doctor continues surfacing debris.
-    #[serde(default = "default_incident_debris_retention_days")]
+    #[serde(default = "default_thirty_day_retention")]
     pub incident_debris_retention_days: Option<u64>,
     /// Incremental-vacuum compaction trigger. `None` disables compaction.
     #[serde(default = "default_compaction_threshold")]
@@ -254,8 +232,8 @@ impl Default for RetentionConfig {
             session_lcm: tracedecay_lcm::LcmRetentionConfig::default(),
             observation:
                 tracedecay_global_db::observation::retention::ObservationRetentionConfig::default(),
-            orphan_store_gc_days: default_orphan_store_gc_days(),
-            incident_debris_retention_days: default_incident_debris_retention_days(),
+            orphan_store_gc_days: default_thirty_day_retention(),
+            incident_debris_retention_days: default_thirty_day_retention(),
             compaction: default_compaction_threshold(),
             store_soft_budgets_bytes: BTreeMap::new(),
             interval_hours: default_retention_interval_hours(),
@@ -325,20 +303,16 @@ impl RetentionConfig {
 /// clamped up to this.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
-fn default_telemetry_timings() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TelemetryConfig {
-    #[serde(default = "default_telemetry_timings")]
+    #[serde(default = "default_true")]
     pub timings: bool,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            timings: default_telemetry_timings(),
+            timings: default_true(),
         }
     }
 }
@@ -360,11 +334,11 @@ impl Default for TelemetryConfig {
 )]
 pub struct SyncConfig {
     /// Enable the daemon git-metadata watcher.
-    #[serde(default = "default_sync_auto_watch")]
+    #[serde(default = "default_false")]
     pub auto_watch: bool,
     /// Admit linked worktrees into the daemon watcher without an explicit
     /// branch-indexing request.
-    #[serde(default = "default_sync_watch_linked_worktrees")]
+    #[serde(default = "default_false")]
     pub watch_linked_worktrees: bool,
     /// Per-project quiet-period debounce before a watcher-triggered sync (ms).
     #[serde(default = "default_sync_watch_debounce_ms")]
@@ -376,13 +350,13 @@ pub struct SyncConfig {
     #[serde(default = "default_sync_watch_max_projects")]
     pub watch_max_projects: usize,
     /// Enable non-blocking sync-on-read for query tools.
-    #[serde(default = "default_sync_read_refresh")]
+    #[serde(default = "default_true")]
     pub read_refresh: bool,
     /// Cooldown between read-triggered background refreshes (seconds).
     #[serde(default = "default_sync_read_cooldown_secs")]
     pub read_cooldown_secs: u64,
     /// Fire a catch-up sync on session start.
-    #[serde(default = "default_sync_session_start_sync")]
+    #[serde(default = "default_true")]
     pub session_start_sync: bool,
     /// Staleness threshold above which session-start sync runs (seconds).
     #[serde(default = "default_sync_session_start_stale_threshold_secs")]
@@ -403,13 +377,13 @@ pub struct SyncConfig {
     #[serde(default = "default_sync_orphan_db_gc_days")]
     pub orphan_db_gc_days: u64,
     /// Auto-initialise never-indexed repos on first contact.
-    #[serde(default = "default_sync_auto_init")]
+    #[serde(default = "default_true")]
     pub auto_init: bool,
     /// Enable the daemon PR-branch auto-tracking mode: when on, the daemon polls
     /// the repo's GitHub remote for open PRs and tracks/untracks each PR head
     /// branch through the normal branch-tracking machinery. Off by default for
     /// back-compat.
-    #[serde(default = "default_sync_auto_track_pr_branches")]
+    #[serde(default = "default_false")]
     pub auto_track_pr_branches: bool,
     /// Poll cadence (seconds) for PR-branch auto-tracking discovery. Clamped up
     /// to [`MIN_AUTO_TRACK_PR_POLL_SECS`] at read time.
@@ -432,22 +406,22 @@ impl SyncConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            auto_watch: default_sync_auto_watch(),
-            watch_linked_worktrees: default_sync_watch_linked_worktrees(),
+            auto_watch: default_false(),
+            watch_linked_worktrees: default_false(),
             watch_debounce_ms: default_sync_watch_debounce_ms(),
             watch_max_delay_ms: default_sync_watch_max_delay_ms(),
             watch_max_projects: default_sync_watch_max_projects(),
-            read_refresh: default_sync_read_refresh(),
+            read_refresh: default_true(),
             read_cooldown_secs: default_sync_read_cooldown_secs(),
-            session_start_sync: default_sync_session_start_sync(),
+            session_start_sync: default_true(),
             session_start_stale_threshold_secs: default_sync_session_start_stale_threshold_secs(),
             backstop_interval_mins: default_sync_backstop_interval_mins(),
             full_sync_escalation_files: default_sync_full_sync_escalation_files(),
             max_concurrent_syncs: default_sync_max_concurrent_syncs(),
             branch_gc_days: default_sync_branch_gc_days(),
             orphan_db_gc_days: default_sync_orphan_db_gc_days(),
-            auto_init: default_sync_auto_init(),
-            auto_track_pr_branches: default_sync_auto_track_pr_branches(),
+            auto_init: default_true(),
+            auto_track_pr_branches: default_false(),
             auto_track_pr_poll_secs: default_sync_auto_track_pr_poll_secs(),
             retention: RetentionConfig::default(),
         }
@@ -551,9 +525,9 @@ impl Default for TraceDecayConfig {
             max_file_size: 1_048_576,
             extract_docstrings: true,
             track_call_sites: true,
-            git_ignore: default_git_ignore(),
+            git_ignore: default_true(),
             diagnostics_prewarm: false,
-            native_graph_activation: default_native_graph_activation(),
+            native_graph_activation: default_true(),
             sync: SyncConfig::default(),
             telemetry: TelemetryConfig::default(),
         }
@@ -825,23 +799,17 @@ pub(crate) fn is_ignored_by_explicit_global_excludes(
     }))
 }
 
-#[cfg(test)]
 fn git_subprocess_path() -> OsString {
     std::env::var_os("PATH").unwrap_or_else(|| {
-        #[cfg(windows)]
-        {
-            OsString::new()
-        }
-        #[cfg(not(windows))]
+        #[cfg(all(test, not(windows)))]
         {
             OsString::from("/usr/bin:/bin")
         }
+        #[cfg(not(all(test, not(windows))))]
+        {
+            OsString::new()
+        }
     })
-}
-
-#[cfg(not(test))]
-fn git_subprocess_path() -> OsString {
-    std::env::var_os("PATH").unwrap_or_default()
 }
 
 fn is_in_local_gitignore(project_path: &Path) -> bool {
