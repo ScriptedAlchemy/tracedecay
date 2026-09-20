@@ -322,7 +322,7 @@ fn require_session_owned_observation(
         || observation.source().session_id().as_str() != session_id
         || observation.scope() != expected_scope
         || anchor.owner() != observation.scope()
-        || serde_json::to_string(anchor.owner()).ok().as_deref() != Some(owner_json)
+        || !anchor.owner_column_matches(owner_json)
         || retained_receipt_id != observation.receipt().receipt().receipt_id().as_str()
     {
         return Err(LcmError::SummarySourceNotOwnedBySession);
@@ -825,7 +825,7 @@ mod tests {
             &malformed.to_string(),
             &observation,
             &anchor,
-            &serde_json::to_string(anchor.owner()).expect("owner json"),
+            &anchor.owner_column_json().expect("owner json"),
         )
         .await;
 
@@ -862,7 +862,7 @@ mod tests {
             &malformed.to_string(),
             &observation,
             &anchor,
-            &serde_json::to_string(anchor.owner()).expect("owner json"),
+            &anchor.owner_column_json().expect("owner json"),
         )
         .await;
 
@@ -931,7 +931,7 @@ mod tests {
             &serde_json::to_string(&observation).expect("observation json"),
             &observation,
             &foreign_anchor,
-            &serde_json::to_string(foreign_anchor.owner()).expect("owner json"),
+            &foreign_anchor.owner_column_json().expect("owner json"),
         )
         .await;
 
@@ -1123,7 +1123,7 @@ mod tests {
                 &serde_json::to_string(&observation).expect("observation json"),
                 &observation,
                 &anchor,
-                &serde_json::to_string(anchor.owner()).expect("owner json"),
+                &anchor.owner_column_json().expect("owner json"),
                 index + 1,
             )
             .await;
@@ -1247,7 +1247,7 @@ mod tests {
             &serde_json::to_string(&canonical).expect("observation json"),
             &canonical,
             &canonical_anchor,
-            &serde_json::to_string(canonical_anchor.owner()).expect("owner json"),
+            &canonical_anchor.owner_column_json().expect("owner json"),
             1,
         )
         .await;
@@ -1268,7 +1268,7 @@ mod tests {
                 &serde_json::to_string(&observation).expect("observation json"),
                 &observation,
                 &anchor,
-                &serde_json::to_string(anchor.owner()).expect("owner json"),
+                &anchor.owner_column_json().expect("owner json"),
                 sequence,
             )
             .await;

@@ -76,7 +76,8 @@ pub(crate) async fn verify_native_source_supersession(
         verify_workflow_effects(conn, effect.workflow_facts()).await?;
     }
     let (old_anchor, new_anchor) = read_transition_anchors(conn, predecessor, &successor).await?;
-    let owner = serde_json::to_string(old_anchor.owner())
+    let owner = old_anchor
+        .owner_column_json()
         .map_err(|error| storage("encode native source owner", error))?;
     let mut disposition = conn
         .query(
@@ -444,7 +445,8 @@ async fn promote_native_source_anchor(
     successor: &DurableObservationV1,
 ) -> ProjectionStoreResult<()> {
     let (old, new) = read_transition_anchors(conn, predecessor, successor).await?;
-    let owner = serde_json::to_string(old.owner())
+    let owner = old
+        .owner_column_json()
         .map_err(|error| storage("encode native source anchor owner", error))?;
     let disposition = RetrievalAnchorDispositionRecordV1::new(
         format!(

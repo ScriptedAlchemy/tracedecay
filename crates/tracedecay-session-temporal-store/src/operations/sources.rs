@@ -634,7 +634,8 @@ pub(super) async fn insert_summary_anchor(
     typed_anchor: Option<&RetrievalAnchorRecord>,
 ) -> Result<(), LcmError> {
     let stored_owner_json = match typed_anchor {
-        Some(anchor) => serde_json::to_string(anchor.owner())
+        Some(anchor) => anchor
+            .owner_column_json()
             .map_err(|error| LcmError::Db(format!("encode summary anchor owner: {error}")))?,
         None => owner_json.to_string(),
     };

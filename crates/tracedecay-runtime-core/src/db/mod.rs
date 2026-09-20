@@ -1,6 +1,8 @@
 mod access;
 mod connection;
 pub mod engine;
+mod row_codec;
+pub use row_codec::{decode_stored_json, encode_stored_json, optional_text_column, text_column};
 mod evidence_assembly;
 mod external_source;
 mod file_identity;

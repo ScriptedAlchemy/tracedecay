@@ -976,13 +976,13 @@ fn terminal_outcome_code(outcome: NativeIntegrationTerminalOutcomeV1) -> &'stati
 }
 
 pub(super) fn encode<T: serde::Serialize>(value: &T) -> NativeIntegrationStoreResult<String> {
-    serde_json::to_string(value).map_err(|error| invalid(error.to_string()))
+    crate::sqlite_persist::encode_json(value).map_err(|error| invalid(error.to_string()))
 }
 
 pub(super) fn decode<T: serde::de::DeserializeOwned>(
     value: &str,
 ) -> NativeIntegrationStoreResult<T> {
-    serde_json::from_str(value).map_err(|error| invalid(error.to_string()))
+    crate::sqlite_persist::decode_json(value).map_err(|error| invalid(error.to_string()))
 }
 
 pub(super) fn text(
@@ -990,8 +990,7 @@ pub(super) fn text(
     column: i32,
     field: &'static str,
 ) -> NativeIntegrationStoreResult<String> {
-    row.get::<String>(column)
-        .map_err(|error| invalid(format!("read {field}: {error}")))
+    crate::sqlite_persist::row_text(row, column, field).map_err(invalid)
 }
 
 fn optional_text(
@@ -999,8 +998,7 @@ fn optional_text(
     column: i32,
     field: &'static str,
 ) -> NativeIntegrationStoreResult<Option<String>> {
-    row.get::<Option<String>>(column)
-        .map_err(|error| invalid(format!("read {field}: {error}")))
+    crate::sqlite_persist::row_optional_text(row, column, field).map_err(invalid)
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> NativeIntegrationStoreError {

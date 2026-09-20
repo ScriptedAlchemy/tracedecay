@@ -418,8 +418,7 @@ async fn verify_summary_anchor(
         .ok()
         .is_some_and(|anchor| {
             anchor.anchor_id().as_str() == manifest.summary_anchor_id
-                && serde_json::to_string(anchor.owner()).ok().as_deref()
-                    == Some(actual_owner_json.as_str())
+                && anchor.owner_column_matches(actual_owner_json.as_str())
                 && matches!(
                     anchor.target(),
                     RetrievalAnchorTargetV2::Entity(entity)
