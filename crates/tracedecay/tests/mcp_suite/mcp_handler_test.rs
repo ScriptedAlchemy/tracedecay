@@ -20,6 +20,8 @@ mod branch_search_test;
 mod branch_sensitivity_test;
 mod circular_behavior_test;
 #[cfg(feature = "test-transport")]
+mod complexity_test;
+#[cfg(feature = "test-transport")]
 mod config_behavior_test;
 #[cfg(feature = "test-transport")]
 mod configuration_unset_test;
