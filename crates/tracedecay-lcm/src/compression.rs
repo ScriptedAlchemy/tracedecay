@@ -114,14 +114,7 @@ pub async fn update_lifecycle(
     conn: &impl Executor,
     update: LcmLifecycleUpdate,
 ) -> Result<LcmLifecycleState, LcmError> {
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
     lifecycle_state(conn, &update.provider, &update.conversation_id).await
 }
 
@@ -207,14 +200,6 @@ async fn link_session_boundary(
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    link_in_transaction(conn, request, old_session_id).await
-}
-
-async fn link_in_transaction(
-    conn: &impl Executor,
-    request: &LcmSessionBoundaryRequest,
-    old_session_id: &str,
-) -> Result<LcmSessionBoundaryResponse, LcmError> {
     ensure_session(conn, &request.provider, &request.session_id).await?;
     let old_state =
         lifecycle_state_or_default(conn, &request.provider, old_session_id, old_session_id).await?;
@@ -237,14 +222,7 @@ async fn link_in_transaction(
         last_finalized_frontier_store_id: carried_frontier,
         maintenance_debt: old_state.maintenance_debt.clone(),
     };
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
 
     Ok(session_boundary_response(
         true,
@@ -1050,20 +1028,27 @@ async fn persist_compression_transaction_writes<'a>(
         last_finalized_frontier_store_id: write.existing_frontier.last_finalized_frontier_store_id,
         maintenance_debt: debt_for_deferred_backlog(remaining_backlog),
     };
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
 
     Ok(CompressionTransactionWriteResult {
         created_summaries,
         frontier: lifecycle_state(conn, &update.provider, &update.conversation_id).await?,
         remaining_backlog,
     })
+}
+
+async fn persist_lifecycle_update(
+    conn: &impl Executor,
+    update: &LcmLifecycleUpdate,
+) -> Result<(), LcmError> {
+    upsert_lifecycle_state(conn, update).await?;
+    replace_maintenance_debt(
+        conn,
+        &update.provider,
+        &update.conversation_id,
+        &update.maintenance_debt,
+    )
+    .await
 }
 
 async fn upsert_lifecycle_state(
@@ -1852,14 +1837,7 @@ async fn condense_summary_nodes_if_ready(
         last_finalized_frontier_store_id: existing_frontier.last_finalized_frontier_store_id,
         maintenance_debt: existing_frontier.maintenance_debt.clone(),
     };
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
     let frontier = lifecycle_state(conn, &update.provider, &update.conversation_id).await?;
     // Mirrors hermes-lcm: `_assemble_context` always follows
     // `_maybe_condense`, so a condensation-only pass still returns the
