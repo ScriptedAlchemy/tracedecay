@@ -143,6 +143,17 @@ pub(crate) trait AuthorityInvariantTransactionProvider {
         &self,
         operation: &'static str,
     ) -> tracedecay_domain::errors::Result<DatabaseWriteTransaction<'_>>;
+
+    /// `Some` when this provider can scan one table's foreign keys without
+    /// holding the canonical writer. `None` keeps the check inside the
+    /// write step, which tests use and which blocks every other writer for
+    /// the whole scan.
+    async fn read_foreign_key_violation(
+        &self,
+        _table: &str,
+    ) -> tracedecay_domain::errors::Result<Option<bool>> {
+        Ok(None)
+    }
 }
 
 impl AuthorityInvariantTransactionProvider for Database {
@@ -151,6 +162,24 @@ impl AuthorityInvariantTransactionProvider for Database {
         operation: &'static str,
     ) -> tracedecay_domain::errors::Result<DatabaseWriteTransaction<'_>> {
         self.begin_bulk_write_transaction(operation).await
+    }
+
+    async fn read_foreign_key_violation(
+        &self,
+        table: &str,
+    ) -> tracedecay_domain::errors::Result<Option<bool>> {
+        // A table-wide `pragma_foreign_key_check` is a read. Running it inside
+        // the write step reserves the canonical writer until the scan returns,
+        // so historical ingest and refresh cannot commit for the whole table.
+        let snapshot = self
+            .read_connection()
+            .background()
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        Ok(Some(
+            foreign_key_table_violates(&snapshot, table).await?,
+        ))
     }
 }
 
@@ -495,22 +524,38 @@ async fn converge_authority_invariants(
 
     if exhaustive && force_exhaustive {
         loop {
-            match authority_invariant_step(
+            let table = authority_invariant_step(
                 provider,
                 "audit global database foreign key table",
-                async |conn| audit_next_foreign_key_table(conn).await,
+                async |conn| foreign_key_audit_next_table(conn).await,
             )
-            .await?
-            {
-                ForeignKeyAuditStep::Continue => {}
-                ForeignKeyAuditStep::Complete => break,
-                ForeignKeyAuditStep::Violation => {
-                    return Err(global_db_operation_message(
-                        OPERATION,
-                        "global database contains a foreign-key violation",
-                    ));
+            .await?;
+            let Some(table) = table else {
+                break;
+            };
+            let violation = match provider.read_foreign_key_violation(&table).await? {
+                Some(violation) => violation,
+                None => {
+                    authority_invariant_step(
+                        provider,
+                        "audit global database foreign key table",
+                        async |conn| foreign_key_table_violates(conn, &table).await,
+                    )
+                    .await?
                 }
+            };
+            if violation {
+                return Err(global_db_operation_message(
+                    OPERATION,
+                    "global database contains a foreign-key violation",
+                ));
             }
+            authority_invariant_step(
+                provider,
+                "audit global database foreign key table",
+                async |conn| record_foreign_key_audit_table(conn, &table).await,
+            )
+            .await?;
         }
     }
 
@@ -575,6 +620,7 @@ async fn foreign_key_violation_exists_resumable(
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ForeignKeyAuditStep {
     Continue,
@@ -582,9 +628,9 @@ enum ForeignKeyAuditStep {
     Violation,
 }
 
-async fn audit_next_foreign_key_table(
+async fn foreign_key_audit_next_table(
     conn: &impl Executor,
-) -> tracedecay_domain::errors::Result<ForeignKeyAuditStep> {
+) -> tracedecay_domain::errors::Result<Option<String>> {
     let mut rows = conn
         .query(
             "SELECT COALESCE((
@@ -633,25 +679,32 @@ async fn audit_next_foreign_key_table(
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        return Ok(ForeignKeyAuditStep::Complete);
+        return Ok(None);
     };
+    Ok(Some(table))
+}
 
+async fn foreign_key_table_violates(
+    conn: &impl QueryExecutor,
+    table: &str,
+) -> tracedecay_domain::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT 1 FROM pragma_foreign_key_check(?1) LIMIT 1",
-            (table.as_str(),),
+            (table,),
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let violation = rows
-        .next()
+    rows.next()
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .is_some();
-    drop(rows);
-    if violation {
-        return Ok(ForeignKeyAuditStep::Violation);
-    }
+        .map(|row| row.is_some())
+        .map_err(|error| global_db_operation_error(OPERATION, error))
+}
+
+async fn record_foreign_key_audit_table(
+    conn: &impl Executor,
+    table: &str,
+) -> tracedecay_domain::errors::Result<()> {
     conn.execute(
         "INSERT INTO authority_foreign_key_audit_progress (audit_name, last_table)
          VALUES (?1, ?2)
@@ -660,6 +713,20 @@ async fn audit_next_foreign_key_table(
     )
     .await
     .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    Ok(())
+}
+
+#[cfg(test)]
+async fn audit_next_foreign_key_table(
+    conn: &impl Executor,
+) -> tracedecay_domain::errors::Result<ForeignKeyAuditStep> {
+    let Some(table) = foreign_key_audit_next_table(conn).await? else {
+        return Ok(ForeignKeyAuditStep::Complete);
+    };
+    if foreign_key_table_violates(conn, &table).await? {
+        return Ok(ForeignKeyAuditStep::Violation);
+    }
+    record_foreign_key_audit_table(conn, &table).await?;
     Ok(ForeignKeyAuditStep::Continue)
 }
 
