@@ -363,6 +363,12 @@ tar -C "$repo" \
   --exclude='./node_modules' \
   -cf - . | tar -xf - -C "$staged"
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
+# The asset staging below rewrites package-local directories inside `$staged`
+# (its `crates/tracedecay/tests/fixtures` becomes the root fixtures), so the
+# integration suites that read package-local fixtures run from this untouched
+# copy of the same snapshot.
+source_snapshot="$work/source"
+cp -a -- "$staged" "$source_snapshot"
 
 staged_product="$staged/crates/tracedecay"
 [[ -f "$staged_product/Cargo.toml" ]] ||
@@ -734,13 +740,13 @@ CARGO_NET_OFFLINE=true cargo nextest run \
 # `cargo package` publishes no integration tests (the root crate's `include`
 # whitelist carries only fixtures), and `mcp_suite` requires the
 # `test-transport` feature the production graph excludes, so the extracted
-# package cannot run this suite. Run it from the staged source snapshot under
-# the `root-transport` CI lens instead, with the packaged CLI as the binary
-# the suite spawns.
+# package cannot run this suite. Run it from the untouched source snapshot
+# under the `root-transport` CI lens instead, with the packaged CLI as the
+# binary the suite spawns.
 echo "distribution acceptance: checking packaged MCP tool behavior"
 TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$staged/Cargo.toml" \
+  --manifest-path "$source_snapshot/Cargo.toml" \
   --release \
   -p tracedecay \
   --test mcp_suite \
