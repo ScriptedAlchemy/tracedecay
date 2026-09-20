@@ -393,7 +393,7 @@ where
             {
                 let _ = cancellation.cancel_upstream(&root, &request_id);
             }
-            self.complete_context_request(
+            self.finish_admitted_request(
                 request_id,
                 pending.response_id,
                 Err(RpcFailure::request_failure(
@@ -413,7 +413,7 @@ where
             {
                 let _ = context.cancel_request(&root, &pending.operation_id);
             }
-            self.complete_context_request(
+            self.finish_admitted_request(
                 request_id,
                 pending.response_id,
                 Err(RpcFailure::request_failure(
@@ -430,7 +430,7 @@ where
             {
                 let _ = context.cancel_request(&root, &pending.operation_id);
             }
-            self.complete_context_request(
+            self.finish_admitted_request(
                 request_id,
                 pending.response_id,
                 Err(RpcFailure::request_failure(
@@ -756,7 +756,7 @@ where
                 .or_else(|| context_pending.map(|pending| pending.response_id))
                 .or_else(|| expansion_pending.map(|pending| pending.response_id));
             if let Some(response_id) = response_id {
-                self.complete_context_request(
+                self.finish_admitted_request(
                     id.clone(),
                     response_id,
                     Err(RpcFailure::request_failure(
