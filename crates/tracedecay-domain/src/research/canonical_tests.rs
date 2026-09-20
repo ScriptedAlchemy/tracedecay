@@ -8,9 +8,22 @@ use super::super::canonical_sink::{
 use super::super::canonical_value::{keys_are_canonically_ordered, write_canonical};
 use super::{
     canonical_json_bytes, canonical_json_bytes_and_sha256, canonical_json_value, canonical_sha256,
+    decode_with_canonical_digest,
 };
 
 use serde_json::json;
+
+#[test]
+fn decode_with_canonical_digest_accepts_matching_payload_and_rejects_tamper() {
+    let value = json!({"b": 1, "a": 2});
+    let payload = serde_json::to_string(&value).unwrap();
+    let digest = canonical_sha256(&value).unwrap();
+    let decoded: Value =
+        decode_with_canonical_digest(&payload, digest.as_str()).expect("matching digest");
+    assert_eq!(decoded, value);
+    assert!(decode_with_canonical_digest::<Value>(&payload, "sha256:dead").is_err());
+    assert!(decode_with_canonical_digest::<Value>("{", digest.as_str()).is_err());
+}
 
 #[test]
 fn canonical_outputs_match_for_nested_ordering_and_scalars() {

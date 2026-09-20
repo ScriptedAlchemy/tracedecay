@@ -96,12 +96,9 @@ impl WorkflowSqliteAuthority {
         let Some(ExactSqlValue::Text(stored_digest)) = row.values.get(1) else {
             return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
         };
-        let definition: WorkflowDefinition = serde_json::from_str(payload)
+        let definition = tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
             .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
-        let digest = canonical_sha256(&definition)
-            .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
-        if digest.as_str() != stored_digest
-            || definition.definition_id() != definition_id
+        if definition.definition_id() != definition_id
             || definition.definition_version() != definition_version
         {
             return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
@@ -277,13 +274,8 @@ fn decode_definition_source_row(
     let Some(ExactSqlValue::Text(stored_digest)) = row.values.get(1) else {
         return Err(definition_authority_unavailable());
     };
-    let definition: WorkflowDefinition =
-        serde_json::from_str(payload).map_err(|_| definition_authority_unavailable())?;
-    let digest = canonical_sha256(&definition).map_err(|_| definition_authority_unavailable())?;
-    if digest.as_str() != stored_digest {
-        return Err(definition_authority_unavailable());
-    }
-    Ok(definition)
+    tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
+        .map_err(|_| definition_authority_unavailable())
 }
 
 fn definition_authority_unavailable() -> WorkflowDefinitionAuthorityError {
@@ -435,17 +427,11 @@ fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement,
 }
 
 fn sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
-    match values.get(index)? {
-        ExactSqlValue::Text(value) => Some(value),
-        _ => None,
-    }
+    crate::exact_sql::text_column(values, index)
 }
 
 fn sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
-    match values.get(index)? {
-        ExactSqlValue::Integer(value) => Some(*value),
-        _ => None,
-    }
+    crate::exact_sql::integer_column(values, index)
 }
 
 fn version_i64(version: u64) -> Result<i64, ()> {
@@ -461,11 +447,11 @@ fn encode_definition(definition: &WorkflowDefinition) -> Result<String, ()> {
 }
 
 fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, ()> {
-    serde_json::to_string(value).map_err(|_| ())
+    crate::exact_sql::encode_json(value, |_| ())
 }
 
 fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
-    serde_json::from_str(payload).map_err(|_| ())
+    crate::exact_sql::decode_json(payload, |_| ())
 }
 
 fn query_tx(

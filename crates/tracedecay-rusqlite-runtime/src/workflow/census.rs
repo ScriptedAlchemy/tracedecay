@@ -5,13 +5,13 @@ use tracedecay_contracts::{
     WorkflowFanOutCensusStoragePort,
 };
 use tracedecay_domain::{
-    ObservabilityTerminalResultV1, RunId, WorkAuthority, WorkflowFanOutCensusV1, WorkflowRunEvent,
+    ObservabilityTerminalResultV1, RunId, WorkAuthority, WorkflowFanOutCensusV1,
     WorkflowRunProjection, WorkflowRunStatus, canonical_sha256,
 };
 
 use super::{
-    ExactSqlTransaction, ExactSqlValue, WorkflowSqliteAuthority, decode_json, encode_json,
-    execute_tx, execute_tx_changed, query_tx, sql_text,
+    ExactSqlTransaction, ExactSqlValue, WorkflowSqliteAuthority, encode_json, execute_tx,
+    execute_tx_changed, query_tx, sql_text,
 };
 
 fn unavailable<E>(_: E) -> WorkflowFanOutCensusError {
@@ -22,16 +22,11 @@ fn decode_census(
     payload: &str,
     stored_digest: &str,
 ) -> Result<WorkflowFanOutCensusV1, WorkflowFanOutCensusError> {
-    let census: WorkflowFanOutCensusV1 =
-        decode_json(payload).map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
+    let census = tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
+        .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
     census
         .validate()
         .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
-    let digest =
-        canonical_sha256(&census).map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
-    if digest.as_str() != stored_digest {
-        return Err(WorkflowFanOutCensusError::InvalidHistory);
-    }
     Ok(census)
 }
 
@@ -117,14 +112,8 @@ fn projection_through_tx(
                 sql_text(&row.values, 0).ok_or(WorkflowFanOutCensusError::InvalidHistory)?;
             let stored_digest =
                 sql_text(&row.values, 1).ok_or(WorkflowFanOutCensusError::InvalidHistory)?;
-            let event: WorkflowRunEvent =
-                decode_json(payload).map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
-            let digest =
-                canonical_sha256(&event).map_err(|_| WorkflowFanOutCensusError::InvalidHistory)?;
-            if digest.as_str() != stored_digest {
-                return Err(WorkflowFanOutCensusError::InvalidHistory);
-            }
-            Ok(event)
+            tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
+                .map_err(|_| WorkflowFanOutCensusError::InvalidHistory)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let projection = WorkflowRunProjection::rebuild(&history)

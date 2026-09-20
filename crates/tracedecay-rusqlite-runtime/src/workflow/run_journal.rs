@@ -18,8 +18,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    ExactSqlTransaction, ExactSqlValue, WorkflowSqliteAuthority, decode_json, encode_json,
-    execute_tx, query_tx, sql_text,
+    ExactSqlTransaction, ExactSqlValue, WorkflowSqliteAuthority, encode_json, execute_tx, query_tx,
+    sql_text,
 };
 
 fn run_journal_unavailable<E>(_: E) -> WorkflowRunStorageError {
@@ -30,13 +30,8 @@ fn decode_event(
     payload: &str,
     stored_digest: &str,
 ) -> Result<WorkflowRunEvent, WorkflowRunStorageError> {
-    let event: WorkflowRunEvent =
-        decode_json(payload).map_err(|_| WorkflowRunStorageError::InvalidHistory)?;
-    let digest = canonical_sha256(&event).map_err(|_| WorkflowRunStorageError::InvalidHistory)?;
-    if digest.as_str() != stored_digest {
-        return Err(WorkflowRunStorageError::InvalidHistory);
-    }
-    Ok(event)
+    tracedecay_domain::decode_with_canonical_digest(payload, stored_digest)
+        .map_err(|_| WorkflowRunStorageError::InvalidHistory)
 }
 
 fn history_tx(
