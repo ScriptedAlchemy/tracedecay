@@ -853,13 +853,6 @@ impl AutomationRunLedgerTaskSummary {
         self.latest_session_evidence_budget_exhausted
             .map(|index| &self.records[index])
     }
-
-    pub fn latest_scheduler_effectful_user_job_terminal(
-        &self,
-    ) -> Option<&AutomationRunLedgerRecord> {
-        self.latest_scheduler_effectful()
-            .filter(|record| record.task == AgentTaskKind::UserJob)
-    }
 }
 
 #[hotpath::measure(label = "automation_runtime.run_ledger.load_page", future = true)]

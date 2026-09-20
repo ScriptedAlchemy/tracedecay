@@ -296,16 +296,6 @@ pub async fn load_outcomes_snapshot(dashboard_root: &Path) -> Result<AutomationO
     })
 }
 
-#[hotpath::measure(label = "automation.outcomes.save", future = true)]
-pub async fn save_outcomes_snapshot(
-    dashboard_root: &Path,
-    snapshot: &AutomationOutcomesSnapshot,
-) -> Result<()> {
-    let lock = outcomes_snapshot_lock(dashboard_root);
-    let _guard = lock.lock().await;
-    save_outcomes_snapshot_unlocked(dashboard_root, snapshot).await
-}
-
 async fn save_outcomes_snapshot_unlocked(
     dashboard_root: &Path,
     snapshot: &AutomationOutcomesSnapshot,
