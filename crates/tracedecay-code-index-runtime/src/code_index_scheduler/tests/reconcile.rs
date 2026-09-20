@@ -10200,7 +10200,20 @@ async fn blocked_observability_store_does_not_hold_reconcile_readiness() {
         .await
         .expect("release observability writer");
     registry.shutdown().await;
-    producer.shutdown().await.expect("flush producer");
+    // The writer held above is this store's only one, and it is held across a
+    // whole reconcile, so the producer's own bounded persistence budget can
+    // expire against it on a slow host: the lane then drops that batch and
+    // latches the denial for its whole life, which `shutdown` reports even
+    // after the writer is released. That denial is the arrangement this test
+    // builds, not a defect. The contract is the readiness loop above, which
+    // converged while the store was blocked; any other fault here is a real
+    // producer defect.
+    match producer.shutdown().await {
+        Ok(_) => {}
+        Err(tracedecay_contracts::ApplicationContractError::Domain(domain))
+            if domain == "observability_persistence_deadline" => {}
+        Err(error) => panic!("flush producer: {error:?}"),
+    }
 }
 
 /// The installed observability lane must persist one canonical index
