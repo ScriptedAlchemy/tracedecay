@@ -46,7 +46,7 @@ impl AutomationSessionRetrieval for StructuralBudgetRefusalRetrieval {
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "test-transport")]
-use tracedecay_automation_runtime::ports::session_evidence::{LcmGrepSort, LcmScope};
+use tracedecay_lcm::{LcmGrepSort, LcmScope};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery};
 

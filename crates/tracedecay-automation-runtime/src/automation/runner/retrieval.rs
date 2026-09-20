@@ -26,10 +26,10 @@ use tracedecay_domain::{
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::ports::session_evidence::LcmScope;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_lcm::LcmScope;
 use tracedecay_session_memory::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
