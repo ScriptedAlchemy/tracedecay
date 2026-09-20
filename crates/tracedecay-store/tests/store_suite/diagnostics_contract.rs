@@ -8,9 +8,7 @@ use tracedecay_store::{DiagnosticStoreError, SanitizedCleanDiagnosticSnapshotV1}
 
 use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn fixture_record(generation: &str, anchor: &str) -> GenerationDiagnosticV1 {
     let mut record = GenerationDiagnosticV1 {

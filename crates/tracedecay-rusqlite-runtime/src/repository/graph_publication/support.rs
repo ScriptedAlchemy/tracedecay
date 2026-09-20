@@ -1509,9 +1509,7 @@ mod dependency_batch_tests {
         GraphPublicationOperationContextV1::new(&control, probe).unwrap()
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     /// A valid hex digit character for `digest()`, cycling over `index`.
     /// Unlike a plain ASCII letter range, every value this returns is

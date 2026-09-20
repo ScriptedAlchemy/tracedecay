@@ -10,9 +10,7 @@ use tracedecay_domain::{
 
 use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 /// Builds a record through the real production publication builder so the
 /// admission rules are exercised against records shaped exactly like the

@@ -60,9 +60,7 @@ impl TestDatabase {
     }
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 /// A real (non-mock) `StorageOperationExecutor`: it performs a genuine SQL
 /// insert against the savepoint `apply_inbox` hands it, keyed by the applied
