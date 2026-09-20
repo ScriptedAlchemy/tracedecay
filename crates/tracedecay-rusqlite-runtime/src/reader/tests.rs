@@ -799,10 +799,15 @@ fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
     let second = pool
         .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
         .expect("second snapshot admission");
-    assert!(matches!(
-        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
-        Err(crate::exact_sql::ExactSqlError::ReaderUnavailable(_))
-    ));
+    assert!(
+        matches!(
+            pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
+            Err(crate::exact_sql::ExactSqlError::ReaderRefused(
+                crate::exact_sql::ExactSqlReaderRefusalV1::Saturated
+            ))
+        ),
+        "a full lane declines the lease, which is not a reader that failed"
+    );
 
     assert_eq!(
         pool.snapshot().snapshot_admissions,

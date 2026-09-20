@@ -12,8 +12,8 @@ use tracedecay_store::{
 };
 
 use crate::exact_sql::{
-    ExactSqlColumnError, ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlRow,
-    ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
+    ExactSqlColumnError, ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle,
+    ExactSqlReaderRefusalV1, ExactSqlRow, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
 
 pub(super) use crate::exact_sql::{optional_text, text};
@@ -72,9 +72,43 @@ const BEGIN_ACQUIRE_BUDGET: Duration = Duration::from_millis(64);
 /// Pause between admission retries, matching the writer's own busy pause.
 const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
 
-/// Runs `attempt` until it answers or the caller is interrupted.
-/// `Ok(None)` means no value: the budget expired under `Busy`, or the attempt
-/// failed outright. The caller owns what that means for its own operation.
+/// What one failed acquisition attempt tells the begin loop to do next.
+///
+/// A lane that declines to admit the work and a lane whose reader or writer
+/// failed are different answers, and only the first leaves the caller free to
+/// reach the data another way. Collapsing them turns a broken store into a
+/// successful read on whatever lane still answers.
+enum BeginAcquireDecision {
+    /// The lane is contended. Another attempt inside the budget may be admitted.
+    RetryWithinBudget,
+    /// The lane declined for good. Waiting out the budget cannot change it.
+    Decline,
+    /// Something failed. The caller must see it rather than route around it.
+    Surface,
+}
+
+fn classify_begin_acquire_failure(error: &ExactSqlError) -> BeginAcquireDecision {
+    match error {
+        // The writer's command queue was full, or the reader lane was fully
+        // leased for its slice. Both drain on their own.
+        ExactSqlError::Busy | ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Saturated) => {
+            BeginAcquireDecision::RetryWithinBudget
+        }
+        // A draining pool admits nothing further, so spending the budget on it
+        // only delays the fallback that will serve this read.
+        ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Draining) => {
+            BeginAcquireDecision::Decline
+        }
+        _ => BeginAcquireDecision::Surface,
+    }
+}
+
+/// Runs `attempt` until it answers, a lane declines it, or the caller is
+/// interrupted.
+///
+/// `Ok(None)` means one thing: no lane would admit the work, and the caller
+/// may serve it another way. Anything that failed is an `Err`, so a caller
+/// cannot mistake a broken store for contention.
 fn acquire_within_begin_budget<T>(
     context: &GraphPublicationOperationContextV1<'_>,
     mut attempt: impl FnMut() -> Result<T, ExactSqlError>,
@@ -82,21 +116,24 @@ fn acquire_within_begin_budget<T>(
     let deadline = Instant::now() + BEGIN_ACQUIRE_BUDGET;
     loop {
         ensure_not_interrupted(context)?;
-        match attempt() {
+        let error = match attempt() {
             Ok(value) => {
                 ensure_not_interrupted(context)?;
                 return Ok(Some(value));
             }
-            Err(ExactSqlError::Busy) => {
-                ensure_not_interrupted(context)?;
+            Err(error) => error,
+        };
+        ensure_not_interrupted(context)?;
+        match classify_begin_acquire_failure(&error) {
+            BeginAcquireDecision::RetryWithinBudget => {
                 if Instant::now() >= deadline {
                     return Ok(None);
                 }
                 std::thread::sleep(BEGIN_BUSY_RETRY_PAUSE);
             }
-            Err(_) => {
-                ensure_not_interrupted(context)?;
-                return Ok(None);
+            BeginAcquireDecision::Decline => return Ok(None),
+            BeginAcquireDecision::Surface => {
+                return Err(GraphPublicationStoreErrorV1::Infrastructure);
             }
         }
     }
@@ -2116,6 +2153,47 @@ mod begin_acquire_tests {
             attempts.get() > 1,
             "the budget spans more than one attempt, so a queue refusal that \
              returns at once is retried while the window lasts"
+        );
+    }
+
+    #[test]
+    fn a_saturated_reader_lane_is_retried_then_defers() {
+        let context = context("begin-acquire.saturated");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::ReaderRefused(
+                ExactSqlReaderRefusalV1::Saturated,
+            ))
+        });
+
+        assert_eq!(outcome, Ok(None));
+        assert!(
+            attempts.get() > 1,
+            "a saturated lane can clear inside the budget, so it is retried \
+             before the caller gives up on it"
+        );
+    }
+
+    #[test]
+    fn a_draining_reader_lane_defers_without_spending_the_budget() {
+        let context = context("begin-acquire.draining");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::ReaderRefused(
+                ExactSqlReaderRefusalV1::Draining,
+            ))
+        });
+
+        assert_eq!(outcome, Ok(None));
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a draining pool admits nothing further, so retrying it only \
+             delays the fallback"
         );
     }
 
