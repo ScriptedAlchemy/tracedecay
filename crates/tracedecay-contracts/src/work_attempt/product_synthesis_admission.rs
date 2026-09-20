@@ -7,16 +7,16 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ApplicationProblem, RequestContext, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
-    WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductRevisionPinsV1, WorkProductSynthesisAdmissionV1, WorkSynthesisAdmissionRecordV1,
-    WorkSynthesisAdmissionV1,
+    ApplicationProblem, RequestContext, SafeDiagnostic, WorkGraphReadPortV1,
+    WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1, WorkProductBindingV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductRevisionPinsV1,
+    WorkProductSynthesisAdmissionV1, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1,
 };
 
 use super::{
     CurrentWorkProductAttemptGraphV1, StartWorkAttemptCommand, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
-    accepted_attempt_draft, admit_product_attempt_request, conflict_problem, contract_problem,
+    accepted_attempt_draft, admit_product_attempt_request, contract_problem,
     current_work_product_attempt_graph, denied_problem, not_found_problem,
     product_admission_problem, product_attempt_projection_binding, storage_problem,
 };
@@ -259,8 +259,8 @@ where
 }
 
 fn identity_conflict() -> ApplicationProblem {
-    conflict_problem(
-        "application.work-attempt.identity-conflict",
-        "The Work attempt identity was already used with different content.",
-    )
+    ApplicationProblem::conflict(SafeDiagnostic {
+        code: ("application.work-attempt.identity-conflict").to_owned(),
+        message: ("The Work attempt identity was already used with different content.").to_owned(),
+    })
 }

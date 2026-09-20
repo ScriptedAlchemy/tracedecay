@@ -4,10 +4,13 @@ use std::sync::Arc;
 
 use tracedecay_contracts::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, CancellationContext, Deadline,
-    LegalAction, RequestId, RetryDirective, SafeDiagnostic, SourceEditInvocationV1,
+    RequestId, SafeDiagnostic, SourceEditInvocationV1,
     SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
 };
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
+
+#[cfg(test)]
+use tracedecay_contracts::RetryDirective;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -261,11 +264,7 @@ fn source_edit_execution_problem(
     let diagnostic = source_edit_safe_diagnostic(code, message)?;
     match diagnostic.code.as_str() {
         SOURCE_EDIT_EXPECTED_STATE_MISMATCH => Ok(ApplicationProblem::stale(diagnostic)),
-        SOURCE_EDIT_IDEMPOTENCY_CONFLICT => Ok(ApplicationProblem::Conflict {
-            diagnostic,
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        }),
+        SOURCE_EDIT_IDEMPOTENCY_CONFLICT => Ok(ApplicationProblem::conflict(diagnostic)),
         SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE | SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE => {
             Ok(ApplicationProblem::unavailable(diagnostic))
         }

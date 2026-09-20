@@ -34,10 +34,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
-};
+use crate::{ApplicationProblem, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic};
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum WorkPlacementStorageError {
@@ -211,10 +208,10 @@ where
             {
                 Ok(existing)
             } else {
-                Err(conflict_problem(
-                    "application.work-placement.identity-conflict",
-                    "The Work run already holds a different placement.",
-                ))
+                Err(ApplicationProblem::conflict(SafeDiagnostic {
+                    code: ("application.work-placement.identity-conflict").to_owned(),
+                    message: ("The Work run already holds a different placement.").to_owned(),
+                }))
             };
         }
         let preflight = self.evaluate(&authority, identity, command.target, observe)?;
@@ -358,14 +355,19 @@ fn storage_problem(error: WorkPlacementStorageError) -> ApplicationProblem {
 
 fn contract_problem(error: WorkPlacementContractError) -> ApplicationProblem {
     match error {
-        WorkPlacementContractError::AlreadyReleased => conflict_problem(
-            "application.work-placement.already-released",
-            "The Work placement was already released.",
-        ),
-        WorkPlacementContractError::NonMonotonicTransition => conflict_problem(
-            "application.work-placement.non-monotonic",
-            "The Work placement transition is older than the published state.",
-        ),
+        WorkPlacementContractError::AlreadyReleased => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-placement.already-released").to_owned(),
+                message: ("The Work placement was already released.").to_owned(),
+            })
+        }
+        WorkPlacementContractError::NonMonotonicTransition => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-placement.non-monotonic").to_owned(),
+                message: ("The Work placement transition is older than the published state.")
+                    .to_owned(),
+            })
+        }
         _ => ApplicationProblem::invalid_request(SafeDiagnostic {
             code: "application.work-placement.invalid-placement".to_owned(),
             message: "The Work placement command or stored state is invalid.".to_owned(),
@@ -387,36 +389,22 @@ fn blocked_problem(
         .map(placement_blocker_name)
         .collect::<Vec<_>>()
         .join(", ");
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-placement.blocked".to_owned(),
-            message: format!("The Work placement is blocked by: {named}."),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
+    ApplicationProblem::conflict(SafeDiagnostic {
+        code: "application.work-placement.blocked".to_owned(),
+        message: format!("The Work placement is blocked by: {named}."),
+    })
 }
 
 fn authority_conflict_problem() -> ApplicationProblem {
-    conflict_problem(
-        "application.work-placement.authority-conflict",
-        "The Work placement authority version changed after this command was prepared.",
-    )
+    ApplicationProblem::conflict(SafeDiagnostic {
+        code: ("application.work-placement.authority-conflict").to_owned(),
+        message: ("The Work placement authority version changed after this command was prepared.")
+            .to_owned(),
+    })
 }
 
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-}
-
-fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
 }
 
 /// Wire names for the closed blocker vocabulary. Kept as a match so a new

@@ -299,10 +299,10 @@ where
             .inspect(&authority, &command, scan_started_at, scan_deadline)
             .map_err(evidence_problem)?;
         if !evidence.validate_for(&command, scan_started_at, scan_deadline) {
-            return Err(conflict_problem(
-                "application.work-leak.evidence-conflict",
-                "The bounded leak scan did not prove a valid verdict.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-leak.evidence-conflict").to_owned(),
+                message: ("The bounded leak scan did not prove a valid verdict.").to_owned(),
+            }));
         }
         let canonical_input_digest =
             canonical_sha256(&(LEAK_INPUT_DIGEST_DOMAIN, &command, &evidence, scan_deadline))
@@ -355,26 +355,15 @@ fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Applica
     }
 }
 
-fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
-}
-
 fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
     match error {
         WorkLeakEvidenceErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkLeakEvidenceErrorV1::Conflict => conflict_problem(
-            "application.work-leak.evidence-conflict",
-            "The Work leak evidence changed during inspection.",
-        ),
+        WorkLeakEvidenceErrorV1::Conflict => ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-leak.evidence-conflict").to_owned(),
+            message: ("The Work leak evidence changed during inspection.").to_owned(),
+        }),
         WorkLeakEvidenceErrorV1::TimedOut => ApplicationProblem::TimedOut {
             stage: CancellationStage::DuringRead,
             retry: RetryDirective::AfterRevalidate,
@@ -392,14 +381,19 @@ fn storage_problem(error: WorkLeakAdjudicationStorageErrorV1) -> ApplicationProb
         WorkLeakAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkLeakAdjudicationStorageErrorV1::RevisionConflict => conflict_problem(
-            "application.work-leak.revision-conflict",
-            "The Work leak adjudication changed before publication.",
-        ),
-        WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => conflict_problem(
-            "application.work-leak.idempotency-conflict",
-            "The Work leak command identity was already used with different input.",
-        ),
+        WorkLeakAdjudicationStorageErrorV1::RevisionConflict => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-leak.revision-conflict").to_owned(),
+                message: ("The Work leak adjudication changed before publication.").to_owned(),
+            })
+        }
+        WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-leak.idempotency-conflict").to_owned(),
+                message: ("The Work leak command identity was already used with different input.")
+                    .to_owned(),
+            })
+        }
         WorkLeakAdjudicationStorageErrorV1::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "application.work-leak.unavailable".to_owned(),

@@ -831,14 +831,10 @@ pub(super) fn operation_event_problem(
                 legal_actions: vec![LegalAction::Refresh],
             }
         }
-        OperationEventError::InvalidFrontier => ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic {
-                code: "operation_event.invalid_frontier".to_owned(),
-                message: "The requested operation-event frontier is invalid".to_owned(),
-            },
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        OperationEventError::InvalidFrontier => ApplicationProblem::conflict(SafeDiagnostic {
+            code: "operation_event.invalid_frontier".to_owned(),
+            message: "The requested operation-event frontier is invalid".to_owned(),
+        }),
         OperationEventError::RequestNotAdmitted => ApplicationProblem::TimedOut {
             stage: CancellationStage::BeforeAdmission,
             retry: RetryDirective::Never,
@@ -867,14 +863,10 @@ pub(super) fn operation_event_problem(
         // published, so the client re-reads current state instead of retrying
         // the same publish.
         OperationEventError::AlreadyBound | OperationEventError::TerminalAlreadyPublished => {
-            ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic {
-                    code: "operation_event.already_published".to_owned(),
-                    message: "The operation-event identity is already published".to_owned(),
-                },
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            }
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: "operation_event.already_published".to_owned(),
+                message: "The operation-event identity is already published".to_owned(),
+            })
         }
         // A misconfigured authority is a deterministic, process-lifetime
         // failure. It is not the caller's request that is wrong and no amount

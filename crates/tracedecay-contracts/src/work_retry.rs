@@ -26,8 +26,8 @@ use crate::work_attempt_effect::{
     WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
 use crate::{
-    ApplicationContractError, ApplicationProblem, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
+    ApplicationContractError, ApplicationProblem, RequestAdmission, RequestContext, RetryDirective,
+    SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
     WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
     WorkProductRetryAdmissionV1, WorkProductRevisionPinsV1, WorkflowFanOutAttemptBindingV1,
     WorkflowRunAppendRequest,
@@ -406,10 +406,12 @@ where
             .map_err(storage_problem)?
         {
             if replayed.receipt().canonical_input_digest != input_digest {
-                return Err(conflict_problem(
-                    "application.work-retry.idempotency-conflict",
-                    "The Work retry command identity was already used with different input.",
-                ));
+                return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                    code: ("application.work-retry.idempotency-conflict").to_owned(),
+                    message:
+                        ("The Work retry command identity was already used with different input.")
+                            .to_owned(),
+                }));
             }
             let attempt = match &replayed {
                 WorkRetryAttemptOutcomeV1::Created { attempt, .. }
@@ -460,10 +462,10 @@ where
             .map_err(evidence_problem)?;
         validate_failure(&command, &original, &failure)?;
         if failure.observed_at.0 > restarted_at.0 {
-            return Err(conflict_problem(
-                "application.work-retry.failure-conflict",
-                "The retry failure was observed after retry admission.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-retry.failure-conflict").to_owned(),
+                message: ("The retry failure was observed after retry admission.").to_owned(),
+            }));
         }
         require_product_retry_admission(&product, &original)?;
         let attempt = prepare_product_retry_attempt(
@@ -534,10 +536,10 @@ fn prepare_workflow_rebind(
             .get(&rebind.binding.step_id)
             .is_none_or(|plan| plan.plan_digest != rebind.binding.plan_digest)
     {
-        return Err(conflict_problem(
-            "application.work-retry.workflow-binding-conflict",
-            "The workflow child binding no longer matches its admitted plan.",
-        ));
+        return Err(ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.workflow-binding-conflict").to_owned(),
+            message: ("The workflow child binding no longer matches its admitted plan.").to_owned(),
+        }));
     }
     if let Some(event) = rebind
         .projection
@@ -557,10 +559,11 @@ fn prepare_workflow_rebind(
                 && retry_receipt_digest == &receipt.owner_receipt_digest
         );
         if !exact_replay {
-            return Err(conflict_problem(
-                "application.work-retry.workflow-binding-conflict",
-                "The workflow command identity was already used by another transition.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-retry.workflow-binding-conflict").to_owned(),
+                message: ("The workflow command identity was already used by another transition.")
+                    .to_owned(),
+            }));
         }
         return Ok(Some(WorkflowRunAppendRequest {
             expected_sequence: event.sequence().checked_sub(1),
@@ -571,10 +574,10 @@ fn prepare_workflow_rebind(
         .projection
         .planned_fan_out_attempt(&receipt.command.original_attempt)
         .ok_or_else(|| {
-            conflict_problem(
-                "application.work-retry.workflow-binding-conflict",
-                "The original Work attempt is not the active workflow child.",
-            )
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-retry.workflow-binding-conflict").to_owned(),
+                message: ("The original Work attempt is not the active workflow child.").to_owned(),
+            })
         })?
         .clone();
     let event = rebind
@@ -594,10 +597,11 @@ fn prepare_workflow_rebind(
             },
         )
         .map_err(|_| {
-            conflict_problem(
-                "application.work-retry.workflow-binding-conflict",
-                "The workflow child retry transition is no longer authorized.",
-            )
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-retry.workflow-binding-conflict").to_owned(),
+                message: ("The workflow child retry transition is no longer authorized.")
+                    .to_owned(),
+            })
         })?;
     Ok(Some(WorkflowRunAppendRequest {
         expected_sequence: Some(rebind.projection.sequence()),
@@ -616,10 +620,10 @@ fn require_product_retry_admission(
     if !item.is_execution_admitted()
         || item.accepted_proposal() != Some(attempt.projection_binding().accepted_proposal())
     {
-        return Err(conflict_problem(
-            "application.work-retry.product-conflict",
-            "The canonical Work product graph no longer admits this retry.",
-        ));
+        return Err(ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.product-conflict").to_owned(),
+            message: ("The canonical Work product graph no longer admits this retry.").to_owned(),
+        }));
     }
     Ok(())
 }
@@ -644,10 +648,11 @@ where
     {
         Ok(())
     } else {
-        Err(conflict_problem(
-            "application.work-retry.effect-unknown",
-            "The original Work attempt has an unresolved non-repeatable effect.",
-        ))
+        Err(ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.effect-unknown").to_owned(),
+            message: ("The original Work attempt has an unresolved non-repeatable effect.")
+                .to_owned(),
+        }))
     }
 }
 
@@ -669,10 +674,10 @@ where
     if original.execution().execution_snapshot().topology() != topology
         || restarted_at.0 >= original.execution().deadline().0
     {
-        return Err(conflict_problem(
-            "application.work-retry.admission-conflict",
-            "The original Work admission no longer permits this retry.",
-        ));
+        return Err(ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.admission-conflict").to_owned(),
+            message: ("The original Work admission no longer permits this retry.").to_owned(),
+        }));
     }
     let identity = WorkAttemptIdentityV1::new(
         original.identity().task_id().clone(),
@@ -764,33 +769,35 @@ fn validate_failure(
     failure: &VerifiedWorkRetryFailureV1,
 ) -> Result<(), ApplicationProblem> {
     if failure.selector != command.failure || failure.evidence_digest.validate().is_err() {
-        return Err(conflict_problem(
-            "application.work-retry.failure-conflict",
-            "The resolved failure does not authorize this Work retry.",
-        ));
+        return Err(ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.failure-conflict").to_owned(),
+            message: ("The resolved failure does not authorize this Work retry.").to_owned(),
+        }));
     }
     if command.failure.cause == WorkRetryCauseV1::RestartRecoveryRequired {
         let WorkRecoveryStateV1::RecoveryRequired { observed_at, .. } = original.recovery() else {
-            return Err(conflict_problem(
-                "application.work-retry.recovery-conflict",
-                "The original Work attempt no longer requires restart recovery.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-retry.recovery-conflict").to_owned(),
+                message: ("The original Work attempt no longer requires restart recovery.")
+                    .to_owned(),
+            }));
         };
         if original.state() != WorkAttemptStateV1::RecoveryRequired
             || observed_at != &failure.observed_at
         {
-            return Err(conflict_problem(
-                "application.work-retry.recovery-conflict",
-                "The restart recovery evidence no longer matches the original attempt.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-retry.recovery-conflict").to_owned(),
+                message: ("The restart recovery evidence no longer matches the original attempt.")
+                    .to_owned(),
+            }));
         }
         return Ok(());
     }
     let Some(terminal) = original.terminal() else {
-        return Err(conflict_problem(
-            "application.work-retry.original-not-terminal",
-            "A runtime failure retry requires terminal evidence.",
-        ));
+        return Err(ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.original-not-terminal").to_owned(),
+            message: ("A runtime failure retry requires terminal evidence.").to_owned(),
+        }));
     };
     let (digest, observed_at, eligible) = match terminal {
         WorkTerminalEvidenceV1::Failed {
@@ -811,10 +818,11 @@ fn validate_failure(
         } => (evidence_digest, observed_at, false),
     };
     if !eligible || digest != &failure.evidence_digest || observed_at != &failure.observed_at {
-        return Err(conflict_problem(
-            "application.work-retry.runtime-evidence-conflict",
-            "The runtime failure no longer matches the original terminal receipt.",
-        ));
+        return Err(ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.runtime-evidence-conflict").to_owned(),
+            message: ("The runtime failure no longer matches the original terminal receipt.")
+                .to_owned(),
+        }));
     }
     Ok(())
 }
@@ -834,17 +842,6 @@ fn retry_receipt_problem(_error: ApplicationContractError) -> ApplicationProblem
     })
 }
 
-fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
-}
-
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
 }
@@ -852,10 +849,10 @@ fn not_found_problem() -> ApplicationProblem {
 fn evidence_problem(error: WorkRetryEvidenceErrorV1) -> ApplicationProblem {
     match error {
         WorkRetryEvidenceErrorV1::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkRetryEvidenceErrorV1::Conflict => conflict_problem(
-            "application.work-retry.failure-conflict",
-            "The Work retry failure evidence changed.",
-        ),
+        WorkRetryEvidenceErrorV1::Conflict => ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.failure-conflict").to_owned(),
+            message: ("The Work retry failure evidence changed.").to_owned(),
+        }),
         WorkRetryEvidenceErrorV1::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-retry.evidence-unavailable".to_owned(),
             message: "The Work retry failure evidence authority is unavailable.".to_owned(),
@@ -866,20 +863,22 @@ fn evidence_problem(error: WorkRetryEvidenceErrorV1) -> ApplicationProblem {
 fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
     match error {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkAttemptStorageError::CapacityExceeded => conflict_problem(
-            "application.work-retry.capacity-exhausted",
-            "Work retry capacity is exhausted.",
-        ),
-        WorkAttemptStorageError::ReservationFenced => conflict_problem(
-            "application.work-retry.reservation-fenced",
-            "The Work run does not currently admit a retry reservation.",
-        ),
+        WorkAttemptStorageError::CapacityExceeded => ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.capacity-exhausted").to_owned(),
+            message: ("Work retry capacity is exhausted.").to_owned(),
+        }),
+        WorkAttemptStorageError::ReservationFenced => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-retry.reservation-fenced").to_owned(),
+                message: ("The Work run does not currently admit a retry reservation.").to_owned(),
+            })
+        }
         WorkAttemptStorageError::AttemptConflict
         | WorkAttemptStorageError::RunAdmissionConflict
-        | WorkAttemptStorageError::FenceConflict => conflict_problem(
-            "application.work-retry.conflict",
-            "The Work retry authority changed.",
-        ),
+        | WorkAttemptStorageError::FenceConflict => ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.conflict").to_owned(),
+            message: ("The Work retry authority changed.").to_owned(),
+        }),
         WorkAttemptStorageError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-retry.unavailable".to_owned(),
             message: "The Work retry authority is unavailable.".to_owned(),
@@ -892,10 +891,10 @@ fn effect_storage_problem(error: WorkAttemptEffectStorageErrorV1) -> Application
         WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkAttemptEffectStorageErrorV1::Conflict => conflict_problem(
-            "application.work-retry.effect-conflict",
-            "The original Work attempt effect receipt changed.",
-        ),
+        WorkAttemptEffectStorageErrorV1::Conflict => ApplicationProblem::conflict(SafeDiagnostic {
+            code: ("application.work-retry.effect-conflict").to_owned(),
+            message: ("The original Work attempt effect receipt changed.").to_owned(),
+        }),
         WorkAttemptEffectStorageErrorV1::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "application.work-retry.effect-unavailable".to_owned(),

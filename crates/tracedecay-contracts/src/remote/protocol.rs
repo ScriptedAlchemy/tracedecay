@@ -555,14 +555,12 @@ pub fn remote_protocol_problem(
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
         },
-        RemoteProtocolFailureV1::AuthorityReachable => ApplicationProblem::Conflict {
-            diagnostic: safe_diagnostic(
+        RemoteProtocolFailureV1::AuthorityReachable => {
+            ApplicationProblem::conflict(safe_diagnostic(
                 "remote.authority_reachable",
                 "Offline capture is rejected while the owning authority is reachable",
-            )?,
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+            )?)
+        }
         RemoteProtocolFailureV1::SpoolSaturated => ApplicationProblem::Saturated {
             diagnostic: safe_diagnostic(
                 "remote.spool_saturated",

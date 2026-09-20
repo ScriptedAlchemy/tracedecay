@@ -34,8 +34,8 @@ pub use capacity::{
     WorkAttemptCapacityVerdictV1,
 };
 use problem::{
-    conflict_problem, contract_problem, denied_problem, list_page_contract_problem,
-    not_found_problem, stale_cursor_problem, storage_problem,
+    contract_problem, denied_problem, list_page_contract_problem, not_found_problem,
+    stale_cursor_problem, storage_problem,
 };
 pub use product_admission::WorkProductAttemptServiceV1;
 pub(crate) use product_admission::{
@@ -576,10 +576,10 @@ where
             return if request.request_id() == &command.request_id {
                 Ok(attempt)
             } else {
-                Err(conflict_problem(
-                    "application.work-attempt.cancellation-conflict",
-                    "A different cancellation request is already recorded.",
-                ))
+                Err(ApplicationProblem::conflict(SafeDiagnostic {
+                    code: ("application.work-attempt.cancellation-conflict").to_owned(),
+                    message: ("A different cancellation request is already recorded.").to_owned(),
+                }))
             };
         }
         if !matches!(
@@ -588,10 +588,11 @@ where
                 | WorkAttemptStateV1::Running
                 | WorkAttemptStateV1::RecoveryRequired
         ) {
-            return Err(conflict_problem(
-                "application.work-attempt.not-cancellable",
-                "Only an open Work attempt can accept a cancellation request.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.not-cancellable").to_owned(),
+                message: ("Only an open Work attempt can accept a cancellation request.")
+                    .to_owned(),
+            }));
         }
         let request = WorkCancellationRequestV1::new(command.request_id, command.occurred_at)
             .map_err(contract_problem)?;
@@ -751,10 +752,10 @@ where
             .load(&authority, identity)
             .map_err(storage_problem)?;
         let WorkCancellationStateV1::Requested(request) = attempt.cancellation().clone() else {
-            return Err(conflict_problem(
-                "application.work-attempt.cancellation-not-requested",
-                "There is no pending cancellation request to acknowledge.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.cancellation-not-requested").to_owned(),
+                message: ("There is no pending cancellation request to acknowledge.").to_owned(),
+            }));
         };
         let acknowledgement = WorkCancellationAcknowledgementV1::new(request, acknowledged_at)
             .map_err(contract_problem)?;
@@ -789,10 +790,10 @@ where
             .map_err(storage_problem)?;
         let WorkCancellationStateV1::Acknowledged(acknowledgement) = attempt.cancellation().clone()
         else {
-            return Err(conflict_problem(
-                "application.work-attempt.cancellation-not-acknowledged",
-                "There is no acknowledged cancellation to escalate.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.cancellation-not-acknowledged").to_owned(),
+                message: ("There is no acknowledged cancellation to escalate.").to_owned(),
+            }));
         };
         let escalation = WorkCancellationEscalationV1::new(acknowledgement, escalated_at)
             .map_err(contract_problem)?;
@@ -880,10 +881,10 @@ where
             .load(&authority, identity)
             .map_err(storage_problem)?;
         if attempt.state() != WorkAttemptStateV1::RecoveryRequired {
-            return Err(conflict_problem(
-                "application.work-attempt.not-recovery-required",
-                "Only an attempt awaiting recovery can be failed this way.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.not-recovery-required").to_owned(),
+                message: ("Only an attempt awaiting recovery can be failed this way.").to_owned(),
+            }));
         }
         let digest = evidence.digest()?;
         let terminal = WorkTerminalEvidenceV1::failed(digest, evidence.observed_at)
@@ -1083,10 +1084,11 @@ pub fn require_registered_work_topology(
     if snapshot.topology() == registered_topology {
         return Ok(());
     }
-    Err(conflict_problem(
-        "application.work-attempt.topology-conflict",
-        "The Work attempt topology differs from the registered runtime authority.",
-    ))
+    Err(ApplicationProblem::conflict(SafeDiagnostic {
+        code: ("application.work-attempt.topology-conflict").to_owned(),
+        message: ("The Work attempt topology differs from the registered runtime authority.")
+            .to_owned(),
+    }))
 }
 
 fn terminal_for_outcome(

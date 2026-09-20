@@ -777,14 +777,10 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
         ConfigurationError::RevisionConflict | ConfigurationError::IdempotencyConflict => {
-            ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic {
-                    code: "configuration.conflict".to_owned(),
-                    message: "The configuration request conflicts with current state".to_owned(),
-                },
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![tracedecay_contracts::LegalAction::Refresh],
-            }
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: "configuration.conflict".to_owned(),
+                message: "The configuration request conflicts with current state".to_owned(),
+            })
         }
         ConfigurationError::PlanExpired | ConfigurationError::PlanStale => {
             ApplicationProblem::stale(SafeDiagnostic {

@@ -541,14 +541,10 @@ pub fn retained_surface_execution_problem(
         RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        RetainedSurfaceExecutionErrorV1::Conflict => ApplicationProblem::Conflict {
-            diagnostic: diagnostic(
-                "application.retained.conflict",
-                "The retained operation conflicts with current state.",
-            ),
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        RetainedSurfaceExecutionErrorV1::Conflict => ApplicationProblem::conflict(diagnostic(
+            "application.retained.conflict",
+            "The retained operation conflicts with current state.",
+        )),
         RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code,
             committed_receipt,

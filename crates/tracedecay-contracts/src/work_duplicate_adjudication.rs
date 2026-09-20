@@ -14,10 +14,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
-};
+use crate::{ApplicationProblem, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic};
 
 pub fn work_duplicate_adjudication_input_digest(
     command: &WorkDuplicateAdjudicationCommandV1,
@@ -436,25 +433,17 @@ fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> Applicatio
         WorkDuplicateAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic {
+        WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(SafeDiagnostic {
                 code: "application.work.duplicate-adjudication.revision-conflict".to_owned(),
                 message: "The duplicate Work adjudication changed after this command was prepared."
                     .to_owned(),
-            },
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+            }),
         WorkDuplicateAdjudicationStorageErrorV1::IdempotencyConflict => {
-            ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic {
+            ApplicationProblem::conflict(SafeDiagnostic {
                     code: "application.work.duplicate-adjudication.idempotency-conflict".to_owned(),
                     message: "The duplicate Work adjudication command identity was already used with different input."
                         .to_owned(),
-                },
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            }
+                })
         }
         WorkDuplicateAdjudicationStorageErrorV1::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {

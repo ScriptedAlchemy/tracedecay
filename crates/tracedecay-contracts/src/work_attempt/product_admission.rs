@@ -11,7 +11,7 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ApplicationProblem, RequestAdmission, RequestContext, WorkGraphReadPortV1,
+    ApplicationProblem, RequestAdmission, RequestContext, SafeDiagnostic, WorkGraphReadPortV1,
     WorkGraphReadRequestV1, WorkGraphReadV1, WorkProductApplicationErrorV1,
     WorkProductAttemptAdmissionErrorV1, WorkProductAttemptAdmissionOutcomeV1,
     WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1, WorkProductBindingV1,
@@ -22,8 +22,7 @@ use crate::{
 
 use super::{
     StartWorkAttemptCommand, WorkAttemptAdmissionKind, WorkAttemptStorageError,
-    WorkAttemptStoragePort, conflict_problem, contract_problem, denied_problem, not_found_problem,
-    storage_problem,
+    WorkAttemptStoragePort, contract_problem, denied_problem, not_found_problem, storage_problem,
 };
 
 const WORK_PRODUCT_START_INPUT_DIGEST_DOMAIN: &str =
@@ -214,18 +213,28 @@ pub(crate) fn product_admission_problem(
             })
         }
         WorkProductAttemptAdmissionErrorV1::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkProductAttemptAdmissionErrorV1::VersionConflict => conflict_problem(
-            "application.work-attempt.product-version-conflict",
-            "The canonical Work product graph changed before attempt admission.",
-        ),
-        WorkProductAttemptAdmissionErrorV1::IdentityConflict => conflict_problem(
-            "application.work-attempt.identity-conflict",
-            "The Work attempt identity was already used with different content.",
-        ),
-        WorkProductAttemptAdmissionErrorV1::IdempotencyConflict => conflict_problem(
-            "application.work-attempt.idempotency-conflict",
-            "The Work attempt command identity was already used with different input.",
-        ),
+        WorkProductAttemptAdmissionErrorV1::VersionConflict => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.product-version-conflict").to_owned(),
+                message: ("The canonical Work product graph changed before attempt admission.")
+                    .to_owned(),
+            })
+        }
+        WorkProductAttemptAdmissionErrorV1::IdentityConflict => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.identity-conflict").to_owned(),
+                message: ("The Work attempt identity was already used with different content.")
+                    .to_owned(),
+            })
+        }
+        WorkProductAttemptAdmissionErrorV1::IdempotencyConflict => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.idempotency-conflict").to_owned(),
+                message:
+                    ("The Work attempt command identity was already used with different input.")
+                        .to_owned(),
+            })
+        }
         WorkProductAttemptAdmissionErrorV1::CapacityExceeded => ApplicationProblem::Saturated {
             diagnostic: crate::SafeDiagnostic {
                 code: "application.work-attempt.capacity-exhausted".to_owned(),
@@ -286,10 +295,12 @@ where
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
         admit_product_attempt_request(context, binding, command.occurred_at)?;
         if command.execution_snapshot.topology() != topology {
-            return Err(conflict_problem(
-                "application.work-attempt.topology-conflict",
-                "The Work attempt topology does not match the registered runtime authority.",
-            ));
+            return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.topology-conflict").to_owned(),
+                message:
+                    ("The Work attempt topology does not match the registered runtime authority.")
+                        .to_owned(),
+            }));
         }
         let authority = crate::work::work_authority(context)?;
         let identity = WorkAttemptIdentityV1::new(
@@ -307,10 +318,12 @@ where
                 if admission_kind != WorkAttemptAdmissionKind::Ordinary
                     || !replayed_attempt_matches_command(context, &command, &identity, &existing)?
                 {
-                    return Err(conflict_problem(
-                        "application.work-attempt.identity-conflict",
-                        "The Work attempt identity was already used with different content.",
-                    ));
+                    return Err(ApplicationProblem::conflict(SafeDiagnostic {
+                        code: ("application.work-attempt.identity-conflict").to_owned(),
+                        message:
+                            ("The Work attempt identity was already used with different content.")
+                                .to_owned(),
+                    }));
                 }
                 return Ok(existing);
             }
@@ -465,10 +478,13 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
         }
         WorkProductApplicationErrorV1::TimedOut => ApplicationProblem::timed_out_before_admission(),
         WorkProductApplicationErrorV1::VersionConflict
-        | WorkProductApplicationErrorV1::RevisionConflict => conflict_problem(
-            "application.work-attempt.product-version-conflict",
-            "The canonical Work product graph changed before attempt admission.",
-        ),
+        | WorkProductApplicationErrorV1::RevisionConflict => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.product-version-conflict").to_owned(),
+                message: ("The canonical Work product graph changed before attempt admission.")
+                    .to_owned(),
+            })
+        }
         WorkProductApplicationErrorV1::EvidenceContinuationStale => {
             ApplicationProblem::stale(crate::SafeDiagnostic {
                 code: "application.work-attempt.product-evidence-continuation-stale".to_owned(),
@@ -477,10 +493,12 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
                         .to_owned(),
             })
         }
-        WorkProductApplicationErrorV1::IdempotencyConflict => conflict_problem(
-            "application.work-attempt.product-idempotency-conflict",
-            "The canonical Work product admission identity conflicts.",
-        ),
+        WorkProductApplicationErrorV1::IdempotencyConflict => {
+            ApplicationProblem::conflict(SafeDiagnostic {
+                code: ("application.work-attempt.product-idempotency-conflict").to_owned(),
+                message: ("The canonical Work product admission identity conflicts.").to_owned(),
+            })
+        }
         WorkProductApplicationErrorV1::InvalidRequest => invalid_start_problem(),
         // Named separately from a generic invalid command because the cause
         // and the remedy are both specific: the selection covers a slice of

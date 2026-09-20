@@ -47,6 +47,29 @@ fn invalid_request_without_action_offers_no_recovery() {
 }
 
 #[test]
+fn conflict_retries_only_after_revalidate_and_refresh() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.conflict".to_owned(),
+        message: "The request conflicts with current state.".to_owned(),
+    };
+    let problem = ApplicationProblem::conflict(diagnostic.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::Conflict {
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        }
+    );
+    assert_eq!(
+        problem.safe_message(),
+        "The request conflicts with current state."
+    );
+    assert_eq!(problem.reason_code(), "application.conflict");
+}
+
+#[test]
 fn reset_required_is_a_distinct_non_retryable_terminal() {
     let problem = ApplicationProblem::reset_required(
         SafeDiagnostic::new("store.reset_required", "The store must be reset.")

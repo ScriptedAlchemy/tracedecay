@@ -198,14 +198,12 @@ pub(super) fn invocation_contract_problem(
                 "The daemon rejected the application request",
             )?)
         }
-        tracedecay_contracts::InvocationError::Conflict => ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic::new(
+        tracedecay_contracts::InvocationError::Conflict => {
+            ApplicationProblem::conflict(SafeDiagnostic::new(
                 "application.surface.conflict",
                 "The application request conflicts with current state",
-            )?,
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+            )?)
+        }
         tracedecay_contracts::InvocationError::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic::new(
                 "application.surface.unavailable",

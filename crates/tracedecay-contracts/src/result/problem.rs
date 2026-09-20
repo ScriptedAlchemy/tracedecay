@@ -830,6 +830,15 @@ impl ApplicationProblem {
         }
     }
 
+    /// Conflict the caller resolves by refreshing. Retries only after revalidate.
+    pub fn conflict(diagnostic: SafeDiagnostic) -> Self {
+        Self::Conflict {
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        }
+    }
+
     pub fn reset_required(diagnostic: SafeDiagnostic) -> Self {
         Self::ResetRequired {
             diagnostic,
