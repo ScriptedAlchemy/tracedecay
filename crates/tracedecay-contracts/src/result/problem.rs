@@ -716,6 +716,19 @@ impl ApplicationProblem {
         }
     }
 
+    /// Conflict that must be revalidated. Retry is `AfterRevalidate` and the
+    /// only legal action is `Refresh`.
+    pub fn conflict(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Conflict {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        }
+    }
+
     pub fn cancelled(stage: CancellationStage) -> Result<Self, ApplicationContractError> {
         let problem = Self::Cancelled {
             stage,

@@ -296,7 +296,7 @@ where
             .inspect(&authority, &command, scan_started_at, scan_deadline)
             .map_err(evidence_problem)?;
         if !evidence.validate_for(&command, scan_started_at, scan_deadline) {
-            return Err(conflict_problem(
+            return Err(ApplicationProblem::conflict(
                 "application.work-leak.evidence-conflict",
                 "The bounded leak scan did not prove a valid verdict.",
             ));
@@ -345,23 +345,12 @@ fn invalid_problem() -> ApplicationProblem {
     }
 }
 
-fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
-}
-
 fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
     match error {
         WorkLeakEvidenceErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkLeakEvidenceErrorV1::Conflict => conflict_problem(
+        WorkLeakEvidenceErrorV1::Conflict => ApplicationProblem::conflict(
             "application.work-leak.evidence-conflict",
             "The Work leak evidence changed during inspection.",
         ),
@@ -382,11 +371,11 @@ fn storage_problem(error: WorkLeakAdjudicationStorageErrorV1) -> ApplicationProb
         WorkLeakAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkLeakAdjudicationStorageErrorV1::RevisionConflict => conflict_problem(
+        WorkLeakAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(
             "application.work-leak.revision-conflict",
             "The Work leak adjudication changed before publication.",
         ),
-        WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => conflict_problem(
+        WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => ApplicationProblem::conflict(
             "application.work-leak.idempotency-conflict",
             "The Work leak command identity was already used with different input.",
         ),

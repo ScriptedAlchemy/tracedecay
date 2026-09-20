@@ -415,25 +415,15 @@ fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> Applicatio
         WorkDuplicateAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic {
-                code: "application.work.duplicate-adjudication.revision-conflict".to_owned(),
-                message: "The duplicate Work adjudication changed after this command was prepared."
-                    .to_owned(),
-            },
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(
+            "application.work.duplicate-adjudication.revision-conflict",
+            "The duplicate Work adjudication changed after this command was prepared.",
+        ),
         WorkDuplicateAdjudicationStorageErrorV1::IdempotencyConflict => {
-            ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic {
-                    code: "application.work.duplicate-adjudication.idempotency-conflict".to_owned(),
-                    message: "The duplicate Work adjudication command identity was already used with different input."
-                        .to_owned(),
-                },
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            }
+            ApplicationProblem::conflict(
+                "application.work.duplicate-adjudication.idempotency-conflict",
+                "The duplicate Work adjudication command identity was already used with different input.",
+            )
         }
         WorkDuplicateAdjudicationStorageErrorV1::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {

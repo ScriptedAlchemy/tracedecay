@@ -208,7 +208,7 @@ where
             {
                 Ok(existing)
             } else {
-                Err(conflict_problem(
+                Err(ApplicationProblem::conflict(
                     "application.work-placement.identity-conflict",
                     "The Work run already holds a different placement.",
                 ))
@@ -347,11 +347,11 @@ fn storage_problem(error: WorkPlacementStorageError) -> ApplicationProblem {
 
 fn contract_problem(error: WorkPlacementContractError) -> ApplicationProblem {
     match error {
-        WorkPlacementContractError::AlreadyReleased => conflict_problem(
+        WorkPlacementContractError::AlreadyReleased => ApplicationProblem::conflict(
             "application.work-placement.already-released",
             "The Work placement was already released.",
         ),
-        WorkPlacementContractError::NonMonotonicTransition => conflict_problem(
+        WorkPlacementContractError::NonMonotonicTransition => ApplicationProblem::conflict(
             "application.work-placement.non-monotonic",
             "The Work placement transition is older than the published state.",
         ),
@@ -380,18 +380,14 @@ fn blocked_problem(
         .map(placement_blocker_name)
         .collect::<Vec<_>>()
         .join(", ");
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-placement.blocked".to_owned(),
-            message: format!("The Work placement is blocked by: {named}."),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
+    ApplicationProblem::conflict(
+        "application.work-placement.blocked",
+        format!("The Work placement is blocked by: {named}."),
+    )
 }
 
 fn authority_conflict_problem() -> ApplicationProblem {
-    conflict_problem(
+    ApplicationProblem::conflict(
         "application.work-placement.authority-conflict",
         "The Work placement authority version changed after this command was prepared.",
     )
@@ -399,17 +395,6 @@ fn authority_conflict_problem() -> ApplicationProblem {
 
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-}
-
-fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
 }
 
 /// Wire names for the closed blocker vocabulary. Kept as a match so a new
