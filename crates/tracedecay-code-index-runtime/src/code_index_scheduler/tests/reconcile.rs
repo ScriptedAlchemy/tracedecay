@@ -5215,24 +5215,36 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         .await
         .expect("scheduler handle");
     let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let lock_thread = std::thread::spawn(move || {
         let _guard = scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         held_tx.send(()).expect("signal scheduler lock held");
-        std::thread::sleep(Duration::from_millis(750));
+        release_rx.recv().expect("release scheduler lock");
     });
     held_rx.recv().expect("scheduler lock acquired");
 
-    let started = std::time::Instant::now();
+    // The contract is that shutdown never takes this mutex on its own behalf:
+    // it sets `shutting_down`, wakes the worker, and joins it, while the worker
+    // polls `try_lock` and returns cancelled the moment that flag is set. So
+    // shutdown must return while this thread still owns the mutex, and the
+    // proof is program order: the release below has not been sent yet.
+    //
+    // Wall time cannot state that. The worker's cancellation-observation
+    // latency is unbounded by design (it may be mid-slice in a blocking
+    // decode), so a clock-based budget measures host CPU, not the lock. A
+    // regression that makes shutdown wait on the mutex deadlocks here instead
+    // of failing, and the harness reports it as a timeout.
     registry.shutdown().await;
-    let elapsed = started.elapsed();
-    lock_thread.join().expect("scheduler lock holder joins");
 
     assert!(
-        elapsed < Duration::from_millis(250),
-        "shutdown waited {elapsed:?} for a synchronous scheduler lock instead of signalling its cooperative cancellation token"
+        !lock_thread.is_finished(),
+        "shutdown returned only after the scheduler lock holder let go, so it waited for a \
+         synchronous scheduler lock instead of signalling its cooperative cancellation token"
     );
+    release_tx.send(()).expect("release scheduler lock");
+    lock_thread.join().expect("scheduler lock holder joins");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
