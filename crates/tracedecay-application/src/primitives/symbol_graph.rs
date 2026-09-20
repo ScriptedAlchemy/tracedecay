@@ -1095,7 +1095,7 @@ fn in_scope_parts(binding: Option<&CodeGraphSymbolBindingV1>, scope: &SymbolGrap
         return false;
     };
     scope.path_prefix.as_deref().is_none_or(|path_prefix| {
-        tracedecay_runtime_core::path_scope::path_matches_scope(file, Some(path_prefix))
+        tracedecay_domain::path_matches_scope(file, Some(path_prefix))
     })
 }
 

@@ -159,7 +159,7 @@ pub async fn analyze_test_risk(
                 && !n.skip_test_coverage
                 && !n.qualified_name.contains("::tests::")
         })
-        .filter(|n| tracedecay_runtime_core::path_scope::path_matches_scope(&n.file, path_prefix))
+        .filter(|n| tracedecay_domain::path_matches_scope(&n.file, path_prefix))
         .collect();
 
     let excluded_count = eligible_fns
@@ -208,7 +208,7 @@ pub async fn analyze_test_risk(
                 && n.skip_test_coverage
                 && !is_test_file(&n.file)
                 && is_source_file(&n.file)
-                && tracedecay_runtime_core::path_scope::path_matches_scope(&n.file, path_prefix)
+                && tracedecay_domain::path_matches_scope(&n.file, path_prefix)
                 && !n.qualified_name.contains("::tests::")
         })
         .count();
@@ -342,7 +342,7 @@ pub fn verified_test_evidence(
                     .into_iter()
                     .map(|file| file.logical_path)
                     .filter(|path| {
-                        tracedecay_runtime_core::path_scope::path_matches_scope(path, Some(prefix))
+                        tracedecay_domain::path_matches_scope(path, Some(prefix))
                     })
                     .collect::<HashSet<_>>()
             })

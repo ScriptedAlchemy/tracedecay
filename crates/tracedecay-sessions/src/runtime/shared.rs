@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tracedecay_domain::collapse_whitespace;
 use tracedecay_lcm::message_storage_text;
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
@@ -716,7 +717,7 @@ fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
 /// unfinished-run evidence) so a multi-line blob never smears a table, bullet,
 /// or stored column.
 pub fn one_line_truncated(text: &str, max: usize) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     if collapsed.chars().count() <= max {
         return collapsed;
     }
@@ -739,7 +740,7 @@ pub fn preview_truncated(text: &str, max_bytes: usize) -> String {
 /// Collapse whitespace and clip to a short preview suitable for a session title.
 pub fn preview_title(text: &str) -> String {
     const MAX_TITLE_CHARS: usize = 80;
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     if collapsed.chars().count() <= MAX_TITLE_CHARS {
         collapsed
     } else {

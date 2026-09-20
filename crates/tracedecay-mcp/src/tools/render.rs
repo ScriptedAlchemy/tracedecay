@@ -101,10 +101,8 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
     let original_chars = formatted.chars().count();
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
-        while end > 0 && !formatted.is_char_boundary(end) {
-            end -= 1;
-        }
-        let preview = &formatted[..end];
+        let preview = utf8_prefix_at_or_before(formatted, end);
+        end = preview.len();
         let mut envelope = serde_json::json!({
             "truncated": true,
             "original_chars": original_chars,

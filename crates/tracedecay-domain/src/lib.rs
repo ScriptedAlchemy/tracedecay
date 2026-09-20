@@ -26,6 +26,7 @@ pub mod retrieval;
 pub mod session;
 pub mod session_derived;
 pub mod source_path_policy;
+pub mod text;
 pub mod work;
 pub mod work_duplicate_adjudication;
 pub mod work_execution_snapshot;
@@ -67,8 +68,8 @@ pub use code_intelligence::{
     is_cli_flag_token, is_commit_hash, is_commit_identifier_token, is_compiler_error_code_token,
     is_configuration_key_token, is_identifier_token, is_path_shape, is_path_token,
     is_qualified_name_token, is_runtime_error_code_token, is_technical_token_char,
-    is_tool_name_token, projection_batch_publication_digest, repository_path_matches_scope,
-    split_subtokens, technical_tokens, validate_code_logical_path,
+    is_tool_name_token, path_matches_scope, projection_batch_publication_digest,
+    repository_path_matches_scope, split_subtokens, technical_tokens, validate_code_logical_path,
 };
 pub use configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
@@ -381,6 +382,10 @@ pub use session_derived::{
     SessionDerivedEvidenceRecordV1, derive_session_evidence_from_occurrences,
 };
 pub use source_path_policy::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
+pub use text::{
+    collapse_whitespace, fold_control_characters, forward_slash_path, forward_slash_text,
+    utf8_prefix_at_or_before,
+};
 pub use work::{RuntimeEvidenceRef, WorkAuthority, WorkContractError, WorkVersion};
 pub use work_duplicate_adjudication::{
     MAX_WORK_DUPLICATE_REASON_BYTES_V1, WorkDuplicateAdjudicationCommandV1,

@@ -312,11 +312,8 @@ fn current_tracedecay_exe() -> Option<String> {
 fn current_tracedecay_exe_from(current: Option<&Path>) -> Option<String> {
     let current = current?;
     let stem = current.file_stem()?.to_str()?;
-    (stem == "tracedecay").then(|| normalize_bin_path(current))
-}
-
-fn normalize_bin_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    (stem == "tracedecay")
+        .then(|| tracedecay_domain::forward_slash_text(&current.to_string_lossy()))
 }
 
 /// How the `post-update` re-exec reacts to the binary-upgrade outcome.
@@ -497,7 +494,7 @@ fn post_update_binary(installed: Option<&Path>) -> tracedecay_domain::errors::Re
 fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> Option<String> {
     installed
         .filter(|path| path.exists())
-        .map(normalize_bin_path)
+        .map(tracedecay_domain::forward_slash_path)
         .or_else(|| current_tracedecay_exe_from(current))
 }
 
@@ -750,7 +747,7 @@ mod tests {
 
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
-        host_owns_canonical_component_set, install_pass_covers_tracked_agents, normalize_bin_path,
+        host_owns_canonical_component_set, install_pass_covers_tracked_agents,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
         prepare_post_update_lease, refresh_generated_plugins_at, restart_daemon_service_with,
         run_install_then_refresh,
@@ -1292,7 +1289,7 @@ mod tests {
 
         let resolved = post_update_binary(Some(&installed)).expect("installed path should resolve");
 
-        assert_eq!(resolved, normalize_bin_path(&installed));
+        assert_eq!(resolved, tracedecay_domain::forward_slash_path(&installed));
     }
 
     #[test]

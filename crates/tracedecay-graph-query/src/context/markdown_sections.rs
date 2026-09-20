@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 use tracedecay_code_extraction::markdown_structure::{
     MarkdownSectionStructure, parse_section_structure,
 };
+use tracedecay_domain::collapse_whitespace;
 
 use tracedecay_session_memory::response_handles::store_response_handle;
 
@@ -309,12 +310,6 @@ fn push_structure_lines(lines: &mut Vec<String>, structure: &Value) {
 
 fn field_str<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or_default()
-}
-
-/// Squashes newlines and runs of blanks so a multi-line preview stays on one
-/// summary line.
-fn collapse_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The section body: 1-based inclusive lines `start ..= end`, empty when the

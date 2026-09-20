@@ -217,25 +217,14 @@ const SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE: &str = "source-edit-symbol-eviden
 const SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE: &str = "source_edit_diagnostics_unavailable";
 
 fn sanitize_safe_diagnostic_text(value: &str, limit: usize) -> String {
-    let collapsed: String = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
+    let collapsed = tracedecay_domain::fold_control_characters(value);
     let trimmed = collapsed.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    let mut end = trimmed.len().min(limit);
-    while end > 0 && !trimmed.is_char_boundary(end) {
-        end -= 1;
-    }
-    trimmed[..end].trim_end().to_owned()
+    tracedecay_domain::utf8_prefix_at_or_before(trimmed, limit)
+        .trim_end()
+        .to_owned()
 }
 
 fn source_edit_kernel_cause(error: &TraceDecayError) -> (String, String) {

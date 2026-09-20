@@ -211,10 +211,7 @@ impl ProjectFiles {
 
 /// Project-relative, forward-slashed rendering of `path`.
 pub(super) fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    tracedecay_domain::forward_slash_path(path.strip_prefix(root).unwrap_or(path))
 }
 
 /// Lexical `.`/`..` normalization.

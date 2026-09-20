@@ -97,7 +97,7 @@ impl ProjectPath {
     }
 
     pub fn relative_path_string(&self) -> String {
-        self.relative_path.to_string_lossy().replace('\\', "/")
+        tracedecay_domain::forward_slash_path(&self.relative_path)
     }
 }
 
