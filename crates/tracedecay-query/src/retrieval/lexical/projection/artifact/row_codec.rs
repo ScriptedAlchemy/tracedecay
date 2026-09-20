@@ -58,13 +58,7 @@ const FIELD_LENGTH_ORDER: [LexicalFieldV1; 9] = [
     LexicalFieldV1::Documentation,
 ];
 
-const GRAIN_ORDER: [CodeSearchChunkGrainV1; 5] = [
-    CodeSearchChunkGrainV1::SymbolSignature,
-    CodeSearchChunkGrainV1::SymbolBody,
-    CodeSearchChunkGrainV1::SymbolMember,
-    CodeSearchChunkGrainV1::FilePreamble,
-    CodeSearchChunkGrainV1::FileWindow,
-];
+const GRAIN_ORDER: &[CodeSearchChunkGrainV1] = CodeSearchChunkGrainV1::ORDER.as_slice();
 
 const EXACT_TERM_KIND_ORDER: &[ExactTechnicalTermKindV1] =
     ExactTechnicalTermKindV1::ORDER.as_slice();
@@ -509,7 +503,7 @@ fn encode_binary(
     }
     put_varint(&mut out, row.anchor.source_span.start_byte);
     put_varint(&mut out, row.anchor.source_span.end_byte);
-    out.push(ordinal_of(&GRAIN_ORDER, &row.anchor.grain, "grain")?);
+    out.push(ordinal_of(GRAIN_ORDER, &row.anchor.grain, "grain")?);
     put_varint(&mut out, u64::from(row.anchor.ordinal));
     put_varint(&mut out, length_u64(row.exact_terms.len())?);
     for term in &row.exact_terms {
@@ -653,7 +647,7 @@ fn decode_binary(
         start_byte: cursor.take_varint()?,
         end_byte: cursor.take_varint()?,
     };
-    let grain = *from_ordinal(&GRAIN_ORDER, cursor.take_u8()?, "grain")?;
+    let grain = *from_ordinal(GRAIN_ORDER, cursor.take_u8()?, "grain")?;
     let ordinal = u32::try_from(cursor.take_varint()?).map_err(corrupt)?;
     let term_count = usize::try_from(cursor.take_varint()?).map_err(corrupt)?;
     if term_count > cursor.bytes.len() {

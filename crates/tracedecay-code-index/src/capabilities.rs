@@ -230,18 +230,13 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
             .iter()
             .map(|descriptor| descriptor.descriptor_revision.clone())
             .collect();
-        let mut available_grains = vec![
-            CodeSearchChunkGrainV1::SymbolSignature,
-            CodeSearchChunkGrainV1::SymbolBody,
-            CodeSearchChunkGrainV1::FilePreamble,
-            CodeSearchChunkGrainV1::FileWindow,
-        ];
-        if descriptors
+        let admit_members = descriptors
             .iter()
-            .any(|descriptor| descriptor.stable_member_spans)
-        {
-            available_grains.push(CodeSearchChunkGrainV1::SymbolMember);
-        }
+            .any(|descriptor| descriptor.stable_member_spans);
+        let mut available_grains: Vec<CodeSearchChunkGrainV1> = CodeSearchChunkGrainV1::ORDER
+            .into_iter()
+            .filter(|grain| *grain != CodeSearchChunkGrainV1::SymbolMember || admit_members)
+            .collect();
         available_grains.sort();
         available_grains.dedup();
 

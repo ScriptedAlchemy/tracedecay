@@ -181,6 +181,18 @@ pub enum CodeSearchChunkGrainV1 {
     FileWindow,
 }
 
+impl CodeSearchChunkGrainV1 {
+    /// Row-codec grain ordinal. Append new grains; reordering changes sealed
+    /// artifact bytes. Capability emission sorts a filtered copy of this list.
+    pub const ORDER: [Self; 5] = [
+        Self::SymbolSignature,
+        Self::SymbolBody,
+        Self::SymbolMember,
+        Self::FilePreamble,
+        Self::FileWindow,
+    ];
+}
+
 /// Where one chunk lives inside one generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
