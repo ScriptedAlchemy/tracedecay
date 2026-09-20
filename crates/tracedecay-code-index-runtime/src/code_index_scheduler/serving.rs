@@ -989,6 +989,35 @@ fn text_artifact_unavailable(error: impl std::fmt::Display) -> RetrievalPortErro
     RetrievalPortError::AuthorityUnavailable(error.to_string())
 }
 
+/// Name a held publication charge as the reader and shrink it to the reader
+/// budget. The bytes never leave the ledger, so the handoff is not a new
+/// admission and measured RSS cannot refuse a charge that was already held.
+fn reader_charge_from_held_reservation(
+    mut held: ResidentMemoryReservationV1,
+) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
+    let reader_budget =
+        u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1).map_err(|_| {
+            RetrievalPortError::Contract("text-artifact reader budget exceeds u64".to_owned())
+        })?;
+    if held.reserved_bytes() < reader_budget {
+        return Err(RetrievalPortError::Contract(format!(
+            "text-artifact publication charge {} is below the reader budget {reader_budget}",
+            held.reserved_bytes()
+        )));
+    }
+    let component = ResidentMemoryComponentIdV1::new("code-text-artifact-reader")
+        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    held.transfer_component(component, reader_budget)
+        .map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact reader charge could not take over its held reservation: reserved \
+                 {} measured {}",
+                error.reserved_bytes, error.measured_bytes
+            ))
+        })?;
+    Ok(held)
+}
+
 /// Durable text-artifact store bound to one worktree's generation store root.
 ///
 /// Publishes finalized staging artifacts under `code-text-artifacts-v1/` and
@@ -2659,10 +2688,17 @@ impl LatestCodeTextGenerationV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Box<CodeTextCloneSuccessorBuildV1>, RetrievalPortError> {
         let generation_id = &self.metadata.manifest().generation_id;
+        // The successor's working set stays at
+        // `CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1`. The charge is at least
+        // the reader budget so publication can transfer it onto the reader
+        // component. A fresh reader admission at that boundary is refused
+        // when graph replay is already on the RSS watermark.
+        let publication_charge = CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1
+            .max(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1);
         let reservation = self.text_artifact_store.reserve_resident_memory(
             generation_id,
             "code-text-clone-successor",
-            CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1,
+            publication_charge,
         )?;
         let artifacts_root = code_text_artifacts_root(self.text_artifact_store.store_root());
         ensure_private_text_artifacts_root(&artifacts_root)?;
@@ -3331,15 +3367,11 @@ impl LatestCodeTextGenerationV1 {
             &sealed_identity,
             control,
         )?;
-        // The builder and source are gone, so its transient reservation no
-        // longer owns bytes. Release it before sampling the reader admission;
-        // the reader guard then carries the still-live unmodeled baseline.
-        drop(build_reservation);
-        let reader_reservation = store.reserve_resident_memory(
-            &self.metadata.manifest().generation_id,
-            "code-text-artifact-reader",
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        )?;
+        // The reader is a smaller charge of the bytes this build already
+        // holds. Dropping the build reservation and reserving the reader
+        // again is a gap: an overlapping graph replay can sit on the process
+        // RSS watermark, and the new admission is then refused forever.
+        let reader_reservation = reader_charge_from_held_reservation(build_reservation)?;
         let final_path = code_text_artifact_path(store.store_root(), &descriptor)
             .map_err(text_artifact_unavailable)?;
         let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
@@ -3449,7 +3481,11 @@ impl LatestCodeTextGenerationV1 {
             .finish(source_receipt, control)
             .map_err(map_text_artifact_error)?;
         drop(build.builder.take());
-        drop(build.build_reservation.take());
+        let held_reservation = build.build_reservation.take().ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "clone-successor resident-memory charge disappeared before publication".to_owned(),
+            )
+        })?;
         let descriptor = self.text_artifact_store.publish_with_prior(
             &build.staging_path,
             &self.metadata.manifest().generation_id,
@@ -3457,11 +3493,7 @@ impl LatestCodeTextGenerationV1 {
             Some(&build.prior_descriptor),
             control,
         )?;
-        let reader_reservation = self.text_artifact_store.reserve_resident_memory(
-            &self.metadata.manifest().generation_id,
-            "code-text-artifact-reader",
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        )?;
+        let reader_reservation = reader_charge_from_held_reservation(held_reservation)?;
         let final_path =
             code_text_artifact_path(self.text_artifact_store.store_root(), &descriptor)
                 .map_err(text_artifact_unavailable)?;

@@ -478,6 +478,57 @@ fn reservation_tracks_exact_identity_and_releases_on_drop() {
 }
 
 #[test]
+fn transfer_keeps_retained_bytes_when_a_new_admission_cannot() {
+    let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
+    let build = key(
+        "project-a",
+        "worktree-a",
+        "generation-a",
+        "code-text-artifact-build",
+    );
+    let reader = key(
+        "project-a",
+        "worktree-a",
+        "generation-a",
+        "code-text-artifact-reader",
+    );
+    let mut held = authority
+        .reserve(build.clone(), bytes(80))
+        .expect("build reservation");
+    let _neighbor = authority
+        .reserve(
+            key("project-a", "worktree-a", "generation-a", "graph"),
+            bytes(20),
+        )
+        .expect("neighbor fills the ceiling");
+    let denied = authority
+        .reserve(reader.clone(), bytes(30))
+        .expect_err("a fresh reader admission does not fit beside the held build charge");
+    assert!(matches!(
+        denied,
+        ResidentMemoryAdmissionFailureV1::ReservationCeiling { .. }
+    ));
+
+    held.transfer_component(reader.component, 30)
+        .expect("the held charge moves without a new admission");
+    assert_eq!(held.key(), &reader);
+    assert_eq!(held.reserved_bytes(), 30);
+    let snapshot = authority.snapshot();
+    assert_eq!(snapshot.used_bytes, 50);
+    assert_eq!(snapshot.charge_for(&build), 0);
+    assert_eq!(snapshot.charge_for(&reader), 30);
+
+    let grown = held.transfer_component(reader.component, 40);
+    assert!(grown.is_err(), "a transfer cannot grow the held charge");
+    assert_eq!(held.reserved_bytes(), 30);
+    assert_eq!(authority.snapshot().charge_for(&reader), 30);
+
+    drop(held);
+    assert_eq!(authority.snapshot().used_bytes, 20);
+    assert_eq!(authority.snapshot().charge_for(&reader), 0);
+}
+
+#[test]
 fn rejection_reports_final_used_requested_and_limit_bytes() {
     let authority = Arc::new(ProcessResidentMemoryV1::new(bytes(100)));
     let _held = authority
