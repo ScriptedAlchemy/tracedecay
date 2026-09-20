@@ -400,15 +400,7 @@ impl ManagedSkill {
         let mut support_files = self.support_files.iter().collect::<Vec<_>>();
         support_files.sort_by(|left, right| left.path.cmp(&right.path));
         for support in support_files {
-            let key = support
-                .path
-                .components()
-                .filter_map(|component| match component {
-                    std::path::Component::Normal(part) => Some(part.to_string_lossy()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("/");
+            let key = support_file_hash_key(&support.path);
             hasher.update(b"\0file:");
             hasher.update(key.as_bytes());
             hasher.update(b"\0");
@@ -425,14 +417,7 @@ impl ManagedSkill {
     fn render_materialized_skill_markdown_with_hash(&self, package_hash: &str) -> Result<String> {
         let name = native_skill_name(&self.metadata.id);
         let description = &self.metadata.routing_description;
-        {
-            let native_only = format!(
-                "---\nname: {name}\ndescription: {}\n---\n\n{}\n",
-                frontmatter_string(description),
-                self.body_markdown
-            );
-            validate_native_skill_markdown(&native_only)?;
-        }
+        self.render_native_skill_markdown()?;
 
         let mut output = String::new();
         output.push_str("---\n");
@@ -471,15 +456,7 @@ impl ManagedSkill {
         hasher.update(b"\0");
         hasher.update(self.body_markdown.as_bytes());
         for file in &self.support_files {
-            let key = file
-                .path
-                .components()
-                .filter_map(|component| match component {
-                    std::path::Component::Normal(part) => Some(part.to_string_lossy()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("/");
+            let key = support_file_hash_key(&file.path);
             hasher.update(b"\0file:");
             hasher.update(key.as_bytes());
             hasher.update(b"\0");
@@ -487,6 +464,16 @@ impl ManagedSkill {
         }
         encode_tagged_lowercase_hex("sha256:", &hasher.finalize())
     }
+}
+
+fn support_file_hash_key(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[doc(hidden)]

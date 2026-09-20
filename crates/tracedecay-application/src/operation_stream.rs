@@ -55,10 +55,6 @@ static OPERATION_EVENT_PROBLEM_CONTRACT: LazyLock<ResultContractRef> = LazyLock:
     .unwrap_or_else(|_| panic!("the operation-event problem contract is static"))
 });
 
-fn current_micros_for_cancellation() -> UtcMicros {
-    now_micros()
-}
-
 /// Stable operation identity. The originating authorized request owns the
 /// identity; paths, labels, and client-selected payloads never participate.
 #[derive(
@@ -1087,7 +1083,7 @@ impl OperationEventAuthority {
         if !already_requested {
             record
                 .cancellation
-                .send_replace(Some(current_micros_for_cancellation()));
+                .send_replace(Some(now_micros()));
         }
         Ok(if already_requested {
             OperationCancelOutcome::AlreadyRequested

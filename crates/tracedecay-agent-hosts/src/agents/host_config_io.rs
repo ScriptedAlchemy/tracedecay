@@ -168,30 +168,6 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(backup_path))
 }
 
-/// Restore a config file from its backup. Prints instructions for manual
-/// recovery if the restore itself fails.
-pub fn restore_config_backup(original: &Path, backup: &Path) {
-    match std::fs::copy(backup, original) {
-        Ok(_) => {
-            eprintln!(
-                "\x1b[33m⚠\x1b[0m  Restored {} from backup",
-                original.display()
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "\x1b[31m✗\x1b[0m Failed to auto-restore {} from backup: {e}",
-                original.display()
-            );
-            eprintln!(
-                "  Manual recovery: cp '{}' '{}'",
-                backup.display(),
-                original.display()
-            );
-        }
-    }
-}
-
 /// Write a JSON value to a file via atomic rename.
 ///
 /// The caller is responsible for creating the backup via
@@ -699,16 +675,6 @@ pub(super) fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
             intent_path.display()
         ),
     })
-}
-
-/// Write a JSON value to a file with pretty formatting.
-/// Creates a backup, writes atomically, and restores on failure.
-#[hotpath::measure(label = "agent_hosts.agents.config.write_json")]
-pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
-    let backup = backup_config_file(path)?;
-    safe_write_json_file(path, value, backup.as_deref())?;
-    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", path.display());
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1306,42 +1272,6 @@ fn parse_toml_config(path: &Path, contents: &str) -> Result<toml::Value> {
         ),
     })?;
     Ok(toml::Value::Table(table))
-}
-
-/// Copy `path` to `<path>.bak` if it exists. Used before overwriting a user
-/// config so an unexpected change is recoverable (issue #63).
-fn backup_file(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut backup = path.as_os_str().to_owned();
-    backup.push(".bak");
-    let backup = std::path::PathBuf::from(backup);
-    std::fs::copy(path, &backup).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to back up {} to {}: {e}",
-            path.display(),
-            backup.display()
-        ),
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Backed up {} to {}",
-        path.display(),
-        backup.display()
-    );
-    Ok(())
-}
-
-/// Write a TOML value to a file, backing up any existing file first.
-#[hotpath::measure(label = "agent_hosts.agents.config.write_toml")]
-pub fn write_toml_file(path: &Path, value: &toml::Value) -> Result<()> {
-    backup_file(path)?;
-    let contents = toml::to_string_pretty(value).unwrap_or_else(|_| String::new());
-    std::fs::write(path, contents).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })?;
-    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", path.display());
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

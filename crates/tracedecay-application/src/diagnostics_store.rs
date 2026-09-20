@@ -1042,10 +1042,10 @@ impl<'a> DiagnosticsStore<'a> {
                     record.span.start_byte as i64,
                     record.span.end_byte as i64,
                     record.code.as_str(),
-                    severity_str(record.severity),
+                    diagnostic_severity_name(record.severity),
                     record.message.as_str(),
                     record.message_digest.as_str(),
-                    producer_kind_str(record.provenance.producer_kind),
+                    diagnostic_producer_kind_name(record.provenance.producer_kind),
                     record.provenance.producer.as_str(),
                     record.provenance.analyzer_revision.as_str(),
                     record.provenance.configuration_revision.as_str(),
@@ -1054,7 +1054,7 @@ impl<'a> DiagnosticsStore<'a> {
                         .sanitization_receipt
                         .as_ref()
                         .map(tracedecay_domain::SanitizationReceiptId::as_str),
-                    evidence_class_str(record.evidence_class),
+                    diagnostic_evidence_class_name(record.evidence_class),
                     record.collected_at.0,
                     state,
                     state_generation,
@@ -1554,10 +1554,6 @@ fn state_columns(state: &DiagnosticRecordStateV1) -> (&'static str, Option<Strin
     (column, state_generation.map(str::to_owned))
 }
 
-fn severity_str(severity: DiagnosticSeverityV1) -> &'static str {
-    diagnostic_severity_name(severity)
-}
-
 fn parse_severity(value: &str, operation: &str) -> Result<DiagnosticSeverityV1> {
     parse_diagnostic_severity(value).ok_or_else(|| {
         db_message(
@@ -1567,10 +1563,6 @@ fn parse_severity(value: &str, operation: &str) -> Result<DiagnosticSeverityV1> 
     })
 }
 
-fn producer_kind_str(kind: DiagnosticProducerKindV1) -> &'static str {
-    diagnostic_producer_kind_name(kind)
-}
-
 fn parse_producer_kind(value: &str, operation: &str) -> Result<DiagnosticProducerKindV1> {
     parse_diagnostic_producer_kind(value).ok_or_else(|| {
         db_message(
@@ -1578,10 +1570,6 @@ fn parse_producer_kind(value: &str, operation: &str) -> Result<DiagnosticProduce
             format!("failed to parse diagnostic producer kind: {value}"),
         )
     })
-}
-
-fn evidence_class_str(class: DiagnosticEvidenceClassV1) -> &'static str {
-    diagnostic_evidence_class_name(class)
 }
 
 fn parse_evidence_class(value: &str, operation: &str) -> Result<DiagnosticEvidenceClassV1> {

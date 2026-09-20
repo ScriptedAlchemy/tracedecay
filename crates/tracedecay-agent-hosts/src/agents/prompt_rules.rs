@@ -201,12 +201,6 @@ pub(crate) fn standard_prompt_rules(marker: &str, options: &PromptRulesOptions) 
     block
 }
 
-/// The CLI-fallback paragraph every host's rules must carry; exposed so
-/// integration tests can assert parity across hosts.
-pub fn cli_fallback_paragraph() -> &'static str {
-    super::CLI_FALLBACK_PROMPT_RULES
-}
-
 /// End offset of a managed block whose marker heading ends at `search_from`:
 /// the next `\n## ` heading, the managed-skill index start marker, or EOF,
 /// whichever comes first.

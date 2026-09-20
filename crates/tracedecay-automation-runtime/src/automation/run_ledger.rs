@@ -211,14 +211,6 @@ impl tracedecay_automation::AutomationRunRecord for AutomationRunLedgerRecord {
     fn accepted_count(&self) -> usize {
         self.accepted_count
     }
-
-    fn validation_report(&self) -> Option<&Value> {
-        self.validation_report.as_ref()
-    }
-
-    fn applied_ops(&self) -> Option<&Value> {
-        self.applied_ops.as_ref()
-    }
 }
 
 pub fn run_ledger_path(dashboard_root: &Path) -> PathBuf {
