@@ -203,6 +203,7 @@ test-helpers = [
     "tracedecay-session-runtime/test-helpers",
     "tracedecay-sessions/test-helpers",
     "tracedecay-store-runtime/test-helpers",
+    "dep:tracedecay-temporal-query",
 ]
 
 test-transport = [
@@ -313,10 +314,11 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+# Only the `test-helpers` session-temporal bench fixture names this crate.
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", optional = true }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
@@ -358,7 +360,7 @@ toml = "1"
 regex = "1.12.3"
 filetime = "0.2"
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
 # test-util enables tokio::test(start_paused = true) so timer-driven unit
 # tests (daemon restart-grace windows) run on virtual time instead of real
 # sleeps.
