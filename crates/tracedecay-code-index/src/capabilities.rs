@@ -372,10 +372,7 @@ mod tests {
 
     use crate::languages::StaticLanguageRegistry;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-            .expect("valid digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn generation_manifest() -> CodeGenerationManifestV1 {
         let registry = StaticLanguageRegistry::new();

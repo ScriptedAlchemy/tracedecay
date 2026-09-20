@@ -338,8 +338,7 @@ pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1
         PolicyDecisionRef, TemporalState,
     };
     use tracedecay_domain::{
-        CommitId, ComponentVersion, ManifestDigest, ProjectId, RefId, RepositoryId, TemporalModeV1,
-        WorktreeId,
+        CommitId, ComponentVersion, ProjectId, RefId, RepositoryId, TemporalModeV1, WorktreeId,
     };
 
     fn id<T>(value: &str) -> T
@@ -349,9 +348,7 @@ pub(super) fn fixture_context_scout_evidence() -> ContextScoutEvidenceEnvelopeV1
     {
         T::try_from(value.to_owned()).unwrap()
     }
-    fn digest(character: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     let authorized_scope = ResolvedScope::new(
         id::<ProjectId>("project.scout"),

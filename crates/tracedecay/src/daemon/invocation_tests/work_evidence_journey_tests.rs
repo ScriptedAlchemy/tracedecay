@@ -38,10 +38,7 @@ where
     T::try_from(value.to_owned()).expect("Work evidence journey identity")
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-        .expect("Work evidence journey digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn product_task(task_id: TaskId) -> (WorkInitiativeV1, WorkPlanV1, WorkMilestoneV1, WorkItemV1) {
     let created_at = UtcMicros(10);

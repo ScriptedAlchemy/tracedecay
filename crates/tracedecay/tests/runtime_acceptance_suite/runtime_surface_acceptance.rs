@@ -3641,6 +3641,4 @@ fn cancelled_receipt(context: &RequestContext) -> OperationReceipt {
     receipt
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("manifest digest")
-}
+use tracedecay_domain::test_fixtures::digest;

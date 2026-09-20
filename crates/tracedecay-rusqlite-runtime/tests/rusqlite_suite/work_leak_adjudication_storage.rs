@@ -11,8 +11,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
-    CoverageStateV1, LeakOwnerClassV1, ManifestDigest, ProjectId, ProposalId, ProviderId, RefId,
-    RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
+    CoverageStateV1, LeakOwnerClassV1, ProjectId, ProposalId, ProviderId, RefId, RepositoryId,
+    RunId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
     WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1, WorkEgressPolicy,
     WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLeakKindV1,
@@ -35,9 +35,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn authority() -> WorkAuthority {
     WorkAuthority::new(

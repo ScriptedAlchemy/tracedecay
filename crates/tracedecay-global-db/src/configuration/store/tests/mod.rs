@@ -7,7 +7,7 @@ use super::{
     ConfigurationMutationAuthority, ConfigurationMutationReceiptV1,
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
     ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationValueV1,
-    GlobalDbConfigurationControlStore, ManifestDigest, TestConnection,
+    GlobalDbConfigurationControlStore, TestConnection,
 };
 use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
 use crate::configuration::registry::ConfigurationRegistry;
@@ -27,9 +27,7 @@ use tracedecay_domain::{
     AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256,
 };
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 #[test]
 fn incomplete_snapshot_requires_reset_instead_of_default_repair() {

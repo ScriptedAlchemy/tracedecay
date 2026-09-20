@@ -811,9 +811,7 @@ where
     T::try_from(value.to_owned()).expect("fixture identity")
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")

@@ -707,8 +707,8 @@ pub mod tests {
         WorkTaskSessionReauthorizationPortV1, WorkTaskSessionRequestV1,
     };
     use tracedecay_domain::{
-        ActorId, CalibrationProfileId, DiversityPolicy, FusionProfile, ManifestDigest,
-        PrivacyDomainId, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrieverKind,
+        ActorId, CalibrationProfileId, DiversityPolicy, FusionProfile, PrivacyDomainId,
+        RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrieverKind,
         ScoreDomainCalibrationV1, ScoreDomainId, SourceStoreId, UtcMicros, WorkGraphVersionV1,
         WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
     };
@@ -726,10 +726,7 @@ pub mod tests {
         T::try_from(value.to_owned()).expect("TaskSession fixture identity")
     }
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-            .expect("TaskSession fixture digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     pub fn context(scope: ResolvedScope) -> RequestContext {
         let grant = CapabilityGrantSnapshot::new(

@@ -8,8 +8,8 @@ use tracedecay_domain::feedback::{
     FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    AgentInstanceId, CodeGenerationId, CommitId, FileOccurrenceId, HostInstanceId, ManifestDigest,
-    ProjectId, RepositoryId, RetrievalAnchorId, SessionId, UtcMicros, WorktreeId,
+    AgentInstanceId, CodeGenerationId, CommitId, FileOccurrenceId, HostInstanceId, ProjectId,
+    RepositoryId, RetrievalAnchorId, SessionId, UtcMicros, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -20,10 +20,7 @@ where
     T::try_from(value.to_owned()).expect("fixture id is canonical")
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-        .expect("fixture digest is canonical")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scope() -> FeedbackScopeV1 {
     FeedbackScopeV1 {

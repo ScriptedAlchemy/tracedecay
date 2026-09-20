@@ -528,13 +528,11 @@ mod tests {
         NativeIntegrationPreviewProjectionV1, NativeIntegrationStatusProjectionV1,
     };
     use tracedecay_domain::{
-        ManifestDigest, NativeIntegrationPhaseV1, NativeIntegrationPreviewId,
-        NativeIntegrationTransactionId, ProjectId, RefId, RepositoryId,
+        NativeIntegrationPhaseV1, NativeIntegrationPreviewId, NativeIntegrationTransactionId,
+        ProjectId, RefId, RepositoryId,
     };
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn identity(scope_ref: &str) -> ObservabilityProducerIdentityV1 {
         ObservabilityProducerIdentityV1 {

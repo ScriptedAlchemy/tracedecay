@@ -38,11 +38,11 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,
-    ManifestDigest, MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, RetrievalAnchorId,
-    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkAcceptanceCriterionV1,
-    WorkCommandId, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
-    WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventSequenceV1,
-    WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorktreeId,
+    MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, RetrievalAnchorId, TaskEvidenceLinkId,
+    TaskEvidenceLinkV1, TaskId, UtcMicros, WorkAcceptanceCriterionV1, WorkCommandId,
+    WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
+    WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventSequenceV1, WorkProductGraphV1,
+    WorkTaskEvidenceCoverageV1, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -64,9 +64,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn binding() -> WorkProductBindingV1 {
     WorkProductBindingV1::new(

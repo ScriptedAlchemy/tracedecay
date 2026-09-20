@@ -2,7 +2,7 @@ use tracedecay_domain::configuration::{
     ProtectedChangePlan, RedactedConfigurationChangeV1, RollbackModeV1, ScopeControlOperationV1,
     SettingKey,
 };
-use tracedecay_domain::{AccessPolicyDigest, ManifestDigest, UtcMicros};
+use tracedecay_domain::{AccessPolicyDigest, UtcMicros};
 use tracedecay_store::configuration::{
     ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1,
 };
@@ -15,9 +15,7 @@ where
     T::try_from(value.to_owned()).expect("fixture id is canonical")
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 #[test]
 fn protected_plan_records_bind_the_redacted_plan_to_the_exact_operation() {

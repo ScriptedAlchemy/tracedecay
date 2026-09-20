@@ -26,7 +26,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, BrainId, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
-    BranchStackRevisionV1, CommitId, LocatorDigest, ManifestDigest, NativeIntegrationDirectionV1,
+    BranchStackRevisionV1, CommitId, LocatorDigest, NativeIntegrationDirectionV1,
     NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
     StackNodeId, UserProfileId, UtcMicros, WorktreeId, WorktreeInventoryEpoch,
     WorktreeInventorySnapshotId,
@@ -287,9 +287,7 @@ fn run_git(root: &Path, args: &[&str]) -> String {
         .to_owned()
 }
 
-fn digest(label: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", label.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 struct DeclaredStackRequest {
     project: ProjectId,

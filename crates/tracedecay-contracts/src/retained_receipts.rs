@@ -688,7 +688,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use tracedecay_domain::{
-        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
+        ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
     };
 
     use crate::retained_surfaces::{
@@ -704,10 +704,7 @@ mod tests {
 
     use super::session_refresh_effect_outcome;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-            .expect("valid digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn refresh_effect_settlement(
         reconciliation_required: bool,

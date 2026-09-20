@@ -688,9 +688,7 @@ mod invocation_tests {
         FeedbackFindingId, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackResultId,
         FeedbackScopeV1, ProviderEvaluationStateV1,
     };
-    use tracedecay_domain::{
-        CommitId, ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, WorktreeId,
-    };
+    use tracedecay_domain::{CommitId, ProjectId, RepositoryId, RetrievalAnchorId, WorktreeId};
 
     use super::{
         CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
@@ -841,7 +839,5 @@ mod invocation_tests {
         FeedbackCycleId::new("cycle.feedback-test").expect("cycle")
     }
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 }

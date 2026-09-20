@@ -9,8 +9,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ShardId, UtcMicros, VectorWatermark,
-    WorktreeId,
+    ActorId, ProjectId, RefId, RepositoryId, ShardId, UtcMicros, VectorWatermark, WorktreeId,
 };
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRoutingDispositionV1,
@@ -26,9 +25,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn evaluation_context_for(
     capability: CapabilityId,

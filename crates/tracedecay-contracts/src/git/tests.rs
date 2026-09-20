@@ -4,7 +4,7 @@ use tracedecay_domain::{
     ActorId, ComponentVersion, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1,
     GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1,
     GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, ManifestDigest, ProjectId, RefId, RepositoryId, RepositoryIndexSnapshotV1,
+    GitOperationStateV1, ProjectId, RefId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
     RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
@@ -29,9 +29,7 @@ where
     T::try_from(value.to_owned()).expect("fixture id")
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture oid")

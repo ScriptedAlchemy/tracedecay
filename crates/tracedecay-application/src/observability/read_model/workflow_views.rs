@@ -412,13 +412,10 @@ const fn required_names() -> [(&'static str, &'static str, &'static str); 11] {
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        ManifestDigest, ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RunId,
-        UtcMicros,
+        ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RunId, UtcMicros,
     };
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn envelope(id: &str, payload: ObservabilityPayloadV1) -> ObservabilityEnvelopeV1 {
         let event_kind = payload.event_kind().to_owned();

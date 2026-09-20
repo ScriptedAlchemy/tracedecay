@@ -22,9 +22,7 @@ use tracedecay_domain::{
     WorktreeId, canonical_sha256,
 };
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 /// A registry mount request whose store-authority fields match `identity`,
 /// stamping that identity's configuration and policy revisions for the

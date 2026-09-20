@@ -11,8 +11,8 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    UserProfileId, UtcMicros, WorktreeId,
+    ActorId, BrainId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision, UserProfileId,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -27,9 +27,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context(worktree: &str, suffix: &str) -> RequestContext {
     context_at("project.fixture", "repository.fixture", worktree, suffix)

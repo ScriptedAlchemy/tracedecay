@@ -9,7 +9,7 @@ use tracedecay_domain::configuration::{
     resolve_restrictive_capabilities,
 };
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, CapabilityId, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
+    AccessPolicyDigest, ActorId, CapabilityId, LocatorDigest, ProjectId, UtcMicros,
 };
 
 fn id<T>(value: &str) -> T
@@ -20,10 +20,7 @@ where
     T::try_from(value.to_owned()).expect("fixture id is canonical")
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-        .expect("fixture digest is canonical")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn locator_digest(byte: char) -> LocatorDigest {
     LocatorDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))

@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use tracedecay_contracts::{WorkPlacementStorageError, WorkPlacementStoragePort};
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
+    ActorId, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
     WorkPlacementBlockerV1, WorkPlacementIdentityV1, WorkPlacementKindV1,
     WorkPlacementObservationV1, WorkPlacementPreflightV1, WorkPlacementStateV1,
     WorkPlacementTargetV1, WorkPlacementV1, WorktreeId,
@@ -34,9 +34,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn authority(actor: &str) -> WorkAuthority {
     authority_in_worktree_with_policy(actor, "worktree.placement.storage", 'a')

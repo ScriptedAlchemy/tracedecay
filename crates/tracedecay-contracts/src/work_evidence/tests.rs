@@ -5,14 +5,14 @@ use std::sync::{
 };
 
 use tracedecay_domain::{
-    ActorId, AttemptId, BrainId, InitiativeId, ManifestDigest, MilestoneId,
-    ObservationSourceIdentityV1, ProjectId, ProviderId, RepositoryId, RetrievalAnchorId, RunId,
-    SessionId, SourceStoreId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UserProfileId,
-    UtcMicros, WorkAcceptanceCriterionV1, WorkAttemptIdentityV1, WorkGraphChangeV1,
-    WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
-    WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventSequenceV1, WorkProductGraphV1,
-    WorkProductSourceWatermarkV1, WorkProposalV1, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRouteDecisionV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorktreeId,
+    ActorId, AttemptId, BrainId, InitiativeId, MilestoneId, ObservationSourceIdentityV1, ProjectId,
+    ProviderId, RepositoryId, RetrievalAnchorId, RunId, SessionId, SourceStoreId,
+    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UserProfileId, UtcMicros,
+    WorkAcceptanceCriterionV1, WorkAttemptIdentityV1, WorkGraphChangeV1, WorkGraphVersionV1,
+    WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId,
+    WorkPlanV1, WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductSourceWatermarkV1,
+    WorkProposalV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRouteDecisionV1, WorkScoreKindV1,
+    WorkShapeAssessmentV1, WorkSizingV1, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -30,9 +30,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn selection() -> WorkProductSelectionScopeV1 {
     WorkProductSelectionScopeV1::relations(BTreeSet::from([

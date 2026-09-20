@@ -22,10 +22,10 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProjectId,
-    ProviderId, RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAuthority,
-    WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
+    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId, ProviderId,
+    RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAuthority, WorkEffectStateV1,
+    WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
     WorkPlacementIdentityV1, WorkPlacementKindV1, WorkPlacementObservationV1, WorkPlacementStateV1,
     WorkPlacementTargetV1, WorkPlacementV1, WorkProviderBackendV1, WorkProviderProtocol,
     WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy, WorkflowOperationRef, WorktreeId,
@@ -40,9 +40,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context(project: &str) -> RequestContext {
     let scope = ResolvedScope::new(

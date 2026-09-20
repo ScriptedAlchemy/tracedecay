@@ -2,20 +2,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
     AcceptanceCriterionId, AttemptId, InitiativeId, MAX_WORK_PRODUCT_EVENT_EVIDENCE,
-    MAX_WORK_PRODUCT_EVENT_RELATION_SCOPES, MAX_WORK_PRODUCT_EVENT_SOURCE_WATERMARKS,
-    ManifestDigest, MilestoneId, ProjectionGenerationId, ProposalId, RetrievalAnchorId, RunId,
-    SourceStoreId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros,
-    WorkAcceptanceCriterionV1, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkGraphChangeV1,
-    WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkPlanId,
-    WorkPlanV1, WorkProductAuthorizedRelationScopeV1, WorkProductContractError,
-    WorkProductEventContractError, WorkProductEventEvidenceV1, WorkProductEventInputV1,
-    WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1,
-    WorkProductProfileScopeV1, WorkProductProjectionBundleV1, WorkProductRelationV1,
-    WorkProductSourceWatermarkV1, WorkProjectionSequenceV1, WorkProposalDispositionV1,
-    WorkProposalV1, WorkProposedChildV1, WorkRelationReplanProposalV1, WorkRouteDecisionV1,
-    WorkRuntimeAttemptProjectionV1, WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1,
-    WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTaskEvidenceCoverageV1,
-    WorkTaskEvidenceV1, WorkTimelineLaneV1, canonical_json_bytes,
+    MAX_WORK_PRODUCT_EVENT_RELATION_SCOPES, MAX_WORK_PRODUCT_EVENT_SOURCE_WATERMARKS, MilestoneId,
+    ProjectionGenerationId, ProposalId, RetrievalAnchorId, RunId, SourceStoreId,
+    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkAcceptanceCriterionV1,
+    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkGraphChangeV1, WorkGraphVersionV1,
+    WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkPlanId, WorkPlanV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductContractError, WorkProductEventContractError,
+    WorkProductEventEvidenceV1, WorkProductEventInputV1, WorkProductEventPayloadV1,
+    WorkProductEventSequenceV1, WorkProductEventV1, WorkProductGraphV1, WorkProductProfileScopeV1,
+    WorkProductProjectionBundleV1, WorkProductRelationV1, WorkProductSourceWatermarkV1,
+    WorkProjectionSequenceV1, WorkProposalDispositionV1, WorkProposalV1, WorkProposedChildV1,
+    WorkRelationReplanProposalV1, WorkRouteDecisionV1, WorkRuntimeAttemptProjectionV1,
+    WorkRuntimeProjectionCoverageV1, WorkRuntimeProjectionV1, WorkScoreKindV1,
+    WorkShapeAssessmentV1, WorkSizingV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
+    WorkTimelineLaneV1, canonical_json_bytes,
 };
 
 fn id<T>(value: &str) -> T
@@ -26,9 +26,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn hierarchy() -> WorkHierarchyV1 {
     WorkHierarchyV1::new(

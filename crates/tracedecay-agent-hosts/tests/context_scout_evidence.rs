@@ -28,7 +28,7 @@ use tracedecay_domain::feedback::{
     ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ComponentVersion, ManifestDigest, ProjectId, RefId, RepositoryId,
+    CodeGenerationId, CommitId, ComponentVersion, ProjectId, RefId, RepositoryId,
     RetrievalAnchorId, SourceSpan, TemporalModeV1, UtcMicros, WorktreeId,
 };
 
@@ -40,9 +40,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(character: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn resolved_scope() -> ResolvedScope {
     ResolvedScope::new(

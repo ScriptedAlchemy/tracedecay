@@ -10,8 +10,8 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
-    ScopeSetRevision, UserProfileId, UtcMicros, WorktreeId,
+    ActorId, BrainId, LocatorDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
+    UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
@@ -147,9 +147,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context_for_actor(worktree: &str, suffix: &str, actor: &str) -> RequestContext {
     let scope = ResolvedScope::new(

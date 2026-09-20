@@ -8,7 +8,7 @@ use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    AccessPolicyDigest, CapabilityId, CommitId, ComponentVersion, LocatorDigest, ManifestDigest,
+    AccessPolicyDigest, CapabilityId, CommitId, ComponentVersion, LocatorDigest,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId, RepositoryId,
     ResolutionAuthorizationV1, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
     ScopeResolutionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
@@ -29,9 +29,7 @@ use tracedecay_store::{
 
 use super::*;
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn fixture() -> (SourceCommitV1, SourceBindingIdentityV1) {
     let definition = SourceDefinitionV1::new(

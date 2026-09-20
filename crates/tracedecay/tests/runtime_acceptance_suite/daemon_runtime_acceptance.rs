@@ -44,9 +44,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(character: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
     let scope = ResolvedScope::new(

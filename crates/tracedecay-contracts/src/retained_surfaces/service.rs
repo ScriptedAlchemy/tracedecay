@@ -779,7 +779,7 @@ mod tests {
         CapabilityGrantSnapshot, Deadline, EffectTermination, IdempotencyKey, ProblemTerminality,
         RequestId, ResolvedScope,
     };
-    use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_domain::{ActorId, ProjectId, RepositoryId, WorktreeId};
     use tracedecay_tool_catalog::EffectClass;
 
     struct ErrorMemoryPort(RetainedSurfaceExecutionErrorV1);
@@ -807,10 +807,7 @@ mod tests {
         T::try_from(value.to_owned()).expect("fixture identity is valid")
     }
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
-            .expect("fixture digest is valid")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn scope() -> ResolvedScope {
         ResolvedScope::new(

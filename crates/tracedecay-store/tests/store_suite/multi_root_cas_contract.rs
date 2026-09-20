@@ -1,11 +1,9 @@
-use tracedecay_domain::{ManifestDigest, ScopeSetId, ScopeSetRevision};
+use tracedecay_domain::{ScopeSetId, ScopeSetRevision};
 use tracedecay_store::runtime::{
     AuthorizedScopeSetRecordV1, ScopeSetCompareAndSwapV1, ScopeSetStoreContractError,
 };
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn record(revision: u64) -> AuthorizedScopeSetRecordV1 {
     AuthorizedScopeSetRecordV1::new(
