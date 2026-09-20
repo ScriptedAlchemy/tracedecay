@@ -595,27 +595,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             .map_err(|error| TranscriptPersistenceError::storage("commit transcript batch", error))
     }
 
-    /// Atomically upserts several transcript sessions (and their messages),
-    /// writing only the searchable `session_messages` projection, never
-    /// `lcm_raw_messages`, and then advances one shared parse cursor.
-    #[hotpath::skip]
-    pub async fn upsert_transcript_projection_batches(
-        &self,
-        batches: &[TranscriptBatch],
-        parse_offset_path: &str,
-        parse_offset: ParseOffset,
-    ) -> Result<(), String> {
-        self.upsert_transcript_batches_inner(
-            batches,
-            parse_offset_path,
-            parse_offset,
-            TranscriptWritePolicy::ProjectionOnly,
-            None,
-        )
-        .await
-        .map_err(|error| error.to_string())
-    }
-
     #[hotpath::measure(label = "sessions.store.transcript.write_batches", future = true)]
     async fn upsert_transcript_batches_inner(
         &self,
