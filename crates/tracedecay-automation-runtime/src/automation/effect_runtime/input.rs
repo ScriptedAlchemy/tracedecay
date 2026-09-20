@@ -103,16 +103,8 @@ fn project_skill_writer_input(
 }
 
 fn project_role(role: &str) -> Result<LcmRoleV1> {
-    match role {
-        "system" => Ok(LcmRoleV1::System),
-        "user" => Ok(LcmRoleV1::User),
-        "assistant" => Ok(LcmRoleV1::Assistant),
-        "tool" => Ok(LcmRoleV1::Tool),
-        "unknown" => Ok(LcmRoleV1::Unknown),
-        _ => Err(contract_error(format!(
-            "session reflector role is not registered: {role}"
-        ))),
-    }
+    LcmRoleV1::parse(role)
+        .ok_or_else(|| contract_error(format!("session reflector role is not registered: {role}")))
 }
 
 fn automation_run_request(

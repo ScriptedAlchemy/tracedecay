@@ -351,6 +351,68 @@ pub enum LcmRoleV1 {
     Unknown,
 }
 
+impl LcmRoleV1 {
+    /// Advertised order for MCP schemas. Labels are [`Self::as_str`], which is
+    /// the serde `snake_case` name, so the catalog cannot drift from the wire.
+    pub const WIRE: [&'static str; 5] = [
+        Self::System.as_str(),
+        Self::User.as_str(),
+        Self::Assistant.as_str(),
+        Self::Tool.as_str(),
+        Self::Unknown.as_str(),
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "tool" => Some(Self::Tool),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod lcm_role_wire_tests {
+    use serde_json::json;
+
+    use super::LcmRoleV1;
+
+    #[test]
+    fn role_labels_match_serde_and_reject_host_aliases() {
+        let roles = [
+            LcmRoleV1::System,
+            LcmRoleV1::User,
+            LcmRoleV1::Assistant,
+            LcmRoleV1::Tool,
+            LcmRoleV1::Unknown,
+        ];
+        let labels: Vec<&str> = roles.iter().copied().map(LcmRoleV1::as_str).collect();
+        assert_eq!(labels.as_slice(), LcmRoleV1::WIRE);
+        for role in roles {
+            assert_eq!(
+                serde_json::to_value(role).expect("role serializes"),
+                json!(role.as_str())
+            );
+            assert_eq!(LcmRoleV1::parse(role.as_str()), Some(role));
+        }
+        assert_eq!(LcmRoleV1::parse("developer"), None);
+        assert_eq!(LcmRoleV1::parse(" model"), None);
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LcmGrepRequestV1 {

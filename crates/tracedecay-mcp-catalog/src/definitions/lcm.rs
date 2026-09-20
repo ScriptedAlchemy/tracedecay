@@ -1,6 +1,7 @@
 //! LCM session-store and session health-baseline tool definitions.
 
 use serde_json::json;
+use tracedecay_contracts::retained_surfaces::LcmRoleV1;
 
 use super::{def, git_scope};
 use crate::ToolDefinition;
@@ -168,7 +169,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "role": {
                     "type": "string",
-                    "enum": ["system", "user", "assistant", "tool", "unknown"],
+                    "enum": LcmRoleV1::WIRE,
                     "description": "Optional raw-message role filter. When supplied, summary results are omitted."
                 },
                 "start_time": {

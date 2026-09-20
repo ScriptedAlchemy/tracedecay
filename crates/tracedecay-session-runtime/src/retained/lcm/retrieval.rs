@@ -29,7 +29,7 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use super::output;
 use super::{
     cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
-    role_name, session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
+    session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
 };
 use crate::retained::session_retrieval_unavailable_detail;
 use crate::session_retrieval::{
@@ -186,7 +186,7 @@ pub(super) async fn execute_grep(
     let message_type = message_type(request.message_type);
     let roles = request
         .role
-        .map(|role| vec![role_name(role).to_owned()])
+        .map(|role| vec![role.as_str().to_owned()])
         .unwrap_or_default();
     let start = request.start_time.as_ref().or(request.since.as_ref());
     let end = request.end_time.as_ref().or(request.until.as_ref());

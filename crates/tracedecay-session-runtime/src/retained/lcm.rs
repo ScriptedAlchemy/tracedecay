@@ -8,7 +8,7 @@ use tracedecay_contracts::retained_surfaces::{
     LcmDoctorHealthV1, LcmDoctorProjectionStateV1, LcmDoctorProjectionV1, LcmDoctorRequestV1,
     LcmDoctorResultV1, LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1,
     LcmLifecycleStatusV1, LcmLoadSessionRequestV1, LcmPayloadCoverageStateV1, LcmPayloadCoverageV1,
-    LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRedactionStatusV1, LcmRoleV1, LcmStatusRequestV1,
+    LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRedactionStatusV1, LcmStatusRequestV1,
     LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmTemporalModeV1,
     MessageRelationshipScopeV1, MessageTypeFilterV1, RetainedOutcomeStatusV1,
     RetainedSurfaceOperation, RetainedSurfaceResultV1, RetainedTimeFilterV1,
@@ -1010,16 +1010,6 @@ pub(super) fn message_type(value: Option<MessageTypeFilterV1>) -> SessionMessage
         MessageTypeFilterV1::All => SessionMessageType::All,
         MessageTypeFilterV1::DirectUser => SessionMessageType::DirectUser,
         MessageTypeFilterV1::ToolResult => SessionMessageType::ToolResult,
-    }
-}
-
-pub(super) const fn role_name(value: LcmRoleV1) -> &'static str {
-    match value {
-        LcmRoleV1::System => "system",
-        LcmRoleV1::User => "user",
-        LcmRoleV1::Assistant => "assistant",
-        LcmRoleV1::Tool => "tool",
-        LcmRoleV1::Unknown => "unknown",
     }
 }
 
