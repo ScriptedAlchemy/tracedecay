@@ -1052,15 +1052,6 @@ impl ChangedCodeChunkSetV1 {
         Ok((reused.len() as u64, reused_digest))
     }
 
-    /// Like [`Self::seal_reused_partition_refs`], but skips per-row identity
-    /// validation. Callers must pass already-validated manifest rows.
-    pub fn seal_reused_partition_refs_trusted(
-        reused: &[(&CodeSearchChunkId, &ContentDigest)],
-    ) -> Result<(u64, ManifestDigest), DomainError> {
-        let reused_digest = code_reused_partition_digest_refs_trusted(reused)?;
-        Ok((reused.len() as u64, reused_digest))
-    }
-
     /// Seal Arc-shared reuse from the parent full-replay commitment.
     ///
     /// Use at Arc-share publish only. Pair-list sealing stays on the mixed /

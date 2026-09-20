@@ -2,7 +2,7 @@
 //! partial-day boundary pages.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{CoverageStateV1, UtcMicros};
+use tracedecay_domain::CoverageStateV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::clock::now_micros;
