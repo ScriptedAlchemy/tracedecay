@@ -93,6 +93,8 @@ mod multi_str_replace_behavior_test;
 mod mutate_graph_test;
 mod node_behavior_test;
 #[cfg(feature = "test-transport")]
+mod outline_behavior_test;
+#[cfg(feature = "test-transport")]
 mod port_order_test;
 mod port_status_test;
 #[cfg(feature = "test-transport")]
@@ -148,6 +150,8 @@ mod work_resume_attempts_test;
 mod work_test;
 #[cfg(feature = "test-transport")]
 mod workflow_activate_definition_test;
+#[cfg(feature = "test-transport")]
+mod workflow_list_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod workflow_register_definition_test;
 

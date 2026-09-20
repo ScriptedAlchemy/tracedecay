@@ -1539,6 +1539,9 @@ mod configuration_idempotency_journey_test;
 mod configuration_protected_preview_journey_test;
 
 #[cfg(test)]
+mod configuration_set_behavior_test;
+
+#[cfg(test)]
 mod read_only_project_open_journey_test;
 
 #[cfg(test)]
