@@ -34,6 +34,7 @@ mod edit_test;
 #[cfg(feature = "test-transport")]
 mod expand_query_behavior;
 mod fact_store_remove_behavior_test;
+mod fact_store_search_behavior_test;
 #[cfg(feature = "test-transport")]
 mod fact_store_update_behavior_test;
 mod feedback_diagnostics_test;
