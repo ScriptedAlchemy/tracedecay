@@ -12,7 +12,10 @@
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, ScopeDimension};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, CatalogValidationError, ExecutableBindingRegistryV1, OperationId,
+    ScopeDimension,
+};
 
 use crate::McpCatalogError;
 use crate::ToolDefinition;
@@ -513,6 +516,52 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
     Ok(definitions)
+}
+
+pub(super) struct FamilyOperation {
+    pub operation_id: String,
+    pub name: String,
+    pub title: String,
+    pub description: String,
+}
+
+/// Project one executable registry into MCP tools. Callers own the transport
+/// prefix, title, and description; the registry owns the schema and effect.
+pub(super) fn project_executable_family(
+    registry: &ExecutableBindingRegistryV1,
+    operations: &[FamilyOperation],
+    incomplete: (&'static str, &'static str),
+    identity: (&'static str, &'static str),
+    missing: (&'static str, &'static str),
+) -> Result<Vec<ToolDefinition>, McpCatalogError> {
+    if registry.iter().count() != operations.len() {
+        return Err(catalog_invalid(incomplete.0, incomplete.1));
+    }
+    operations
+        .iter()
+        .map(|operation| {
+            let operation_id = OperationId::new(operation.operation_id.clone())
+                .map_err(|_| catalog_invalid(identity.0, identity.1))?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .ok_or_else(|| catalog_invalid(missing.0, missing.1))?;
+            Ok(ToolDefinition {
+                name: operation.name.clone(),
+                description: operation.description.clone(),
+                input_schema: binding.request_schema().body().clone(),
+                annotations: Some(json!({
+                    "readOnlyHint": binding.effect().is_read_only(),
+                    "title": operation.title,
+                })),
+                meta: None,
+            })
+        })
+        .collect()
+}
+
+fn catalog_invalid(field: &'static str, reason: &'static str) -> McpCatalogError {
+    CatalogValidationError::InvalidValue { field, reason }.into()
 }
 
 fn spawn_definition_worker(
