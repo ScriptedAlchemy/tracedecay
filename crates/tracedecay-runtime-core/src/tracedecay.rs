@@ -57,3 +57,24 @@ fn unix_micros_saturating(pre_epoch: i64) -> i64 {
         Err(_) => pre_epoch,
     }
 }
+
+/// Microseconds in `duration`, saturating to `u64::MAX` on overflow.
+pub fn saturating_duration_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::saturating_duration_micros;
+
+    #[test]
+    fn saturating_duration_micros_keeps_small_spans_and_clamps_overflow() {
+        assert_eq!(saturating_duration_micros(Duration::from_micros(7)), 7);
+        assert_eq!(
+            saturating_duration_micros(Duration::from_secs(u64::MAX)),
+            u64::MAX
+        );
+    }
+}

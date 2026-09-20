@@ -888,7 +888,7 @@ impl PrContextControls {
 }
 
 fn elapsed_micros(started: std::time::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).map_or(u64::MAX, |value| value)
+    tracedecay_runtime_core::tracedecay::saturating_duration_micros(started.elapsed())
 }
 
 fn pr_context_impact_snapshot(

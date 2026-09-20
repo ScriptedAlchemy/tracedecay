@@ -639,7 +639,7 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
             let invocation = (runtime.lsp_input)(request).await?;
             if !lsp_trigger_matches_invocation(trigger, &invocation) {
                 let duration_micros =
-                    u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+                    tracedecay_runtime_core::tracedecay::saturating_duration_micros(started_at.elapsed());
                 runtime.source_observations.observe_source_event(
                     &invocation.request.input,
                     FeedbackSourceEventV1::ArgumentRejected {
@@ -660,7 +660,7 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
             }
             let input = invocation.request.input.clone();
             let admission_duration_micros =
-                u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+                tracedecay_runtime_core::tracedecay::saturating_duration_micros(started_at.elapsed());
             runtime.source_observations.observe_source_event(
                 &input,
                 lsp_method_state_event(
@@ -672,7 +672,7 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
             );
             let result = Box::pin(runtime.run_once(invocation)).await;
             let duration_micros =
-                u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+                tracedecay_runtime_core::tracedecay::saturating_duration_micros(started_at.elapsed());
             let outcome = if result.is_ok() {
                 FeedbackOutcomeV1::Completed
             } else {

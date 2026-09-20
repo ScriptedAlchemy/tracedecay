@@ -440,7 +440,7 @@ pub(crate) fn measure_json_payload_bytes<T: Serialize + ?Sized>(value: &T) -> Op
 }
 
 pub(crate) fn elapsed_us(started: Instant) -> u64 {
-    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    tracedecay_runtime_core::tracedecay::saturating_duration_micros(started.elapsed())
 }
 
 fn duration_as_millis_u64(budget: Duration) -> u64 {
