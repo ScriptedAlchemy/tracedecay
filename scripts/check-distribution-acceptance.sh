@@ -917,9 +917,15 @@ if CARGO_NET_OFFLINE=true cargo check \
   2>"$test_api_stderr"; then
   die "production package exposed test-transport APIs"
 fi
-grep -Eq "no function or associated item named .*has_project_session_retrieval_service_for_test" \
-  "$test_api_stderr" ||
+# rustc words this refusal differently across releases ("no function or
+# associated item named" before 1.97, "no associated function or constant
+# named" from 1.97), so match the error code and the probed name.
+grep -Eq "error\[E0599\].*has_project_session_retrieval_service_for_test" \
+  "$test_api_stderr" || {
+  echo "distribution acceptance: test API probe stderr follows" >&2
+  tail -n 60 -- "$test_api_stderr" >&2
   die "test API probe failed for an unexpected reason"
+}
 
 binary=$(python3 "$repo/scripts/resolve-installed-binary.py" \
   "$install_root" \
