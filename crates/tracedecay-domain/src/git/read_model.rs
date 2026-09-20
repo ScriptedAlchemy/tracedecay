@@ -65,15 +65,6 @@ pub enum GitObjectFormatV1 {
     Sha256,
 }
 
-impl GitObjectFormatV1 {
-    pub const fn oid_hex_len(self) -> usize {
-        match self {
-            Self::Sha1 => 40,
-            Self::Sha256 => 64,
-        }
-    }
-}
-
 fn validate_git_oid(value: &str, field: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
         return Err(DomainError::Empty { field });
