@@ -96,6 +96,7 @@ mod project_list_test;
 #[cfg(feature = "test-transport")]
 mod project_search_behavior_test;
 mod rank_behavior_test;
+mod redundancy_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod release_placement_test;
 mod remote_status_test;
