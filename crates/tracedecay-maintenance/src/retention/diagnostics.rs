@@ -257,10 +257,7 @@ fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
 }
 
 fn bounded_statement(statement: &str) -> String {
-    let cleaned: String = statement
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
+    let cleaned = tracedecay_domain::fold_control_characters(statement);
     let cleaned = cleaned.trim();
     if cleaned.len() <= DOCTOR_TEXT_LIMIT {
         return cleaned.to_string();

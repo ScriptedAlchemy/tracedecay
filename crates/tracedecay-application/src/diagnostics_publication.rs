@@ -915,16 +915,7 @@ pub async fn publish_compiler_diagnostics_through_code_index_v1(
 /// a producer's text always satisfies `validate_sanitized_message`.
 #[must_use]
 pub fn bounded_notice(message: &str) -> String {
-    let collapsed: String = message
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
+    let collapsed = tracedecay_domain::fold_control_characters(message);
     let collapsed = collapsed.trim();
     if collapsed.is_empty() {
         return "diagnostic reported without a message".to_owned();

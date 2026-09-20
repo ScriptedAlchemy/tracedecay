@@ -6,6 +6,25 @@
 //! stays empty. Callers that trim, mark truncation, or refuse a mid-character
 //! budget still do that themselves.
 
+/// Replace Unicode control characters with an ASCII space.
+///
+/// Newline, carriage return, and tab are controls, so they become spaces.
+/// Non-controls, including ordinary spaces and `/`, are unchanged. An empty
+/// string stays empty. This does not trim.
+#[must_use]
+pub fn fold_control_characters(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// Replace `\` with `/`.
 ///
 /// Trailing separators stay. `\` becomes `/`, `foo\` becomes `foo/`, and
@@ -49,7 +68,17 @@ pub fn utf8_prefix_at_or_before(text: &str, max_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{collapse_whitespace, forward_slash_text, utf8_prefix_at_or_before};
+    use super::{
+        collapse_whitespace, fold_control_characters, forward_slash_text, utf8_prefix_at_or_before,
+    };
+
+    #[test]
+    fn control_characters_become_spaces_without_trimming() {
+        assert_eq!(fold_control_characters(""), "");
+        assert_eq!(fold_control_characters("a\nb\tc\r"), "a b c ");
+        assert_eq!(fold_control_characters(" src/ "), " src/ ");
+        assert_eq!(fold_control_characters("é"), "é");
+    }
 
     #[test]
     fn forward_slashes_keep_trailing_separators_and_an_empty_string() {

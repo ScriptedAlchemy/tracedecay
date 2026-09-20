@@ -77,16 +77,7 @@ fn source_finding(
 fn bounded_statement(statement: &str) -> String {
     const STATEMENT_LIMIT_BYTES: usize = 512;
     const TRUNCATION_MARK: &str = "…";
-    let sanitized = statement
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
+    let sanitized = tracedecay_domain::fold_control_characters(statement);
     let sanitized = sanitized.trim();
     if sanitized.len() <= STATEMENT_LIMIT_BYTES {
         return sanitized.to_owned();

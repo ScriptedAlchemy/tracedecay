@@ -217,16 +217,7 @@ const SOURCE_EDIT_SYMBOL_EVIDENCE_UNAVAILABLE: &str = "source-edit-symbol-eviden
 const SOURCE_EDIT_DIAGNOSTICS_UNAVAILABLE: &str = "source_edit_diagnostics_unavailable";
 
 fn sanitize_safe_diagnostic_text(value: &str, limit: usize) -> String {
-    let collapsed: String = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
+    let collapsed = tracedecay_domain::fold_control_characters(value);
     let trimmed = collapsed.trim();
     if trimmed.is_empty() {
         return String::new();
