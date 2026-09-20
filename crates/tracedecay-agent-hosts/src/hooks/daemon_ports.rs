@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Deserialize;
 use tracedecay_contracts::context_scout::{ContextScoutAddressV1, ContextScoutDeliveryReceiptV1};
@@ -123,12 +123,7 @@ struct DaemonAdmissionResponseWireV1 {
 }
 
 pub(crate) fn now_utc() -> UtcMicros {
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(1, |duration| {
-            duration.as_micros().min(i64::MAX as u128) as i64
-        });
-    UtcMicros(micros.max(1))
+    UtcMicros(tracedecay_runtime_core::tracedecay::saturating_utc_now().0.max(1))
 }
 
 #[hotpath::measure(label = "agent_hosts.hook_ports.admission_decode")]

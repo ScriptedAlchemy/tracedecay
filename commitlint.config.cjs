@@ -9,6 +9,7 @@ const allowedTypes = [
   "refactor",
   "revert",
   "style",
+  "simplify",
   "test",
 ];
 

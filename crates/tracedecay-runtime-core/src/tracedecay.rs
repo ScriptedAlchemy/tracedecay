@@ -1,12 +1,12 @@
 //! Kernel-owned slice of the root `tracedecay` orchestrator module.
 //!
-//! Wall-clock stamps for this crate share [`wall_clock_since_epoch`]: a
-//! pre-epoch clock saturates to a zero duration. Microsecond stamps then
-//! saturate overflow to `i64::MAX`; second stamps keep the prior `as i64`
-//! conversion. This crate cannot depend on `tracedecay_contracts::clock`
-//! (that crate is the ports/contracts layer; taking it would pull policy,
-//! tool-catalog, and schemars into a kernel that currently has no
-//! application edge).
+//! Wall-clock stamps for this crate share one read. A pre-epoch clock saturates
+//! to a zero duration, except [`utc_now_or_one`], which reads as `1` so a failed
+//! stamp stays distinct from an absent `UtcMicros(0)`. Microsecond overflow
+//! saturates to `i64::MAX`; second stamps keep the prior `as i64` conversion.
+//! This crate cannot depend on `tracedecay_contracts::clock` (that crate is the
+//! ports/contracts layer; taking it would pull policy, tool-catalog, and
+//! schemars into a kernel that currently has no application edge).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,5 +30,17 @@ pub fn current_timestamp() -> i64 {
 /// `i64::MAX`. This is the kernel-local equivalent of
 /// `tracedecay_contracts::clock::now_micros`.
 pub fn saturating_utc_now() -> UtcMicros {
-    UtcMicros(i64::try_from(wall_clock_since_epoch().as_micros()).unwrap_or(i64::MAX))
+    UtcMicros(unix_micros_saturating(0))
+}
+
+/// Saturating microseconds since the epoch. A pre-epoch clock reads as `1`.
+pub fn utc_now_or_one() -> UtcMicros {
+    UtcMicros(unix_micros_saturating(1))
+}
+
+fn unix_micros_saturating(pre_epoch: i64) -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_micros()).unwrap_or(i64::MAX),
+        Err(_) => pre_epoch,
+    }
 }

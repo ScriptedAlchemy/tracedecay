@@ -2,8 +2,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use tracedecay_domain::SessionId;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::ports::ExecutionControl;
@@ -542,11 +540,7 @@ impl SessionTemporalRefreshWakeState {
         telemetry.durable_backlog = durable_backlog;
         telemetry.last_pass_made_progress = made_progress;
         if made_progress {
-            let micros = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-                .min(i64::MAX as u128) as i64;
+            let micros = tracedecay_runtime_core::tracedecay::saturating_utc_now().0;
             telemetry.last_progress_at_unix_micros = Some(micros);
         }
         if telemetry.depths_published {
