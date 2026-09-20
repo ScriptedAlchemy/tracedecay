@@ -6,6 +6,16 @@
 //! stays empty. Callers that trim, mark truncation, or refuse a mid-character
 //! budget still do that themselves.
 
+/// Join Unicode whitespace-separated pieces with a single ASCII space.
+///
+/// Leading, trailing, and repeated whitespace disappear. An empty or
+/// all-whitespace input stays empty. Newlines become spaces. Characters
+/// that are not whitespace, including a trailing `/`, are preserved.
+#[must_use]
+pub fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Longest prefix of `text` whose byte length is at most `max_bytes`.
 ///
 /// A cut inside a multibyte character walks back to the previous char
@@ -19,7 +29,15 @@ pub fn utf8_prefix_at_or_before(text: &str, max_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::utf8_prefix_at_or_before;
+    use super::{collapse_whitespace, utf8_prefix_at_or_before};
+
+    #[test]
+    fn collapse_whitespace_keeps_non_space_and_drops_only_whitespace() {
+        assert_eq!(collapse_whitespace("  a \n\t b  "), "a b");
+        assert_eq!(collapse_whitespace("   "), "");
+        assert_eq!(collapse_whitespace(""), "");
+        assert_eq!(collapse_whitespace("src/"), "src/");
+    }
 
     #[test]
     fn walks_back_when_the_cut_lands_inside_a_multibyte_char() {

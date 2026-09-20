@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::collapse_whitespace;
 
 use crate::hook_events::HookEvent;
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
@@ -60,7 +61,7 @@ const LOOKUP_IDENTIFIER_MAX_BYTES: usize = 256;
 /// [`FAILURE_REASON_MAX_CHARS`] characters (never argument bodies, callers
 /// must derive `reason` from response/error text only).
 pub fn bounded_failure_reason(reason: &str) -> String {
-    let collapsed: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(reason);
     if collapsed.chars().count() <= FAILURE_REASON_MAX_CHARS {
         collapsed
     } else {

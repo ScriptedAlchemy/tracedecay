@@ -16,6 +16,7 @@ use tracedecay_code_index::chunks::content_digest;
 use tracedecay_contracts::historical_query::HistoricalGitReadUnavailableReasonV1;
 use tracedecay_contracts::is_canonical_repository_relative_path;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::collapse_whitespace;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
     CalibrationProfileId, DiversityPolicy, DiversityPolicyId, FusionProfile, FusionProfileId,
@@ -500,10 +501,6 @@ fn normalized_document_prose(bytes: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     collapse_whitespace(&joined)
-}
-
-fn collapse_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn compute_corpus_digest_from_document_bytes<'a>(
