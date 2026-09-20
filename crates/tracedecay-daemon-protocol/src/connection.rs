@@ -209,13 +209,18 @@ where
     }
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.preamble", future = true)]
-pub async fn write_daemon_preamble(
-    writer: &mut tokio::io::WriteHalf<BrokerStream>,
-    connection: &DaemonConnection,
+/// Writes the optional auth preface and the handshake line.
+///
+/// Callers that already hold a [`DaemonConnection`] use
+/// [`write_daemon_preamble`]. The composition-root client uses this directly
+/// because its connection type is the authority record, not the protocol
+/// connection.
+pub async fn write_daemon_handshake_preamble(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    auth_token: Option<&str>,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
-    if let Some(token) = connection.auth_token.as_deref() {
+    if let Some(token) = auth_token {
         writer
             .write_all(DaemonAuthPreface::new(token).to_line()?.as_bytes())
             .await?;
@@ -224,6 +229,15 @@ pub async fn write_daemon_preamble(
     writer.write_all(handshake.to_line()?.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     Ok(())
+}
+
+#[hotpath::measure(label = "daemon_protocol.client.preamble", future = true)]
+pub async fn write_daemon_preamble(
+    writer: &mut tokio::io::WriteHalf<BrokerStream>,
+    connection: &DaemonConnection,
+    handshake: &DaemonHandshake,
+) -> Result<()> {
+    write_daemon_handshake_preamble(writer, connection.auth_token.as_deref(), handshake).await
 }
 
 pub fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {

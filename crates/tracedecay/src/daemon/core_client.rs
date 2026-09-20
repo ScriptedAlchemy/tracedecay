@@ -15,19 +15,19 @@ use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{ResolvedDaemonConnection, client_connection};
 use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
+pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub(crate) use tracedecay_daemon_protocol::connection::{
     DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
     is_transient_daemon_connect_error,
 };
-pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub use tracedecay_daemon_protocol::daemon_tool_response_bound;
 use tracedecay_daemon_protocol::tool_request_deadline;
 
 #[cfg(unix)]
 use super::unavailable_error;
 use super::{
-    BrokerStream, DaemonAuthPreface, DaemonClientDeadline, DaemonHandshake, JsonRpcError,
-    JsonRpcRequest, JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
+    BrokerStream, DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest,
+    JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
     TraceDecayError, error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
 
@@ -135,15 +135,12 @@ pub(crate) async fn write_daemon_preamble(
     connection: &ResolvedDaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
-    if let Some(token) = connection.auth_token.as_deref() {
-        writer
-            .write_all(DaemonAuthPreface::new(token).to_line()?.as_bytes())
-            .await?;
-        writer.write_all(b"\n").await?;
-    }
-    writer.write_all(handshake.to_line()?.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    Ok(())
+    tracedecay_daemon_protocol::write_daemon_handshake_preamble(
+        writer,
+        connection.auth_token.as_deref(),
+        handshake,
+    )
+    .await
 }
 
 pub(crate) fn default_available_socket_path() -> Result<PathBuf> {
