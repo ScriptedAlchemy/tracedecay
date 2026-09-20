@@ -1,3 +1,4 @@
+use super::problems::{application_contract_error_response, registered_adapter_unavailable};
 use axum::response::Response;
 use serde::Serialize;
 use tracedecay_api::{
@@ -11,9 +12,6 @@ use tracedecay_contracts::{
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, DaemonInvocationError, InvocationCancellationPolicy,
 };
-use tracedecay_tool_catalog::RouteExposureV1;
-
-use super::problems::{application_contract_error_response, registered_adapter_unavailable};
 
 pub(crate) trait RegisteredHttpOperation: Copy {
     fn operation_id(self) -> String;
@@ -248,7 +246,7 @@ where
             &format!("The {family} operation is not advertised by this build"),
         );
     };
-    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+    let Some((binding_id, _)) = binding.public_route() else {
         return registered_adapter_unavailable(
             request_id,
             &problem_code("route_unavailable"),
@@ -332,7 +330,7 @@ where
             &format!("The {family} operation is not advertised by this build"),
         );
     };
-    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+    let Some((binding_id, _)) = binding.public_route() else {
         return registered_adapter_unavailable(
             request_id,
             &problem_code("route_unavailable"),
