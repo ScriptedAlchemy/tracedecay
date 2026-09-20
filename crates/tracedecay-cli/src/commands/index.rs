@@ -69,8 +69,14 @@ pub(crate) async fn handle_init(
         true,
     )?;
     handshake.moved_store_adoption = adoption;
+    // A connectable socket is the whole precondition: `brokered_init` carries
+    // its own 120 s bootstrap deadline, so a daemon that has not finished
+    // answering initialize within the one-second reachability probe is still
+    // the daemon this init must broker through. Requiring the identity proof
+    // here refused cold starts on CPU-constrained hosts and told the operator
+    // to start a daemon that was already running.
     #[cfg(unix)]
-    let daemon_available = tracedecay_daemon_control::daemon_reachable();
+    let daemon_available = tracedecay_daemon_control::daemon_socket_connectable();
     #[cfg(not(unix))]
     let daemon_available = true;
 
