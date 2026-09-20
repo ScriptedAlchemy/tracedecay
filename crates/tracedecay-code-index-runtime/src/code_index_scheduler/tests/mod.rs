@@ -1671,7 +1671,14 @@ async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path:
                             && freshness.coverage
                                 == tracedecay_contracts::code_index_freshness::CodeIndexFreshnessCoverageV1::Complete
                     });
-                if still_ready && !registry.reconcile_in_progress_for_test(path).await {
+                // A seat can leave a continuation queued (the clone-fingerprint
+                // successor runs on a later pass), and the ladder reports
+                // Verifying for as long as that pass runs. Ready means no pass
+                // is running and none is pending.
+                if still_ready
+                    && !registry.reconcile_in_progress_for_test(path).await
+                    && registry.pending_wake_micros_for_root(path).await == Some(0)
+                {
                     break;
                 }
                 continue;
