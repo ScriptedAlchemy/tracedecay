@@ -66,19 +66,8 @@ const GRAIN_ORDER: [CodeSearchChunkGrainV1; 5] = [
     CodeSearchChunkGrainV1::FileWindow,
 ];
 
-const EXACT_TERM_KIND_ORDER: [ExactTechnicalTermKindV1; 11] = [
-    ExactTechnicalTermKindV1::WholeSymbol,
-    ExactTechnicalTermKindV1::QualifiedName,
-    ExactTechnicalTermKindV1::Path,
-    ExactTechnicalTermKindV1::CompilerErrorCode,
-    ExactTechnicalTermKindV1::CompilerErrorText,
-    ExactTechnicalTermKindV1::RuntimeErrorCode,
-    ExactTechnicalTermKindV1::RuntimeErrorText,
-    ExactTechnicalTermKindV1::CliFlag,
-    ExactTechnicalTermKindV1::ToolName,
-    ExactTechnicalTermKindV1::ConfigurationKey,
-    ExactTechnicalTermKindV1::CommitIdentifier,
-];
+const EXACT_TERM_KIND_ORDER: &[ExactTechnicalTermKindV1] =
+    ExactTechnicalTermKindV1::ORDER.as_slice();
 
 /// Compact row payload: drop identities already stored as columns or
 /// generation metadata, and reconstruct ASCII-normalized text on read.
@@ -525,7 +514,7 @@ fn encode_binary(
     put_varint(&mut out, length_u64(row.exact_terms.len())?);
     for term in &row.exact_terms {
         out.push(ordinal_of(
-            &EXACT_TERM_KIND_ORDER,
+            EXACT_TERM_KIND_ORDER,
             &term.kind(),
             "exact term kind",
         )?);
@@ -674,7 +663,7 @@ fn decode_binary(
     }
     let mut exact_terms = Vec::with_capacity(term_count);
     for _ in 0..term_count {
-        let kind = *from_ordinal(&EXACT_TERM_KIND_ORDER, cursor.take_u8()?, "exact term kind")?;
+        let kind = *from_ordinal(EXACT_TERM_KIND_ORDER, cursor.take_u8()?, "exact term kind")?;
         let original_bytes = cursor.take_bytes()?.to_vec();
         let span = SourceSpan {
             start_byte: cursor.take_varint()?,

@@ -43,20 +43,9 @@ pub const GENERATION_SEAL_SEPARATOR: &str = "tracedecay.code-generation-seal.v1"
 /// The chunk schema revision pinned by this implementation.
 pub const CHUNK_SCHEMA_REVISION_V1: &str = "code-search-chunk.v1";
 
-/// The exact-term kinds the query chunker emits.
-pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] = &[
-    ExactTechnicalTermKindV1::WholeSymbol,
-    ExactTechnicalTermKindV1::QualifiedName,
-    ExactTechnicalTermKindV1::Path,
-    ExactTechnicalTermKindV1::CompilerErrorCode,
-    ExactTechnicalTermKindV1::CompilerErrorText,
-    ExactTechnicalTermKindV1::RuntimeErrorCode,
-    ExactTechnicalTermKindV1::RuntimeErrorText,
-    ExactTechnicalTermKindV1::CliFlag,
-    ExactTechnicalTermKindV1::ToolName,
-    ExactTechnicalTermKindV1::ConfigurationKey,
-    ExactTechnicalTermKindV1::CommitIdentifier,
-];
+/// The exact-term kinds the query chunker emits, in codec ordinal order.
+pub const BASE_EXACT_TERM_KINDS: &[ExactTechnicalTermKindV1] =
+    ExactTechnicalTermKindV1::ORDER.as_slice();
 
 /// The edge-authority classes query tree-sitter extraction declares: edges
 /// derived purely from syntax are `SyntaxExact`; unresolved constructs are

@@ -247,6 +247,26 @@ pub enum ExactTechnicalTermKindV1 {
     CommitIdentifier,
 }
 
+impl ExactTechnicalTermKindV1 {
+    /// Lexical row-codec ordinal and the capability manifest's kind set.
+    ///
+    /// The codec stores the index in this array. Append new kinds; reordering
+    /// changes sealed artifact bytes.
+    pub const ORDER: [Self; 11] = [
+        Self::WholeSymbol,
+        Self::QualifiedName,
+        Self::Path,
+        Self::CompilerErrorCode,
+        Self::CompilerErrorText,
+        Self::RuntimeErrorCode,
+        Self::RuntimeErrorText,
+        Self::CliFlag,
+        Self::ToolName,
+        Self::ConfigurationKey,
+        Self::CommitIdentifier,
+    ];
+}
+
 /// One whole exact technical term extracted as evidence. Extraction
 /// evidence only; protected lexical policy is applied separately.
 ///
