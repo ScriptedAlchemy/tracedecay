@@ -306,24 +306,6 @@ pub fn catalog_discovery_tools_list_payload(
     Ok(payload)
 }
 
-pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
-    budget: u8,
-    profile_id: &ProfileId,
-    authorized_capabilities: &BTreeSet<CapabilityId>,
-    available_scope: &BTreeSet<ScopeDimension>,
-    registry_mode: ToolRegistryMode,
-) -> Result<Vec<ToolDefinition>, McpDispatchMetadataError> {
-    let entry = discovery_cache_get_or_insert(
-        profile_id,
-        authorized_capabilities,
-        available_scope,
-        registry_mode,
-    )?;
-    let mut definitions = (*entry.tools).clone();
-    apply_context_description(&mut definitions, &context_warming_description(budget));
-    Ok(definitions)
-}
-
 pub fn default_catalog_discovery_authority()
 -> Result<BTreeSet<CapabilityId>, tracedecay_daemon_protocol::ApplicationSurfaceAdapterError> {
     Ok(

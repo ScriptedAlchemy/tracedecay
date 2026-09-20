@@ -2,8 +2,8 @@
 
 use serde::Deserialize;
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationFactV1, CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
+    CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1,
     CanonicalWorkflowSemanticKindV1, DurableObservationV1, ObservationContractError,
     ObservationScopeV1,
 };
@@ -406,7 +406,7 @@ fn canonical_message_metadata_for(
             rendering,
             envelope.provider().as_str(),
             envelope.native_record_kind(),
-            canonical_role(*role),
+            role.as_str(),
             content,
             envelope.relations().message_id() != Some(envelope.stable_record_id()),
         )
@@ -787,7 +787,7 @@ fn canonical_message_fields_for(
         .iter()
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
     {
-        let role = canonical_role(*role);
+        let role = role.as_str();
         let text = canonical_fact_text(content)?;
         if let Some(semantics) = rendering_message_semantics(
             rendering,
@@ -957,16 +957,6 @@ pub fn canonical_fact_text(value: &serde_json::Value) -> ProjectionStoreResult<S
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
 }
 
-fn canonical_role(role: CanonicalMessageRoleV1) -> &'static str {
-    match role {
-        CanonicalMessageRoleV1::User => "user",
-        CanonicalMessageRoleV1::Assistant => "assistant",
-        CanonicalMessageRoleV1::System => "system",
-        CanonicalMessageRoleV1::Tool => "tool",
-        CanonicalMessageRoleV1::Unknown => "unknown",
-    }
-}
-
 fn reasoning_kind(visibility: CanonicalReasoningVisibilityV1) -> &'static str {
     match visibility {
         CanonicalReasoningVisibilityV1::Visible => "reasoning_visible",
@@ -1013,11 +1003,11 @@ pub fn workflow_semantic_kind(kind: CanonicalWorkflowSemanticKindV1) -> &'static
 mod tests {
     use serde_json::json;
     use tracedecay_domain::{
-        CanonicalBoundaryKindV1, CanonicalObservationEvidenceV1, CanonicalObservationRelationsV1,
-        ComponentVersion, ObservationId, ObservationIdentityMaterialV1,
-        ObservationOrderingDomainV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-        ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, RetentionClass,
-        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        CanonicalBoundaryKindV1, CanonicalMessageRoleV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationRelationsV1, ComponentVersion, ObservationId,
+        ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
+        RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
         SanitizerDispositionV1, SensitivityV1, SessionId,
     };
 

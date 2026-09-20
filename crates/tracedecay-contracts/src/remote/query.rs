@@ -35,8 +35,6 @@ use crate::{
 };
 
 pub const REMOTE_QUERY_SCHEMA_REVISION_V1: u16 = 1;
-pub const REMOTE_EXACT_OBSERVATION_QUERY_USE_CASE_V1: &str =
-    "use-case.remote.query.exact-observation";
 
 static REMOTE_EXACT_OBSERVATION_QUERY_RESULT_CONTRACT_V1: LazyLock<ResultContractRef> =
     LazyLock::new(|| {

@@ -320,22 +320,6 @@ pub fn required_string_list(
     }
 }
 
-/// An optional text setting (canonical JSON policy trees are stored as text).
-/// Absence is `None`; presence with another type is an error.
-pub fn optional_text_setting<'a>(
-    snapshot: &'a ConfigurationSnapshotV1,
-    key_name: &str,
-) -> Result<Option<&'a str>> {
-    match snapshot.effective_values.get(&setting_key(key_name)?) {
-        None => Ok(None),
-        Some(ConfigurationValueV1::Text(value)) => Ok(Some(value)),
-        Some(value) => Err(config_error(format!(
-            "resolved configuration setting '{key_name}' has wrong type: expected text, got {:?}",
-            value.kind()
-        ))),
-    }
-}
-
 fn config_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
         message: message.into(),

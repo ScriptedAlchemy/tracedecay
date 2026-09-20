@@ -122,11 +122,6 @@ impl TableGrowthSampleV1 {
     pub fn growth_bytes(&self) -> StorageByteSizeV1 {
         self.current_bytes.saturating_sub(self.previous_bytes)
     }
-
-    #[must_use]
-    pub fn is_growing(&self) -> bool {
-        self.current_bytes > self.previous_bytes
-    }
 }
 
 /// An owner-configured soft size budget for one store.

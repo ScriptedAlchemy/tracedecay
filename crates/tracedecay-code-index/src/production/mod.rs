@@ -318,14 +318,6 @@ impl CodeIndexGenerationScopeV1 {
         }
     }
 
-    pub fn for_branch_stack_node(node: &tracedecay_domain::BranchStackNodeV1) -> Self {
-        Self {
-            repository: node.repository_id.clone(),
-            reference: Some(node.reference.clone()),
-            worktree: node.worktree_id.clone(),
-        }
-    }
-
     /// Whether two scopes name the same physical checkout.
     ///
     /// Repository and worktree are checkout identity: a generation sealed

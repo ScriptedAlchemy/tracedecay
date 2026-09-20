@@ -1728,6 +1728,20 @@ pub enum CanonicalMessageRoleV1 {
     Unknown,
 }
 
+impl CanonicalMessageRoleV1 {
+    /// Role label written into canonical projections. It is the serde name so
+    /// projection and the wire encoding cannot drift.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Tool => "tool",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalReasoningVisibilityV1 {
