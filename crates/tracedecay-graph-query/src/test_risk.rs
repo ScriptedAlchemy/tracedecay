@@ -341,9 +341,7 @@ pub fn verified_test_evidence(
                 files
                     .into_iter()
                     .map(|file| file.logical_path)
-                    .filter(|path| {
-                        tracedecay_domain::path_matches_scope(path, Some(prefix))
-                    })
+                    .filter(|path| tracedecay_domain::path_matches_scope(path, Some(prefix)))
                     .collect::<HashSet<_>>()
             })
         })

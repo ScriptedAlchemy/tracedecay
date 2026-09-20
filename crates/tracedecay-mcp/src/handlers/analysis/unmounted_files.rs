@@ -75,10 +75,7 @@ pub async fn handle_unmounted_files(
                         .map(move |entry| (ecosystem.ecosystem, entry))
                 })
                 .filter(|(_, entry)| {
-                    tracedecay_domain::path_matches_scope(
-                        &entry.file,
-                        path_filter.as_deref(),
-                    )
+                    tracedecay_domain::path_matches_scope(&entry.file, path_filter.as_deref())
                 })
                 .collect::<Vec<_>>();
             let unmounted_file_count = matching.len();

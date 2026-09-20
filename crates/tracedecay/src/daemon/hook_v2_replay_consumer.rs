@@ -246,7 +246,11 @@ async fn drain_admitted_host_spool(
 }
 
 fn hook_replay_now() -> UtcMicros {
-    UtcMicros(tracedecay_runtime_core::tracedecay::saturating_utc_now().0.max(1))
+    UtcMicros(
+        tracedecay_runtime_core::tracedecay::saturating_utc_now()
+            .0
+            .max(1),
+    )
 }
 
 struct RegisteredReplayConsumer {

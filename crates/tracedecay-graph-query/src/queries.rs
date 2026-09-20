@@ -237,9 +237,7 @@ impl<'a> GraphQueryManager<'a> {
                     .binding
                     .as_ref()
                     .and_then(|binding| binding.logical_path.as_deref())
-                    .is_some_and(|path| {
-                        tracedecay_domain::path_matches_scope(path, path_prefix)
-                    })
+                    .is_some_and(|path| tracedecay_domain::path_matches_scope(path, path_prefix))
                     && (kind_filter.is_empty() || kind_filter.contains(metadata.kind.as_str()))
                     && (include_public || metadata.visibility != "public")
                     && metadata.simple_name != "main"

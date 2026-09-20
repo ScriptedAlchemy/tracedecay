@@ -1,3 +1,4 @@
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::fs::File;
 #[cfg(not(windows))]
@@ -5,7 +6,6 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{BrainId, UserProfileId};
 use tracedecay_runtime_core::path_safety::{
     canonicalize_existing_prefix, collapse_relative_components,

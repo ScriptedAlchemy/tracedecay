@@ -840,11 +840,7 @@ async fn drive_retained_invocation_responses<'a>(
             Ok(request) => execute(request).await,
             Err(response) => response,
         };
-        update_connection_lsp_sessions(
-            owned_lsp_sessions,
-            session_transition.as_ref(),
-            &response,
-        );
+        update_connection_lsp_sessions(owned_lsp_sessions, session_transition.as_ref(), &response);
         let delivery = delivery.filter(|delivery| delivery.is_successful_delivery(&response));
         // Resolve fan-out bindings before the socket response crosses
         // the wire. The same immutable attempts are used for a

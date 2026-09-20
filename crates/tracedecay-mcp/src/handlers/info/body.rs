@@ -173,9 +173,8 @@ fn body_candidates(
     for candidate in candidates {
         let path = required_file_path(&candidate)?;
         let metadata = required_metadata(&candidate)?;
-        if scope_prefix.is_none_or(|scope| {
-            tracedecay_domain::path_matches_scope(path, Some(scope))
-        }) {
+        if scope_prefix.is_none_or(|scope| tracedecay_domain::path_matches_scope(path, Some(scope)))
+        {
             let preference = NodeKind::from_str(&metadata.kind)
                 .map_or(u8::MAX, |kind| body_kind_preference(&kind));
             scoped.push((preference, candidate));

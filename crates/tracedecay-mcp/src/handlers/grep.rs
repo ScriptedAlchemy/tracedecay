@@ -137,9 +137,7 @@ pub async fn handle_grep(
         .hits
         .into_iter()
         .map(GrepHit::from)
-        .filter(|hit| {
-            tracedecay_domain::path_matches_scope(hit.file.as_str(), scope_prefix)
-        })
+        .filter(|hit| tracedecay_domain::path_matches_scope(hit.file.as_str(), scope_prefix))
         .collect::<Vec<_>>();
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
