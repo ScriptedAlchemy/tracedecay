@@ -56,8 +56,13 @@ operating model](docs/V2-OPERATING-MODEL.md).
 cd /path/to/your/project
 tracedecay init
 tracedecay install
+tracedecay daemon install-service
 tracedecay status
 ```
+
+`tracedecay status` reads the daemon and never starts it, so install the
+per-user service first. See [the user guide](docs/USER-GUIDE.md) for the
+daemon lifecycle commands.
 
 `tracedecay install` auto-detects supported agents. To target one host:
 
