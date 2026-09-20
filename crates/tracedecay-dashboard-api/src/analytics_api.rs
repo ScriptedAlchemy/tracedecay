@@ -1052,10 +1052,7 @@ async fn durable_analytics_rows(
 }
 
 pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHintsPayloadV1 {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
-        .iter()
-        .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
+    let mut by_category = zero_hint_counts();
 
     for event in events {
         let category = event.hint_category.as_deref().unwrap_or("");
@@ -1104,11 +1101,15 @@ pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
     })
 }
 
-fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
+fn zero_hint_counts() -> BTreeMap<String, HintCounts> {
+    HINT_CATEGORIES
         .iter()
         .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
+        .collect()
+}
+
+fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
+    let mut by_category = zero_hint_counts();
     for row in counts {
         by_category.insert(
             row.category.clone(),

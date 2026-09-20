@@ -21,11 +21,9 @@ pub fn with_functions_display_limit(
 }
 
 fn functions_display_limit() -> Option<usize> {
-    parse_usize_env("HOTPATH_FUNCTIONS_LIMIT").or_else(|| parse_usize_env("HOTPATH_LIMIT"))
-}
-
-fn parse_usize_env(name: &str) -> Option<usize> {
-    std::env::var(name).ok().and_then(|raw| raw.parse().ok())
+    ["HOTPATH_FUNCTIONS_LIMIT", "HOTPATH_LIMIT"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().and_then(|raw| raw.parse().ok()))
 }
 
 #[cfg(test)]
