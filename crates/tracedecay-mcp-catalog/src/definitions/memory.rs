@@ -100,7 +100,7 @@ const MEMORY_TOOLS: &[MemoryTool] = &[
 ];
 
 pub(super) fn memory_definitions(
-    mut schema: impl FnMut(&str) -> Result<Value, McpCatalogError>,
+    mut schema: impl FnMut(&'static str) -> Result<Value, McpCatalogError>,
 ) -> Result<Vec<ToolDefinition>, McpCatalogError> {
     MEMORY_TOOLS
         .iter()
