@@ -486,34 +486,6 @@ impl ExactSqlHandle {
         Ok(merge_memory_release(readers, writer))
     }
 
-    /// Enables incremental auto-vacuum through its fixed maintenance rebuild.
-    fn enqueue_repair_incremental_auto_vacuum(
-        &self,
-    ) -> Result<async_channel::Receiver<Result<(), ExactSqlError>>, ExactSqlError> {
-        let (reply, response) = async_channel::bounded(1);
-        self.writer
-            .as_ref()
-            .ok_or(ExactSqlError::WriterUnavailable)?
-            .try_send(WriterCommand::Vacuum {
-                reply,
-                authority: self.write_authority.clone(),
-            })
-            .map_err(map_writer_send_error)?;
-        Ok(response)
-    }
-
-    pub fn repair_incremental_auto_vacuum(&self) -> Result<(), ExactSqlError> {
-        recv_writer_reply(self.enqueue_repair_incremental_auto_vacuum()?)
-            .map_err(|_| ExactSqlError::WriterUnavailable)?
-    }
-
-    pub async fn repair_incremental_auto_vacuum_async(&self) -> Result<(), ExactSqlError> {
-        self.enqueue_repair_incremental_auto_vacuum()?
-            .recv()
-            .await
-            .map_err(|_| ExactSqlError::WriterUnavailable)?
-    }
-
     /// Interactive read snapshot. Admits against the whole general lane.
     pub fn begin_read_snapshot(
         &self,

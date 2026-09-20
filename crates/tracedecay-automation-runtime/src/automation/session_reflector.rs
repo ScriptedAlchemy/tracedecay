@@ -447,8 +447,8 @@ fn session_fact_category(category: &str) -> Option<FactCategoryV1> {
 
 /// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket
 /// labels models frequently emit despite the numeric prompt instruction.
-/// Buckets map to the representative scores defined next to
-/// [`tracedecay_session_memory::memory::trust::trust_bucket`], so they cannot drift out of their
+/// Buckets map to the representative scores in
+/// [`tracedecay_session_memory::memory::trust`], so they cannot drift out of their
 /// documented ranges.
 ///
 /// Deliberate decision: the prompt forbids string labels, but they are

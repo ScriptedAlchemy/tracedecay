@@ -41,7 +41,7 @@ test-helpers = [
 ]
 
 # Mirrors the composition root's `test-transport`: the standalone
-# `TraceDecay::init` / `open` / `open_read_only` entry points route through
+# `TraceDecay::init` / `open` / `open_read_only_with_options` entry points route through
 # the registered test runtime instead of the exclusive maintenance lease.
 test-transport = [
     "test-helpers",

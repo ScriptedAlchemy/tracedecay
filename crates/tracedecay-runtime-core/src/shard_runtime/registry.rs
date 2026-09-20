@@ -823,17 +823,6 @@ impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
             tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::ExecuteBatch => {
                 "execute registered exact SQL statement batch"
             }
-            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::Vacuum => {
-                if self.authority.role() != crate::db::DatabaseAuthorityRole::Maintenance {
-                    return Err(
-                        tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
-                            "whole-database vacuum requires exclusive maintenance authority"
-                                .to_owned(),
-                        ),
-                    );
-                }
-                "vacuum registered database under exclusive maintenance"
-            }
             tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::BeginTransaction => {
                 "begin registered exact SQL transaction"
             }

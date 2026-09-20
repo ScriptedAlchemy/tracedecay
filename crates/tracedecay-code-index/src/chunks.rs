@@ -585,13 +585,6 @@ impl DeterministicCodeChunker {
         }
     }
 
-    /// Pin the sensitivity level recorded on every chunk of this generation.
-    #[must_use]
-    pub fn with_sensitivity_level(mut self, level: SensitivityLevelV1) -> Self {
-        self.sensitivity_level = level;
-        self
-    }
-
     /// The generation this chunker is bound to.
     pub fn generation_id(&self) -> &CodeGenerationId {
         &self.generation_id
@@ -4318,7 +4311,10 @@ pub fn real_symbol() {}
                        pub fn refresh_probe_0000_000(input: u32) -> u32 { input + 0 }\n";
         let calling = index(calling);
         assert!(
-            calling.edges.iter().any(|edge| edge.kind == RelationEdgeKindV1::Calls),
+            calling
+                .edges
+                .iter()
+                .any(|edge| edge.kind == RelationEdgeKindV1::Calls),
             "a same-file call must still seal, so the empty probe is not a dead path: {:?}",
             calling.edges
         );

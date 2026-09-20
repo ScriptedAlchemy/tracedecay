@@ -1,4 +1,4 @@
-use super::{ParseOffset, RegisteredGlobalDb, TranscriptBatch};
+use super::{ParseOffset, RegisteredGlobalDb};
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionRecord, SessionStoreAccess, TranscriptGitEvidence,
     TranscriptPersistenceError,
@@ -99,21 +99,6 @@ impl RegisteredGlobalDb {
     ) -> Result<(), TranscriptPersistenceError> {
         SessionStoreAccess::new(self)
             .persist_transcript_offset_result(parse_offset_path, expected_offset, parse_offset)
-            .await
-    }
-
-    #[hotpath::measure(
-        future = true,
-        label = "global_db.transcript.upsert_projection_batches"
-    )]
-    pub async fn upsert_transcript_projection_batches(
-        &self,
-        batches: &[TranscriptBatch],
-        parse_offset_path: &str,
-        parse_offset: ParseOffset,
-    ) -> Result<(), String> {
-        SessionStoreAccess::new(self)
-            .upsert_transcript_projection_batches(batches, parse_offset_path, parse_offset)
             .await
     }
 

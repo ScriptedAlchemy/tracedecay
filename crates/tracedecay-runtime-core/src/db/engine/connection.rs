@@ -195,15 +195,6 @@ impl Connection {
             .map_err(Into::into)
     }
 
-    #[hotpath::skip]
-    pub async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        runtime
-            .repair_incremental_auto_vacuum_async()
-            .await
-            .map_err(Into::into)
-    }
-
     #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
