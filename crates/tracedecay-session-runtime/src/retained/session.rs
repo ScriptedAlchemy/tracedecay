@@ -30,8 +30,7 @@ use tracedecay_sessions::runtime::{
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::{
-    TemporalCandidateFilterV1, TemporalCandidatePopulationCount, TemporalMessageTypeFilterV1,
-    TemporalSessionScopeFilterV1,
+    TemporalCandidateFilterV1, TemporalCandidatePopulationCount,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
@@ -42,7 +41,8 @@ use super::session_refresh::{
 use crate::session_retrieval::{
     DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
     SessionRetrievalCoverageOmissionView, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
-    SessionRetrievalStoreScope, SessionTemporalMetadataView,
+    SessionRetrievalStoreScope, SessionTemporalMetadataView, temporal_message_type,
+    temporal_session_scope,
 };
 use tracedecay_contracts::retained_receipts::{evidence_outcome, session_refresh_effect_outcome};
 use tracedecay_domain::errors::TraceDecayError;
@@ -549,16 +549,8 @@ impl MessageSearchInput {
             parent_session_id: self.parent_session_id.clone(),
             source: None,
             include_summaries: false,
-            session_scope: match self.scope {
-                SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
-                SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
-                SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
-            },
-            message_type: match self.message_type {
-                SessionMessageType::All => TemporalMessageTypeFilterV1::All,
-                SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
-                SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
-            },
+            session_scope: temporal_session_scope(self.scope),
+            message_type: temporal_message_type(self.message_type),
             roles: Vec::new(),
             start_time: self.since,
             end_time: self.until,
