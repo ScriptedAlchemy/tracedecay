@@ -459,10 +459,10 @@ fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplication
         (WorkOperation::StartAttempt, WorkApplicationOutcomeV1::StartAttempt(outcome))
         | (WorkOperation::AttemptStatus, WorkApplicationOutcomeV1::AttemptStatus(outcome))
         | (WorkOperation::CancelAttempt, WorkApplicationOutcomeV1::CancelAttempt(outcome)) => {
-            application_outcome_payload(outcome).is_some()
+            outcome.payload().is_some()
         }
         (WorkOperation::HydrateArtifacts, WorkApplicationOutcomeV1::HydrateArtifacts(outcome)) => {
-            application_outcome_payload(outcome).is_some_and(|hydration| {
+            outcome.payload().is_some_and(|hydration| {
                 matches!(
                     hydration,
                     tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
@@ -471,14 +471,6 @@ fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplication
             })
         }
         _ => false,
-    }
-}
-
-fn application_outcome_payload<T>(outcome: &ApplicationOutcome<T>) -> Option<&T> {
-    match outcome {
-        ApplicationOutcome::Evidence(result) => result.payload.as_ref(),
-        ApplicationOutcome::Preview(result) => result.payload.as_ref(),
-        ApplicationOutcome::Effect(result) => result.payload.as_ref(),
     }
 }
 

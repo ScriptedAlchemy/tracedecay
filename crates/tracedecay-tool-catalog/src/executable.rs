@@ -364,6 +364,19 @@ impl ExecutableBindingV1 {
         &self.exposure
     }
 
+    /// The catalog route when this binding is public. Internal composition
+    /// returns `None` so a missing route and a private binding stay indistinguishable
+    /// to adapters.
+    pub fn public_route(&self) -> Option<(&BindingId, &str)> {
+        match &self.exposure {
+            RouteExposureV1::Public {
+                binding_id,
+                route_path,
+            } => Some((binding_id, route_path.as_str())),
+            RouteExposureV1::Internal => None,
+        }
+    }
+
     pub const fn effect(&self) -> EffectClass {
         self.effect
     }
@@ -547,27 +560,28 @@ impl SdkExecutableBindingV1 {
         transport: SdkTransportBindingV1,
     ) -> Result<Self, CatalogValidationError> {
         transport.validate()?;
-        match (&transport, executable.exposure()) {
-            (
-                SdkTransportBindingV1::Http { route_path },
-                RouteExposureV1::Public {
-                    binding_id: executable_binding_id,
-                    route_path: executable_route_path,
-                },
-            ) if binding_id == *executable_binding_id && route_path == executable_route_path => {}
-            (SdkTransportBindingV1::Http { .. }, _) => {
-                return Err(CatalogValidationError::InvalidValue {
-                    field: "SDK HTTP binding",
-                    reason: "must exactly match the executable public route",
-                });
+        match &transport {
+            SdkTransportBindingV1::Http { route_path } => {
+                let matches_public = executable.public_route().is_some_and(
+                    |(executable_binding_id, executable_route_path)| {
+                        &binding_id == executable_binding_id
+                            && route_path.as_str() == executable_route_path
+                    },
+                );
+                if !matches_public {
+                    return Err(CatalogValidationError::InvalidValue {
+                        field: "SDK HTTP binding",
+                        reason: "must exactly match the executable public route",
+                    });
+                }
             }
-            (SdkTransportBindingV1::McpTool { .. }, RouteExposureV1::Internal) => {}
-            (SdkTransportBindingV1::McpTool { .. }, RouteExposureV1::Public { .. }) => {
+            SdkTransportBindingV1::McpTool { .. } if executable.public_route().is_some() => {
                 return Err(CatalogValidationError::InvalidValue {
                     field: "SDK MCP binding",
                     reason: "must not alias an HTTP executable route",
                 });
             }
+            SdkTransportBindingV1::McpTool { .. } => {}
         }
         Ok(Self {
             executable,

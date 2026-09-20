@@ -93,6 +93,16 @@ pub enum ApplicationOutcome<T> {
     Effect(EffectResult<T>),
 }
 
+impl<T> ApplicationOutcome<T> {
+    pub fn payload(&self) -> Option<&T> {
+        match self {
+            Self::Evidence(result) => result.payload.as_ref(),
+            Self::Preview(result) => result.payload.as_ref(),
+            Self::Effect(result) => result.payload.as_ref(),
+        }
+    }
+}
+
 /// Successful application result with a stable contract, request, and scope.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -181,6 +191,13 @@ pub struct ApplicationProblemRecord {
     #[serde(skip)]
     #[schemars(skip)]
     source: ApplicationProblem,
+}
+
+impl ApplicationProblemRecord {
+    /// `code: message`, the single line adapters print for a refusal.
+    pub fn summary(&self) -> String {
+        format!("{}: {}", self.code, self.message)
+    }
 }
 
 impl<'de> Deserialize<'de> for ApplicationProblemRecord {
