@@ -17,10 +17,10 @@ use tracedecay_contracts::RetainedSurfaceOperation;
 use tracedecay_contracts::multi_root::multi_root_capability_manifest;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CancellationContract, CancellationPoint,
-    EffectClass, ExecutableBindingV1, McpDeadlineContractV1, McpDispatchAvailability,
-    McpDispatchCatalogV1, McpDispatchContractInputV1, McpDispatchContractV1,
-    McpDispatchUnavailableReason, McpIdempotencyContract, McpInverseContract,
-    McpInverseUnavailableReason, McpTerminalState,
+    EffectClass, ExecutableBindingRegistryV1, ExecutableBindingV1, McpDeadlineContractV1,
+    McpDispatchAvailability, McpDispatchCatalogV1, McpDispatchContractInputV1,
+    McpDispatchContractV1, McpDispatchUnavailableReason, McpIdempotencyContract,
+    McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 
 mod work;
@@ -472,6 +472,40 @@ pub(super) struct DispatchCatalogBinding {
     pub(super) name: String,
     pub(super) group: Option<McpToolDispatchGroup>,
     pub(super) executable_binding: Option<&'static ExecutableBindingV1>,
+}
+
+pub(super) fn project_family_dispatch(
+    group: McpToolDispatchGroup,
+    registry: &'static ExecutableBindingRegistryV1,
+    operations: impl IntoIterator<Item = (String, String)>,
+    identity: (&'static str, &'static str),
+    missing: (&'static str, &'static str),
+) -> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
+    operations
+        .into_iter()
+        .map(|(name, operation_id)| {
+            let operation_id = tracedecay_tool_catalog::OperationId::new(operation_id)
+                .map_err(|_| dispatch_invalid(identity.0, identity.1))?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .ok_or_else(|| dispatch_invalid(missing.0, missing.1))?;
+            Ok(DispatchCatalogBinding {
+                name,
+                group: Some(group),
+                executable_binding: Some(binding),
+            })
+        })
+        .collect()
+}
+
+fn dispatch_invalid(
+    field: &'static str,
+    reason: &'static str,
+) -> super::dispatch::McpDispatchMetadataError {
+    super::dispatch::McpDispatchMetadataError::CatalogValidation(
+        tracedecay_tool_catalog::CatalogValidationError::InvalidValue { field, reason },
+    )
 }
 
 fn dispatch_catalog_bindings()

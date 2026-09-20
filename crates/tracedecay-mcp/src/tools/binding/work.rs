@@ -47,37 +47,26 @@ pub(super) fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::super::dispatch::McpDispatchMetadataError> {
     let registry = tracedecay_contracts::work_executable_binding_registry()
         .map_err(super::super::dispatch::McpDispatchMetadataError::CatalogValidation)?;
-    tracedecay_api::WorkOperation::ALL
-        .into_iter()
-        .map(|operation| {
-            let name = format!("tracedecay_work_{}", operation.operation_key());
-            let operation_id = tracedecay_tool_catalog::OperationId::new(operation.operation_id())
-                .map_err(|_| {
-                    super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
-                        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
-                            field: "MCP Work operation identity",
-                            reason: "must name one canonical Work operation",
-                        },
-                    )
-                })?;
-            let binding = registry
-                .get(&operation_id)
-                .and_then(|availability| availability.binding())
-                .ok_or({
-                    super::super::dispatch::McpDispatchMetadataError::CatalogValidation(
-                        tracedecay_tool_catalog::CatalogValidationError::InvalidValue {
-                            field: "MCP Work executable binding",
-                            reason: "canonical Work operation is not executable",
-                        },
-                    )
-                })?;
-            Ok(DispatchCatalogBinding {
-                name,
-                group: Some(McpToolDispatchGroup::Work),
-                executable_binding: Some(binding),
-            })
-        })
-        .collect()
+    super::project_family_dispatch(
+        McpToolDispatchGroup::Work,
+        registry,
+        tracedecay_api::WorkOperation::ALL
+            .into_iter()
+            .map(|operation| {
+                (
+                    format!("tracedecay_work_{}", operation.operation_key()),
+                    operation.operation_id(),
+                )
+            }),
+        (
+            "MCP Work operation identity",
+            "must name one canonical Work operation",
+        ),
+        (
+            "MCP Work executable binding",
+            "canonical Work operation is not executable",
+        ),
+    )
 }
 
 #[cfg(test)]
