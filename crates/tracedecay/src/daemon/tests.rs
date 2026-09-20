@@ -52,6 +52,17 @@ mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;
 
+#[cfg(unix)]
+fn git(root: &std::path::Path, args: &[&str]) {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .status()
+        .expect("run Git fixture command");
+    assert!(status.success(), "git {args:?}");
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ObservedMcpRoute {
     Rmcp,

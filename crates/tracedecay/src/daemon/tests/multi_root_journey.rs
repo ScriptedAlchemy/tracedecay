@@ -1,7 +1,6 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,24 +26,14 @@ use tracedecay_daemon_service::{
     DaemonInvocationRequest, parse_daemon_invocation_request,
 };
 
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?}");
-}
-
 fn repository() -> TempDir {
     let repository = TempDir::new().expect("repository");
-    git(repository.path(), &["init", "--quiet"]);
-    git(
+    super::git(repository.path(), &["init", "--quiet"]);
+    super::git(
         repository.path(),
         &["config", "user.name", "TraceDecay Test"],
     );
-    git(
+    super::git(
         repository.path(),
         &["config", "user.email", "tracedecay@example.com"],
     );
@@ -53,8 +42,8 @@ fn repository() -> TempDir {
         "pub fn value() -> u8 { 1 }\n",
     )
     .expect("source");
-    git(repository.path(), &["add", "."]);
-    git(repository.path(), &["commit", "--quiet", "-m", "base"]);
+    super::git(repository.path(), &["add", "."]);
+    super::git(repository.path(), &["commit", "--quiet", "-m", "base"]);
     repository
 }
 
@@ -67,8 +56,8 @@ fn paginated_repository(prefix: &str) -> TempDir {
         .collect::<Vec<_>>()
         .concat();
     std::fs::write(repository.path().join("lib.rs"), source).expect("paged source");
-    git(repository.path(), &["add", "."]);
-    git(
+    super::git(repository.path(), &["add", "."]);
+    super::git(
         repository.path(),
         &["commit", "--quiet", "-m", "paged source"],
     );
