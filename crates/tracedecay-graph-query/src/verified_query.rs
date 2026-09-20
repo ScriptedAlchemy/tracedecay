@@ -23,7 +23,7 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::GraphCancellation;
 
-use super::queries::{GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
+use super::queries::GraphQueryManager;
 use super::source_authority::{
     AdmittedSourceAuthority, graph_source_scope_mismatch, graph_source_unbound,
 };
@@ -298,27 +298,6 @@ impl VerifiedGraphQuery {
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.file_dependencies", future = true)]
-    pub async fn get_file_dependencies(&self, file_path: &str) -> Result<Vec<String>> {
-        self.await_bound(self.manager().get_file_dependencies(file_path))
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.node_metrics", future = true)]
-    pub async fn get_node_metrics(&self, node_id: &str) -> Result<NodeMetrics> {
-        self.await_bound(self.manager().get_node_metrics(node_id))
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.health_aggregates", future = true)]
-    pub async fn health_file_aggregates(
-        &self,
-        path_prefix: Option<&str>,
-    ) -> Result<Vec<VerifiedHealthFileAggregateV1>> {
-        self.await_bound(self.manager().health_file_aggregates(path_prefix))
-            .await
-    }
-
     #[hotpath::measure(label = "usecases.graph.verified.health_snapshot", future = true)]
     pub async fn verified_health_snapshot(
         &self,
@@ -370,11 +349,6 @@ impl VerifiedGraphQuery {
             file_path,
             kinds,
         )
-    }
-
-    pub fn render_signatures(&self, file_path: &str) -> Result<Value> {
-        self.refuse_if_bound_closed()?;
-        read_modes::render_signatures(&self.reader, Arc::clone(&self.cancellation), file_path)
     }
 
     pub fn generation(&self) -> &CodeGenerationId {
