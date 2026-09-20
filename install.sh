@@ -30,16 +30,37 @@ case "$(uname -s)/$(uname -m)" in
     ;;
 esac
 
-if [[ $requested_version == latest ]]; then
-  resolved_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${release_root}/latest")
-  tag=${resolved_url##*/}
-else
-  tag=${requested_version#v}
-  tag="v${tag}"
-fi
+# `latest` is the newest published release including prereleases, because the
+# 0.1.0 beta line is where tracedecay ships. GitHub's `releases/latest`
+# redirect never resolves to a prerelease, so it pinned installs to the last
+# stable tag (v0.0.74, 2026-08-19) and the whole beta line was unreachable.
+# `TRACEDECAY_VERSION=stable` opts back into that redirect.
+case $requested_version in
+  latest)
+    tag=$(
+      curl -fsSL "https://api.github.com/repos/${repository}/releases?per_page=1" |
+        grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' |
+        head -n 1 |
+        cut -d'"' -f4
+    )
+    ;;
+  stable)
+    resolved_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${release_root}/latest")
+    tag=${resolved_url##*/}
+    ;;
+  *)
+    tag="v${requested_version#v}"
+    ;;
+esac
 [[ $tag == v* ]] || fail "GitHub did not return a valid release tag"
 
-asset="tracedecay-${tag}-${platform}.tar.gz"
+# release-beta.yml names prerelease archives `tracedecay-beta-<tag>-...`;
+# release.yml names stable ones `tracedecay-<tag>-...`.
+if [[ $tag == *-beta.* ]]; then
+  asset="tracedecay-beta-${tag}-${platform}.tar.gz"
+else
+  asset="tracedecay-${tag}-${platform}.tar.gz"
+fi
 asset_root="${release_root}/download/${tag}"
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
