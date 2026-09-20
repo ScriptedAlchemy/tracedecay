@@ -28,6 +28,8 @@ mod configuration_unset_test;
 mod constructors_behavior_test;
 mod context_behavior_test;
 mod context_test;
+#[cfg(feature = "test-transport")]
+mod dead_code_behavior_test;
 mod dependency_depth_test;
 mod dependency_hint_test;
 mod derives_test;
