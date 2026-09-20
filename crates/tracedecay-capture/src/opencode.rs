@@ -56,7 +56,7 @@ fn normalize_opencode_record(
     let mut facts = Vec::new();
     if let Some(content) = message_content(parts) {
         facts.push(CanonicalObservationFactV1::Message {
-            role: canonical_role(role),
+            role: CanonicalMessageRoleV1::from_wire_label(role),
             content,
             model: message
                 .pointer("/model/modelID")
@@ -288,16 +288,6 @@ fn message_content(parts: &[Value]) -> Option<Value> {
         .cloned()
         .collect::<Vec<_>>();
     (!content.is_empty()).then_some(Value::Array(content))
-}
-
-fn canonical_role(role: &str) -> CanonicalMessageRoleV1 {
-    match role {
-        "user" => CanonicalMessageRoleV1::User,
-        "assistant" => CanonicalMessageRoleV1::Assistant,
-        "system" => CanonicalMessageRoleV1::System,
-        "tool" => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
 }
 
 /// OpenCode's `time.created` is strictly numeric; string forms stay

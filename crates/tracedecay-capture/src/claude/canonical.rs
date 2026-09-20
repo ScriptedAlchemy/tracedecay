@@ -571,17 +571,12 @@ fn system_hook_has_signal(native: &Value) -> bool {
 }
 
 fn canonical_role(message: &Value, record_kind: &str) -> CanonicalMessageRoleV1 {
-    match message
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or(record_kind)
-    {
-        "user" => CanonicalMessageRoleV1::User,
-        "assistant" => CanonicalMessageRoleV1::Assistant,
-        "system" => CanonicalMessageRoleV1::System,
-        "tool" => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
+    CanonicalMessageRoleV1::from_wire_label(
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or(record_kind),
+    )
 }
 
 fn optional_id(native: &Value, keys: &[&str]) -> Option<ObservationId> {
