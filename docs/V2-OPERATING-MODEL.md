@@ -4,9 +4,8 @@ This is a concise operator and contributor summary of final-V2 storage, scope,
 host ingestion, and retrieval. The
 [V2 roadmap](plans/tracedecay-v2/00-plan-set-index.md) is the sole authority for
 precedence, rejected mechanisms, delivery order, and acceptance; its numbered
-plans own detailed behavior, and
-[`NEXT.md`](plans/tracedecay-v2/NEXT.md) reports current delivery status.
-Runtime status remains the truth for capabilities not yet delivered.
+plans own detailed behavior. Runtime status remains the truth for capabilities
+not yet delivered.
 
 ## Authorities
 
