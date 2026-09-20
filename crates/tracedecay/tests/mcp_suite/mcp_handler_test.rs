@@ -65,6 +65,8 @@ mod lcm_doctor_test;
 mod lcm_expand_behavior_test;
 #[cfg(feature = "test-transport")]
 mod lcm_grep_behavior_test;
+#[cfg(feature = "test-transport")]
+mod lcm_load_session_behavior;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
