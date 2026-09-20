@@ -482,12 +482,6 @@ impl LanguageRegistry {
         }
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub fn from_extractors_for_test(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
-        Self::from_extractors(extractors)
-    }
-
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
         let extractor = path.rsplit('.').next().and_then(|ext| {

@@ -461,10 +461,6 @@ impl VerifiedSealedLexicalPageV1 {
         &self.symbol_displays
     }
 
-    pub fn symbol_display_capacity(&self) -> usize {
-        self.symbol_displays.capacity()
-    }
-
     pub fn imports(&self) -> &[CodeIndexImportEvidenceV1] {
         &self.imports
     }
