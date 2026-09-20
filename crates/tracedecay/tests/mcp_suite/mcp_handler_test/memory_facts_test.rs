@@ -52,7 +52,7 @@ pub(super) async fn invoke_production_tool_response(
 
 /// Invoke an exact MCP operation through the production daemon executor and
 /// project its typed operation payload for focused behavioral assertions.
-async fn invoke_exact_tool(
+pub(super) async fn invoke_exact_tool(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
     arguments: Value,
@@ -132,7 +132,7 @@ fn committed_add_result(payload: &Value) -> &Value {
 }
 
 pub(super) struct FactStoreCrossProjectFixture {
-    harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+    pub(super) harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
     target_root: std::path::PathBuf,
     pub(super) active_server: Arc<tracedecay::mcp::McpServer>,
     pub(super) target_server: Arc<tracedecay::mcp::McpServer>,
@@ -1109,20 +1109,6 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
             .as_u64()
             .is_some_and(|capacity| capacity > 0)
     );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn fact_store_reason_requires_an_entity_selection() {
-    let cg = setup_project().await;
-
-    for args in [json!({}), json!({"entities": ["same", "same"]})] {
-        let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", args).await;
-        assert!(
-            result.is_err(),
-            "the exact reason route must reject empty or duplicate entity selections"
-        );
-    }
     close_test_graph(cg).await;
 }
 

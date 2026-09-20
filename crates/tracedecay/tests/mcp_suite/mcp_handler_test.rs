@@ -3,6 +3,8 @@
 //! Split into per-domain modules under `mcp_handler_test/`; shared
 //! fixtures and helpers live in the suite-level `support` module.
 
+#[cfg(feature = "test-transport")]
+mod active_project_test;
 mod admin_test;
 #[cfg(feature = "test-transport")]
 mod affected_tests_behavior_test;
@@ -21,6 +23,9 @@ mod branch_diff_behavior_test;
 mod branch_search_test;
 #[cfg(feature = "test-transport")]
 mod branch_sensitivity_test;
+mod callees_behavior_test;
+mod callers_behavior_test;
+mod callers_for_test;
 mod circular_behavior_test;
 #[cfg(feature = "test-transport")]
 mod complexity_test;
@@ -33,11 +38,14 @@ mod constructors_behavior_test;
 mod context_behavior_test;
 mod context_test;
 mod coupling_test;
+#[cfg(feature = "test-transport")]
+mod dead_code_behavior_test;
 mod dependency_depth_test;
 mod dependency_hint_test;
 mod derives_test;
 mod diagnose_test;
 #[cfg(feature = "test-transport")]
+mod diagnostics_test;
 mod distribution_test;
 #[cfg(feature = "test-transport")]
 mod edit_test;
@@ -46,6 +54,7 @@ mod expand_query_behavior;
 mod fact_feedback_behavior_test;
 mod fact_store_add_behavior_test;
 #[cfg(feature = "test-transport")]
+mod fact_store_curate_test;
 mod fact_store_get_test;
 mod fact_store_list_test;
 #[cfg(feature = "test-transport")]
@@ -90,6 +99,9 @@ mod lcm_test;
 mod memory_contradiction_contract_test;
 #[cfg(feature = "test-transport")]
 mod memory_fact_assertions;
+mod memory_fact_probe_test;
+#[cfg(feature = "test-transport")]
+mod memory_fact_store_reason_test;
 #[cfg(feature = "test-transport")]
 mod memory_fact_supersede_test;
 mod memory_facts_test;
@@ -125,6 +137,7 @@ mod rename_symbol_test;
 #[cfg(feature = "test-transport")]
 mod replace_symbol_test;
 mod retrieve_truncation_test;
+mod runtime_behavior_test;
 mod schema_test;
 mod search_behavior_test;
 mod session_refresh_begin_test;
@@ -163,6 +176,7 @@ mod work_test;
 #[cfg(feature = "test-transport")]
 mod workflow_activate_definition_test;
 #[cfg(feature = "test-transport")]
+mod workflow_get_definition_test;
 mod workflow_list_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod workflow_register_definition_test;
