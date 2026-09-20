@@ -334,7 +334,7 @@ where
     }
 }
 
-fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
+pub fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
     match kind {
         ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,

@@ -68,28 +68,7 @@ impl DashboardAutomationAuthorityErrorV1 {
 }
 
 fn application_problem_status(problem: &ApplicationProblemEnvelope) -> StatusCode {
-    match problem.problem.kind() {
-        tracedecay_contracts::ApplicationProblemKind::PartialEffect
-        | tracedecay_contracts::ApplicationProblemKind::Conflict
-        | tracedecay_contracts::ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        tracedecay_contracts::ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        tracedecay_contracts::ApplicationProblemKind::NotFoundOrNotAuthorized => {
-            StatusCode::NOT_FOUND
-        }
-        tracedecay_contracts::ApplicationProblemKind::Unsupported => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
-        tracedecay_contracts::ApplicationProblemKind::ResetRequired
-        | tracedecay_contracts::ApplicationProblemKind::Unavailable => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        tracedecay_contracts::ApplicationProblemKind::ExecutionFailed => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-        tracedecay_contracts::ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        tracedecay_contracts::ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
-        tracedecay_contracts::ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-    }
+    tracedecay_api::application_problem_status(problem.problem.kind())
 }
 
 pub(crate) fn automation_authority_error_response(
