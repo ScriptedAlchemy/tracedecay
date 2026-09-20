@@ -838,6 +838,24 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
+fn pack_byte_ngram(bytes: &[u8]) -> u32 {
+    debug_assert!((1..=3).contains(&bytes.len()));
+    bytes
+        .iter()
+        .enumerate()
+        .fold((bytes.len() as u32) << 24, |packed, (index, byte)| {
+            packed | (u32::from(*byte) << (index * 8))
+        })
+}
+
+fn packed_query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {
+    let width = bytes.len().min(3);
+    if width == 0 {
+        return BTreeSet::new();
+    }
+    bytes.windows(width).map(pack_byte_ngram).collect()
+}
+
 fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, score: u64) {
     scores
         .entry(field)
