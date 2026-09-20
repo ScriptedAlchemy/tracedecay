@@ -14,7 +14,6 @@ use super::backend::{
     BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
-use super::host_io::HostIo;
 use super::lifecycle::{
     AgentRunFinalizer, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
     AutomationRunLedgerPublication, AutomationRunResult, BackendTaskRun, SchedulerGate,
@@ -51,15 +50,16 @@ use evidence::{
     SkillWriterEvidenceOutcome, build_session_reflector_evidence, build_skill_writer_evidence,
     canonical_evidence_hash,
 };
-use retrieval::{production_user_automation_retrieval, unavailable_automation_retrieval};
+use retrieval::unavailable_automation_retrieval;
 use session_reflector::{
     ProposedAgentOutput, SessionReflectorFinalization, build_session_reflector_prompt,
     finalize_session_reflector_success, validate_session_fact_candidates,
 };
 use skill_writer::{
     ProposedSkillOutput, SkillWriterFinalization, build_skill_writer_prompt,
-    finalize_skill_writer_success, run_user_skill_writer_with_backend_and_retrieval,
+    finalize_skill_writer_success,
 };
+pub(crate) use skill_writer::run_user_skill_writer_with_backend_and_retrieval;
 
 pub use super::lifecycle::{
     AutomationRunSettlementGuard, RetainedAutomationRun, RetainedAutomationSettlementDisposition,
@@ -138,17 +138,6 @@ fn profile_curation_authority(
     })
 }
 
-/// One callable projectless post-session review suitable for host hooks.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct UserSessionAutomationOptions {
-    #[serde(default)]
-    pub session_reflector: SessionReflectorAutomationOptions,
-    #[serde(default)]
-    pub memory_curator: MemoryCuratorAutomationOptions,
-    #[serde(default)]
-    pub skill_writer: SkillWriterAutomationOptions,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserSessionAutomationRun {
     pub session_reflector: SessionReflectorAutomationRun,
@@ -169,84 +158,6 @@ struct CombinedReviewPublication<'a> {
     ledger: AutomationRunLedgerPublication,
     reflector_guard: Option<&'a AutomationRunSettlementGuard>,
     skill_guard: Option<&'a AutomationRunSettlementGuard>,
-}
-
-#[hotpath::measure(future = true, label = "automation.run.user_session")]
-pub async fn run_user_session_automation_with_backend(
-    host_io: HostIo,
-    profile_root: &std::path::Path,
-    session_registry: Arc<dyn ProfileRuntime>,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: UserSessionAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> AutomationRunResult<UserSessionAutomationRun> {
-    let _run = super::scheduler_metrics::RunningGuard::enter();
-    let _duration = super::scheduler_metrics::DurationGuard::run();
-    let retrieval = production_user_automation_retrieval(profile_root).await;
-    run_user_session_automation_with_backend_and_retrieval(
-        host_io,
-        profile_root,
-        session_registry,
-        config,
-        configuration_revision_id,
-        AutomationTaskIo {
-            backend,
-            retrieval: retrieval.as_ref(),
-        },
-        options,
-        run_control,
-    )
-    .await
-}
-
-pub(crate) async fn run_user_session_automation_with_backend_and_retrieval(
-    host_io: HostIo,
-    profile_root: &std::path::Path,
-    session_registry: Arc<dyn ProfileRuntime>,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    io: AutomationTaskIo<'_>,
-    options: UserSessionAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> AutomationRunResult<UserSessionAutomationRun> {
-    let session_reflector = run_user_session_reflector_with_backend_and_retrieval(
-        profile_root,
-        Arc::clone(&session_registry),
-        config,
-        run_control,
-        configuration_revision_id,
-        io,
-        options.session_reflector,
-    )
-    .await?;
-    let memory_curator = run_user_memory_curator_with_backend(
-        profile_root,
-        Arc::clone(&session_registry),
-        config,
-        configuration_revision_id,
-        io.backend,
-        options.memory_curator,
-        run_control,
-    )
-    .await?;
-    let skill_writer = run_user_skill_writer_with_backend_and_retrieval(
-        host_io,
-        profile_root,
-        session_registry,
-        config,
-        configuration_revision_id,
-        io.backend,
-        io.retrieval,
-        options.skill_writer,
-    )
-    .await?;
-    Ok(UserSessionAutomationRun {
-        session_reflector,
-        memory_curator,
-        skill_writer,
-    })
 }
 
 /// Options for the scheduler-only combined reflector+skill pass. Manual
