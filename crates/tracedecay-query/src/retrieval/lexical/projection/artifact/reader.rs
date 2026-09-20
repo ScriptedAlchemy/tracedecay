@@ -24,11 +24,10 @@ use tracedecay_code_index::clones::{
 };
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkId, CompactCandidate,
-    ComponentRevision, EvidenceRole, ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1,
-    FixedPointScore, LogicalEvidenceId, ManifestDigest, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, SourceSpan,
-    SymbolOccurrenceId, canonical_sha256,
+    CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
+    CompactCandidate, ExactFieldV1, ExactTechnicalTermKindV1, LanguageDescriptorRevision,
+    ManifestDigest, RetrieverBatch, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SourceOccurrenceId, SourceSpan, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_private_fs::open_private_file;
 
@@ -58,22 +57,22 @@ use super::{
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::RetrievalExecutionControl;
 use crate::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
+    CodeCandidateBindingV1, ExactTermPostingReadPort, LexicalPostingReadPort,
     RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, contract_error, lane_candidate_cap,
     retrieval_checkpoint,
 };
 
 use super::super::{
-    ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS, FuzzyExpansionsV1,
-    FuzzyQueryGroupV1, LexicalFieldTextV1, LexicalRowScoreV1, LiteralProofCacheV1,
-    PHRASE_SCORE_MILLIS, PreparedLexicalQueryV1, add_score, bm25_score_micros, collect_term_kinds,
-    exact_matches, field_weight_millis, fuzzy_distance_bound, matches_phrase, normalize_lexical,
-    normalized_field_text, proximity_count, retrieval_anchor, substring_count,
+    ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1,
+    LexicalIndexedRow, LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1,
+    bm25_score_micros, exact_matches, field_weight_millis, fuzzy_distance_bound,
+    lexical_lane_binding, lexical_lane_candidate, matches_phrase, normalize_lexical,
+    score_lexical_row,
 };
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalSpellingVariantV1, MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
-    admit_candidate_sources, candidate_admission_outcome, field_admitted,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
+    candidate_admission_outcome, field_admitted,
 };
 
 impl LexicalFieldTextV1 for ArtifactRowV1 {
@@ -107,6 +106,20 @@ impl LexicalFieldTextV1 for ArtifactRowV1 {
 
     fn symbol_documentation(&self) -> Option<&str> {
         self.symbol_documentation.as_deref()
+    }
+}
+
+impl LexicalIndexedRow for ArtifactRowV1 {
+    fn chunk_id(&self) -> &CodeSearchChunkId {
+        &self.id
+    }
+
+    fn anchor(&self) -> &CodeSearchChunkAnchorV1 {
+        &self.anchor
+    }
+
+    fn language_descriptor_revision(&self) -> &LanguageDescriptorRevision {
+        &self.language_descriptor_revision
     }
 }
 
@@ -2154,7 +2167,7 @@ impl<'a> ArtifactQueryV1<'a> {
                     &phrase_frequencies,
                     &stats,
                     &frequencies,
-                )?;
+                );
                 let Some(ranking) = admitted_score_micros(&score, &request.field_filters)? else {
                     return Ok(());
                 };
@@ -2163,10 +2176,9 @@ impl<'a> ArtifactQueryV1<'a> {
                 retain_bounded(
                     &mut ranked,
                     cap,
-                    RankedLexicalEntryV1 {
+                    Keyed {
                         key: (Reverse(ranking), row.id.as_str().to_owned(), document),
-                        score,
-                        row,
+                        value: (score, row),
                     },
                 );
                 Ok(())
@@ -2180,14 +2192,14 @@ impl<'a> ArtifactQueryV1<'a> {
             if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
                 retrieval_checkpoint(control)?;
             }
-            let RankedLexicalEntryV1 {
-                key: (_, _, _),
-                score,
-                row,
+            let Keyed {
+                value: (score, row),
+                ..
             } = entry;
-            let mut candidate = candidate(
-                self.receipt,
+            let mut candidate = lexical_lane_candidate(
                 &row,
+                self.receipt.freshness(),
+                self.receipt.repository_id().cloned(),
                 RetrieverKind::Lexical,
                 self.metadata.lexical_retriever_revision.clone(),
                 request.score_domain.clone(),
@@ -2195,7 +2207,7 @@ impl<'a> ArtifactQueryV1<'a> {
             )?;
             candidate.ordinal_rank = ordinal as u32;
             let evidence = LexicalLaneEvidence {
-                binding: binding(&row, &candidate, score.matched_kinds),
+                binding: lexical_lane_binding(&row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
                 matched_whole_terms: score.matched_whole_terms,
                 matched_subtokens: score.matched_subtokens,
@@ -2259,15 +2271,13 @@ impl<'a> ArtifactQueryV1<'a> {
             retain_bounded(
                 &mut ranked,
                 cap,
-                RankedExactEntryV1 {
+                Keyed {
                     key: (
                         Reverse(matched_literals.len()),
                         row.id.as_str().to_owned(),
                         document,
                     ),
-                    admitted_ordinal,
-                    matched_literals,
-                    matched_kinds,
+                    value: (admitted_ordinal, matched_literals, matched_kinds),
                 },
             );
             Ok(())
@@ -2281,11 +2291,9 @@ impl<'a> ArtifactQueryV1<'a> {
             if ordinal.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
                 retrieval_checkpoint(request.control)?;
             }
-            let RankedExactEntryV1 {
+            let Keyed {
                 key: (_, _, document),
-                admitted_ordinal,
-                matched_literals,
-                matched_kinds,
+                value: (admitted_ordinal, matched_literals, matched_kinds),
             } = entry;
             let proof = proofs.admitted_proof(admitted_ordinal)?;
             let matched_literals = matched_literals
@@ -2293,9 +2301,10 @@ impl<'a> ArtifactQueryV1<'a> {
                 .map(|literal| request.literals[*literal].clone())
                 .collect::<Vec<_>>();
             let row = self.row(document)?;
-            let mut candidate = candidate(
-                self.receipt,
+            let mut candidate = lexical_lane_candidate(
                 &row,
+                self.receipt.freshness(),
+                self.receipt.repository_id().cloned(),
                 RetrieverKind::ExactLiteral,
                 self.metadata.exact_retriever_revision.clone(),
                 self.metadata.exact_score_domain.clone(),
@@ -2303,7 +2312,7 @@ impl<'a> ArtifactQueryV1<'a> {
             )?;
             candidate.ordinal_rank = ordinal as u32;
             let evidence = ExactLaneEvidence {
-                binding: binding(&row, &candidate, matched_kinds),
+                binding: lexical_lane_binding(&row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
             };
@@ -2773,155 +2782,21 @@ impl<'a> ArtifactQueryV1<'a> {
         phrase_frequencies: &BTreeMap<String, usize>,
         stats: &LexicalStatsCacheV1,
         frequencies: &LexicalTermFrequenciesV1,
-    ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
+    ) -> LexicalRowScoreV1 {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
-            self.score_row_inner(row, prepared, fuzzy, phrase_frequencies, stats, frequencies)
+            score_lexical_row(
+                row,
+                &row.exact_terms,
+                prepared,
+                fuzzy,
+                phrase_frequencies,
+                |field, term| term_frequency(frequencies, field, term),
+                |field, term| stats.document_frequency(field, term),
+                |field, term_frequency, document_frequency| {
+                    self.term_score_with_df(field, term_frequency, row, document_frequency, stats)
+                },
+            )
         })
-    }
-
-    fn score_row_inner(
-        &self,
-        row: &ArtifactRowV1,
-        prepared: &PreparedLexicalQueryV1<'_>,
-        fuzzy: &FuzzyExpansionsV1,
-        phrase_frequencies: &BTreeMap<String, usize>,
-        stats: &LexicalStatsCacheV1,
-        frequencies: &LexicalTermFrequenciesV1,
-    ) -> Result<LexicalRowScoreV1, RetrievalPortError> {
-        let mut field_scores = BTreeMap::new();
-        let mut matched_whole_terms = BTreeSet::new();
-        let mut matched_subtokens = BTreeSet::new();
-        let mut matched_phrases = BTreeSet::new();
-        let mut matched_proximities = BTreeSet::new();
-        let mut spelling_variants = BTreeSet::new();
-        let mut matched_kinds = BTreeSet::new();
-        let mut typo_recovery_applied = false;
-        for field in row.field_lengths.keys() {
-            if *field != LexicalFieldV1::Subtoken {
-                for (query_term, normalized) in &prepared.whole_terms {
-                    let exact_tf = term_frequency(frequencies, *field, normalized);
-                    if exact_tf > 0 {
-                        add_score(
-                            &mut field_scores,
-                            *field,
-                            self.term_score(*field, normalized, exact_tf, row, stats),
-                        );
-                        matched_whole_terms.insert((*query_term).to_owned());
-                        collect_term_kinds(&row.exact_terms, normalized, &mut matched_kinds);
-                    }
-                    if let Some(expansions) = fuzzy.by_query.get(*query_term) {
-                        for expansion in expansions {
-                            let tf = term_frequency(frequencies, *field, expansion);
-                            if tf == 0 {
-                                continue;
-                            }
-                            let score = self
-                                .term_score(*field, expansion, tf, row, stats)
-                                .saturating_mul(FUZZY_SCORE_MILLIS)
-                                / 1_000;
-                            add_score(&mut field_scores, *field, score);
-                            matched_whole_terms.insert((*query_term).to_owned());
-                            spelling_variants.insert(LexicalSpellingVariantV1 {
-                                query: (*query_term).to_owned(),
-                                alternative: expansion.clone(),
-                            });
-                            typo_recovery_applied = true;
-                            collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
-                        }
-                    }
-                }
-            } else {
-                for (subtoken, normalized) in &prepared.subtokens {
-                    let tf = term_frequency(frequencies, *field, normalized);
-                    if tf > 0 {
-                        add_score(
-                            &mut field_scores,
-                            *field,
-                            self.term_score(*field, normalized, tf, row, stats),
-                        );
-                        matched_subtokens.insert((*subtoken).to_owned());
-                    }
-                }
-            }
-        }
-        for (phrase, normalized) in &prepared.phrases {
-            for field in row.field_lengths.keys() {
-                let Some(text) = normalized_field_text(row, *field) else {
-                    continue;
-                };
-                let tf = substring_count(&text, normalized);
-                if tf == 0 {
-                    continue;
-                }
-                let score = self
-                    .term_score_with_df(
-                        *field,
-                        tf,
-                        row,
-                        phrase_frequencies
-                            .get(normalized)
-                            .copied()
-                            .unwrap_or_default(),
-                        stats,
-                    )
-                    .saturating_mul(PHRASE_SCORE_MILLIS)
-                    / 1_000;
-                add_score(&mut field_scores, *field, score);
-                matched_phrases.insert((*phrase).to_owned());
-            }
-        }
-        for proximity in &prepared.proximities {
-            for field in row.field_lengths.keys() {
-                let Some(text) = normalized_field_text(row, *field) else {
-                    continue;
-                };
-                let tf = proximity_count(&text, &proximity.terms, proximity.original.maximum_gap);
-                if tf == 0 {
-                    continue;
-                }
-                let score = self
-                    .term_score_with_df(*field, tf, row, 1, stats)
-                    .saturating_mul(PHRASE_SCORE_MILLIS)
-                    / 1_000;
-                add_score(&mut field_scores, *field, score);
-                matched_proximities.insert(proximity.original.clone());
-            }
-        }
-        let echo_penalty_applied =
-            !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
-        if echo_penalty_applied {
-            for score in field_scores.values_mut() {
-                *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
-            }
-        }
-        Ok(LexicalRowScoreV1 {
-            field_scores: field_scores.into_iter().collect(),
-            matched_whole_terms: matched_whole_terms.into_iter().collect(),
-            matched_subtokens: matched_subtokens.into_iter().collect(),
-            matched_phrases: matched_phrases.into_iter().collect(),
-            matched_proximities: matched_proximities.into_iter().collect(),
-            spelling_variants: spelling_variants.into_iter().collect(),
-            matched_kinds: matched_kinds.into_iter().collect(),
-            typo_recovery_applied,
-            echo_penalty_applied,
-        })
-    }
-
-    fn term_score(
-        &self,
-        field: LexicalFieldV1,
-        term: &str,
-        term_frequency: usize,
-        row: &ArtifactRowV1,
-        stats: &LexicalStatsCacheV1,
-    ) -> u64 {
-        self.term_score_with_df(
-            field,
-            term_frequency,
-            row,
-            stats.document_frequency(field, term),
-            stats,
-        )
     }
 
     fn term_score_with_df(
@@ -3016,120 +2891,29 @@ impl LexicalStatsCacheV1 {
     }
 }
 
-fn candidate(
-    receipt: &VerifiedCodeLexicalArtifactV1,
-    row: &ArtifactRowV1,
-    retriever: RetrieverKind,
-    retriever_revision: ComponentRevision,
-    score_domain: ScoreDomainId,
-    exact_admission_proof: Option<ExactAdmissionProof>,
-) -> Result<CompactCandidate, RetrievalPortError> {
-    let lane = retriever.as_str();
-    let chunk_id = row.id.as_str();
-    let generation = row.anchor.generation_id.as_str();
-    let evidence_id = row.anchor.symbol_occurrence_id.as_ref().map_or_else(
-        || format!("code-chunk:{chunk_id}"),
-        |symbol| format!("code-symbol:{}", symbol.as_str()),
-    );
-    Ok(CompactCandidate {
-        anchor_id: retrieval_anchor(evidence_id.clone())?,
-        logical_evidence_id: LogicalEvidenceId::new(evidence_id).map_err(contract_error)?,
-        source_occurrence_id: SourceOccurrenceId::new(format!(
-            "code-chunk:{generation}:{chunk_id}"
-        ))
-        .map_err(contract_error)?,
-        file_occurrence_id: Some(row.anchor.file_occurrence_id.clone()),
-        source_namespace: receipt.freshness().source_namespace.clone(),
-        repository_id: receipt.repository_id().cloned(),
-        session_or_thread_id: None,
-        logical_copy_cluster_id: None,
-        logical_copy_evidence_anchor: None,
-        evidence_role: EvidenceRole::Primary,
-        retriever,
-        retriever_revision,
-        score_domain,
-        raw_score: FixedPointScore::ZERO,
-        ordinal_rank: 0,
-        exact_admission_proof,
-        retriever_evidence_anchor: retrieval_anchor(format!("code-lexical:{lane}:{chunk_id}"))?,
-        freshness: receipt.freshness().clone(),
-    })
+/// Heap entry ordered by `key` alone. Payload is excluded from equality so a
+/// worst-first `BinaryHeap` ranks capped winners without comparing row
+/// material.
+struct Keyed<K, V> {
+    key: K,
+    value: V,
 }
 
-fn binding(
-    row: &ArtifactRowV1,
-    candidate: &CompactCandidate,
-    matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
-) -> CodeCandidateBindingV1 {
-    CodeCandidateBindingV1 {
-        candidate_anchor: candidate.anchor_id.clone(),
-        occurrence: CodeOccurrenceRefV1 {
-            generation: row.anchor.generation_id.clone(),
-            file: row.anchor.file_occurrence_id.clone(),
-            symbol: row.anchor.symbol_occurrence_id.clone(),
-            chunk: Some(row.id.clone()),
-        },
-        language_descriptor_revision: row.language_descriptor_revision.clone(),
-        matched_term_kinds,
-        source_occurrence: candidate.source_occurrence_id.clone(),
-    }
-}
-
-/// One admitted exact candidate retained during bounded selection: the
-/// canonical ranking key plus ordinals into the request literals, the
-/// admitting literal and every matched literal. Winner materialization
-/// resolves the proof from the per-request cache and clones the literals
-/// only then. Ordering is by key alone.
-struct RankedExactEntryV1 {
-    key: (Reverse<usize>, String, u32),
-    admitted_ordinal: usize,
-    matched_literals: Vec<usize>,
-    matched_kinds: Vec<ExactTechnicalTermKindV1>,
-}
-
-/// One lexical winner retained during bounded selection. Carrying its decoded
-/// row and score avoids both winner rehydration and score recomputation.
-struct RankedLexicalEntryV1 {
-    key: (Reverse<u64>, String, u32),
-    score: LexicalRowScoreV1,
-    row: ArtifactRowV1,
-}
-
-impl PartialEq for RankedLexicalEntryV1 {
+impl<K: PartialEq, V> PartialEq for Keyed<K, V> {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key
     }
 }
 
-impl Eq for RankedLexicalEntryV1 {}
+impl<K: Eq, V> Eq for Keyed<K, V> {}
 
-impl PartialOrd for RankedLexicalEntryV1 {
+impl<K: Ord, V> PartialOrd for Keyed<K, V> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for RankedLexicalEntryV1 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.key.cmp(&other.key)
-    }
-}
-
-impl PartialEq for RankedExactEntryV1 {
-    fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-    }
-}
-
-impl Eq for RankedExactEntryV1 {}
-
-impl PartialOrd for RankedExactEntryV1 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RankedExactEntryV1 {
+impl<K: Ord, V> Ord for Keyed<K, V> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.key.cmp(&other.key)
     }

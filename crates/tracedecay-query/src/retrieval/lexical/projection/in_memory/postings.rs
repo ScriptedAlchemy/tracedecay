@@ -102,7 +102,7 @@ impl ByteNgramPostings {
         })?;
         debug_assert_eq!(unique.capacity(), scratch_entries);
         for width in 1..=bytes.len().min(3) {
-            unique.extend(bytes.windows(width).map(pack_byte_ngram));
+            unique.extend(bytes.windows(width).map(super::super::pack_byte_ngram));
         }
         unique.sort_unstable();
         unique.dedup();
@@ -242,15 +242,7 @@ impl ByteNgramPostings {
     }
 
     pub(super) fn candidate_documents(&self, needle: &[u8]) -> RoaringBitmap {
-        let width = needle.len().min(3);
-        if width == 0 {
-            return RoaringBitmap::new();
-        }
-        let ngrams = needle
-            .windows(width)
-            .map(pack_byte_ngram)
-            .collect::<BTreeSet<_>>();
-        let mut ngrams = ngrams.into_iter();
+        let mut ngrams = super::super::packed_query_ngrams(needle).into_iter();
         let Some(first) = ngrams.next() else {
             return RoaringBitmap::new();
         };
@@ -356,16 +348,6 @@ impl ByteNgramBudget {
             LEXICAL_PROJECTION_NGRAM_MEMORY_BUDGET_EXCEEDED, self.maximum_bytes
         )
     }
-}
-
-fn pack_byte_ngram(bytes: &[u8]) -> u32 {
-    debug_assert!((1..=3).contains(&bytes.len()));
-    bytes
-        .iter()
-        .enumerate()
-        .fold((bytes.len() as u32) << 24, |packed, (index, byte)| {
-            packed | (u32::from(*byte) << (index * 8))
-        })
 }
 
 fn pack_posting(ngram: u32, document: u32) -> u64 {

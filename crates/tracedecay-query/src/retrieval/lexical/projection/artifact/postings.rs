@@ -90,7 +90,7 @@ pub(super) fn document_ngrams(
             if observed.is_multiple_of(4_096) {
                 checkpoint(control)?;
             }
-            ngrams.push(pack_byte_ngram(window));
+            ngrams.push(super::super::pack_byte_ngram(window));
             observed = observed.checked_add(1).ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
                     "lexical artifact n-gram work count overflowed".to_owned(),
@@ -104,21 +104,7 @@ pub(super) fn document_ngrams(
 }
 
 pub(super) fn query_ngrams(bytes: &[u8]) -> BTreeSet<u32> {
-    let width = bytes.len().min(3);
-    if width == 0 {
-        return BTreeSet::new();
-    }
-    bytes.windows(width).map(pack_byte_ngram).collect()
-}
-
-fn pack_byte_ngram(bytes: &[u8]) -> u32 {
-    debug_assert!((1..=3).contains(&bytes.len()));
-    bytes
-        .iter()
-        .enumerate()
-        .fold((bytes.len() as u32) << 24, |packed, (index, byte)| {
-            packed | (u32::from(*byte) << (index * 8))
-        })
+    super::super::packed_query_ngrams(bytes)
 }
 
 #[cfg(test)]
