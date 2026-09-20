@@ -324,7 +324,6 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
 tokio = { version = "1", features = ["full"] }
@@ -332,10 +331,8 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 sha2 = "0.11"
-glob = "0.3"
 walkdir = "2"
 gix.workspace = true
-hex = "0.4"
 zeroize = "1.9.0"
 keyring = { version = "4.1.5", features = ["v1"] }
 tempfile = "3"
@@ -347,16 +344,17 @@ rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0", optional = true }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
-# (tests/daemon_suite). Store-locality detection moved with the locator
-# resolver to tracedecay-store-runtime.
-[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+# (tests/daemon_suite). Store-locality detection lives in tracedecay-store-runtime.
+[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dev-dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tree-sitter = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+glob = "0.3"
 hex = "0.4"
+toml = "1"
 regex = "1.12.3"
 filetime = "0.2"
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
