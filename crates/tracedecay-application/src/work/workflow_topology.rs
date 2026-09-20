@@ -12,8 +12,9 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
-    GraphWatermark, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
+    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphStoreFailureClass,
+    GraphTraversalDirection, GraphWatermark, SourceGeneration, TraversalRequest,
+    VerifiedGraphSnapshot, classify_graph_store_error,
 };
 
 const WORKFLOW_PROJECTION: &str = "workflow-topology";
@@ -42,27 +43,12 @@ pub enum WorkflowTopologyError {
 
 impl From<GraphDbError> for WorkflowTopologyError {
     fn from(error: GraphDbError) -> Self {
-        match error {
-            GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted { .. } | GraphDbError::DeadlineExceeded => {
-                Self::BudgetExhausted
-            }
-            GraphDbError::InvalidRequest { message } => Self::Contract(message),
-            GraphDbError::Corrupt { message }
-            | GraphDbError::ResetRequired { message }
-            | GraphDbError::DurabilityUncertain { message }
-            | GraphDbError::ProjectionMismatch { message, .. }
-            | GraphDbError::GenerationMismatch { message, .. } => Self::Corrupt(message),
-            GraphDbError::Conflict { .. } => {
-                Self::Unavailable("workflow topology publication conflict".to_owned())
-            }
-            GraphDbError::Unavailable { message }
-            | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
-            error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
-            | GraphDbError::SealedRevisionIncompatible { .. }) => {
-                Self::Unavailable(error.to_string())
-            }
-            GraphDbError::Closed => Self::Unavailable("graph store is closed".to_owned()),
+        match classify_graph_store_error(error, "workflow topology publication conflict") {
+            GraphStoreFailureClass::Cancelled => Self::Cancelled,
+            GraphStoreFailureClass::BudgetExhausted => Self::BudgetExhausted,
+            GraphStoreFailureClass::Contract(message) => Self::Contract(message),
+            GraphStoreFailureClass::Corrupt(message) => Self::Corrupt(message),
+            GraphStoreFailureClass::Unavailable(message) => Self::Unavailable(message),
         }
     }
 }
