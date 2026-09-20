@@ -157,17 +157,11 @@ fn open_no_follow(path: &Path) -> io::Result<File> {
     options.open(path).map_err(normalize_no_follow_error)
 }
 
-#[cfg(unix)]
 fn normalize_no_follow_error(error: io::Error) -> io::Error {
+    #[cfg(unix)]
     if error.raw_os_error() == Some(libc::ELOOP) {
-        io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link")
-    } else {
-        error
+        return io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link");
     }
-}
-
-#[cfg(not(unix))]
-fn normalize_no_follow_error(error: io::Error) -> io::Error {
     error
 }
 
@@ -477,17 +471,7 @@ pub fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     platform_rename_noreplace(source, destination)
 }
 
-#[cfg(target_os = "linux")]
-fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
-    crate::rename_noreplace::rename_noreplace_at(
-        libc::AT_FDCWD,
-        source.as_os_str(),
-        libc::AT_FDCWD,
-        destination.as_os_str(),
-    )
-}
-
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     crate::rename_noreplace::rename_noreplace_at(
         libc::AT_FDCWD,
