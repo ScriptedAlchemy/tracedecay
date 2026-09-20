@@ -9,7 +9,6 @@ use cap_std::fs::Dir;
 use cap_std::fs::OpenOptionsExt;
 use cap_std::time::SystemClock;
 use serde::{Deserialize, Serialize};
-use tracedecay_automation::config::validate_schedule as validate_leaf_schedule;
 pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
 use tracedecay_automation::evidence_budget::{
     SessionEvidenceBudgetBackoff, SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
@@ -747,10 +746,6 @@ pub fn stale_lock_secs(config: &AutomationConfig, task: AgentTaskKind) -> Option
     task_config(config, task)
         .and_then(|task_config| task_config.stale_lock_secs)
         .or(Some(DEFAULT_STALE_LOCK_SECS))
-}
-
-pub fn validate_schedule(schedule: Option<&str>) -> Result<()> {
-    Ok(validate_leaf_schedule(schedule)?)
 }
 
 /// User jobs carry their own schedule/enabled state (see
