@@ -248,15 +248,91 @@ fn open_delivery_receipt_spool(
     )
 }
 
+struct PreparedNativeCapture {
+    outcome: NativeHookCaptureOutcomeV1,
+    delivery_writer: Option<HookDeliveryReceiptSpoolV1>,
+    delivery_open_error: Option<HookDeliverySpoolError>,
+    delivery_material: Option<tracedecay_hooks::NativeEnvelopeMaterialV1>,
+    rejection: Option<String>,
+}
+
+impl PreparedNativeCapture {
+    fn plain(outcome: NativeHookCaptureOutcomeV1) -> Self {
+        Self {
+            outcome,
+            delivery_writer: None,
+            delivery_open_error: None,
+            delivery_material: None,
+            rejection: None,
+        }
+    }
+}
+
+fn prepare_native_capture(
+    source: NativeHookCaptureSourceV1,
+    payload: &[u8],
+    working_directory: &std::io::Result<std::path::PathBuf>,
+) -> PreparedNativeCapture {
+    let Ok(project_root) = working_directory.as_ref() else {
+        return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unavailable);
+    };
+    let layout = match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
+        project_root,
+    ) {
+        Ok(Some(layout)) => layout,
+        Ok(None) => return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unbound),
+        Err(_) => return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unavailable),
+    };
+    let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
+        &tracedecay::hook_runtime(),
+        &layout,
+    );
+    let (Some(now), Ok(worktree_id)) = (current_time(), worktree_id) else {
+        return PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unavailable);
+    };
+    match tracedecay_agent_hosts::hooks::native_capture_material(source, payload, now) {
+        Ok(material) => {
+            let outcome = tracedecay_hooks::capture_native_event_for_replay(
+                &layout.data_root,
+                worktree_id,
+                source,
+                payload,
+                material,
+                now,
+                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+            );
+            if outcome != NativeHookCaptureOutcomeV1::Captured {
+                return PreparedNativeCapture::plain(outcome);
+            }
+            let (delivery_writer, delivery_open_error) =
+                match open_delivery_receipt_spool(&layout.data_root, source.host()) {
+                    Ok(writer) => (Some(writer), None),
+                    Err(error) => (None, Some(error)),
+                };
+            PreparedNativeCapture {
+                outcome,
+                delivery_writer,
+                delivery_open_error,
+                delivery_material: Some(material),
+                rejection: None,
+            }
+        }
+        Err(
+            tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeEvent
+            | tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeFamily,
+        ) => PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Unsupported),
+        Err(error) => PreparedNativeCapture {
+            rejection: Some(error.to_string()),
+            ..PreparedNativeCapture::plain(NativeHookCaptureOutcomeV1::Rejected)
+        },
+    }
+}
+
 pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     let payload = match read_bounded_stdin() {
         Ok(payload) => payload,
         Err(()) => return refused("stdin was unreadable or exceeded the payload bound"),
     };
-    let mut delivery_writer = None;
-    let mut delivery_open_error = None;
-    let mut delivery_material = None;
-    let mut rejection = None;
     let working_directory = std::env::current_dir();
     // The invocation is analytics-visible whatever the capture outcome: an
     // unbound, unsupported, or rejected callback still proves the host fired
@@ -268,62 +344,8 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         None,
         &String::from_utf8_lossy(&payload),
     );
-    let outcome = match working_directory {
-        Ok(project_root) => {
-            match tracedecay_runtime_core::storage::resolve_enrolled_layout_for_current_profile(
-                &project_root,
-            ) {
-                Ok(Some(layout)) => {
-                    let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
-                        &tracedecay::hook_runtime(),
-                        &layout,
-                    );
-                    match (current_time(), worktree_id) {
-                        (Some(now), Ok(worktree_id)) => {
-                            match tracedecay_agent_hosts::hooks::native_capture_material(
-                                source, &payload, now,
-                            ) {
-                                Ok(material) => {
-                                    let outcome = tracedecay_hooks::capture_native_event_for_replay(
-                                        &layout.data_root,
-                                        worktree_id,
-                                        source,
-                                        &payload,
-                                        material,
-                                        now,
-                                        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-                                    );
-                                    if outcome == NativeHookCaptureOutcomeV1::Captured {
-                                        match open_delivery_receipt_spool(
-                                            &layout.data_root,
-                                            source.host(),
-                                        ) {
-                                            Ok(writer) => delivery_writer = Some(writer),
-                                            Err(error) => delivery_open_error = Some(error),
-                                        }
-                                        delivery_material = Some(material);
-                                    }
-                                    outcome
-                                }
-                                Err(
-                                    tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeEvent
-                                    | tracedecay_hooks::NativeHookDecodeError::UnsupportedNativeFamily,
-                                ) => NativeHookCaptureOutcomeV1::Unsupported,
-                                Err(error) => {
-                                    rejection = Some(error.to_string());
-                                    NativeHookCaptureOutcomeV1::Rejected
-                                }
-                            }
-                        }
-                        _ => NativeHookCaptureOutcomeV1::Unavailable,
-                    }
-                }
-                Ok(None) => NativeHookCaptureOutcomeV1::Unbound,
-                Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
-            }
-        }
-        Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
-    };
+    let prepared = prepare_native_capture(source, &payload, &working_directory);
+    let outcome = prepared.outcome;
 
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -336,13 +358,14 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
     }
     drop(stdout);
     if outcome == NativeHookCaptureOutcomeV1::Captured {
-        let Some(writer) = delivery_writer else {
-            return refused(match delivery_open_error {
+        let Some(writer) = prepared.delivery_writer else {
+            return refused(match prepared.delivery_open_error {
                 Some(error) => format!("native delivery receipt spool unavailable: {error}"),
                 None => "native delivery receipt writer unavailable".to_string(),
             });
         };
-        let (Some(material), Some(delivered_at)) = (delivery_material, current_time()) else {
+        let (Some(material), Some(delivered_at)) = (prepared.delivery_material, current_time())
+        else {
             return refused("native delivery receipt material unavailable");
         };
         let Some(settlement) = native_hook_delivery_settlement(source, material, delivered_at)
@@ -366,7 +389,7 @@ pub(crate) fn run_native_capture(source: NativeHookCaptureSourceV1) -> i32 {
         | NativeHookCaptureOutcomeV1::Full
         | NativeHookCaptureOutcomeV1::ResetRequired
         | NativeHookCaptureOutcomeV1::Unavailable
-        | NativeHookCaptureOutcomeV1::AdmissionTimedOut => refused(match rejection {
+        | NativeHookCaptureOutcomeV1::AdmissionTimedOut => refused(match prepared.rejection {
             Some(reason) => format!("native capture did not land: {outcome:?} ({reason})"),
             None => format!("native capture did not land: {outcome:?}"),
         }),

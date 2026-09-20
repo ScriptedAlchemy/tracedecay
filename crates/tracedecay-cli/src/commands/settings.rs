@@ -104,12 +104,7 @@ async fn invoke_configuration_surface(
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .map_err(|error| configuration_error(error.to_string()))?;
-    let handshake = tracedecay::daemon::handshake_for_current_client(
-        Some(project_path.to_path_buf()),
-        None,
-        false,
-        false,
-    )?;
+    let handshake = super::daemon::client_handshake(Some(project_path))?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     loop {
         let result = crate::cli::dispatch::resolve_cli_application_surface(

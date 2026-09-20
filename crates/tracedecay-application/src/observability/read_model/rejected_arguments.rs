@@ -29,7 +29,7 @@ pub(crate) fn unavailable_rejected_arguments(
     reason: &str,
 ) -> RejectedArgumentAnalyticsV1 {
     RejectedArgumentAnalyticsV1 {
-        coverage: unknown_coverage(),
+        coverage: super::unknown_coverage(),
         projector_revision: PROJECTOR_REVISION.to_owned(),
         watermark: watermark.to_owned(),
         eligible_attempts: None,
@@ -225,17 +225,5 @@ fn finish(
         redacted_name_count: 0,
         groups,
         unavailable_reason,
-    }
-}
-
-const fn unknown_coverage() -> MetricCoverageV1 {
-    MetricCoverageV1 {
-        eligible: None,
-        observed: 0,
-        completed: 0,
-        censored: 0,
-        unknown: 1,
-        excluded: 0,
-        state: CoverageStateV1::Unknown,
     }
 }

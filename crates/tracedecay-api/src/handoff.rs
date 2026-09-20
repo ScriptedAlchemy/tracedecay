@@ -52,40 +52,13 @@ impl HandoffOperation {
         matches!(self, Self::ListTaskHandoffs)
     }
 
-    pub const fn operation_id_str(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "operation.handoff.issue_task_handoff",
-            Self::ListTaskHandoffs => "operation.handoff.list_task_handoffs",
-            Self::OpenInvestigationHandoff => "operation.handoff.open_investigation_handoff",
-            Self::OpenTaskHandoff => "operation.handoff.open_task_handoff",
-        }
-    }
-
-    pub const fn route_segment(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "issue-task",
-            Self::ListTaskHandoffs => "list-task",
-            Self::OpenInvestigationHandoff => "open-investigation",
-            Self::OpenTaskHandoff => "open-task",
-        }
-    }
-
-    pub const fn route_path(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "/handoff/issue-task",
-            Self::ListTaskHandoffs => "/handoff/list-task",
-            Self::OpenInvestigationHandoff => "/handoff/open-investigation",
-            Self::OpenTaskHandoff => "/handoff/open-task",
-        }
-    }
-
-    pub const fn application_route_path(self) -> &'static str {
-        match self {
-            Self::IssueTaskHandoff => "/application/handoff/issue-task",
-            Self::ListTaskHandoffs => "/application/handoff/list-task",
-            Self::OpenInvestigationHandoff => "/application/handoff/open-investigation",
-            Self::OpenTaskHandoff => "/application/handoff/open-task",
-        }
+    mounted_operation_paths! {
+        id_prefix = "operation.handoff.",
+        route_prefix = "handoff",
+        IssueTaskHandoff: "issue_task_handoff", "issue-task";
+        ListTaskHandoffs: "list_task_handoffs", "list-task";
+        OpenInvestigationHandoff: "open_investigation_handoff", "open-investigation";
+        OpenTaskHandoff: "open_task_handoff", "open-task";
     }
 
     pub fn request_schema_name(self) -> Cow<'static, str> {

@@ -7,7 +7,7 @@ use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationP
 /// boundary so a slow CLI invocation can attribute time to client identity
 /// resolution separately from the daemon round-trip itself.
 #[hotpath::measure(label = "cli.daemon.handshake")]
-fn client_handshake(
+pub(crate) fn client_handshake(
     project_path: Option<&std::path::Path>,
 ) -> tracedecay_domain::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
     tracedecay::daemon::handshake_for_current_client(

@@ -10,6 +10,7 @@ const allowedTypes = [
   "revert",
   "simplify",
   "style",
+  "simplify",
   "test",
 ];
 
