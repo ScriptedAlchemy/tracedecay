@@ -805,7 +805,10 @@ print(
     + " }"
 )
 PY
-cat >"$consumer/src/main.rs" <<'RS'
+# The host bundle generators sign each bundle with the commit that produced
+# it; the packaged product's source head is that commit.
+printf 'const GENERATOR_COMMIT: &str = "%s";\n' "$source_git_sha" >"$consumer/src/main.rs"
+cat >>"$consumer/src/main.rs" <<'RS'
 use std::collections::BTreeSet;
 
 use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
@@ -857,11 +860,11 @@ fn main() {
     );
     for host in RECEIPT_BACKED_HOST_KINDS {
         let components = default_components(host);
-        let component_set = verified_embedded_default_host_component_set(host, 0)
+        let component_set = verified_embedded_default_host_component_set(host, 0, GENERATOR_COMMIT)
             .expect("default packaged host component set must verify");
         assert_eq!(component_set.component_set.components.len(), components.len());
         for component in components {
-            let bundle = verified_embedded_host_bundle(host, component, 0)
+            let bundle = verified_embedded_host_bundle(host, component, 0, GENERATOR_COMMIT)
                 .expect("packaged host bundle must be callable");
             bundle
                 .manifest
