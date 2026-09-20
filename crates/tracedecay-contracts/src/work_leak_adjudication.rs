@@ -16,8 +16,8 @@ use tracedecay_domain::{
 
 use crate::work::work_authority;
 use crate::{
-    ApplicationProblem, CancellationStage, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic,
+    ApplicationProblem, CancellationStage, LegalAction, RequestContext, RetryDirective,
+    SafeDiagnostic,
 };
 
 pub const MAX_WORK_LEAK_EVIDENCE_REFS_V1: usize = 8;
@@ -269,7 +269,7 @@ where
         scan_started_at: UtcMicros,
         scan_deadline: UtcMicros,
     ) -> Result<WorkLeakAdjudicationOutcomeV1, ApplicationProblem> {
-        admit(context, scan_started_at)?;
+        ApplicationProblem::ensure_admitted(context, scan_started_at)?;
         if !command.validate()
             || scan_deadline.0 < scan_started_at.0
             || u64::try_from(scan_deadline.0.saturating_sub(scan_started_at.0))
@@ -332,14 +332,6 @@ fn canonical_label(value: &str, maximum: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'-' | b'_'))
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
 }
 
 fn invalid_problem() -> ApplicationProblem {

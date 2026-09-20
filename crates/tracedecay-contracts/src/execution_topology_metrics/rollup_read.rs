@@ -10,7 +10,7 @@ use crate::observability::{
     ObservabilityFuture, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
 };
 use crate::work::work_authority;
-use crate::{ApplicationProblem, RequestAdmission, RequestContext, RetryDirective};
+use crate::{ApplicationProblem, RequestContext, RetryDirective};
 
 use super::projection::TELEMETRY_DROP_EVENT_KIND_V1;
 use super::rollup::{
@@ -77,7 +77,7 @@ where
 {
     validate_request(request)?;
     let observed_at = now_micros();
-    admit(context, observed_at)?;
+    ApplicationProblem::ensure_admitted(context, observed_at)?;
     authorize(context)?;
     let authorized_scope_ref = work_authority(context)?.project_id().as_str().to_owned();
     let observed_at_micros = observed_at.0;
@@ -106,7 +106,7 @@ where
                 ExecutionMetricUnavailableV1::EventBudgetExceeded,
             ));
         }
-        admit(context, now_micros())?;
+        ApplicationProblem::ensure_admitted(context, now_micros())?;
         let page = match observations
             .query(boundary_query(
                 &authorized_scope_ref,
@@ -182,7 +182,7 @@ where
     }
 
     let fragments = if let Some(horizon) = full_days {
-        admit(context, now_micros())?;
+        ApplicationProblem::ensure_admitted(context, now_micros())?;
         let page = match rollups
             .query_rollup_fragments(ExecutionTopologyRollupFragmentQueryV1 {
                 authorized_scope_ref: authorized_scope_ref.clone(),
@@ -239,14 +239,6 @@ fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), A
         ));
     }
     Ok(())
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
 }
 
 fn authorize(context: &RequestContext) -> Result<(), ApplicationProblem> {

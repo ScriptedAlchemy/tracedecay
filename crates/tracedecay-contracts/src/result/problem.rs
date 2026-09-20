@@ -1,8 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
 
 use super::{CancellationStage, EffectReceipt, EffectTermination};
+use crate::context::{RequestAdmission, RequestContext};
 use crate::error::ApplicationContractError;
 
 /// Diagnostic code for an admitted route whose owner is still registering
@@ -701,6 +703,16 @@ impl ApplicationProblem {
             stage: CancellationStage::BeforeAdmission,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
+        }
+    }
+
+    /// Admitted requests continue. Cancellation and deadline expiry become
+    /// the matching pre-admission problems.
+    pub fn ensure_admitted(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Self> {
+        match context.admission_at(observed_at) {
+            RequestAdmission::Admitted => Ok(()),
+            RequestAdmission::Cancelled => Err(Self::cancelled_before_admission()),
+            RequestAdmission::TimedOut => Err(Self::timed_out_before_admission()),
         }
     }
 

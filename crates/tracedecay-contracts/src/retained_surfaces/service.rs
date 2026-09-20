@@ -23,8 +23,7 @@ use crate::retrieval::{
 };
 use crate::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, CancellationSignal,
-    CancellationStage, EffectReceipt, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic,
+    CancellationStage, EffectReceipt, LegalAction, RequestContext, RetryDirective, SafeDiagnostic,
 };
 
 pub type RetainedSurfaceExecutionFutureV1<'a> = Pin<
@@ -219,7 +218,7 @@ impl<'a> RetainedSurfaceServiceV1<'a> {
         observed_at: UtcMicros,
         request: &RetainedSurfaceRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, ApplicationProblem> {
-        admit(context, observed_at)?;
+        ApplicationProblem::ensure_admitted(context, observed_at)?;
         if cancellation.context().token_id != context.cancellation().token_id {
             return Err(ApplicationProblem::not_found_or_not_authorized(
                 RetryDirective::Never,
@@ -513,14 +512,6 @@ pub const fn retained_surface_operation_is_effect(operation: RetainedSurfaceOper
             | RetainedSurfaceOperation::SessionRefreshCancel
             | RetainedSurfaceOperation::SessionRefreshBegin
     )
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
 }
 
 /// Canonical semantic problem projection for a retained runtime failure.

@@ -26,8 +26,8 @@ use crate::work_attempt_effect::{
     WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
 use crate::{
-    ApplicationContractError, ApplicationProblem, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
+    ApplicationContractError, ApplicationProblem, LegalAction, RequestContext, RetryDirective,
+    SafeDiagnostic, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
     WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
     WorkProductRetryAdmissionV1, WorkProductRevisionPinsV1, WorkflowFanOutAttemptBindingV1,
     WorkflowRunAppendRequest,
@@ -376,7 +376,7 @@ where
         restarted_at: UtcMicros,
         workflow_rebind: Option<WorkflowFanOutRetryRebindV1>,
     ) -> Result<WorkRetryAttemptOutcomeV1, ApplicationProblem> {
-        admit(context, restarted_at)?;
+        ApplicationProblem::ensure_admitted(context, restarted_at)?;
         if !command.validate() {
             return Err(invalid_problem());
         }
@@ -787,14 +787,6 @@ fn validate_failure(
         ));
     }
     Ok(())
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
 }
 
 fn invalid_problem() -> ApplicationProblem {

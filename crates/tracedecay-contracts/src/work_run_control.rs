@@ -39,10 +39,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
-};
+use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum WorkRunControlStorageError {
@@ -304,7 +301,7 @@ where
         command: PauseWorkRunCommand,
     ) -> Result<WorkRunControlTransitionReceiptV1, ApplicationProblem> {
         hotpath::measure_block!("application.work.run_control.pause", {
-            admit(context, command.occurred_at)?;
+            ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
             let authority = work_authority(context)?;
             let frontier = self
                 .storage
@@ -399,7 +396,7 @@ where
         command: ResumeWorkRunCommand,
     ) -> Result<WorkRunControlTransitionReceiptV1, ApplicationProblem> {
         hotpath::measure_block!("application.work.run_control.resume", {
-            admit(context, command.occurred_at)?;
+            ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
             let authority = work_authority(context)?;
             let frontier = self
                 .storage
@@ -580,14 +577,6 @@ fn check_expected(
         (Some(current), Some(expected)) if current == expected => Ok(()),
         (None, None) => Ok(()),
         _ => Err(authority_conflict_problem()),
-    }
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
     }
 }
 

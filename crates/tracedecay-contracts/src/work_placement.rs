@@ -34,10 +34,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
-};
+use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum WorkPlacementStorageError {
@@ -176,7 +173,7 @@ where
             &WorkPlacementTargetV1,
         ) -> Result<WorkPlacementObservationV1, ApplicationProblem>,
     ) -> Result<WorkPlacementPreflightV1, ApplicationProblem> {
-        admit(context, request.occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, request.occurred_at)?;
         let authority = work_authority(context)?;
         let identity = WorkPlacementIdentityV1::new(request.task_id, request.run_id);
         self.evaluate(&authority, identity, request.target, observe)
@@ -196,7 +193,7 @@ where
             &WorkPlacementTargetV1,
         ) -> Result<WorkPlacementObservationV1, ApplicationProblem>,
     ) -> Result<WorkPlacementV1, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
         let authority = work_authority(context)?;
         let identity = WorkPlacementIdentityV1::new(command.task_id, command.run_id);
         let existing = self
@@ -270,7 +267,7 @@ where
             &WorkPlacementTargetV1,
         ) -> Result<WorkPlacementObservationV1, ApplicationProblem>,
     ) -> Result<WorkPlacementV1, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
         let authority = work_authority(context)?;
         let identity = WorkPlacementIdentityV1::new(command.task_id, command.run_id);
         let current = self
@@ -334,14 +331,6 @@ where
             .target_holder(authority, root)
             .map_err(storage_problem)?
             .is_some_and(|holder| &holder != identity))
-    }
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
     }
 }
 

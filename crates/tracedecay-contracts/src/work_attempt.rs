@@ -22,7 +22,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{ApplicationProblem, RequestAdmission, RequestContext};
+use crate::{ApplicationProblem, RequestContext};
 
 mod capacity;
 mod problem;
@@ -559,7 +559,7 @@ where
         context: &RequestContext,
         command: CancelWorkAttemptCommand,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
         let authority = work_authority(context)?;
         let identity = WorkAttemptIdentityV1::new(
             command.task_id.clone(),
@@ -623,7 +623,7 @@ where
         context: &RequestContext,
         command: &ResumeWorkAttemptsCommand,
     ) -> Result<WorkAttemptRecoveryReportV1, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
         let authority = work_authority(context)?;
         let open = self
             .attempts
@@ -1126,13 +1126,5 @@ fn cancellation_request(state: &WorkCancellationStateV1) -> Option<&WorkCancella
         WorkCancellationStateV1::Escalated(escalation) => {
             Some(escalation.acknowledgement().request())
         }
-    }
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
     }
 }

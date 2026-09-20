@@ -11,13 +11,13 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ApplicationProblem, RequestAdmission, RequestContext, WorkGraphReadPortV1,
-    WorkGraphReadRequestV1, WorkGraphReadV1, WorkProductApplicationErrorV1,
-    WorkProductAttemptAdmissionErrorV1, WorkProductAttemptAdmissionOutcomeV1,
-    WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1, WorkProductBindingV1,
-    WorkProductEventDraftV1, WorkProductOwnerAuthorizationErrorV1,
-    WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductRevisionPinsV1,
-    WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    ApplicationProblem, RequestContext, WorkGraphReadPortV1, WorkGraphReadRequestV1,
+    WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductAttemptAdmissionErrorV1,
+    WorkProductAttemptAdmissionOutcomeV1, WorkProductAttemptAdmissionPortV1,
+    WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductEventDraftV1,
+    WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
+    WorkProductPortContextV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
+    WorkRelationScopeV1,
 };
 
 use super::{
@@ -50,11 +50,7 @@ pub(crate) fn admit_product_attempt_request(
     if !context.allows(binding.capability_id(), binding.use_case_id()) {
         return Err(not_found_problem());
     }
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
+    ApplicationProblem::ensure_admitted(context, observed_at)
 }
 
 pub(crate) fn replayed_attempt_matches_command(

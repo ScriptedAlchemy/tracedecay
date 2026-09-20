@@ -14,10 +14,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
-};
+use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
 
 pub fn work_duplicate_adjudication_input_digest(
     command: &WorkDuplicateAdjudicationCommandV1,
@@ -200,7 +197,7 @@ where
         context: &RequestContext,
         command: WorkDuplicateAdjudicationCommandV1,
     ) -> Result<WorkDuplicateAdjudicationAppendOutcomeV1, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
         let authority = work_authority(context)?;
         let command = command.canonicalized();
         command.validate().map_err(|_| invalid_problem())?;
@@ -240,7 +237,7 @@ where
         command_id: WorkCommandId,
         occurred_at: UtcMicros,
     ) -> Result<WorkDuplicateAdjudicationCommandV1, ApplicationProblem> {
-        admit(context, occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, occurred_at)?;
         let authority = work_authority(context)?;
         if request.first_attempt == request.second_attempt {
             return Err(invalid_problem());
@@ -274,7 +271,7 @@ where
         context: &RequestContext,
         request: WorkDuplicateAttemptClassificationRequestV1,
     ) -> Result<WorkDuplicateAttemptClassificationReadV1, ApplicationProblem> {
-        admit(context, request.observed_at)?;
+        ApplicationProblem::ensure_admitted(context, request.observed_at)?;
         let authority = work_authority(context)?;
         let mut attempts = request.attempts;
         attempts.sort();
@@ -399,14 +396,6 @@ fn classify_complete_attempt_relations(
             non_duplicate_attempts,
             relation_receipts,
         },
-    }
-}
-
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
     }
 }
 
