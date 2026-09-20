@@ -150,13 +150,10 @@ jobs:
           toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ matrix.target }}
 
-      # Restore before the first cargo invocation. resolve-release-source-profile
-      # runs `cargo tree` twice (~4 min cold on beta.40) and used to do that
-      # before rust-cache, so a warm registry sitting in Actions cache never
-      # reached the step that needed it. Tag runs can restore only same-ref or
-      # default-branch caches; this shared-key must stay stable so a later
-      # master writer can seed them. cache-workspace-crates stays false: the
-      # 10 GB repo budget is already full of CI lineages (~13.8 GB / 28 entries).
+      # Restore before the packaging compile. Tag runs can restore only
+      # same-ref or default-branch caches; this shared-key must stay stable so
+      # a later master writer can seed them. cache-workspace-crates stays
+      # false: the 10 GB repo budget is already full of CI lineages.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

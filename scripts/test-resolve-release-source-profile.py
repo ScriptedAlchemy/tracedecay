@@ -104,6 +104,49 @@ def main() -> int:
             f"unexpected historical macOS features: {historical_macos!r}"
         )
 
+    production = run_fixture(
+        """[package]
+name = "tracedecay"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["production"]
+production = ["token-counting", "lite", "full"]
+token-counting = []
+lite = []
+full = []
+"""
+    )
+    if production.returncode != 0:
+        raise SystemExit(production.stderr)
+    if production.github_output != (
+        "profile=production\n"
+        "cargo_args=--no-default-features --features production\n"
+        "cargo_features=production\n"
+    ):
+        raise SystemExit(
+            f"unexpected production profile output: {production.github_output!r}"
+        )
+
+    contaminated_production = run_fixture(
+        """[package]
+name = "tracedecay"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["production"]
+production = ["token-counting", "lite", "full", "test-transport"]
+token-counting = []
+lite = []
+full = []
+test-transport = []
+"""
+    )
+    if contaminated_production.returncode == 0:
+        raise SystemExit("production test-transport contamination was accepted")
+
     partial_hotpath = resolver.production_release_features(
         {"production": [], "hotpath": []}, "x86_64-unknown-linux-gnu"
     )

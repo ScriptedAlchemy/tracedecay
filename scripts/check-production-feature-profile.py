@@ -48,6 +48,11 @@ def main() -> int:
         type=Path,
         default=Path(__file__).resolve().parent.parent,
     )
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="check the feature table and skip cargo tree",
+    )
     arguments = parser.parse_args()
     repo = arguments.repo.resolve()
 
@@ -66,6 +71,9 @@ def main() -> int:
         raise SystemExit("production feature set lost a required member")
     if "test-transport" in features["production"]:
         raise SystemExit("production feature directly enables test-transport")
+    if arguments.manifest_only:
+        print("production feature manifest is eligible for release")
+        return 0
 
     # `cargo metadata` unifies dev-dependency features across the workspace and
     # therefore makes test-only transports look production-reachable. Inspect

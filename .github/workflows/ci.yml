@@ -1064,6 +1064,11 @@ jobs:
           # forks on the local feature while hotpath::io! expands on the backend.
           cargo check --workspace --all-targets --features hotpath/hotpath --locked
 
+      # One graph walk for the whole push. Release jobs only read the manifest;
+      # repeating cargo tree on every target does not change the binary.
+      - name: Check the production feature graph
+        run: python3 scripts/check-production-feature-profile.py
+
   # The configuration users actually receive. `scripts/resolve-release-source-profile.py`
   # resolves the release build to `--no-default-features --features production`
   # on the release profile, and nothing on a push compiled it: `debug-cli` is a

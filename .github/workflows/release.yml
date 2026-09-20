@@ -190,11 +190,10 @@ jobs:
           toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ matrix.target }}
 
-      # Restore before the first cargo invocation (`cargo tree` in the
-      # profile resolver). Tag runs can restore only same-ref or default-branch
-      # caches; keep this shared-key stable so a later master writer can seed
-      # them. cache-workspace-crates stays false so release blobs stay inside
-      # the 10 GB GitHub cache budget.
+      # Restore before the packaging compile. Tag runs can restore only
+      # same-ref or default-branch caches; keep this shared-key stable so a
+      # later master writer can seed them. cache-workspace-crates stays false
+      # so release blobs stay inside the 10 GB GitHub cache budget.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
