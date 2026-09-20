@@ -387,7 +387,7 @@ mod tests {
     use tracedecay_domain::{
         BrainId, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
         CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
-        CanonicalObservationRelationsV1, DurableObservationV1, ManifestDigest, ObservationId,
+        CanonicalObservationRelationsV1, DurableObservationV1, ObservationId,
         ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
         ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
         ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId,
@@ -429,10 +429,7 @@ mod tests {
         DaemonSessionRetrievalRoot::profile(serving).expect("profile retrieval root")
     }
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-            .expect("manifest digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn session(provider: &str, session_id: &str, project_key: &str) -> SessionRecord {
         SessionRecord {

@@ -23,8 +23,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::ConfigurationValueV1;
 use tracedecay_domain::feedback::FeedbackContentIdentityV1;
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ManifestDigest, ProjectId, RefId, RetrievalAnchorId,
-    TemporalModeV1,
+    CodeGenerationId, ComponentVersion, ProjectId, RefId, RetrievalAnchorId, TemporalModeV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
@@ -50,9 +49,7 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
-fn digest(character: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn configured_model_evidence(marker: u8) -> ContextScoutEvidenceEnvelopeV1 {
     let scope = ResolvedScope::new(

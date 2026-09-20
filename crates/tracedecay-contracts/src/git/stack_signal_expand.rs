@@ -270,9 +270,7 @@ impl GitHubStackSignalExpandPortError {
 mod tests {
     use super::*;
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn native_preview() -> GitHubStackSignalNativePreviewV1 {
         GitHubStackSignalNativePreviewV1 {

@@ -29,9 +29,7 @@ use super::*;
 use crate::config::lock_user_data_dir_test_env;
 use crate::project::TraceDecay;
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn retained_scope() -> ResolvedScope {
     ResolvedScope::new(

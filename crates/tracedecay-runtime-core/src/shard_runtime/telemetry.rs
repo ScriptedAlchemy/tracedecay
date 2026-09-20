@@ -423,7 +423,6 @@ const fn count_if(value: bool) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use std::time::Duration;
 
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
@@ -434,13 +433,7 @@ mod tests {
         ShardRuntime, ShardRuntimeEvictionBlocker, ShardRuntimeLeaseKind,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: Debug,
-    {
-        T::try_from(value.to_owned()).expect("canonical test identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn binding(project: &str, incarnation: u64, epoch: u64) -> StoreRuntimeBindingV1 {
         StoreRuntimeBindingV1::new(

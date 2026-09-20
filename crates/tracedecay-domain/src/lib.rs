@@ -26,6 +26,7 @@ pub mod retrieval;
 pub mod session;
 pub mod session_derived;
 pub mod source_path_policy;
+pub mod test_fixtures;
 pub mod text;
 pub mod work;
 pub mod work_duplicate_adjudication;

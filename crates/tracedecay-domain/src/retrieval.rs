@@ -1281,13 +1281,7 @@ mod tests {
     const ONE_DIGEST: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn freshness() -> SourceFreshness {
         SourceFreshness {

@@ -81,13 +81,7 @@ const PROVIDER_TRANSCRIPT_ASSISTANT_MESSAGE_ID: &str = "message.advanced-workflo
 const PROVIDER_TRANSCRIPT_REFRESH_MESSAGE_ID: &str =
     "message.advanced-workflow-provider-participant-refresh";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("advanced workflow identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn run(command: &mut Command, operation: &str) -> Vec<u8> {
     let output = command

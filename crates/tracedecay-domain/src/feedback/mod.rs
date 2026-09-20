@@ -1587,17 +1587,9 @@ impl FeedbackCycleObservationV1 {
 mod tests {
     use super::*;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use crate::test_fixtures::digest;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use crate::test_fixtures::id;
 
     fn request(content: FeedbackContentIdentityV1) -> FeedbackCycleRequestV1 {
         FeedbackCycleRequestV1::new(

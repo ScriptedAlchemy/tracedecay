@@ -33,14 +33,10 @@ impl OverlayDiagnosticDebouncer {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_domain::ManifestDigest;
-
     use super::*;
     use crate::session::AuthorizedLspWorkspace;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     #[test]
     fn nested_workspace_overlay_belongs_only_to_the_deepest_root() {

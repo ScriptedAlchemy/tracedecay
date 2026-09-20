@@ -12,13 +12,7 @@ use tracedecay_domain::{
     ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn digest<T>(byte: char) -> T
 where

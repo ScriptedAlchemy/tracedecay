@@ -16,13 +16,7 @@ use tracedecay_domain::{
     RepositoryDirtyStateV1, RepositoryId, SourceSpan, TreeId, WorktreeId,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Display,
-{
-    T::try_from(value.to_owned()).unwrap_or_else(|error| panic!("{value}: {error}"))
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn identity(commit: &str, tree: &str, dirty: RepositoryDirtyStateV1) -> ParseDocumentIdentity {
     identity_in_worktree(commit, tree, dirty, "worktree.incremental")

@@ -23,9 +23,7 @@ fn session_id() -> SessionId {
     serde_json::from_str("\"session-1\"").expect("valid session id")
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn participant(session: &str, source: &str, generation: u64) -> TemporalParticipantGeneration {
     TemporalParticipantGeneration::new(

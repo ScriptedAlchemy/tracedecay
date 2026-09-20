@@ -24,8 +24,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId, TemporalModeV1,
-    UtcMicros,
+    CodeGenerationId, ComponentVersion, RefId, RetrievalAnchorId, TemporalModeV1, UtcMicros,
 };
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
@@ -36,17 +35,9 @@ use tracedecay_tool_catalog::BindingSurface;
 
 use crate::common;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(character: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
     let scope = ResolvedScope::new(

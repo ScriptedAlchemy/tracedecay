@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -307,32 +306,9 @@ pub(super) async fn init_sibling_registered_fixture(
     (graph, sibling)
 }
 
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
+#[path = "../../../../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
+use isolated_profile::EnvVarGuard;
 
 pub(super) struct SelectorEnv {
     _home: EnvVarGuard,

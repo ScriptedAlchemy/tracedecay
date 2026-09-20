@@ -4,9 +4,9 @@ use tracedecay_domain::{
     GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId,
     GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    GitObjectFormatV1, GitOidV1, ManifestDigest, ProjectId, RepositoryId,
-    RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
-    RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
+    GitObjectFormatV1, GitOidV1, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
+    RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
+    RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{
@@ -52,17 +52,9 @@ async fn repositories_page(
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")

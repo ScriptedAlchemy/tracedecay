@@ -16,15 +16,13 @@ use tracedecay_daemon_service::{
 };
 use tracedecay_domain::{
     CoverageStateV1, DeliveryChannelIdentityV1, DeliveryEventClassV1, DeliverySettlementAttemptV1,
-    DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1, ManifestDigest,
+    DeliverySettlementOutcomeV1, DeliverySettlementV1, DeliverySurfaceFamilyV1,
     ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
     ObservabilityTerminalResultV1, ProjectId, RepositoryId, RetrievalQueryObservedV1, UtcMicros,
     WorktreeId, canonical_sha256,
 };
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 /// A registry mount request whose store-authority fields match `identity`,
 /// stamping that identity's configuration and policy revisions for the

@@ -8,26 +8,18 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    AttemptId, ManifestDigest, ProjectId, ProviderId, RunId, TaskId, UtcMicros, WorkArtifactId,
-    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId, WorkProviderBackendV1,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId,
-    WorkflowOperationRef, WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference,
-    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
-    WorkflowRunProjection, WorkflowRunStatus, WorkflowStep, WorkflowStepEffectOutcome,
-    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput,
+    AttemptId, ProjectId, ProviderId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
+    WorkAttemptIdentityV1, WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef,
+    WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
+    WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunProjection,
+    WorkflowRunStatus, WorkflowStep, WorkflowStepEffectOutcome, WorkflowStepEffectReceipt,
+    WorkflowStepId, WorkflowStepOutput,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context(command: &str, input: char, occurred_at: i64) -> WorkflowRunEventContext {
     WorkflowRunEventContext {

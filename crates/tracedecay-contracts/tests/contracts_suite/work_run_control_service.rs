@@ -24,25 +24,17 @@ use tracedecay_contracts::{
     WorkRunControlStoragePort, WorkRunLiveAttemptV1,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, UtcMicros,
-    WorkAuthority, WorkBlockedIntervalReceiptV1, WorkRunControlAuthorityV1, WorkRunControlReasonV1,
+    ActorId, AttemptId, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
+    WorkBlockedIntervalReceiptV1, WorkRunControlAuthorityV1, WorkRunControlReasonV1,
     WorkRunControlStateV1, WorkRunControlV1, WorkflowStepId, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 const ADMITTED_DEADLINE: UtcMicros = UtcMicros(10_000);
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn task() -> TaskId {
     id::<TaskId>("task.run-control")

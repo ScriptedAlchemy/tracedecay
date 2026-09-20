@@ -150,9 +150,7 @@ impl WorkflowResourceObservedV1 {
 mod tests {
     use super::*;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use crate::test_fixtures::digest;
 
     #[test]
     fn lifecycle_requires_exact_journal_coverage() {

@@ -173,9 +173,7 @@ impl HandoffOpenTargetPort for CurrentTargets {
     }
 }
 
-fn digest(fill: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", fill.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scope() -> ResolvedScope {
     ResolvedScope::new(

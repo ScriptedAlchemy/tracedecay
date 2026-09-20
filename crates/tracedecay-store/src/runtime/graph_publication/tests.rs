@@ -13,9 +13,7 @@ fn projection(project: &str) -> GraphProjectionIdentityV1 {
     }
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 #[test]
 fn replay_payload_and_digests_are_closed_and_validated() {

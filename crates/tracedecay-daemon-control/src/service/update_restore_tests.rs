@@ -8,8 +8,6 @@
 //! mismatch when the daemon that answers is not the expected version.
 
 #[cfg(unix)]
-use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
 use std::io::{BufRead, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
@@ -42,34 +40,10 @@ fn quiesced_guard() -> QuiescedDaemonLifecycle {
 }
 
 #[cfg(unix)]
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
+#[path = "../../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
 #[cfg(unix)]
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
+use isolated_profile::EnvVarGuard;
 
 #[cfg(unix)]
 fn serve_initialize_identity(

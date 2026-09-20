@@ -614,30 +614,20 @@ mod tests {
         ConfigurationMutationGrantReceiptV1, ConfigurationSnapshotV1, ConfigurationValueV1,
         ProtectedChange, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
     };
-    use tracedecay_domain::{
-        AccessPolicyDigest, ActorId, LocatorDigest, ManifestDigest, ProjectId,
-    };
+    use tracedecay_domain::{AccessPolicyDigest, ActorId, LocatorDigest, ProjectId};
     use tracedecay_global_db::configuration::contracts::ports::{
         ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationOperationFuture,
         CurrentConfigurationMutationAuthorizationV1,
     };
     use tracedecay_global_db::configuration::contracts::types::ConfigurationSettlementAuthorityV1;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn policy_digest(byte: char) -> AccessPolicyDigest {
         AccessPolicyDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     struct Store {
         current: ConfigurationCurrentStateV1,

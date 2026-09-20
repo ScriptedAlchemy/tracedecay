@@ -303,11 +303,7 @@ mod tests {
     /// Host-absolute fixture path: `$XDG_CONFIG_HOME` only wins when it is
     /// absolute, and a bare `/xdg/...` literal is not absolute on Windows.
     fn absolute_fixture_path(posix: &str) -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
-        } else {
-            PathBuf::from(posix)
-        }
+        PathBuf::from(tracedecay_domain::test_fixtures::fixture_abs_root(posix))
     }
 
     #[test]

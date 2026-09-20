@@ -20,17 +20,9 @@ use tracedecay_domain::{
     WorkflowStepId, WorktreeId,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn fan_out_input(identity: &str, input_digest: ManifestDigest) -> WorkflowFanOutInput {
     let task_id = id::<TaskId>(&format!("task.workflow.runtime.{identity}"));

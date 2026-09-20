@@ -8,13 +8,7 @@ use tracedecay_store::{
 use super::*;
 use crate::read_consistency::{CommitWatermarkSource, WatermarkSourceState};
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn binding(project: &str) -> StoreRuntimeBindingV1 {
     StoreRuntimeBindingV1::new(

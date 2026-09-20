@@ -743,13 +743,10 @@ mod tests {
     use super::*;
     use crate::{EffectTermination, IdempotencyKey};
     use serde_json::Value;
-    use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_domain::{ActorId, ProjectId, RepositoryId, WorktreeId};
     use tracedecay_tool_catalog::{EffectClass, SchemaId, UseCaseId};
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
-            .expect("fixture digest is valid")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn receipt() -> EffectReceipt {
         let expected_state = digest('a');

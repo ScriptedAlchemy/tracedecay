@@ -3,13 +3,11 @@ use serde_json::Value;
 use tracedecay_api::read_model::multi_root::MultiRootQueryReadModelV1;
 use tracedecay_contracts::{MultiRootContinuationV1, MultiRootQueryPageV1, OpaqueCursor};
 use tracedecay_domain::{
-    CollectionRevision, ManifestDigest, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome,
-    ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,
+    CollectionRevision, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1,
+    ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,
 };
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 #[test]
 fn dashboard_read_model_preserves_per_root_partial_truth() {

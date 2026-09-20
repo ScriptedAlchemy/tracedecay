@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::{
-    AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest, ManifestDigest,
+    AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
     ResolutionAuthorizationV1, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
     ScopeResolutionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
@@ -19,9 +19,7 @@ use tracedecay_store::{
     apply_source_projection, build_source_projection,
 };
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn definition() -> SourceDefinitionV1 {
     definition_with_max(4)

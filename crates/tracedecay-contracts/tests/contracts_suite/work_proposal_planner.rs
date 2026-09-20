@@ -21,11 +21,11 @@ use tracedecay_contracts::{
     WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1,
 };
 use tracedecay_domain::{
-    ActorId, InitiativeId, ManifestDigest, MilestoneId, ProjectId, ProjectionGenerationId,
-    ProposalId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy,
-    WorkExecutionLimits, WorkFallbackTopology, WorkFilesystemPolicy, WorkGraphVersionV1,
-    WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId,
-    WorkPlanV1, WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProductSourceWatermarkV1,
+    ActorId, InitiativeId, MilestoneId, ProjectId, ProjectionGenerationId, ProposalId,
+    RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy, WorkExecutionLimits,
+    WorkFallbackTopology, WorkFilesystemPolicy, WorkGraphVersionV1, WorkHierarchyV1,
+    WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProductGraphV1, WorkProductProjectionBundleV1, WorkProductSourceWatermarkV1,
     WorkProjectionSequenceV1, WorkRouteExecutionProfileV1, WorkRuntimeProjectionCoverageV1,
     WorkRuntimeProjectionV1, WorkSandboxPolicy, WorktreeId,
 };
@@ -44,17 +44,9 @@ const CREATED_AT: UtcMicros = UtcMicros(10);
 /// incomparable and never enter the calibration cohort.
 const EVALUATED_AT: UtcMicros = UtcMicros(50);
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context(project: &str) -> RequestContext {
     let scope = ResolvedScope::new(

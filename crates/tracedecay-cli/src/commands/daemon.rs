@@ -326,7 +326,7 @@ mod tests {
         ResolvedScope, ResultContractRef, RetrievalEvidence, RetryDirective, TemporalState,
     };
     use tracedecay_domain::{
-        ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+        ActorId, ComponentVersion, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, SortContractId, UseCaseId};
 
@@ -346,9 +346,7 @@ mod tests {
         .unwrap()
     }
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn context() -> RequestContext {
         let capability = CapabilityId::new("capability.cli.fixture").unwrap();

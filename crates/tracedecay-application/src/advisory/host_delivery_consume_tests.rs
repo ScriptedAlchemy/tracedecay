@@ -38,8 +38,8 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ComponentVersion, ContentDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, LanguageId, LocatorDigest, ManifestDigest, ProjectId, ProviderId,
-    RefId, RepositoryId, RetrievalAnchorId, SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
+    LanguageDescriptorRevision, LanguageId, LocatorDigest, ProjectId, ProviderId, RefId,
+    RepositoryId, RetrievalAnchorId, SourceSpan, SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
 use tracedecay_hooks::{HookFeedbackDeliveryOutcomeV1, HookFeedbackRollbackSwitchV1};
 use tracedecay_lsp::{
@@ -63,9 +63,7 @@ use crate::feedback::concrete::{FeedbackRuntime, open_feedback_runtime};
 use crate::lsp_runtime::DaemonLspSessionFactory;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 
-fn digest(fill: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", fill.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn resolved_scope() -> ResolvedScope {
     ResolvedScope::new(

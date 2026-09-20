@@ -6,7 +6,7 @@
 //! dimensions into a score, or lets a human override outrank an exclusion.
 
 use tracedecay_domain::{
-    ManifestDigest, TaskId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy, WorkExecutionLimits,
+    TaskId, UtcMicros, WorkApprovalPolicy, WorkEgressPolicy, WorkExecutionLimits,
     WorkFallbackTopology, WorkFilesystemPolicy, WorkRouteExecutionProfileV1, WorkSandboxPolicy,
 };
 use tracedecay_policy::work_loop::{
@@ -21,10 +21,7 @@ use tracedecay_policy::work_loop::{
 const LOCAL_WATERMARK: i64 = 10;
 const EVALUATED_AT: i64 = 100;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-        .expect("fixture digest is canonical")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn base_input() -> WorkProposalPolicyInputV1 {
     WorkProposalPolicyInputV1 {

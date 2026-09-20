@@ -47,12 +47,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     #[test]
     fn ids_reject_invalid_deserialized_values() {

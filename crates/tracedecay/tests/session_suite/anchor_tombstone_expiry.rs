@@ -7,12 +7,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
-    ComponentVersion, Confidence, CoverageReportV1, DomainError, EntityId, EntityKind, EntityRef,
-    EvidenceClass, FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEventId,
-    FactEvidenceRefV1, FactEvidenceRelationV1, FactId, FactIdentityMaterialV1,
-    FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
-    ObservationScopeV1, PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    PrivacyDomainId, ProjectId, ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass,
+    ComponentVersion, Confidence, CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass,
+    FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEventId, FactEvidenceRefV1,
+    FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
+    PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectId, ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass,
     RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
     SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, UtcMicros,
@@ -31,12 +31,7 @@ use crate::common::open_graph_db_from_template;
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String, Error = DomainError>,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn owner() -> FactOwnerV1 {
     FactOwnerV1::Profile

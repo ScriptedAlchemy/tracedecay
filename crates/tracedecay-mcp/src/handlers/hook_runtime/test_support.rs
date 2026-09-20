@@ -15,8 +15,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId, TemporalModeV1,
-    UtcMicros,
+    CodeGenerationId, ComponentVersion, RefId, RetrievalAnchorId, TemporalModeV1, UtcMicros,
 };
 
 pub(super) fn admission_test_envelope(
@@ -75,9 +74,7 @@ pub(super) fn retained_claim(id: u8) -> ContextScoutDurableClaimV1 {
         T::try_from(value.to_owned()).unwrap()
     }
 
-    fn digest(character: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn evidence(id: u8) -> ContextScoutEvidenceEnvelopeV1 {
         let scope = ResolvedScope::new(

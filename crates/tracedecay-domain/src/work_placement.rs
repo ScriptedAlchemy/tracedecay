@@ -564,17 +564,7 @@ mod tests {
         }
     }
 
-    /// `Path::is_absolute` is host-specific: a bare `/workspace/...` literal
-    /// is not absolute on Windows, where an absolute path needs a drive or a
-    /// UNC prefix. The fixture must name a root the running host agrees is
-    /// absolute, or the contract rejects it as `InvalidTargetRoot`.
-    fn absolute_root(posix: &str) -> String {
-        if cfg!(windows) {
-            format!("C:{}", posix.replace('/', "\\"))
-        } else {
-            posix.to_owned()
-        }
-    }
+    use crate::test_fixtures::fixture_abs_root as absolute_root;
 
     fn linked() -> WorkPlacementTargetV1 {
         WorkPlacementTargetV1::new(

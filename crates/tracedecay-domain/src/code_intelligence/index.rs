@@ -518,17 +518,9 @@ fn validate_language_revisions<T>(
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use crate::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot() -> SanitizedCodeSnapshotV1 {
         SanitizedCodeSnapshotV1 {

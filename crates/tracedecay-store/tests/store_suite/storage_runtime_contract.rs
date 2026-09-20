@@ -13,13 +13,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::*;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture id is canonical")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn digest(byte: char) -> CommandDigestV1 {
     CommandDigestV1::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
