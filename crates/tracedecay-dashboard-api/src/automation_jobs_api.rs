@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::{JsonError, http_detail, internal_error};
+use super::util::{JsonError, internal_error, json_error};
 use super::{
     DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1,
     automation_authority_error_response, exact_automation_authority,
@@ -97,7 +97,7 @@ pub async fn list(State(state): State<DashboardState>) -> ApiResult {
 #[hotpath::measure(label = "dashboard_api.jobs.create", future = true)]
 pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
     let body = serde_json::from_value::<CreateJobBody>(body)
-        .map_err(|err| bad_request(&format!("invalid job: {err}")))?;
+        .map_err(|err| json_error(StatusCode::BAD_REQUEST, &format!("invalid job: {err}")))?;
     let now = current_timestamp();
     let job = AutomationJob {
         id: match body.id {
@@ -117,7 +117,7 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
         updated_at: now,
         extra: BTreeMap::new(),
     };
-    validate_job(&job).map_err(|err| bad_request(&err.to_string()))?;
+    validate_job(&job).map_err(|err| json_error(StatusCode::BAD_REQUEST, &err.to_string()))?;
     let job_for_write = job.clone();
     let result = super::automation_run_service::execute_dashboard_automation_write(
         &state,
@@ -139,7 +139,10 @@ pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>
     .await
     .map_err(|err| internal_error(&err))?;
     if result["conflict"] == true {
-        return Err(bad_request(&format!("job '{}' already exists", job.id)));
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            &format!("job '{}' already exists", job.id),
+        ));
     }
     Ok(Json(json!({ "job": job })))
 }
@@ -159,8 +162,12 @@ pub async fn update(
     AxumPath(job_id): AxumPath<String>,
     Json(body): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<PatchJobBody>(body)
-        .map_err(|err| bad_request(&format!("invalid job patch: {err}")))?;
+    let patch = serde_json::from_value::<PatchJobBody>(body).map_err(|err| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid job patch: {err}"),
+        )
+    })?;
     let job_id_for_write = job_id.clone();
     let result = super::automation_run_service::execute_dashboard_automation_write(
         &state,
@@ -219,7 +226,7 @@ pub async fn update(
         return Err(not_found(&job_id));
     }
     if let Some(message) = result["validation_error"].as_str() {
-        return Err(bad_request(message));
+        return Err(json_error(StatusCode::BAD_REQUEST, message));
     }
     let updated = serde_json::from_value::<AutomationJob>(result["job"].clone())
         .map_err(|err| internal_error(&err))?;
@@ -293,7 +300,7 @@ async fn load_job_or_404(
     state: &DashboardState,
     job_id: &str,
 ) -> std::result::Result<AutomationJob, JsonError> {
-    validate_job_id(job_id).map_err(|err| bad_request(&err.to_string()))?;
+    validate_job_id(job_id).map_err(|err| json_error(StatusCode::BAD_REQUEST, &err.to_string()))?;
     match find_job(&state.dashboard_root, job_id).await {
         Ok(Some(job)) => Ok(job),
         Ok(None) => Err(not_found(job_id)),
@@ -331,13 +338,9 @@ fn generated_job_id(name: &str) -> String {
     format!("{slug}-{}", micros_now() % 1_000_000)
 }
 
-fn bad_request(message: &str) -> JsonError {
-    (StatusCode::BAD_REQUEST, Json(http_detail(message)))
-}
-
 fn not_found(job_id: &str) -> JsonError {
-    (
+    json_error(
         StatusCode::NOT_FOUND,
-        Json(http_detail(&format!("automation job '{job_id}' not found"))),
+        format!("automation job '{job_id}' not found"),
     )
 }
