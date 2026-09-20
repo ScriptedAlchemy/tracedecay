@@ -1947,7 +1947,7 @@ where
         let started = crate::hotpath_observe::start_build_to_queryable();
         crate::hotpath_observe::record_generation_state("building");
         crate::hotpath_observe::record_rebuild_state("unknown");
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
             &request.repository_parse_identity,
@@ -1956,7 +1956,7 @@ where
         let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
         let lookup = self.lookup_active_generation(&scope)?;
         let active = lookup.reusable;
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let intake = self.intake_at(request.sealed_at, registry_for_snapshot(&request.snapshot)?);
         let capability = intake
@@ -1974,7 +1974,7 @@ where
                     .fold(0_u64, u64::saturating_add),
             );
         }
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
             self.config.project_id.clone(),
@@ -2027,7 +2027,7 @@ where
                 None,
             ),
         };
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let parser_registry = Arc::new(tracedecay_code_extraction::LanguageRegistry::new());
         let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
@@ -2079,7 +2079,7 @@ where
                 ));
             }
         };
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
         let candidate = hotpath::measure_block!("code_index.build.assemble", {
             let coverage = coverage_summary(&validated.snapshot, &staged.files);
             let changes = match (active.as_ref(), staged.parent_shared_occurrences.as_ref()) {
@@ -2157,10 +2157,10 @@ where
                 changes,
                 &staged.chunks,
             )?;
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let projection = project_for_publication(&mut self.projection, projection_request)
                 .map_err(CodeIndexProductionErrorV1::Projection)?;
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let imports = hotpath::measure_block!(
                 "code_index.build.assemble.import_evidence",
                 derive_import_evidence(&staged.files)
@@ -2242,22 +2242,6 @@ where
         }
     }
 
-    fn checkpoint(
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        if control.is_cancelled() {
-            Err(CodeIndexProductionErrorV1::Interrupted(
-                CodeIndexInterruptionV1::Cancelled,
-            ))
-        } else if control.is_deadline_exceeded() {
-            Err(CodeIndexProductionErrorV1::Interrupted(
-                CodeIndexInterruptionV1::DeadlineExceeded,
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
     fn interruption_error(control: &dyn CodeIndexExecutionControlV1) -> CodeIndexProductionErrorV1 {
         if control.is_deadline_exceeded() {
             CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
@@ -2295,7 +2279,7 @@ where
         CodeIndexProductionErrorV1,
     > {
         crate::hotpath_observe::measure_hot_loop!("code_index.materialize.file", {
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let captured = captured_files
                 .get(&file.file_occurrence_id)
                 .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
@@ -2334,7 +2318,7 @@ where
                     u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
                     0,
                 );
-                Self::checkpoint(control)?;
+                lexical_page_source::checkpoint(control)?;
                 let clone_stats = ClonePayloadBuildStatsV1 {
                     reused: u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
                     computed: 0,
@@ -2384,7 +2368,7 @@ where
                 control,
             ) {
                 Ok((parse_artifacts, parsed_len)) => {
-                    Self::checkpoint(control)?;
+                    lexical_page_source::checkpoint(control)?;
                     extractor
                         .extract_preparsed(
                             &receipt_bound,
@@ -2408,12 +2392,12 @@ where
                         ..
                     }),
                 ) => {
-                    Self::checkpoint(control)?;
+                    lexical_page_source::checkpoint(control)?;
                     return Err(error);
                 }
                 Err(error) => return Err(error),
             };
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let (artifacts, exact_authority, clone_stats) = chunker
                 .index_file_with_authority_from_extraction_reusing(
                     &receipt_bound,
@@ -2428,7 +2412,7 @@ where
                     error => CodeIndexProductionErrorV1::Chunk(error),
                 })?;
             physical_artifacts.record_clone_payloads(clone_stats.reused, clone_stats.computed);
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let (authority, extraction, _) = extraction.into_parts();
             let artifact = Arc::new(FileGenerationArtifactsV1 {
                 authority,
@@ -2518,11 +2502,11 @@ where
         // subsequent physical reuse remain deterministic.
         let mut files = Vec::with_capacity(extracted.len());
         for (reuse_key, artifact, _) in extracted {
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             physical_artifacts.insert(reuse_key, &artifact);
             files.push(artifact);
         }
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
         staged_generation(manifest.generation_id.clone(), files, Vec::new(), None)
     }
 
@@ -2630,7 +2614,7 @@ where
                  worker|
                  -> Result<(usize, IncrementFileMaterializationV1), CodeIndexProductionErrorV1> {
                 let (index, file_plan) = *item;
-                Self::checkpoint(control)?;
+                lexical_page_source::checkpoint(control)?;
                 let materialization = match &file_plan.action {
                     FileExtractionActionV1::CarryForward {
                         file_occurrence_id,
@@ -2816,7 +2800,7 @@ where
         let mut clone_stale_invalidations = 0_u64;
 
         for materialization in file_materializations {
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             match materialization {
                 IncrementFileMaterializationV1::CarryForward {
                     artifact,
@@ -2851,7 +2835,7 @@ where
                 }
             }
         }
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let mut staged = staged_generation(
             manifest.generation_id.clone(),
