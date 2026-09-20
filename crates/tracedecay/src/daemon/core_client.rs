@@ -13,8 +13,6 @@ use tracedecay_daemon_control::default_socket_path;
 #[cfg(not(unix))]
 use tracedecay_daemon_identity::current_daemon_connection;
 use tracedecay_daemon_identity::{ResolvedDaemonConnection, client_connection};
-use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
-
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub(crate) use tracedecay_daemon_protocol::connection::{
     DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
@@ -105,29 +103,13 @@ pub(crate) async fn next_daemon_response_line<R>(
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    // Hold the reader across liveness polls. `read_mcp_line` is dropped when
-    // the poll wins `select!`; the accumulator lives on `line_reader`.
-    let mut line_reader = BoundedLineReader::new(reader);
-    loop {
-        tokio::select! {
-            result = line_reader.read_mcp_line() => {
-                return match result {
-                    Ok(line) => Ok(line),
-                    Err(error) if is_wire_oversized_io_error(&error) => {
-                        Err(TraceDecayError::Config {
-                            message: format!(
-                                "daemon {request_label} response exceeded wire message bound ({WIRE_RECORD_TOO_LARGE})"
-                            ),
-                        })
-                    }
-                    Err(error) => Err(error.into()),
-                };
-            }
-            () = tokio::time::sleep(liveness_poll_interval) => {
-                ensure_daemon_connection_live(connection, request_label).await?;
-            }
-        }
-    }
+    tracedecay_daemon_protocol::poll_daemon_response_line(
+        reader,
+        request_label,
+        liveness_poll_interval,
+        || ensure_daemon_connection_live(connection, request_label),
+    )
+    .await
 }
 
 pub(crate) async fn write_daemon_preamble(

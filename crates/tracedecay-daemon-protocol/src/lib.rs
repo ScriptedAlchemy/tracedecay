@@ -81,7 +81,8 @@ pub use connection::{
     DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
     connect_to_daemon_connection, daemon_connect_failure, daemon_response_stalled,
     daemon_response_stalled_during, daemon_tool_response_bound, next_daemon_response_line,
-    tool_request_deadline, write_daemon_handshake_preamble, write_daemon_preamble,
+    poll_daemon_response_line, tool_request_deadline, write_daemon_handshake_preamble,
+    write_daemon_preamble,
 };
 pub use contract::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD,

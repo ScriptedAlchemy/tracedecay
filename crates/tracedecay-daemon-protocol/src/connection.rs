@@ -176,15 +176,21 @@ pub async fn ensure_daemon_connection_live(
     Ok(())
 }
 
-#[hotpath::measure(label = "daemon_protocol.client.response.wait", future = true)]
-pub async fn next_daemon_response_line<R>(
+/// Reads the next daemon frame, polling `ensure_live` whenever the read is
+/// still pending.
+///
+/// The reader stays held across polls. `read_mcp_line` is dropped when the
+/// poll wins `select!`; the accumulator lives on the line reader.
+pub async fn poll_daemon_response_line<R, F, Fut>(
     reader: &mut R,
-    connection: &DaemonConnection,
     request_label: &str,
     liveness_poll_interval: Duration,
+    mut ensure_live: F,
 ) -> Result<Option<String>>
 where
     R: tokio::io::AsyncBufRead + Unpin,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
 {
     let mut line_reader = BoundedLineReader::new(reader);
     loop {
@@ -203,10 +209,26 @@ where
                 };
             }
             () = tokio::time::sleep(liveness_poll_interval) => {
-                ensure_daemon_connection_live(connection, request_label).await?;
+                ensure_live().await?;
             }
         }
     }
+}
+
+#[hotpath::measure(label = "daemon_protocol.client.response.wait", future = true)]
+pub async fn next_daemon_response_line<R>(
+    reader: &mut R,
+    connection: &DaemonConnection,
+    request_label: &str,
+    liveness_poll_interval: Duration,
+) -> Result<Option<String>>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    poll_daemon_response_line(reader, request_label, liveness_poll_interval, || {
+        ensure_daemon_connection_live(connection, request_label)
+    })
+    .await
 }
 
 /// Writes the optional auth preface and the handshake line.
