@@ -83,7 +83,7 @@ tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracing = "0.1"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = "0.5"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
