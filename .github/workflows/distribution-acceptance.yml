@@ -96,6 +96,10 @@ jobs:
           mold-version: 2.41.0
           make-default: true
 
+      # The acceptance script runs the packaged suites through nextest.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Build release binary for packaging
         run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
 
