@@ -278,14 +278,10 @@ impl OperationEventError {
                 "The requested operation-event frontier is invalid",
             )?),
             Self::RequestNotAdmitted => ApplicationProblem::timed_out_before_admission(),
-            Self::Saturated => ApplicationProblem::Saturated {
-                diagnostic: SafeDiagnostic::new(
-                    "operation_event.saturated",
-                    "Operation-event capacity is temporarily saturated",
-                )?,
-                retry: RetryDirective::AfterDelay,
-                legal_actions: vec![LegalAction::Retry],
-            },
+            Self::Saturated => ApplicationProblem::saturated(SafeDiagnostic::new(
+                "operation_event.saturated",
+                "Operation-event capacity is temporarily saturated",
+            )?),
             // Permanently invalid input: the same request can never succeed, so
             // the client must correct it rather than retry.
             Self::InvalidContext(_)

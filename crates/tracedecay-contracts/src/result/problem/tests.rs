@@ -47,6 +47,29 @@ fn invalid_request_without_action_offers_no_recovery() {
 }
 
 #[test]
+fn saturated_retries_after_delay() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.saturated".to_owned(),
+        message: "The authority has no remaining capacity.".to_owned(),
+    };
+    let problem = ApplicationProblem::saturated(diagnostic.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::Saturated {
+            diagnostic,
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+        }
+    );
+    assert_eq!(
+        problem.safe_message(),
+        "The authority has no remaining capacity."
+    );
+    assert_eq!(problem.reason_code(), "application.saturated");
+}
+
+#[test]
 fn conflict_retries_only_after_revalidate_and_refresh() {
     let diagnostic = SafeDiagnostic {
         code: "application.conflict".to_owned(),

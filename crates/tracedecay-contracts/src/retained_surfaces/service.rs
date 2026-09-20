@@ -570,14 +570,10 @@ pub fn retained_surface_execution_problem(
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::CorrectRequest],
         },
-        RetainedSurfaceExecutionErrorV1::Saturated => ApplicationProblem::Saturated {
-            diagnostic: diagnostic(
-                "application.retained.saturated",
-                "The retained authority cannot admit more work right now.",
-            ),
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        RetainedSurfaceExecutionErrorV1::Saturated => ApplicationProblem::saturated(diagnostic(
+            "application.retained.saturated",
+            "The retained authority cannot admit more work right now.",
+        )),
         // Structural budget refusal uses InvalidRequest so the wire kind stays
         // unchanged and non-retryable. Callers must narrow scope or limit.
         RetainedSurfaceExecutionErrorV1::Unavailable { detail } => {

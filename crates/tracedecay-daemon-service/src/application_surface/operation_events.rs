@@ -840,14 +840,10 @@ pub(super) fn operation_event_problem(
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         },
-        OperationEventError::Saturated => ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic {
-                code: "operation_event.saturated".to_owned(),
-                message: "Operation-event capacity is temporarily saturated".to_owned(),
-            },
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        OperationEventError::Saturated => ApplicationProblem::saturated(SafeDiagnostic {
+            code: "operation_event.saturated".to_owned(),
+            message: "Operation-event capacity is temporarily saturated".to_owned(),
+        }),
         // Permanently invalid input: the same request can never succeed, so the
         // client must correct it rather than retry.
         OperationEventError::InvalidContext(_)

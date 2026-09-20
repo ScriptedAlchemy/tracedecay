@@ -235,15 +235,13 @@ pub(crate) fn product_admission_problem(
                         .to_owned(),
             })
         }
-        WorkProductAttemptAdmissionErrorV1::CapacityExceeded => ApplicationProblem::Saturated {
-            diagnostic: crate::SafeDiagnostic {
+        WorkProductAttemptAdmissionErrorV1::CapacityExceeded => {
+            ApplicationProblem::saturated(crate::SafeDiagnostic {
                 code: "application.work-attempt.capacity-exhausted".to_owned(),
                 message: "The registered Work topology has no parallel attempt capacity."
                     .to_owned(),
-            },
-            retry: crate::RetryDirective::AfterDelay,
-            legal_actions: vec![crate::LegalAction::Retry],
-        },
+            })
+        }
         WorkProductAttemptAdmissionErrorV1::Unavailable => {
             ApplicationProblem::unavailable(crate::SafeDiagnostic {
                 code: "application.work-attempt.product-admission-unavailable".to_owned(),

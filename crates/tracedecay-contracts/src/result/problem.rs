@@ -830,6 +830,15 @@ impl ApplicationProblem {
         }
     }
 
+    /// Capacity refusal. Retry only after a delay.
+    pub fn saturated(diagnostic: SafeDiagnostic) -> Self {
+        Self::Saturated {
+            diagnostic,
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+        }
+    }
+
     /// Conflict the caller resolves by refreshing. Retries only after revalidate.
     pub fn conflict(diagnostic: SafeDiagnostic) -> Self {
         Self::Conflict {

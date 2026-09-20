@@ -15,7 +15,7 @@ use super::{
     binary_version, classify_mcp_method, parse_daemon_invocation_request,
     read_line_handling_wire_oversized, write_json_rpc_response,
 };
-use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+use tracedecay_contracts::{ApplicationProblem, SafeDiagnostic};
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -459,14 +459,10 @@ fn invocation_saturation_response(
     };
     Some(super::DaemonInvocationResponse::application_problem(
         request.request_id,
-        ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic {
-                code: code.to_owned(),
-                message: "The owning TraceDecay daemon has no request capacity".to_owned(),
-            },
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        ApplicationProblem::saturated(SafeDiagnostic {
+            code: code.to_owned(),
+            message: "The owning TraceDecay daemon has no request capacity".to_owned(),
+        }),
     ))
 }
 

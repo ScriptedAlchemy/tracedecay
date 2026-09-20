@@ -31,7 +31,7 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, OmissionReason,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, OmissionReason,
     OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
     PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId,
     ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
@@ -1846,14 +1846,10 @@ fn saturated<T>(
     problem(
         context,
         operation,
-        ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic::new(
-                "application.retrieval.saturated",
-                "The admitted primitive authority has reached its bounded capacity.",
-            )?,
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        ApplicationProblem::saturated(SafeDiagnostic::new(
+            "application.retrieval.saturated",
+            "The admitted primitive authority has reached its bounded capacity.",
+        )?),
     )
 }
 
