@@ -8,7 +8,7 @@
 use serde_json::{Value, json};
 
 use super::memory_facts_test::{
-    close_test_graph, invoke_production_tool, production_server, setup_project,
+    close_test_graph, fact_store_server, invoke_production_tool, setup_project,
 };
 use crate::support::handle_real_server_tool_call_raw;
 
@@ -25,7 +25,7 @@ async fn call_reason(
     arguments: Value,
 ) -> Value {
     handle_real_server_tool_call_raw(
-        production_server(fixture),
+        fact_store_server(fixture),
         "tracedecay_fact_store_reason",
         arguments,
     )
