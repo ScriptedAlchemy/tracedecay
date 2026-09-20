@@ -26,7 +26,10 @@ use tracedecay_code_index_retention::code_index_generations::{
     code_text_artifacts_root, scoped_code_index_store_root,
 };
 
-use super::super::graph_activation::install_injected_activation_gate;
+use super::super::graph_activation::{
+    injected_activation_attempt_count, install_injected_activation_gate,
+    set_injected_activation_failures,
+};
 use super::CodeIndexSchedulerRegistryV1;
 
 /// Ceiling on how long a test waits for the worker to reach the asserted
@@ -36,6 +39,11 @@ const CONVERGENCE_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Poll spacing while waiting on the freshness projection.
 const POLL_SPACING: Duration = Duration::from_millis(50);
+
+/// More injected activation failures than any bounded test window can drain,
+/// so a seat observed under this injection is never a pass that simply
+/// outlasted the injection and activated for real.
+const UNDRAINABLE_ACTIVATION_FAILURES: usize = 10_000;
 
 struct Fixture {
     _root: TempDir,
@@ -146,6 +154,26 @@ impl Fixture {
             tokio::time::sleep(POLL_SPACING).await;
         }
         last
+    }
+
+    /// Poll the real serving slot until something is seated, waking the
+    /// worker between observations exactly as the periodic cadence does.
+    async fn wait_for_seated_generation(
+        &self,
+    ) -> Option<std::sync::Arc<super::super::CodeIndexPublishedGenerationV1>> {
+        let deadline = tokio::time::Instant::now() + CONVERGENCE_DEADLINE;
+        loop {
+            let seated = self
+                .registry
+                .serving_code_scope(&self.project)
+                .await
+                .and_then(|scope| scope.serving_generation);
+            if seated.is_some() || tokio::time::Instant::now() >= deadline {
+                return seated;
+            }
+            self.wake_without_new_input().await;
+            tokio::time::sleep(POLL_SPACING).await;
+        }
     }
 }
 
@@ -399,6 +427,42 @@ async fn fresh_graph_activation_starts_while_the_clone_successor_is_pending() {
     assert!(
         text.query_owners_are_ready(),
         "finishing the successor must keep exact and lexical owners ready"
+    );
+    fixture.registry.shutdown().await;
+}
+
+/// Exact and lexical serving does not depend on native graph. A retryable
+/// activation failure used to replace the whole prepared triple with
+/// `Ok((Err, None, None))`, which failed the serving swap's own guard, so the
+/// sealed generation never reached the slot and search kept the predecessor
+/// for the entire activation backoff. Under an activation that keeps failing
+/// retryably, that is starvation: no pass ever seats.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn text_seats_while_graph_activation_keeps_failing_retryably() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.seat-through-retry", |_| {})
+            .await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    // Injected deadline failures are the retryable class, and they carry no
+    // conflict verdict, so every attempt takes the retry arm rather than
+    // falling through to the terminal one that already keeps the seat.
+    set_injected_activation_failures(&scope.worktree_id, UNDRAINABLE_ACTIVATION_FAILURES);
+    drop(admission);
+
+    let seated = fixture.wait_for_seated_generation().await;
+    let attempts = injected_activation_attempt_count(&scope.worktree_id);
+    assert!(
+        attempts > 0,
+        "the fixture must observe a real graph activation attempt, otherwise the seat proves nothing"
+    );
+    assert!(
+        seated.is_some(),
+        "the sealed generation must take the serving seat while graph activation retries \
+         (activation attempts: {attempts})"
     );
     fixture.registry.shutdown().await;
 }

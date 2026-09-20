@@ -1693,7 +1693,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     retry_delay_micros = retry_delay.as_micros() as u64,
                                     error = %error,
                                     "graph activation failed retryably; the sealed generation \
-                                     stays unseated until the scheduled retry"
+                                     still seats and the next pass retries native graph"
                                 );
                                 hotpath::gauge!("daemon.code_index.graph_seat.retry_total")
                                     .inc(1_u64);
@@ -1707,7 +1707,15 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // The scheduled retry is the seat attempt, so it
                                 // must not be turned away as already attempted.
                                 graph_seat_attempted = None;
-                                result = Ok((Err(error), None, None));
+                                // The prepared candidate stays. Rewriting the
+                                // pass result to `Ok((Err, None, None))` here
+                                // failed the serving swap's own guard, so an
+                                // activation that kept failing retryably never
+                                // let any pass seat: search held its predecessor
+                                // while a complete generation sat on disk. The
+                                // terminal arm below already keeps the seat and
+                                // marks graph unavailable; a retry is a weaker
+                                // verdict than terminal and must not seat less.
                             } else {
                                 next_seat_attempt_at = None;
                                 seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
