@@ -47,7 +47,6 @@ use git::*;
 use graph::*;
 pub use graph::{SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS};
 use lcm::*;
-use memory::*;
 use multi_root::*;
 use skills::*;
 use testing::*;
@@ -454,20 +453,9 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_diagnose(),
         def_derives(),
         def_run_affected_tests(),
-        def_fact_store_add(request_schema("fact_store_add")?),
-        def_fact_store_search(request_schema("fact_store_search")?),
-        def_fact_store_probe(request_schema("fact_store_probe")?),
-        def_fact_store_related(request_schema("fact_store_related")?),
-        def_fact_store_reason(request_schema("fact_store_reason")?),
-        def_fact_store_contradict(request_schema("fact_store_contradict")?),
-        def_fact_store_get(request_schema("fact_store_get")?),
-        def_fact_store_update(request_schema("fact_store_update")?),
-        def_fact_store_remove(request_schema("fact_store_remove")?),
-        def_fact_store_supersede(request_schema("fact_store_supersede")?),
-        def_fact_store_list(request_schema("fact_store_list")?),
-        def_fact_feedback(request_schema("fact_feedback")?),
-        def_memory_status(request_schema("memory_status")?),
-        def_fact_store_curate(request_schema("fact_store_curate")?),
+    ];
+    definitions.extend(memory::memory_definitions(&request_schema)?);
+    definitions.extend([
         def_automation_run_list(),
         def_automation_run_view(),
         def_automation_run_artifact_view(),
@@ -504,7 +492,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_source_edit_reconcile(),
         def_source_edit_rollback(),
         def_find_exact_symbol(),
-    ];
+    ]);
     definitions.extend(application_definitions()?);
     let work = work_worker.join().map_err(|_| {
         McpCatalogError::Initialization(
