@@ -139,6 +139,12 @@ pub(super) struct FactStoreCrossProjectFixture {
     _isolation: TestTempDir,
 }
 
+impl FactStoreCrossProjectFixture {
+    pub(super) async fn shutdown(self) {
+        self.harness.shutdown().await;
+    }
+}
+
 fn initialize_production_fact_project(root: &Path) {
     fs::create_dir_all(root).expect("cross-project fact fixture root");
     crate::fixture::write_indexed_fixture_sources(root);

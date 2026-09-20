@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::project::TraceDecay;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
@@ -1129,17 +1130,305 @@ async fn commit_context_clean_worktree_returns_json() {
     .await
     .unwrap();
 
-    let text = extract_text(&result.value);
-    let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["summary"].as_str(), Some("No changes detected."));
-    assert_eq!(output["changed_files"].as_array().map(Vec::len), Some(0));
+    let output = commit_context_json(&result.value);
+    assert_eq!(result.value.get("isError"), None);
     assert_eq!(
-        output["symbols_by_role"]
-            .as_object()
-            .map(serde_json::Map::len),
-        Some(0)
+        output,
+        json!({
+            "changed_files": [],
+            "symbols_by_role": {},
+            "suggested_category": null,
+            "recent_commits": ["init"],
+            "summary": "No changes detected.",
+        })
     );
-    assert!(output["recent_commits"].as_array().is_some());
+}
+
+/// Staged source and test files are what an agent sees when drafting a
+/// commit: file roles, the symbols in those files, and the category that
+/// follows from those roles.
+#[tokio::test]
+async fn commit_context_staged_source_and_test_reports_symbols() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn baseline() -> i64 { 0 }\n"),
+            ("tests/invoice_test.rs", "fn baseline_check() {}\n"),
+        ],
+        "seed context",
+    );
+    write_project_file(
+        project,
+        "src/lib.rs",
+        "pub fn billed_total() -> i64 {\n    1\n}\n",
+    );
+    write_project_file(
+        project,
+        "tests/invoice_test.rs",
+        "fn covers_billed_total() {}\n",
+    );
+    git_run(project, &["add", "src/lib.rs", "tests/invoice_test.rs"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "changed_files": [
+                {"file": "src/lib.rs", "role": "source", "symbols": 1},
+                {"file": "tests/invoice_test.rs", "role": "test", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "billed_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }],
+                "test": [{
+                    "name": "covers_billed_total",
+                    "kind": "function",
+                    "file": "tests/invoice_test.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix (source + tests)",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 2 symbol(s) affected",
+        })
+    );
+}
+
+/// Config and docs changes are not source work. Config files collapse to one
+/// summary entry instead of one symbol per key.
+#[tokio::test]
+async fn commit_context_config_and_docs_report_chore() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn untouched() {}\n"),
+            ("billing.cfg", "timeout=1\n"),
+            ("notes.txt", "committed note\n"),
+        ],
+        "seed context",
+    );
+    write_project_file(project, "billing.cfg", "timeout=9\n");
+    write_project_file(project, "notes.txt", "Ship the invoice total.\n");
+    git_run(project, &["add", "billing.cfg", "notes.txt"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "changed_files": [
+                {"file": "billing.cfg", "role": "config", "symbols": 0},
+                {"file": "notes.txt", "role": "docs", "symbols": 0}
+            ],
+            "symbols_by_role": {
+                "config": [{
+                    "file": "billing.cfg",
+                    "kind": "config_summary",
+                    "config_keys": 0
+                }]
+            },
+            "suggested_category": "chore/docs/config",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+}
+
+/// `staged_only` is the difference between "what will this commit contain"
+/// and "what is dirty". An unstaged docs edit must appear only when the
+/// caller asks for every uncommitted change.
+#[tokio::test]
+async fn commit_context_staged_only_excludes_unstaged_file() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[
+            ("Cargo.toml", BILLING_MANIFEST),
+            ("src/lib.rs", "pub fn baseline() -> i64 { 0 }\n"),
+            ("notes.txt", "committed note\n"),
+        ],
+        "seed context",
+    );
+    // gix compares the working-tree mtime, in whole seconds, with the index
+    // stat. A write in the same second as `git commit` is invisible, so the
+    // unstaged edit has to land in a later second.
+    std::thread::sleep(Duration::from_secs(2));
+    write_project_file(project, "notes.txt", "unstaged note\n");
+    write_project_file(
+        project,
+        "src/lib.rs",
+        "pub fn staged_total() -> i64 {\n    1\n}\n",
+    );
+    git_run(project, &["add", "src/lib.rs"]);
+
+    let (host, _env) = init_test_project(project).await;
+    let staged = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json", "staged_only": true}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let everything = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json", "staged_only": false}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(staged.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&staged.value),
+        json!({
+            "changed_files": [
+                {"file": "src/lib.rs", "role": "source", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "staged_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix/refactor",
+            "recent_commits": ["seed context"],
+            "summary": "1 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+    assert_eq!(everything.value.get("isError"), None);
+    assert_eq!(
+        commit_context_json(&everything.value),
+        json!({
+            "changed_files": [
+                {"file": "notes.txt", "role": "docs", "symbols": 0},
+                {"file": "src/lib.rs", "role": "source", "symbols": 1}
+            ],
+            "symbols_by_role": {
+                "source": [{
+                    "name": "staged_total",
+                    "kind": "function",
+                    "file": "src/lib.rs",
+                    "line": 0
+                }]
+            },
+            "suggested_category": "feature/fix/refactor",
+            "recent_commits": ["seed context"],
+            "summary": "2 file(s) changed, 1 symbol(s) affected",
+        })
+    );
+}
+
+/// A repository whose HEAD does not name a commit cannot describe a commit.
+/// The tool reports that as a git status failure, not an empty success.
+#[tokio::test]
+async fn commit_context_unborn_head_is_git_status_error() {
+    let dir = test_temp_dir();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
+    seed_commit(
+        project,
+        &[("src/lib.rs", "pub fn baseline() {}\n")],
+        "seed context",
+    );
+    let (host, _env) = init_test_project(project).await;
+    git_run(project, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+
+    let result = handle_tool_call(
+        &host,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    close_test_graph(host).await;
+
+    assert_eq!(result.value.get("isError"), Some(&json!(true)));
+    assert_eq!(
+        commit_context_json(&result.value),
+        json!({
+            "error": {
+                "kind": "git",
+                "operation": "status",
+                "message": "cannot peel HEAD to commit: Branch 'refs/heads/unborn' does not have any commits",
+            }
+        })
+    );
+}
+
+const BILLING_MANIFEST: &str =
+    "[package]\nname = \"billing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+
+fn seed_commit(project: &Path, files: &[(&str, &str)], message: &str) {
+    fs::create_dir_all(project).unwrap();
+    for (path, body) in files {
+        write_project_file(project, path, body);
+    }
+    git_run(project, &["init"]);
+    git_run(project, &["add", "."]);
+    git_run(project, &["commit", "-m", message]);
+}
+
+fn write_project_file(project: &Path, path: &str, body: &str) {
+    let full = project.join(path);
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(full, body).unwrap();
+}
+
+fn commit_context_json(value: &Value) -> Value {
+    serde_json::from_str(extract_text(value)).unwrap_or_else(|error| {
+        panic!(
+            "tracedecay_commit_context did not return JSON: {error}\n{}",
+            extract_text(value)
+        )
+    })
 }
 
 #[tokio::test]

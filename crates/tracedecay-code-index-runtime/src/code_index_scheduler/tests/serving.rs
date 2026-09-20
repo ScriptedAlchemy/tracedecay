@@ -2721,11 +2721,15 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
             .expect("advance artifact build under an adequate authority")
         {}
         let snapshot = adequate.snapshot();
+        let reader_budget = u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1)
+            .expect("reader budget fits u64");
         assert!(
             snapshot.charges.iter().any(|charge| {
-                charge.key.component.as_str() == "code-text-artifact-reader" && charge.bytes > 0
+                charge.key.component.as_str() == "code-text-artifact-reader"
+                    && charge.bytes == reader_budget
             }),
-            "serving artifact owners must hold the measured reader charge: {snapshot:?}"
+            "serving artifact owners hold exactly the reader budget, not the larger publication \
+             charge they take over: {snapshot:?}"
         );
         assert!(
             !snapshot
