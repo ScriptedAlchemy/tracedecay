@@ -26,6 +26,7 @@ pub mod retrieval;
 pub mod session;
 pub mod session_derived;
 pub mod source_path_policy;
+pub mod text;
 pub mod work;
 pub mod work_duplicate_adjudication;
 pub mod work_execution_snapshot;
@@ -381,6 +382,7 @@ pub use session_derived::{
     SessionDerivedEvidenceRecordV1, derive_session_evidence_from_occurrences,
 };
 pub use source_path_policy::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
+pub use text::utf8_prefix_at_or_before;
 pub use work::{RuntimeEvidenceRef, WorkAuthority, WorkContractError, WorkVersion};
 pub use work_duplicate_adjudication::{
     MAX_WORK_DUPLICATE_REASON_BYTES_V1, WorkDuplicateAdjudicationCommandV1,

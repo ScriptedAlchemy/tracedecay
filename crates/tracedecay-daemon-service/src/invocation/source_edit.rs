@@ -231,11 +231,9 @@ fn sanitize_safe_diagnostic_text(value: &str, limit: usize) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let mut end = trimmed.len().min(limit);
-    while end > 0 && !trimmed.is_char_boundary(end) {
-        end -= 1;
-    }
-    trimmed[..end].trim_end().to_owned()
+    tracedecay_domain::utf8_prefix_at_or_before(trimmed, limit)
+        .trim_end()
+        .to_owned()
 }
 
 fn source_edit_kernel_cause(error: &TraceDecayError) -> (String, String) {

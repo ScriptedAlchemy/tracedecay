@@ -94,17 +94,12 @@ fn evidence(
     ))
 }
 
-/// Truncate to at most `max` bytes, cutting at a char boundary so the result
-/// stays valid UTF-8 (and a truncated reference identifier stays well formed).
+/// Truncate to at most `max` bytes on a char boundary.
+///
+/// The cut is `utf8_prefix_at_or_before`. This only owns the `String` the
+/// evidence identifiers store.
 pub(crate) fn truncate_at_char_boundary(value: &str, max: usize) -> String {
-    if value.len() <= max {
-        return value.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
+    tracedecay_domain::utf8_prefix_at_or_before(value, max).to_string()
 }
 
 fn coverage(

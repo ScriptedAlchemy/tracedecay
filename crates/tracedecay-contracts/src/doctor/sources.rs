@@ -92,11 +92,8 @@ fn bounded_statement(statement: &str) -> String {
         return sanitized.to_owned();
     }
     let budget = STATEMENT_LIMIT_BYTES - TRUNCATION_MARK.len();
-    let mut cut = budget;
-    while cut > 0 && !sanitized.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}{TRUNCATION_MARK}", sanitized[..cut].trim_end())
+    let cut = tracedecay_domain::utf8_prefix_at_or_before(sanitized, budget);
+    format!("{}{TRUNCATION_MARK}", cut.trim_end())
 }
 
 /// Build an honest non-healthy finding for an unobservable source read.
