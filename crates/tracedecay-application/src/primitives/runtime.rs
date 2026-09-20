@@ -342,12 +342,6 @@ impl PrimitiveProjectRuntime {
     pub fn database(&self) -> &Database {
         &self.database
     }
-
-    /// Releases the project database, dispatch, and all Arc-backed
-    /// primitive authorities as one teardown unit.
-    pub fn teardown(self) {
-        drop(self);
-    }
 }
 
 impl PrimitiveDispatch for OwnedPrimitiveRuntime {

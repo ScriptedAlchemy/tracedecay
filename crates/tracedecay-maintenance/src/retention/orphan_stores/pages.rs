@@ -586,15 +586,6 @@ pub struct UnregisteredCollectionPlan {
     pub retained_immature: Vec<UnregisteredStoreFinding>,
 }
 
-impl UnregisteredCollectionPlan {
-    /// Total bytes that collecting [`Self::collect`] would reclaim.
-    pub fn collectable_bytes(&self) -> u64 {
-        self.collect
-            .iter()
-            .fold(0u64, |acc, f| acc.saturating_add(f.size_bytes))
-    }
-}
-
 /// Partition findings under a retention window. Pure.
 pub fn plan_unregistered_collection(
     findings: Vec<UnregisteredStoreFinding>,

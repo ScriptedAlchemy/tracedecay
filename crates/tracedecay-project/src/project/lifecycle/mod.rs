@@ -714,11 +714,6 @@ impl TraceDecay {
     /// status/verification commands that must be able to inspect read-only
     /// stores without mutating them.
     #[hotpath::skip]
-    pub async fn open_read_only(project_root: &Path) -> Result<Self> {
-        Self::open_read_only_with_options(project_root, TraceDecayOpenOptions::default()).await
-    }
-
-    #[hotpath::skip]
     pub async fn open_read_only_with_options(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,

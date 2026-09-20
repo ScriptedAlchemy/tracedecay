@@ -210,7 +210,6 @@ pub enum ExactSqlWriteIntent {
     Execute,
     Query,
     ExecuteBatch,
-    Vacuum,
     BeginTransaction,
     Commit,
 }

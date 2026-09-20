@@ -585,13 +585,6 @@ impl DeterministicCodeChunker {
         }
     }
 
-    /// Pin the sensitivity level recorded on every chunk of this generation.
-    #[must_use]
-    pub fn with_sensitivity_level(mut self, level: SensitivityLevelV1) -> Self {
-        self.sensitivity_level = level;
-        self
-    }
-
     /// The generation this chunker is bound to.
     pub fn generation_id(&self) -> &CodeGenerationId {
         &self.generation_id
