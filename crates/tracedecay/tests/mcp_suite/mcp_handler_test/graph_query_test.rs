@@ -1073,6 +1073,37 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
         payload["ranking_metadata"]["strategy"],
         "dependency_distance_then_path"
     );
+
+    // A changed-file list is a git diff, so it routinely names paths this
+    // generation never published: a new file, a deleted one, a rename's old
+    // path, a manifest. Such a path has no symbols, so the traversal reaches
+    // adjacency with an empty seed list, and adjacency refuses that by
+    // contract. The refusal used to surface as a non-retryable
+    // `code-graph-invalid-request` that failed the whole call, so one
+    // unindexed entry cost the caller every other file's answer.
+    let unpublished = harness
+        .call_tool(
+            &project,
+            "tracedecay_affected",
+            json!({"files": ["src/never_published.rs"], "depth": 5, "format": "json"}),
+        )
+        .await
+        .expect("production invocation succeeds")
+        .result
+        .expect("an unpublished path is answerable, not an invalid request");
+    let unpublished: Value = serde_json::from_str(
+        unpublished["content"][0]["text"]
+            .as_str()
+            .expect("affected JSON text"),
+    )
+    .expect("affected JSON payload");
+    assert_eq!(
+        unpublished["affected_tests"],
+        json!([]),
+        "a path this generation never published has no dependents, not an error"
+    );
+    assert_eq!(unpublished["ranked_tests"], json!([]));
+    assert_eq!(unpublished["recommended_tests"], json!([]));
 }
 
 #[cfg(feature = "test-transport")]

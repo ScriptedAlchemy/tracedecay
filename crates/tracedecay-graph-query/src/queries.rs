@@ -361,6 +361,15 @@ impl<'a> GraphQueryManager<'a> {
             .iter()
             .map(|symbol| symbol.occurrence.clone())
             .collect::<Vec<_>>();
+        // `symbols_in_logical_file` answers a path this generation never
+        // published with an empty vector by contract, and adjacency refuses an
+        // empty seed list by contract. Without this the seam between the two
+        // turned "no such file here" into a non-retryable invalid request.
+        // `incoming_edges` and `edges_among` below already carry this guard;
+        // this was the one adjacency call site missing it.
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
         let edges = hotpath::measure_block!("usecases.graph.file_neighbors.edges", {
             if incoming {
                 self.reader.callers(
