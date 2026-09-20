@@ -731,15 +731,20 @@ CARGO_NET_OFFLINE=true cargo nextest run \
   --config "$patch_config" \
   --no-tests=fail
 
+# `cargo package` publishes no integration tests (the root crate's `include`
+# whitelist carries only fixtures), and `mcp_suite` requires the
+# `test-transport` feature the production graph excludes, so the extracted
+# package cannot run this suite. Run it from the staged source snapshot under
+# the `root-transport` CI lens instead, with the packaged CLI as the binary
+# the suite spawns.
 echo "distribution acceptance: checking packaged MCP tool behavior"
 TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$root_package/Cargo.toml" \
+  --manifest-path "$staged/Cargo.toml" \
   --release \
-  --no-default-features \
-  --features production \
+  -p tracedecay \
   --test mcp_suite \
-  --config "$patch_config" \
+  --features tracedecay/test-transport \
   --no-tests=fail
 
 install_root="$work/install"
