@@ -41,9 +41,6 @@ tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 
-[target.'cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
 filetime = "0.2"
 tempfile = "3"
