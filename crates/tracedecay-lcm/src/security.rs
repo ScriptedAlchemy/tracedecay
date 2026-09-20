@@ -114,8 +114,7 @@ pub fn ignore_message_reason_with_compiled(
 }
 
 pub fn matches_any_pattern<S: AsRef<str>>(patterns: &[S], value: &str) -> bool {
-    let compiled = cached_session_patterns(patterns);
-    matches_any_compiled_pattern(&compiled, value)
+    cached_session_patterns(patterns).is_match(value)
 }
 
 /// Session pattern lists come from configuration and repeat on every LCM
@@ -138,10 +137,6 @@ fn cached_session_patterns<S: AsRef<str>>(patterns: &[S]) -> Arc<CompiledPattern
     }
     cache.insert(key, Arc::clone(&compiled));
     compiled
-}
-
-pub fn matches_any_compiled_pattern(patterns: &CompiledPatternSet, value: &str) -> bool {
-    patterns.is_match(value)
 }
 
 #[hotpath::measure(label = "sessions.lcm.compile_session")]

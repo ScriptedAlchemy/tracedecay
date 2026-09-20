@@ -202,6 +202,50 @@ fn redact_text(
     protected
 }
 
+struct SecretSpan {
+    secret_start: usize,
+    secret_end: usize,
+    consumed_to: usize,
+}
+
+fn secret_span(text: &str, mut pos: usize) -> SecretSpan {
+    pos = skip_chars(text, pos, char::is_whitespace);
+    let Some(quote) = text[pos..]
+        .chars()
+        .next()
+        .filter(|ch| matches!(*ch, '"' | '\''))
+    else {
+        let end = skip_chars(text, pos, |ch| {
+            !ch.is_whitespace() && !matches!(ch, ',' | '"' | '\'' | ']' | '}')
+        });
+        return SecretSpan {
+            secret_start: pos,
+            secret_end: end,
+            consumed_to: end,
+        };
+    };
+    pos += quote.len_utf8();
+    let secret_start = pos;
+    while pos < text.len() {
+        let Some(ch) = text[pos..].chars().next() else {
+            break;
+        };
+        if ch == quote || matches!(ch, '\r' | '\n' | ']' | '}') {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    let secret_end = pos;
+    if text[pos..].chars().next().is_some_and(|ch| ch == quote) {
+        pos += quote.len_utf8();
+    }
+    SecretSpan {
+        secret_start,
+        secret_end,
+        consumed_to: pos,
+    }
+}
+
 fn record_pattern_change(
     protected: &mut String,
     next: String,
@@ -237,35 +281,11 @@ fn redact_assignments(text: &str, keys: &[&str], min_secret_len: usize) -> Strin
             continue;
         }
         pos += 1;
-        pos = skip_chars(text, pos, char::is_whitespace);
-        let mut secret_start = pos;
-        let (secret_end, consumed_to) = if let Some(quote) = text[pos..]
-            .chars()
-            .next()
-            .filter(|ch| matches!(*ch, '"' | '\''))
-        {
-            pos += quote.len_utf8();
-            secret_start = pos;
-            while pos < text.len() {
-                let Some(ch) = text[pos..].chars().next() else {
-                    break;
-                };
-                if ch == quote || matches!(ch, '\r' | '\n' | ']' | '}') {
-                    break;
-                }
-                pos += ch.len_utf8();
-            }
-            let secret_end = pos;
-            if text[pos..].chars().next().is_some_and(|ch| ch == quote) {
-                pos += quote.len_utf8();
-            }
-            (secret_end, pos)
-        } else {
-            pos = skip_chars(text, pos, |ch| {
-                !ch.is_whitespace() && !matches!(ch, ',' | '"' | '\'' | ']' | '}')
-            });
-            (pos, pos)
-        };
+        let SecretSpan {
+            secret_start,
+            secret_end,
+            consumed_to,
+        } = secret_span(text, pos);
         if text[secret_start..secret_end].chars().count() < min_secret_len {
             out.push_str(&text[cursor..consumed_to]);
             cursor = consumed_to;

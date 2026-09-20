@@ -372,7 +372,10 @@ fn externalized_payload_placeholder(
             safe_placeholder_metadata(&payload_ref.kind),
             safe_placeholder_metadata(reason),
         ),
-        None => format!("[Externalized LCM ingest payload: kind={}; {body}]", safe_placeholder_metadata(&payload_ref.kind)),
+        None => format!(
+            "[Externalized LCM ingest payload: kind={}; {body}]",
+            safe_placeholder_metadata(&payload_ref.kind)
+        ),
     }
 }
 
@@ -398,27 +401,33 @@ async fn upsert_inline_raw_message(
     upsert_owned_raw_message(
         conn,
         message,
-        Some(text),
-        content_hash.as_str(),
-        LcmStorageKind::Inline,
-        None,
-        snippet.as_str(),
-        index.as_str(),
-        metadata_json,
+        OwnedRawMessageWrite {
+            content: Some(text),
+            content_hash: content_hash.as_str(),
+            storage_kind: LcmStorageKind::Inline,
+            payload_ref: None,
+            snippet: snippet.as_str(),
+            index_text: index.as_str(),
+            metadata_json,
+        },
     )
     .await
+}
+
+struct OwnedRawMessageWrite<'a> {
+    content: Option<&'a str>,
+    content_hash: &'a str,
+    storage_kind: LcmStorageKind,
+    payload_ref: Option<&'a str>,
+    snippet: &'a str,
+    index_text: &'a str,
+    metadata_json: Option<&'a str>,
 }
 
 async fn upsert_owned_raw_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
-    content: Option<&str>,
-    content_hash: &str,
-    storage_kind: LcmStorageKind,
-    payload_ref: Option<&str>,
-    snippet: &str,
-    index_text: &str,
-    metadata_json: Option<&str>,
+    write: OwnedRawMessageWrite<'_>,
 ) -> Result<(), LcmError> {
     let affected = conn
         .execute(
@@ -450,13 +459,13 @@ async fn upsert_owned_raw_message(
                 message.role.as_str(),
                 message.ordinal,
                 message.timestamp,
-                content,
-                content_hash,
-                storage_kind.as_str(),
-                payload_ref,
-                snippet,
-                index_text,
-                metadata_json,
+                write.content,
+                write.content_hash,
+                write.storage_kind.as_str(),
+                write.payload_ref,
+                write.snippet,
+                write.index_text,
+                write.metadata_json,
             ],
         )
         .await?;
@@ -820,13 +829,15 @@ pub async fn commit_staged_raw_message(
     upsert_owned_raw_message(
         conn,
         message,
-        None,
-        whole_message.payload_ref.content_hash.as_str(),
-        LcmStorageKind::External,
-        Some(whole_message.payload_ref.payload_ref.as_str()),
-        whole_message.placeholder.as_str(),
-        whole_message.placeholder.as_str(),
-        Some(whole_message.metadata_json.as_str()),
+        OwnedRawMessageWrite {
+            content: None,
+            content_hash: whole_message.payload_ref.content_hash.as_str(),
+            storage_kind: LcmStorageKind::External,
+            payload_ref: Some(whole_message.payload_ref.payload_ref.as_str()),
+            snippet: whole_message.placeholder.as_str(),
+            index_text: whole_message.placeholder.as_str(),
+            metadata_json: Some(whole_message.metadata_json.as_str()),
+        },
     )
     .await?;
     persist_raw_predecessor_range(conn, message).await?;
