@@ -134,7 +134,7 @@ async fn open_sources(files: &[(&str, &str)]) -> (ProductionSourceEditFixture, T
     for (relative, body) in files {
         fs::write(project.join(relative), body).unwrap();
     }
-    let (fixture, _) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
     (fixture, dir)
 }
 
@@ -142,7 +142,7 @@ async fn open_pair() -> (ProductionSourceEditFixture, TestTempDir) {
     let dir = test_temp_dir();
     let project = dir.path().join("project");
     write_pair(&project);
-    let (fixture, _) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
     (fixture, dir)
 }
 

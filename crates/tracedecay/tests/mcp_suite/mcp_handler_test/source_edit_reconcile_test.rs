@@ -46,7 +46,7 @@ async fn open_project() -> OpenedProject {
     let project = dir.path().join("project");
     fs::create_dir_all(project.join("src/locked")).unwrap();
     fs::write(project.join(RELATIVE_PATH), PREIMAGE).unwrap();
-    let (fixture, ()) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
     OpenedProject {
         file: project.join(RELATIVE_PATH),
         fixture,

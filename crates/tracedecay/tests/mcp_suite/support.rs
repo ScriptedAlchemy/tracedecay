@@ -418,7 +418,7 @@ pub(crate) struct ProductionSourceEditFixture {
 #[cfg(feature = "test-transport")]
 pub(crate) async fn init_production_source_edit_project(
     project_root: &Path,
-) -> (ProductionSourceEditFixture, ()) {
+) -> ProductionSourceEditFixture {
     let isolation_root = project_root
         .parent()
         .expect("source-edit project has an isolation parent");
@@ -429,13 +429,10 @@ pub(crate) async fn init_production_source_edit_project(
     ))
     .await
     .expect("production source-edit composition");
-    (
-        ProductionSourceEditFixture {
-            harness,
-            project_root: project_root.to_path_buf(),
-        },
-        (),
-    )
+    ProductionSourceEditFixture {
+        harness,
+        project_root: project_root.to_path_buf(),
+    }
 }
 
 #[cfg(feature = "test-transport")]
@@ -991,9 +988,6 @@ pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Shared setup
-// ---------------------------------------------------------------------------
 pub(crate) struct TestTempDir {
     pub(crate) dir: Option<TempDir>,
 }

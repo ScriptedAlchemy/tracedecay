@@ -29,7 +29,7 @@ async fn open_fixture(files: &[(&str, &str)]) -> (TestTempDir, ProductionSourceE
         fs::create_dir_all(path.parent().expect("fixture file has a parent")).unwrap();
         fs::write(&path, contents).unwrap();
     }
-    let (fixture, ()) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
     (dir, fixture)
 }
 

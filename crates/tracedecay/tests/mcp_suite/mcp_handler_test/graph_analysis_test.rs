@@ -123,17 +123,12 @@ async fn close_test_graph(host: impl AnalysisToolHost) {
     host.close_analysis_host().await;
 }
 
-async fn setup_project() -> (ProductionCompositionFixture, ()) {
-    (production_composition_fixture().await, ())
-}
-
-async fn setup_empty_analysis_project() -> (ProductionCompositionFixture, (), ()) {
-    let fixture = production_composition_fixture_with_sources(|project| {
+async fn setup_empty_analysis_project() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("src/lib.rs"), "").unwrap();
     })
-    .await;
-    (fixture, (), ())
+    .await
 }
 
 fn write_integration_test_risk_sources(project: &Path) {
@@ -160,14 +155,12 @@ fn write_integration_test_risk_sources(project: &Path) {
     .unwrap();
 }
 
-async fn setup_integration_test_risk_project() -> (ProductionCompositionFixture, ()) {
-    let fixture =
-        production_composition_fixture_with_sources(write_integration_test_risk_sources).await;
-    (fixture, ())
+async fn setup_integration_test_risk_project() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(write_integration_test_risk_sources).await
 }
 
-async fn setup_test_risk_non_src_fixture() -> (ProductionCompositionFixture, ()) {
-    let fixture = production_composition_fixture_with_sources(|project| {
+async fn setup_test_risk_non_src_fixture() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(|project| {
         write_integration_test_risk_sources(project);
         fs::write(
             project.join("build.rs"),
@@ -176,12 +169,11 @@ async fn setup_test_risk_non_src_fixture() -> (ProductionCompositionFixture, ())
         )
         .unwrap();
     })
-    .await;
-    (fixture, ())
+    .await
 }
 
-async fn setup_workspace_test_risk_fixture() -> (ProductionCompositionFixture, ()) {
-    let fixture = production_composition_fixture_with_sources(|project| {
+async fn setup_workspace_test_risk_fixture() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("crates/demo/src")).unwrap();
         fs::create_dir_all(project.join("crates/demo/tests")).unwrap();
         fs::write(
@@ -205,12 +197,11 @@ async fn setup_workspace_test_risk_fixture() -> (ProductionCompositionFixture, (
         )
         .unwrap();
     })
-    .await;
-    (fixture, ())
+    .await
 }
 
-async fn setup_ts_describe_it_project() -> (ProductionCompositionFixture, ()) {
-    let fixture = production_composition_fixture_with_sources(|project| {
+async fn setup_ts_describe_it_project() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("package.json"),
@@ -229,12 +220,11 @@ async fn setup_ts_describe_it_project() -> (ProductionCompositionFixture, ()) {
         )
         .unwrap();
     })
-    .await;
-    (fixture, ())
+    .await
 }
 
-async fn setup_unsafe_block_fixture() -> (ProductionCompositionFixture, ()) {
-    let fixture = production_composition_fixture_with_sources(|project| {
+async fn setup_unsafe_block_fixture() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("Cargo.toml"),
@@ -260,11 +250,10 @@ pub fn safe_add(a: u64, b: u64) -> u64 {
         )
         .unwrap();
     })
-    .await;
-    (fixture, ())
+    .await
 }
 
-async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
+async fn init_test_project(project: &Path) -> MountedProductionProject {
     if !project.join(".git").is_dir() {
         git_run(project, &["init", "--quiet"]);
         git_run(project, &["add", "."]);
@@ -294,7 +283,7 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
         project_root: project.to_path_buf(),
     };
     wait_for_current_graph(&mounted).await;
-    (mounted, ())
+    mounted
 }
 
 #[tokio::test]
@@ -330,7 +319,7 @@ pub fn recovered() -> BuildOptions {
 "#,
     )
     .unwrap();
-    let (graph, _env) = init_test_project(&project_root).await;
+    let graph = init_test_project(&project_root).await;
 
     let result = handle_tool_call(
         &graph,
@@ -392,7 +381,7 @@ pub mod second {
 "#,
     )
     .unwrap();
-    let (graph, _env) = init_test_project(&project_root).await;
+    let graph = init_test_project(&project_root).await;
 
     let result = handle_tool_call(
         &graph,
@@ -459,7 +448,7 @@ export default defineConfig({
         "export const orphan = 1;\n",
     )
     .unwrap();
-    let (graph, _env) = init_test_project(&project_root).await;
+    let graph = init_test_project(&project_root).await;
 
     let result = handle_tool_call(
         &graph,
@@ -544,7 +533,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
 /// zero below a real negative result rather than an unpopulated index.
 #[tokio::test]
 async fn test_dead_code() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "format_greeting").await;
 
     let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
@@ -571,7 +560,7 @@ async fn test_dead_code() {
 /// of the file's symbols as modified and `main` as impacted downstream.
 #[tokio::test]
 async fn test_diff_context() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
@@ -629,7 +618,7 @@ async fn test_diff_context() {
 /// a real "no cycles here" rather than "nothing was analysed".
 #[tokio::test]
 async fn test_circular() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "helper").await;
 
     let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
@@ -652,7 +641,7 @@ async fn test_circular() {
 
 #[tokio::test]
 async fn test_rename_preview() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     let node_id = find_node_id(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
@@ -709,7 +698,7 @@ async fn test_rename_preview() {
 /// proves the call edges are present, which is what makes zero meaningful.
 #[tokio::test]
 async fn test_recursion() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     let _populated = find_node_id(&cg, "format_greeting").await;
 
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
@@ -800,7 +789,7 @@ async fn pr_context_no_git_returns_structured_git_error() {
 
 #[tokio::test]
 async fn test_port_status() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
@@ -883,7 +872,7 @@ async fn port_status_does_not_match_methods_of_different_parents() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -942,7 +931,7 @@ async fn port_status_matches_methods_with_same_parent_type() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -969,7 +958,7 @@ async fn port_status_matches_methods_with_same_parent_type() {
 
 #[tokio::test]
 async fn test_port_order() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
@@ -1048,7 +1037,7 @@ async fn port_order_sorts_a_tied_level_before_applying_the_limit() {
         "pub fn zeta() {}\npub fn alpha() {}\npub fn middle() {}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(&project_root).await;
+    let cg = init_test_project(&project_root).await;
 
     let result = handle_tool_call(
         &cg,
@@ -1073,7 +1062,7 @@ async fn port_order_sorts_a_tied_level_before_applying_the_limit() {
 
 #[tokio::test]
 async fn test_rename_preview_not_found() {
-    let (cg, _env, _dir) = setup_empty_analysis_project().await;
+    let cg = setup_empty_analysis_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_rename_preview",
@@ -1112,7 +1101,7 @@ async fn commit_context_clean_worktree_returns_json() {
     git_run(project, &["add", "."]);
     git_run(project, &["commit", "-m", "init"]);
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_commit_context",
@@ -1166,7 +1155,7 @@ async fn commit_context_staged_source_and_test_reports_symbols() {
     );
     git_run(project, &["add", "src/lib.rs", "tests/invoice_test.rs"]);
 
-    let (host, _env) = init_test_project(project).await;
+    let host = init_test_project(project).await;
     let result = handle_tool_call(
         &host,
         "tracedecay_commit_context",
@@ -1228,7 +1217,7 @@ async fn commit_context_config_and_docs_report_chore() {
     write_project_file(project, "notes.txt", "Ship the invoice total.\n");
     git_run(project, &["add", "billing.cfg", "notes.txt"]);
 
-    let (host, _env) = init_test_project(project).await;
+    let host = init_test_project(project).await;
     let result = handle_tool_call(
         &host,
         "tracedecay_commit_context",
@@ -1291,7 +1280,7 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
     );
     git_run(project, &["add", "src/lib.rs"]);
 
-    let (host, _env) = init_test_project(project).await;
+    let host = init_test_project(project).await;
     let staged = handle_tool_call(
         &host,
         "tracedecay_commit_context",
@@ -1367,7 +1356,7 @@ async fn commit_context_unborn_head_is_git_status_error() {
         &[("src/lib.rs", "pub fn baseline() {}\n")],
         "seed context",
     );
-    let (host, _env) = init_test_project(project).await;
+    let host = init_test_project(project).await;
     git_run(project, &["symbolic-ref", "HEAD", "refs/heads/unborn"]);
 
     let result = handle_tool_call(
@@ -1448,7 +1437,7 @@ async fn test_changelog_with_real_git() {
     git_run(project, &["add", "."]);
     git_run(project, &["commit", "-m", "add function"]);
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -1489,7 +1478,7 @@ async fn test_changelog_with_real_git() {
 /// breakdown.
 #[tokio::test]
 async fn test_health_detailed_includes_raw_signals() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_health",
@@ -1804,7 +1793,7 @@ _No dependency clusters found._
 
 #[tokio::test]
 async fn test_test_risk() {
-    let (cg, _dir) = setup_project().await;
+    let cg = production_composition_fixture().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_test_risk",
@@ -1845,7 +1834,7 @@ async fn test_test_risk() {
 
 #[tokio::test]
 async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
-    let (cg, _dir) = setup_integration_test_risk_project().await;
+    let cg = setup_integration_test_risk_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_test_risk",
@@ -1921,7 +1910,7 @@ async fn test_test_risk_distinguishes_direct_and_closure_attribution() {
 
 #[tokio::test]
 async fn test_test_risk_scopes_workspace_source_before_following_external_test_callers() {
-    let (cg, _dir) = setup_workspace_test_risk_fixture().await;
+    let cg = setup_workspace_test_risk_fixture().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_test_risk",
@@ -1951,7 +1940,7 @@ async fn test_test_risk_scopes_workspace_source_before_following_external_test_c
 
 #[tokio::test]
 async fn test_test_risk_attributes_ts_describe_it_tests() {
-    let (cg, _dir) = setup_ts_describe_it_project().await;
+    let cg = setup_ts_describe_it_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_test_risk",
@@ -1991,7 +1980,7 @@ async fn test_test_risk_attributes_ts_describe_it_tests() {
 
 #[tokio::test]
 async fn test_test_map_lists_ts_it_title_as_covering_test() {
-    let (cg, _dir) = setup_ts_describe_it_project().await;
+    let cg = setup_ts_describe_it_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_test_map",
@@ -2021,7 +2010,7 @@ async fn test_test_map_lists_ts_it_title_as_covering_test() {
 
 #[tokio::test]
 async fn test_test_risk_excludes_non_src_functions_from_denominator_and_risks() {
-    let (cg, _dir) = setup_test_risk_non_src_fixture().await;
+    let cg = setup_test_risk_non_src_fixture().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_test_risk",
@@ -2089,7 +2078,7 @@ fn helper() {
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     wait_for_current_graph(&cg).await;
 
     let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
@@ -2138,7 +2127,7 @@ fn main() {
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -2177,7 +2166,7 @@ pub fn second() { dep::shared(); }
     )
     .unwrap();
     fs::write(project.join("src/dep.rs"), "pub fn shared() {}\n").unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -2216,13 +2205,13 @@ async fn recursion_keeps_direct_recursion() {
         "pub fn recurse(n: u32) -> u32 {\n    if n == 0 { 0 } else { recurse(n - 1) }\n}\n\npub fn nonrecursive() -> u32 { 42 }\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let output = extract_json(&result.value);
     assert_eq!(
-public_recursion_report(&output),
+        public_recursion_report(&output),
         json!({
             "cycle_count": 1,
             "cycles": [{
@@ -2235,7 +2224,7 @@ public_recursion_report(&output),
         }),
         "direct recursion must be the only cycle, and `nonrecursive` must stay out: {output}"
     );
-assert_reported_cycles_close(&output);
+    assert_reported_cycles_close(&output);
 }
 
 #[tokio::test]
@@ -2250,13 +2239,13 @@ async fn recursion_filters_self_edge_artifacts() {
         "pub fn recurse(n: u32) -> u32 {\n    if n == 0 { 0 } else { recurse(n - 1) }\n}\n\npub struct Triplet {\n    rows: Vec<usize>,\n}\n\nimpl Triplet {\n    pub fn push(&mut self, row: usize) {\n        self.rows.push(row);\n    }\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let output = extract_json(&result.value);
     assert_eq!(
-public_recursion_report(&output),
+        public_recursion_report(&output),
         json!({
             "cycle_count": 1,
             "cycles": [{
@@ -2269,7 +2258,7 @@ public_recursion_report(&output),
         }),
         "`self.rows.push` must not become a cycle while `recurse` is reported: {output}"
     );
-assert_reported_cycles_close(&output);
+    assert_reported_cycles_close(&output);
 }
 
 #[tokio::test]
@@ -2288,13 +2277,13 @@ pub fn c() { a(); }
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_recursion", json!({}), None, None)
         .await
         .unwrap();
     let output = extract_json(&result.value);
     assert_eq!(
-public_recursion_report(&output),
+        public_recursion_report(&output),
         json!({
             "cycle_count": 1,
             "cycles": [{
@@ -2309,7 +2298,7 @@ public_recursion_report(&output),
         }),
         "the only cycle is a -> b -> c -> a: {output}"
     );
-assert_reported_cycles_close(&output);
+    assert_reported_cycles_close(&output);
 }
 
 /// `tracedecay_changelog`'s response must not list directories under
@@ -2337,7 +2326,7 @@ async fn changelog_filters_directory_paths() {
     fs::write(project.join("src/sub/added.rs"), "pub fn a() {}\n").unwrap();
     git_run(project, &["add", "."]);
     git_run(project, &["commit", "-m", "two"]);
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -2384,7 +2373,7 @@ pub fn caller() { called(); }
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let default_result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
@@ -2438,7 +2427,7 @@ async fn diagnose_normalizes_absolute_and_backslash_paths() {
         "pub fn target() {}\npub fn caller() { target(); }\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let abs_path = project.join("src/lib.rs");
     let abs_str = abs_path.to_string_lossy().to_string();
@@ -2504,7 +2493,7 @@ pub fn helper() {}
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let caller_id = find_node_id(&cg, "caller").await;
     let result = handle_tool_call(
@@ -2563,7 +2552,7 @@ impl Default for B { fn default() -> Self { B } }
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -2623,7 +2612,7 @@ async fn circular_reports_one_entry_per_scc_not_per_walk() {
         "use crate::a::a_fn;\npub fn c_fn() { a_fn(); }\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_circular", json!({}), None, None)
         .await
         .unwrap();
@@ -2674,7 +2663,7 @@ pub fn leaf() {}
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_port_order",
@@ -2736,7 +2725,7 @@ pub fn h() { a(); }
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_port_order",
@@ -2814,7 +2803,7 @@ impl Triplet {
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_port_order",
@@ -2851,7 +2840,7 @@ pub trait Leaf: Middle {}
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(&cg, "tracedecay_inheritance_depth", json!({}), None, None)
         .await
         .unwrap();
@@ -2901,7 +2890,7 @@ async fn analysis_symbol_locations_are_one_based() {
         "function abandonedHelper(): number { return 7; }\nexport function entry(): number { return 1; }\n",
     )
     .unwrap();
-    let (graph, _env) = init_test_project(&project_root).await;
+    let graph = init_test_project(&project_root).await;
 
     for (tool, arguments, collection, symbol, expected_line) in [
         (
@@ -3006,7 +2995,7 @@ async fn typescript_typed_variables_reach_public_type_relation_queries() {
          export let fallback: Greeter = primary;\n",
     )
     .unwrap();
-    let (graph, ()) = init_test_project(&project_root).await;
+    let graph = init_test_project(&project_root).await;
     let greeter_id = find_node_id(&graph, "Greeter").await;
     let variable_ids = [
         ("primary", find_node_id(&graph, "primary").await),
@@ -3096,7 +3085,7 @@ function helper() { return unrelated; }
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(&project_root).await;
+    let cg = init_test_project(&project_root).await;
     let parent_id = find_node_id(&cg, "SettingsEditable").await;
 
     let hierarchy = handle_tool_call(
@@ -3250,7 +3239,7 @@ async fn circular_emits_disjoint_sccs_under_load() {
         )
         .unwrap();
     }
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     // Disjointness is only observable when every member is listed, so raise the
     // member bound above this fixture's 15-file component.
     let result = handle_tool_call(
@@ -3302,7 +3291,7 @@ async fn diff_context_dedupes_modified_symbols_on_duplicate_input() {
         "pub struct S; pub fn one() {} pub fn two() {}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -3351,7 +3340,7 @@ async fn changelog_filters_deleted_directory_entries() {
     fs::remove_dir_all(project.join("crates")).unwrap();
     git_run(project, &["add", "-A"]);
     git_run(project, &["commit", "-m", "drop crates"]);
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_changelog",
@@ -3411,7 +3400,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     git_run(project, &["add", "."]);
     git_run(project, &["commit", "-m", "deps"]);
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -3585,7 +3574,7 @@ async fn pr_context_reports_the_pinned_feature_summary() {
         Some("2020-01-03T03:04:05Z"),
     );
 
-    let (host, _env) = init_test_project(project).await;
+    let host = init_test_project(project).await;
     let feature = pr_context_json(
         &host,
         json!({"format": "json", "base_ref": "master", "head_ref": "feature"}),
@@ -3801,7 +3790,7 @@ fn dead_helper_with_attr() {}
 "#,
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(&cg, "tracedecay_dead_code", json!({}), None, None)
         .await
@@ -3826,7 +3815,7 @@ fn dead_helper_with_attr() {}
 /// must surface the site.
 #[tokio::test]
 async fn unsafe_patterns_reports_unsafe_block_in_markdown_and_json() {
-    let (cg, _project) = setup_unsafe_block_fixture().await;
+    let cg = setup_unsafe_block_fixture().await;
 
     // Markdown is the runtime default; request it explicitly so the test helper
     // (which force-injects `format=json` for tools outside its allowlist) does
@@ -3921,7 +3910,7 @@ pub fn write_both(target: &mut Target, other: &mut Other) {
 "#,
     )
     .unwrap();
-    let (host, _env) = init_test_project(&project_root).await;
+    let host = init_test_project(&project_root).await;
 
     let result = handle_tool_call(
         &host,
@@ -3986,7 +3975,7 @@ pub fn while_let_then_sibling(target: &Target, mut other: Option<Other>) -> u32 
         let shadow_root = shadow_dir.path().join("project");
         fs::create_dir_all(shadow_root.join("src")).unwrap();
         fs::write(shadow_root.join("src/lib.rs"), shadow_source).unwrap();
-        let (shadow_host, _shadow_env) = init_test_project(&shadow_root).await;
+        let shadow_host = init_test_project(&shadow_root).await;
         let error = expect_tool_error(
             handle_tool_call(
                 &shadow_host,
@@ -4017,7 +4006,7 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
         )),
     )
     .unwrap();
-    let (host, _env) = init_test_project(&project_root).await;
+    let host = init_test_project(&project_root).await;
 
     let result = handle_tool_call(
         &host,
@@ -4126,7 +4115,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(project_root.join("src")).unwrap();
     fs::write(project_root.join("src/lib.rs"), FIELD_BEHAVIOR_SOURCE).unwrap();
-    let (host, _env) = init_test_project(&project_root).await;
+    let host = init_test_project(&project_root).await;
 
     let read_method = "src/lib.rs::Counter::read";
     let bump = "src/lib.rs::bump";
@@ -4240,7 +4229,7 @@ async fn field_sites_behavior_reports_literal_read_and_write_sites() {
     let qualified_root = qualified_dir.path().join("project");
     fs::create_dir_all(qualified_root.join("src")).unwrap();
     fs::write(qualified_root.join("src/lib.rs"), FIELD_QUALIFIED_SOURCE).unwrap();
-    let (qualified_host, _qualified_env) = init_test_project(&qualified_root).await;
+    let qualified_host = init_test_project(&qualified_root).await;
     let qualified = call_field_sites(
         &qualified_host,
         json!({"field": "Counter::n", "format": "json"}),
@@ -4311,7 +4300,7 @@ pub fn closure_then_sibling(counter: &Counter) -> u32 {
 "#,
     )
     .unwrap();
-    let (host, _env) = init_test_project(&project_root).await;
+    let host = init_test_project(&project_root).await;
 
     let error = expect_tool_error(
         handle_tool_call(
@@ -4466,7 +4455,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     let dir = test_temp_dir();
     let project = dir.path().join("project");
     write_call_chain(&project);
-    let (host, _) = init_test_project(&project).await;
+    let host = init_test_project(&project).await;
 
     let changed = handle_tool_call(
         &host,
@@ -4916,7 +4905,7 @@ async fn gini_reports_literal_coefficients_for_known_distributions() {
 
 #[tokio::test]
 async fn gini_empty_index_reports_perfect_equality() {
-    let (host, _, _) = setup_empty_analysis_project().await;
+    let host = setup_empty_analysis_project().await;
     let payload = gini_json(&host, json!({"format": "json"})).await;
     assert_eq!(
         payload,
@@ -5211,7 +5200,7 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     let chain_dir = test_temp_dir();
     let chain_root = chain_dir.path().join("project");
     write_chain_project(&chain_root);
-    let (chain, _env) = init_test_project(&chain_root).await;
+    let chain = init_test_project(&chain_root).await;
 
     let chain_default = call_hotspots(&chain, json!({"format": "json"})).await;
     let chain_limit_one = call_hotspots(&chain, json!({"format": "json", "limit": 1})).await;
@@ -5263,7 +5252,7 @@ async fn hotspots_ranks_symbols_by_edge_degree_and_clamps_limit() {
     let fanout_dir = test_temp_dir();
     let fanout_root = fanout_dir.path().join("project");
     let fanout_bytes = write_fanout_project(&fanout_root);
-    let (fanout, _env) = init_test_project(&fanout_root).await;
+    let fanout = init_test_project(&fanout_root).await;
     let fanout_default = call_hotspots(&fanout, json!({"format": "json"})).await;
     let fanout_capped = call_hotspots(&fanout, json!({"format": "json", "limit": 250})).await;
     let fanout_one = call_hotspots(&fanout, json!({"format": "json", "limit": 1})).await;
@@ -5488,7 +5477,7 @@ async fn recursion_reports_literal_cycles_and_refuses_non_positive_limit() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs_write_fixture(&project_root);
-    let (graph, ()) = init_test_project(&project_root).await;
+    let graph = init_test_project(&project_root).await;
 
     let payload = call_recursion(&graph, json!({"format": "json", "limit": 10})).await;
     assert_eq!(

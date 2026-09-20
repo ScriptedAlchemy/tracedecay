@@ -333,7 +333,7 @@ async fn test_rename_symbol_dry_run_default_reports_plan_and_writes_nothing() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     rename_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
     assert_eq!(node["name"], "compute_grand_total");
@@ -415,7 +415,7 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     rename_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
     let preview = preview_rename(&cg, &node, "calculate_total_cents").await;
@@ -490,7 +490,7 @@ async fn test_rename_symbol_stale_tree_refuses_before_writing() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     rename_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
     let preview = preview_rename(&cg, &node, "calculate_total_cents").await;
@@ -595,7 +595,7 @@ async fn test_rename_symbol_denies_invalid_and_colliding_names() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     rename_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
 
@@ -676,7 +676,7 @@ async fn test_rename_symbol_blocks_unresolved_cross_module_spelling() {
     let project = project_root.as_path();
     rename_fixture(project).await;
     fs::write(project.join("src/nested/orders.rs"), ORDERS_CROSS_MODULE).unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
     let payload = call_json(
@@ -787,7 +787,7 @@ async fn test_rename_symbol_publication_failure_preserves_preimage() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     rename_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let node = preview_node(&cg, "compute_grand_total").await;
     let preview = preview_rename(&cg, &node, "calculate_total_cents").await;
