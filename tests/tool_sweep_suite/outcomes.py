@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from typing import Any
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def decode_json_stdout(stdout: str) -> Any:
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout
 
 
 _NOT_FOUND = re.compile(
