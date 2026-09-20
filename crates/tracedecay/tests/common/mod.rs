@@ -1,6 +1,8 @@
 #![allow(dead_code)] // shared test support: each suite binary compiles this module and uses a subset
 
 pub mod fixture;
+#[cfg(feature = "test-transport")]
+pub mod mcp_response;
 pub mod repository_layout;
 
 use std::ffi::{OsStr, OsString};

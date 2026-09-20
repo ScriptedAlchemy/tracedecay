@@ -21,6 +21,7 @@ use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_
 use super::*;
 #[cfg(unix)]
 use tracedecay_application::pr_tracking::try_acquire_manual_branch_lifecycle;
+use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_daemon_identity::profile_identity;
@@ -957,6 +958,47 @@ impl ProductionProjectCompositionHarnessV1 {
     }
 }
 
+/// Liveness floor for the readiness probe above.
+///
+/// Every seat install and every source revalidation that keeps an unchanged
+/// generation seated signals the serving watch, so the common case wakes on
+/// the publication itself. This bound only covers the terminal answers that
+/// install no seat — a route that has not mounted yet, and a verified source
+/// that publishes no generation at all.
+const CODE_INDEX_READINESS_BACKSTOP: Duration = Duration::from_millis(100);
+
+/// Park until the mounted route seats a generation, or until the backstop.
+///
+/// The probe this paces canonicalizes the root, takes the scheduler registry's
+/// mounted mutex several times, offloads a Git-metadata freshness capture to
+/// the blocking pool, and emits a decline event. Re-running it on a fixed
+/// millisecond cadence spends that on the same cores as the reconcile it is
+/// waiting for, so the wait is driven by the serving watch instead.
+async fn await_serving_generation_change(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    serving_changed: &mut Option<tokio::sync::watch::Receiver<()>>,
+) {
+    if serving_changed.is_none() {
+        *serving_changed = schedulers
+            .subscribe_serving_generation_changes(project_root)
+            .await;
+    }
+    let Some(changed) = serving_changed.as_mut() else {
+        tokio::time::sleep(CODE_INDEX_READINESS_BACKSTOP).await;
+        return;
+    };
+    match timeout(CODE_INDEX_READINESS_BACKSTOP, changed.changed()).await {
+        Ok(Ok(())) | Err(_) => {}
+        // The route retired its watch. Drop it and let the next probe report
+        // whatever typed state replaced the mount.
+        Ok(Err(_)) => {
+            *serving_changed = None;
+            tokio::time::sleep(CODE_INDEX_READINESS_BACKSTOP).await;
+        }
+    }
+}
+
 #[hotpath::measure(label = "daemon.harness.wait_code_index", future = true)]
 async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
@@ -975,6 +1017,12 @@ async fn wait_for_production_composition_code_index(
         return Ok(());
     }
     let wait_started = Instant::now();
+    // Subscribe before the first probe so a seat installed between the probe
+    // and the wait still wakes this loop.
+    let mut serving_changed = invocation
+        .code_index_schedulers
+        .subscribe_serving_generation_changes(project_root)
+        .await;
     let publication = timeout(Duration::from_secs(20), async {
         loop {
             // Scope-aware readiness is the authenticated demand boundary that
@@ -1025,7 +1073,12 @@ async fn wait_for_production_composition_code_index(
             {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            await_serving_generation_change(
+                &invocation.code_index_schedulers,
+                project_root,
+                &mut serving_changed,
+            )
+            .await;
         }
     })
     .await;

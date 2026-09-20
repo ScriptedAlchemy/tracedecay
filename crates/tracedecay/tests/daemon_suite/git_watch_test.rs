@@ -15,7 +15,8 @@ use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, scoped_code_index_store_root,
 };
 use tracedecay_domain::configuration::SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY;
-use tracedecay_mcp::JsonRpcResponse;
+
+use crate::common::mcp_response::tool_json;
 fn git(project: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(["-c", "core.hooksPath=.git/no-hooks"])
@@ -66,29 +67,8 @@ async fn indexed_repo() -> (TempDir, PathBuf, ProductionProjectCompositionHarnes
         .unwrap();
     (root, project, harness)
 }
-fn tool_payload(response: &JsonRpcResponse) -> Value {
-    assert!(response.error.is_none(), "{response:?}");
-    let result = response.result.as_ref().expect("tool result");
-    assert_ne!(result["isError"], true, "tool effect failed: {result}");
-    let text = result["content"][0]["text"].as_str().expect("tool text");
-    serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("tool returned invalid JSON: {error}; text={text}"))
-}
-async fn tool(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    tool_payload(
-        &harness
-            .call_tool(project, name, arguments)
-            .await
-            .unwrap_or_else(|error| panic!("{name} failed: {error}")),
-    )
-}
 async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
-    tool(
+    tool_json(
         harness,
         project,
         "tracedecay_status",
@@ -116,7 +96,7 @@ async fn search(
     project: &Path,
     query: &str,
 ) -> Value {
-    let payload = tool(
+    let payload = tool_json(
         harness,
         project,
         "tracedecay_search",
@@ -127,53 +107,9 @@ async fn search(
         payload["reason"], "search_capacity_unavailable",
         "search {query:?} lost the execution permit race and was refused instead of queued: {payload}"
     );
-    resolve_truncated_tool_payload(harness, project, payload).await
+    payload
 }
 
-/// A `tracedecay_search` body over the MCP response cap arrives as a handle
-/// envelope whose preview is not the JSON the journey reads. Reassemble the
-/// stored original through `tracedecay_retrieve` pages exactly as an agent
-/// does, so `code_generation` and `results` come from the full answer.
-async fn resolve_truncated_tool_payload(
-    harness: &ProductionProjectCompositionHarnessV1,
-    project: &Path,
-    payload: Value,
-) -> Value {
-    if payload.get("truncated") != Some(&json!(true)) {
-        return payload;
-    }
-    let handle = payload["handle"]
-        .as_str()
-        .unwrap_or_else(|| panic!("truncated search omitted retrieve handle: {payload}"));
-    let mut content = String::new();
-    let mut offset = 0_u64;
-    loop {
-        let retrieved = tool(
-            harness,
-            project,
-            "tracedecay_retrieve",
-            json!({"handle": handle, "format": "json", "offset": offset}),
-        )
-        .await;
-        content.push_str(retrieved["content"].as_str().unwrap_or_else(|| {
-            panic!("truncated search handle carried no content page: {retrieved}")
-        }));
-        if retrieved["has_more"] != json!(true) {
-            break;
-        }
-        let next_offset = retrieved["next_offset"].as_u64().unwrap_or_else(|| {
-            panic!("retrieve reported more pages without a next offset: {retrieved}")
-        });
-        assert!(
-            next_offset > offset,
-            "retrieve did not advance past offset {offset}: {retrieved}"
-        );
-        offset = next_offset;
-    }
-    serde_json::from_str(&content).unwrap_or_else(|error| {
-        panic!("truncated search handle did not retrieve JSON: {error}; content={content}")
-    })
-}
 fn symbol_count(payload: &Value, name: &str) -> usize {
     payload["results"]
         .as_array()
@@ -191,7 +127,7 @@ fn generation_index_len(data_root: &Path, project: &Path) -> usize {
     pointer.generation_index.len()
 }
 async fn request_refresh(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
-    let receipt = tool(
+    let receipt = tool_json(
         harness,
         project,
         "tracedecay_admin_sync",
@@ -356,7 +292,7 @@ async fn linked_worktree_requires_mount_then_serves_only_its_exact_generation() 
     // `linked_worktree_disabled` state and never publishes. The opt-in is a
     // project-layer setting decided at route open, so write it through the
     // production configuration tool before the worktree route opens.
-    let receipt = tool(
+    let receipt = tool_json(
         &harness,
         &project,
         "tracedecay_configuration_set",
