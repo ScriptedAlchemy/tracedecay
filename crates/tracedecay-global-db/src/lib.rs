@@ -63,8 +63,6 @@ pub use observation_projection::{
     converge_projection_predecessor, project_observation, project_queued_observations,
     rebuild_projection,
 };
-#[cfg(test)]
-pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 pub use tracedecay_domain::CoverageStateV1;
 pub use workflow_adapter::GlobalDbWorkflowStore;
 mod observation_store;
