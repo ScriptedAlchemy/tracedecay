@@ -41,7 +41,7 @@ Pick whichever method suits your platform.
 **Linux and Apple silicon macOS:**
 
 ```bash
-curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ScriptedAlchemy/tracedecay/master/install.sh | bash
 ```
 
 **Windows:**

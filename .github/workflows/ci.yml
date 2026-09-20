@@ -1043,6 +1043,96 @@ jobs:
           cargo check --workspace --all-targets --features test-transport --locked
           cargo check --workspace --all-targets --features hotpath,hotpath-mcp --locked
 
+  # The configuration users actually receive. `scripts/resolve-release-source-profile.py`
+  # resolves the release build to `--no-default-features --features production`
+  # on the release profile, and nothing on a push compiled it: `debug-cli` is a
+  # dev-profile binary built only for the stock host integrations, and every
+  # other lane runs the default feature graph. A break confined to the
+  # `production` graph (the mimalloc allocator, the embedded dashboard, the
+  # release profile itself) therefore first appeared while a release was being
+  # cut, which is the most expensive place to find it.
+  #
+  # Compile plus a smoke run, on one target. The packaging battery that sits on
+  # top of this binary (`cargo package`, the extracted-crate rebuild, MCPB, the
+  # MCP stdio checks) stays in distribution-acceptance.yml, which is
+  # dispatch-only and explicitly not a ship gate. This job does not repeat any
+  # of it, and that workflow keeps its own cache lineage.
+  shipped-cli:
+    name: Shipped CLI build (x86_64-linux)
+    needs: scope-gate
+    if: ${{ needs.scope-gate.outputs.run-heavy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      # `production` embeds the dashboard, so the bundle has to exist before
+      # cargo runs. Handing build.rs the digest of this bundle keeps the build
+      # script from shelling out to npm a second time.
+      - name: Build the embedded dashboard bundle
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Pin the embedded bundle for the skip-mode build
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
+          echo "TRACEDECAY_SKIP_DASHBOARD_BUILD=1" >> "$GITHUB_ENV"
+          echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      # rust-toolchain.toml, not floating stable: the release workflows build
+      # this configuration with the pinned compiler, so a push gate on a
+      # different one is not evidence about the same artifact.
+      - name: Resolve pinned toolchain
+        id: pin
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
+        with:
+          toolchain: ${{ steps.pin.outputs.toolchain }}
+          targets: ${{ env.TARGET }}
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      # Dependencies only. The workspace crates are what a push changes, so
+      # caching their release artifacts would re-save the tree every run for a
+      # restore that hits nothing, against the repository's 10 GB budget that
+      # the test lanes' caches are already evicted from.
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-shipped-cli-${{ env.TARGET }}
+          cache-workspace-crates: "false"
+          cache-on-failure: true
+
+      - name: Build the shipped binary
+        shell: bash
+        run: |
+          cargo build --package tracedecay-cli --bin tracedecay --release \
+            --target "$TARGET" --no-default-features --features production --locked
+
+      - name: Smoke-run the shipped binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${TARGET}/release/tracedecay"
+          test -x "$binary"
+          "$binary" --version
+          "$binary" --help >/dev/null
+
   dashboard:
     name: Dashboard
     needs: scope-gate

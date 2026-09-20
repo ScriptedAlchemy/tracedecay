@@ -33,7 +33,7 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 
 ```bash
 # Linux and Apple silicon macOS
-curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ScriptedAlchemy/tracedecay/master/install.sh | bash
 
 # Windows: download the x86_64 Windows archive from the latest release,
 # extract tracedecay.exe, and place it on PATH.
