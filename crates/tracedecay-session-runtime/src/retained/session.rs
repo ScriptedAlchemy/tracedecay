@@ -3,12 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_contracts::retained_surfaces::{
-    GitScopeV1, MessageRelationshipScopeV1, MessageSearchHitV1, MessageSearchRequestV1,
-    MessageSearchResultV1, MessageTypeFilterV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1, SessionMessageV1, SessionRecordV1, SessionRefreshRequestV1,
-    SessionRefreshScopeV1, SessionsForRequestV1, TemporalCoverageOmissionV1, TemporalExplanationV1,
-    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1,
-    WorkflowsRequestV1,
+    GitScopeV1, MessageSearchHitV1, MessageSearchRequestV1, MessageSearchResultV1,
+    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1, SessionMessageV1,
+    SessionRecordV1, SessionRefreshRequestV1, SessionRefreshScopeV1, SessionsForRequestV1,
+    TemporalCoverageOmissionV1, TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1,
+    TemporalOmissionV1, TemporalPopulationCountV1, WorkflowsRequestV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -439,6 +438,30 @@ impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1<'_> {
     }
 }
 
+/// The provider parser names the offending value and the accepted set; keep
+/// that corrective diagnostic in the refusal instead of collapsing it to the
+/// generic invalid-request problem. A value the sanitized diagnostic cannot
+/// carry (oversized or control characters) still refuses with the generic
+/// problem.
+fn invalid_provider(error: String) -> RetainedSurfaceExecutionErrorV1 {
+    tracedecay_contracts::SafeDiagnostic::new(
+        "application.retained.message-search-provider-invalid",
+        error,
+    )
+    .map_or(
+        RetainedSurfaceExecutionErrorV1::InvalidRequest,
+        |diagnostic| {
+            RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                tracedecay_contracts::ApplicationProblem::InvalidRequest {
+                    diagnostic,
+                    retry: tracedecay_contracts::RetryDirective::Never,
+                    legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+                },
+            )
+        },
+    )
+}
+
 struct MessageSearchInput {
     query: String,
     goals: bool,
@@ -467,49 +490,17 @@ impl MessageSearchInput {
             None if goals => String::new(),
             None => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
         };
-        // The provider parser names the offending value and the accepted set;
-        // keep that corrective diagnostic in the refusal instead of collapsing
-        // it to the generic invalid-request problem. A value the sanitized
-        // diagnostic cannot carry (oversized or control characters) still
-        // refuses with the generic problem.
         let provider =
-            ProviderScope::parse_optional(request.provider.as_deref()).map_err(|error| {
-                tracedecay_contracts::SafeDiagnostic::new(
-                    "application.retained.message-search-provider-invalid",
-                    error.clone(),
-                )
-                .map_or(
-                    RetainedSurfaceExecutionErrorV1::InvalidRequest,
-                    |diagnostic| {
-                        RetainedSurfaceExecutionErrorV1::ApplicationProblem(
-                            tracedecay_contracts::ApplicationProblem::InvalidRequest {
-                                diagnostic,
-                                retry: tracedecay_contracts::RetryDirective::Never,
-                                legal_actions: vec![
-                                    tracedecay_contracts::LegalAction::CorrectRequest,
-                                ],
-                            },
-                        )
-                    },
-                )
-            })?;
+            ProviderScope::parse_optional(request.provider.as_deref()).map_err(invalid_provider)?;
         let include_subagents = request.include_subagents.unwrap_or(true);
-        let mut scope = match request.scope.unwrap_or(MessageRelationshipScopeV1::All) {
-            MessageRelationshipScopeV1::All => SessionSearchScope::All,
-            MessageRelationshipScopeV1::ParentsOnly => SessionSearchScope::ParentsOnly,
-            MessageRelationshipScopeV1::SubagentsOnly => SessionSearchScope::SubagentsOnly,
-        };
+        let mut scope = super::lcm::relationship_scope(request.scope);
         if !include_subagents && scope == SessionSearchScope::SubagentsOnly {
             return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
         }
         if !include_subagents && scope == SessionSearchScope::All {
             scope = SessionSearchScope::ParentsOnly;
         }
-        let message_type = match request.message_type.unwrap_or(MessageTypeFilterV1::All) {
-            MessageTypeFilterV1::All => SessionMessageType::All,
-            MessageTypeFilterV1::DirectUser => SessionMessageType::DirectUser,
-            MessageTypeFilterV1::ToolResult => SessionMessageType::ToolResult,
-        };
+        let message_type = super::lcm::message_type(request.message_type);
         let workflow_run = optional_string(request.workflow_run.as_deref())?;
         let workflow_agent = optional_string(request.workflow_agent.as_deref())?;
         if workflow_agent.is_some() && workflow_run.is_none() {
