@@ -356,7 +356,6 @@ fn member(
 }
 
 fn exact_family(
-    identity: &FixtureIdentity,
     members: Vec<Value>,
     total_member_count: u64,
     lengths: &[u64],
@@ -482,8 +481,8 @@ async fn redundancy_ranks_exact_copies_by_duplicated_body_bytes() {
     assert_eq!(
         observed_families(&full, &identity),
         vec![
-            exact_family(&identity, ledger_members(&identity), 3, &ledger, true, None),
-            exact_family(&identity, audit_members(&identity), 2, &audit, true, None),
+            exact_family(ledger_members(&identity), 3, &ledger, true, None),
+            exact_family(audit_members(&identity), 2, &audit, true, None),
         ],
         "{full}"
     );
@@ -513,7 +512,6 @@ async fn redundancy_ranks_exact_copies_by_duplicated_body_bytes() {
     assert_eq!(
         observed_families(&ledger_only, &identity),
         vec![exact_family(
-            &identity,
             ledger_members(&identity),
             3,
             &ledger,
@@ -637,7 +635,6 @@ async fn redundancy_ranks_exact_copies_by_duplicated_body_bytes() {
     assert_eq!(
         observed_families(&first_page, &identity),
         vec![exact_family(
-            &identity,
             ledger_members(&identity),
             3,
             &ledger,
@@ -669,7 +666,6 @@ async fn redundancy_ranks_exact_copies_by_duplicated_body_bytes() {
     assert_eq!(
         observed_families(&second_page, &identity),
         vec![exact_family(
-            &identity,
             audit_members(&identity),
             2,
             &audit,
@@ -707,7 +703,6 @@ async fn redundancy_ranks_exact_copies_by_duplicated_body_bytes() {
     assert_eq!(
         observed_families(&changed, &identity),
         vec![exact_family(
-            &identity,
             ledger_members(&identity),
             3,
             &ledger,
