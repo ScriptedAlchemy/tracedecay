@@ -41,26 +41,8 @@ fn insert_attempt(
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let outcome = insert_attempt_in_transaction(&transaction, authority, attempt, concurrency);
-        match outcome {
-            Ok(WorkAttemptInsertOutcome::Inserted) => {
-                transaction
-                    .commit()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkAttemptInsertOutcome::Inserted)
-            }
-            Ok(WorkAttemptInsertOutcome::Replayed(attempt)) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkAttemptInsertOutcome::Replayed(attempt))
-            }
-            Err(error) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Err(error)
-            }
-        }
+        let commit = matches!(outcome, Ok(WorkAttemptInsertOutcome::Inserted));
+        finish_immediate(transaction, outcome, commit)
     })
 }
 
@@ -421,26 +403,8 @@ fn insert_synthesis_record(
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let outcome = insert_synthesis_in_transaction(&transaction, authority, record, concurrency);
-        match outcome {
-            Ok(WorkSynthesisInsertOutcome::Inserted) => {
-                transaction
-                    .commit()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkSynthesisInsertOutcome::Inserted)
-            }
-            Ok(WorkSynthesisInsertOutcome::Replayed(result)) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkSynthesisInsertOutcome::Replayed(result))
-            }
-            Err(error) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Err(error)
-            }
-        }
+        let commit = matches!(outcome, Ok(WorkSynthesisInsertOutcome::Inserted));
+        finish_immediate(transaction, outcome, commit)
     })
 }
 
@@ -596,6 +560,20 @@ impl WorkAttemptEvidenceReadPort for WorkSqliteStorage {
             Ok(WorkAttemptEvidencePageV1 { rows, remaining })
         })
     }
+}
+
+fn finish_immediate<T>(
+    transaction: crate::exact_sql::ExactSqlTransaction,
+    outcome: Result<T, WorkAttemptStorageError>,
+    commit: bool,
+) -> Result<T, WorkAttemptStorageError> {
+    let settled = if commit {
+        transaction.commit().map(|_| ())
+    } else {
+        transaction.rollback().map(|_| ())
+    };
+    settled.map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    outcome
 }
 
 fn insert_attempt_row(
