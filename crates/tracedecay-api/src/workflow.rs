@@ -73,46 +73,26 @@ impl WorkflowOperation {
         Self::GetRun,
     ];
 
-    pub const fn operation_id_str(self) -> &'static str {
-        match self {
-            Self::RegisterDefinition => "operation.workflow.register_definition",
-            Self::ActivateDefinition => "operation.workflow.activate_definition",
-            Self::RetireDefinition => "operation.workflow.retire_definition",
-            Self::RejectDefinition => "operation.workflow.reject_definition",
-            Self::ValidateDefinition => "operation.workflow.validate_definition",
-            Self::GetDefinition => "operation.workflow.get_definition",
-            Self::ListDefinitions => "operation.workflow.list_definitions",
-            Self::DefinitionHistory => "operation.workflow.definition_history",
-            Self::DiffDefinition => "operation.workflow.diff_definition",
-            Self::HandoffIssue => "operation.workflow.handoff_issue",
-            Self::HandoffRedeem => "operation.workflow.handoff_redeem",
-            Self::StartRun => "operation.workflow.start_run",
-            Self::PauseRun => "operation.workflow.pause_run",
-            Self::ResumeRun => "operation.workflow.resume_run",
-            Self::CancelRun => "operation.workflow.cancel_run",
-            Self::GetRun => "operation.workflow.get_run",
-        }
-    }
-
-    pub const fn operation_key(self) -> &'static str {
-        match self {
-            Self::RegisterDefinition => "register_definition",
-            Self::ActivateDefinition => "activate_definition",
-            Self::RetireDefinition => "retire_definition",
-            Self::RejectDefinition => "reject_definition",
-            Self::ValidateDefinition => "validate_definition",
-            Self::GetDefinition => "get_definition",
-            Self::ListDefinitions => "list_definitions",
-            Self::DefinitionHistory => "definition_history",
-            Self::DiffDefinition => "diff_definition",
-            Self::HandoffIssue => "handoff_issue",
-            Self::HandoffRedeem => "handoff_redeem",
-            Self::StartRun => "start_run",
-            Self::PauseRun => "pause_run",
-            Self::ResumeRun => "resume_run",
-            Self::CancelRun => "cancel_run",
-            Self::GetRun => "get_run",
-        }
+    mounted_operation_paths! {
+        with_key,
+        id_prefix = "operation.workflow.",
+        route_prefix = "workflow",
+        RegisterDefinition: "register_definition", "register-definition";
+        ActivateDefinition: "activate_definition", "activate-definition";
+        RetireDefinition: "retire_definition", "retire-definition";
+        RejectDefinition: "reject_definition", "reject-definition";
+        ValidateDefinition: "validate_definition", "validate-definition";
+        GetDefinition: "get_definition", "get-definition";
+        ListDefinitions: "list_definitions", "list-definitions";
+        DefinitionHistory: "definition_history", "definition-history";
+        DiffDefinition: "diff_definition", "diff-definition";
+        HandoffIssue: "handoff_issue", "handoff-issue";
+        HandoffRedeem: "handoff_redeem", "handoff-redeem";
+        StartRun: "start_run", "start-run";
+        PauseRun: "pause_run", "pause-run";
+        ResumeRun: "resume_run", "resume-run";
+        CancelRun: "cancel_run", "cancel-run";
+        GetRun: "get_run", "get-run";
     }
 
     pub fn from_operation_key(key: &str) -> Option<Self> {
@@ -135,69 +115,6 @@ impl WorkflowOperation {
                 | Self::DiffDefinition
                 | Self::GetRun
         )
-    }
-
-    pub const fn route_segment(self) -> &'static str {
-        match self {
-            Self::RegisterDefinition => "register-definition",
-            Self::ActivateDefinition => "activate-definition",
-            Self::RetireDefinition => "retire-definition",
-            Self::RejectDefinition => "reject-definition",
-            Self::ValidateDefinition => "validate-definition",
-            Self::GetDefinition => "get-definition",
-            Self::ListDefinitions => "list-definitions",
-            Self::DefinitionHistory => "definition-history",
-            Self::DiffDefinition => "diff-definition",
-            Self::HandoffIssue => "handoff-issue",
-            Self::HandoffRedeem => "handoff-redeem",
-            Self::StartRun => "start-run",
-            Self::PauseRun => "pause-run",
-            Self::ResumeRun => "resume-run",
-            Self::CancelRun => "cancel-run",
-            Self::GetRun => "get-run",
-        }
-    }
-
-    pub const fn route_path(self) -> &'static str {
-        match self {
-            Self::RegisterDefinition => "/workflow/register-definition",
-            Self::ActivateDefinition => "/workflow/activate-definition",
-            Self::RetireDefinition => "/workflow/retire-definition",
-            Self::RejectDefinition => "/workflow/reject-definition",
-            Self::ValidateDefinition => "/workflow/validate-definition",
-            Self::GetDefinition => "/workflow/get-definition",
-            Self::ListDefinitions => "/workflow/list-definitions",
-            Self::DefinitionHistory => "/workflow/definition-history",
-            Self::DiffDefinition => "/workflow/diff-definition",
-            Self::HandoffIssue => "/workflow/handoff-issue",
-            Self::HandoffRedeem => "/workflow/handoff-redeem",
-            Self::StartRun => "/workflow/start-run",
-            Self::PauseRun => "/workflow/pause-run",
-            Self::ResumeRun => "/workflow/resume-run",
-            Self::CancelRun => "/workflow/cancel-run",
-            Self::GetRun => "/workflow/get-run",
-        }
-    }
-
-    pub const fn application_route_path(self) -> &'static str {
-        match self {
-            Self::RegisterDefinition => "/application/workflow/register-definition",
-            Self::ActivateDefinition => "/application/workflow/activate-definition",
-            Self::RetireDefinition => "/application/workflow/retire-definition",
-            Self::RejectDefinition => "/application/workflow/reject-definition",
-            Self::ValidateDefinition => "/application/workflow/validate-definition",
-            Self::GetDefinition => "/application/workflow/get-definition",
-            Self::ListDefinitions => "/application/workflow/list-definitions",
-            Self::DefinitionHistory => "/application/workflow/definition-history",
-            Self::DiffDefinition => "/application/workflow/diff-definition",
-            Self::HandoffIssue => "/application/workflow/handoff-issue",
-            Self::HandoffRedeem => "/application/workflow/handoff-redeem",
-            Self::StartRun => "/application/workflow/start-run",
-            Self::PauseRun => "/application/workflow/pause-run",
-            Self::ResumeRun => "/application/workflow/resume-run",
-            Self::CancelRun => "/application/workflow/cancel-run",
-            Self::GetRun => "/application/workflow/get-run",
-        }
     }
 
     pub fn request_schema_name(self) -> Cow<'static, str> {

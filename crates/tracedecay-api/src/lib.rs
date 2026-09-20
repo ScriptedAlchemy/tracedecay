@@ -11,6 +11,9 @@
 //!
 #![forbid(unsafe_code)]
 
+#[macro_use]
+mod mounted_operation;
+
 pub mod assets;
 pub mod configuration;
 pub mod doctor;
