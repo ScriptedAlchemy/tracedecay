@@ -7,12 +7,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     GitCommitMetadataV1, GitCoverageV1, GitHeadStateV1, GitHistoryV1, GitOidV1, ManifestDigest,
     RefId, RepositoryId, canonical_sha256,
 };
+use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
@@ -749,14 +749,6 @@ fn ref_entity_id(reference: &RefId) -> Result<GraphEntityId, GitTopologyProjecti
 
 fn metadata_entity_id() -> Result<GraphEntityId, GitTopologyProjectionError> {
     GraphEntityId::new(stable_identity("metadata", GIT_PROJECTION)).map_err(Into::into)
-}
-
-fn stable_identity(kind: &str, value: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(kind.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
 fn serialize(value: &impl Serialize) -> Result<Vec<u8>, GitTopologyProjectionError> {

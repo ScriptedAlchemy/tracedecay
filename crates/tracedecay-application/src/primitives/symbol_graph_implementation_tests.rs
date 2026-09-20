@@ -2,7 +2,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore, CodeGraphSymbolBindingV1,
     build_code_graph_manifest, code_graph_projection_identity,
@@ -17,6 +16,7 @@ use tracedecay_domain::{
     PolicyRevisionId, RelationEdgeKindV1, SanitizerRevision, SensitivityDecision,
     SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
+use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
     GraphEntityId, GraphNamespace, GraphProjectorRevision, GraphProperty, GraphPropertyName,
     NeverCancelled, VerifiedGraphSnapshot,
@@ -299,12 +299,4 @@ struct SymbolRecordFixture {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
-}
-
-fn stable_identity(kind: &str, value: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(kind.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    format!("{kind}:{}", hex::encode(digest.finalize()))
 }

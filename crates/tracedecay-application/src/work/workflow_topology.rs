@@ -5,9 +5,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{WorkflowDefinition, WorkflowStep, WorkflowStepId, canonical_sha256};
+use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
@@ -428,14 +428,6 @@ fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), WorkflowT
     } else {
         Ok(())
     }
-}
-
-fn stable_identity(kind: &str, value: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(kind.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
 fn serialize(value: &impl Serialize) -> Result<Vec<u8>, WorkflowTopologyError> {
