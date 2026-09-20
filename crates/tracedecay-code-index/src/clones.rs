@@ -13,7 +13,7 @@ use tracedecay_code_extraction::{
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
-    WorktreeId, canonical_json_bytes, canonical_sha256,
+    WorktreeId, canonical_json_bytes, canonical_sha256, nonnegative_sha256_prefix,
 };
 
 const BODY_DIGEST_DOMAIN: &str = "tracedecay.clone-body.v1";
@@ -616,11 +616,7 @@ fn winnow_clone_tokens(
         .map(|window| {
             let bytes = canonical_json_bytes(&(FINGERPRINT_DOMAIN, window))
                 .map_err(|error| error.to_string())?;
-            let digest = Sha256::digest(bytes);
-            let prefix: [u8; 8] = digest[..8]
-                .try_into()
-                .map_err(|error: std::array::TryFromSliceError| error.to_string())?;
-            Ok(u64::from_be_bytes(prefix) & i64::MAX as u64)
+            Ok(nonnegative_sha256_prefix(Sha256::digest(bytes).as_slice()))
         })
         .collect::<Result<Vec<_>, String>>()?;
     select_rightmost_minima(&hashes)
