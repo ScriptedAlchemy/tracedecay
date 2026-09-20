@@ -29,8 +29,7 @@ use tower::ServiceExt;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_contracts::{
-    APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, LegalAction, RequestId, RetryDirective,
-    SafeDiagnostic,
+    APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, RequestId, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_service::remote_http_transport::RemoteBrainTlsListener;
@@ -587,11 +586,7 @@ fn project_router_problem_response(
             ) else {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             };
-            ApplicationProblem::Saturated {
-                diagnostic,
-                retry: RetryDirective::AfterDelay,
-                legal_actions: vec![LegalAction::Retry],
-            }
+            ApplicationProblem::saturated(diagnostic.code, diagnostic.message)
         }
         ProjectRouterProblem::TimedOut => ApplicationProblem::timed_out_before_admission(),
         ProjectRouterProblem::Unavailable => {

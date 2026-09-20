@@ -204,14 +204,10 @@ where
                     .await
                 }
                 _ => {
-                    return Err(ApplicationProblem::InvalidRequest {
-                        diagnostic: SafeDiagnostic {
-                            code: "feedback.invalid_operation".to_owned(),
-                            message: "The feedback read operation is invalid".to_owned(),
-                        },
-                        retry: RetryDirective::Never,
-                        legal_actions: Vec::new(),
-                    });
+                    return Err(ApplicationProblem::invalid_request_without_action(
+                        "feedback.invalid_operation",
+                        "The feedback read operation is invalid",
+                    ));
                 }
             }
             .map_err(feedback_owner_problem)?;

@@ -48,9 +48,10 @@ pub use handoff::{
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOwnerKind,
     HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1, adapter_problem_response,
-    application_problem_response, application_router, configuration_application_router,
-    feedback_application_router, http_application_full_route_path, http_application_owner_kind,
-    http_application_route_path, http_route_documents, is_http_application_operation_exposed,
+    application_problem_response, application_problem_status, application_router,
+    configuration_application_router, feedback_application_router,
+    http_application_full_route_path, http_application_owner_kind, http_application_route_path,
+    http_route_documents, is_http_application_operation_exposed,
 };
 pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,

@@ -69,32 +69,23 @@ pub(super) fn work_product_problem(error: WorkProductApplicationErrorV1) -> Appl
             ApplicationProblem::cancelled_before_admission()
         }
         WorkProductApplicationErrorV1::TimedOut => ApplicationProblem::timed_out_before_admission(),
-        WorkProductApplicationErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "work.invalid_graph_operation".to_owned(),
-                message: "The Work graph request is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-        },
+        WorkProductApplicationErrorV1::InvalidRequest => ApplicationProblem::invalid_request(
+            "work.invalid_graph_operation",
+            "The Work graph request is invalid",
+        ),
         // A read under this selection succeeds and discloses what it left out;
         // a mutation cannot, because the head it would pin is the covered
         // slice's, not the journal's. The refusal therefore names the cause and
         // the remedy instead of hiding behind the concealed not-found answer
         // the old fail-closed refusal produced.
         WorkProductApplicationErrorV1::SelectionCoverageIncomplete => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "work.selection_coverage_incomplete".to_owned(),
-                    message: "The Work selection covers only part of the owner's journal, so no \
+            ApplicationProblem::invalid_request(
+                "work.selection_coverage_incomplete",
+                "The Work selection covers only part of the owner's journal, so no \
                               graph mutation can be prepared or submitted against it; widen the \
                               selection to the relation scopes the excluded events were admitted \
-                              under"
-                        .to_owned(),
-                },
-                retry: RetryDirective::Never,
-                legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-            }
+                              under",
+            )
         }
         WorkProductApplicationErrorV1::VersionConflict => {
             ApplicationProblem::stale(SafeDiagnostic {

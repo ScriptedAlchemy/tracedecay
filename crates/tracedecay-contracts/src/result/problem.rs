@@ -690,6 +690,24 @@ impl ApplicationProblem {
         }
     }
 
+    /// Invalid request that offers no recovery action. Never retries.
+    ///
+    /// Empty legal actions are part of the refusal: adapters must not invent
+    /// `CorrectRequest` for these problems.
+    pub fn invalid_request_without_action(
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    }
+
     pub fn cancelled_before_admission() -> Self {
         Self::Cancelled {
             stage: CancellationStage::BeforeAdmission,
@@ -844,6 +862,18 @@ impl ApplicationProblem {
             diagnostic,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+        }
+    }
+
+    /// Capacity refusal. Retry only after a delay.
+    pub fn saturated(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Saturated {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
         }
     }
 

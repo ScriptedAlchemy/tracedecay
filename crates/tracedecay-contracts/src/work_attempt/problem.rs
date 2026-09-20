@@ -23,15 +23,10 @@ pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProb
             "application.work-attempt.fence-conflict",
             "The Work attempt lease fence changed after this transition was prepared.",
         ),
-        WorkAttemptStorageError::CapacityExceeded => ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic {
-                code: "application.work-attempt.capacity-exhausted".to_owned(),
-                message: "The registered Work topology has no parallel attempt capacity."
-                    .to_owned(),
-            },
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        WorkAttemptStorageError::CapacityExceeded => ApplicationProblem::saturated(
+            "application.work-attempt.capacity-exhausted",
+            "The registered Work topology has no parallel attempt capacity.",
+        ),
         WorkAttemptStorageError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-attempt.storage-unavailable".to_owned(),
             message: "The Work attempt authority is unavailable.".to_owned(),

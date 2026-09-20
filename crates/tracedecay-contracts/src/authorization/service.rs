@@ -7,9 +7,7 @@ use tracedecay_policy::authorization::{
 
 use crate::context::{RequestAdmission, RequestContext};
 use crate::handlers::ApplicationOperation;
-use crate::result::{
-    ApplicationProblem, AuthorityReceipt, PolicyDecisionRef, RetryDirective, SafeDiagnostic,
-};
+use crate::result::{ApplicationProblem, AuthorityReceipt, PolicyDecisionRef, RetryDirective};
 
 use super::{
     AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome, AuthorizationRequest,
@@ -101,15 +99,10 @@ where
 
         let policy = self.policy_reference(&decision)?;
         AuthorityReceipt::from_context(context, policy, observed_at).map_err(|_| {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
-                    "application.authorization.invalid-context",
-                    "The request context is invalid.",
-                )
-                .expect("static safe diagnostic is valid"),
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            }
+            ApplicationProblem::invalid_request_without_action(
+                "application.authorization.invalid-context",
+                "The request context is invalid.",
+            )
         })
     }
 
@@ -207,14 +200,11 @@ where
                 .ok_or_else(|| self.non_disclosure.proof_problem())?;
         let policy = self.policy_reference(&decision)?;
         let receipt = AuthorityReceipt::from_context(request.context, policy, request.observed_at)
-            .map_err(|_| ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
+            .map_err(|_| {
+                ApplicationProblem::invalid_request_without_action(
                     "application.authorization.invalid-context",
                     "The request context is invalid.",
                 )
-                .expect("static safe diagnostic is valid"),
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
             })?;
 
         Ok(AuthorizationAdmission {

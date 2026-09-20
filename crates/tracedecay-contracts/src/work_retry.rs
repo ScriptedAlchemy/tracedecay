@@ -671,7 +671,7 @@ where
         .execution()
         .cancellation_generation()
         .checked_add(1)
-        .ok_or_else(invalid_problem)?;
+        .ok_or_else(|| invalid_problem())?;
     let envelope = WorkExecutionEnvelopeV1::new(
         identity.clone(),
         binding.clone(),

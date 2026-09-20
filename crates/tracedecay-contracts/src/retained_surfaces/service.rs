@@ -523,25 +523,17 @@ pub fn retained_surface_execution_problem(
         RetainedSurfaceExecutionErrorV1::StructuralRefusal(refusal) => {
             structural_refusal_problem(refusal)
         }
-        RetainedSurfaceExecutionErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
-            diagnostic: diagnostic(
-                "application.retained.invalid-request",
-                "The retained operation request is invalid.",
-            ),
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        RetainedSurfaceExecutionErrorV1::InvalidRequest => ApplicationProblem::invalid_request(
+            "application.retained.invalid-request",
+            "The retained operation request is invalid.",
+        ),
         RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        RetainedSurfaceExecutionErrorV1::Conflict => ApplicationProblem::Conflict {
-            diagnostic: diagnostic(
-                "application.retained.conflict",
-                "The retained operation conflicts with current state.",
-            ),
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        RetainedSurfaceExecutionErrorV1::Conflict => ApplicationProblem::conflict(
+            "application.retained.conflict",
+            "The retained operation conflicts with current state.",
+        ),
         RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code,
             committed_receipt,
@@ -567,14 +559,10 @@ pub fn retained_surface_execution_problem(
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::CorrectRequest],
         },
-        RetainedSurfaceExecutionErrorV1::Saturated => ApplicationProblem::Saturated {
-            diagnostic: diagnostic(
-                "application.retained.saturated",
-                "The retained authority cannot admit more work right now.",
-            ),
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        RetainedSurfaceExecutionErrorV1::Saturated => ApplicationProblem::saturated(
+            "application.retained.saturated",
+            "The retained authority cannot admit more work right now.",
+        ),
         // Structural budget refusal uses InvalidRequest so the wire kind stays
         // unchanged and non-retryable. Callers must narrow scope or limit.
         RetainedSurfaceExecutionErrorV1::Unavailable { detail } => {
@@ -744,11 +732,7 @@ fn structural_refusal_problem(refusal: RetainedStructuralRefusalV1) -> Applicati
             "The authorized session scope exceeds the cursor manifest byte limit. Narrow the session scope.",
         ),
     };
-    ApplicationProblem::InvalidRequest {
-        diagnostic,
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(diagnostic.code, diagnostic.message)
 }
 
 fn diagnostic(code: &'static str, message: &'static str) -> SafeDiagnostic {

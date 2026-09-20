@@ -39,7 +39,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
+use crate::{ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic};
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum WorkRunControlStorageError {
@@ -614,28 +614,19 @@ fn contract_problem(error: WorkRunControlContractError) -> ApplicationProblem {
         | WorkRunControlContractError::DuplicateFencedAttempt
         | WorkRunControlContractError::InvalidBlockedIntervalRevision
         | WorkRunControlContractError::InvalidBlockedIntervalClosure => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "application.work-run-control.invalid-transition".to_owned(),
-                    message: "The Work run control command or stored state is invalid.".to_owned(),
-                },
-                retry: RetryDirective::Never,
-                legal_actions: vec![LegalAction::CorrectRequest],
-            }
+            ApplicationProblem::invalid_request(
+                "application.work-run-control.invalid-transition",
+                "The Work run control command or stored state is invalid.",
+            )
         }
     }
 }
 
 fn invalid_pending_interval_limit_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-run-control.invalid-pending-interval-limit".to_owned(),
-            message: "The Work blocked-interval recovery page limit must be between 1 and 128."
-                .to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work-run-control.invalid-pending-interval-limit",
+        "The Work blocked-interval recovery page limit must be between 1 and 128.",
+    )
 }
 
 fn workflow_steps_for_live_attempts(
@@ -662,15 +653,10 @@ fn workflow_steps_for_live_attempts(
 }
 
 fn invalid_open_interval_durable_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-run-control.open-interval-durable".to_owned(),
-            message: "Only a settled Work blocked interval can be marked durably delivered."
-                .to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work-run-control.open-interval-durable",
+        "Only a settled Work blocked interval can be marked durably delivered.",
+    )
 }
 
 fn authority_conflict_problem() -> ApplicationProblem {

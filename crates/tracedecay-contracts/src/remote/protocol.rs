@@ -555,22 +555,14 @@ pub fn remote_protocol_problem(
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
         },
-        RemoteProtocolFailureV1::AuthorityReachable => ApplicationProblem::Conflict {
-            diagnostic: safe_diagnostic(
-                "remote.authority_reachable",
-                "Offline capture is rejected while the owning authority is reachable",
-            )?,
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
-        RemoteProtocolFailureV1::SpoolSaturated => ApplicationProblem::Saturated {
-            diagnostic: safe_diagnostic(
-                "remote.spool_saturated",
-                "The remote offline-capture spool has no remaining capacity",
-            )?,
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        RemoteProtocolFailureV1::AuthorityReachable => ApplicationProblem::conflict(
+            "remote.authority_reachable",
+            "Offline capture is rejected while the owning authority is reachable",
+        ),
+        RemoteProtocolFailureV1::SpoolSaturated => ApplicationProblem::saturated(
+            "remote.spool_saturated",
+            "The remote offline-capture spool has no remaining capacity",
+        ),
         RemoteProtocolFailureV1::AuthorityUnavailable => ApplicationProblem::Unavailable {
             classification: crate::ApplicationUnavailableClassV1::Authority,
             diagnostic: safe_diagnostic(

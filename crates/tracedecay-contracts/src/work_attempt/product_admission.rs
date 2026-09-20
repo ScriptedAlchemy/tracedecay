@@ -203,15 +203,10 @@ pub(crate) fn product_admission_problem(
 ) -> ApplicationProblem {
     match error {
         WorkProductAttemptAdmissionErrorV1::InvalidAdmission => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: crate::SafeDiagnostic {
-                    code: "application.work-attempt.invalid-product-admission".to_owned(),
-                    message: "The Work attempt does not match the canonical product graph."
-                        .to_owned(),
-                },
-                retry: crate::RetryDirective::Never,
-                legal_actions: vec![crate::LegalAction::CorrectRequest],
-            }
+            ApplicationProblem::invalid_request(
+                "application.work-attempt.invalid-product-admission",
+                "The Work attempt does not match the canonical product graph.",
+            )
         }
         WorkProductAttemptAdmissionErrorV1::NotFoundOrNotAuthorized => not_found_problem(),
         WorkProductAttemptAdmissionErrorV1::VersionConflict => ApplicationProblem::conflict(
@@ -226,15 +221,10 @@ pub(crate) fn product_admission_problem(
             "application.work-attempt.idempotency-conflict",
             "The Work attempt command identity was already used with different input.",
         ),
-        WorkProductAttemptAdmissionErrorV1::CapacityExceeded => ApplicationProblem::Saturated {
-            diagnostic: crate::SafeDiagnostic {
-                code: "application.work-attempt.capacity-exhausted".to_owned(),
-                message: "The registered Work topology has no parallel attempt capacity."
-                    .to_owned(),
-            },
-            retry: crate::RetryDirective::AfterDelay,
-            legal_actions: vec![crate::LegalAction::Retry],
-        },
+        WorkProductAttemptAdmissionErrorV1::CapacityExceeded => ApplicationProblem::saturated(
+            "application.work-attempt.capacity-exhausted",
+            "The registered Work topology has no parallel attempt capacity.",
+        ),
         WorkProductAttemptAdmissionErrorV1::Unavailable => {
             ApplicationProblem::unavailable(crate::SafeDiagnostic {
                 code: "application.work-attempt.product-admission-unavailable".to_owned(),
@@ -486,18 +476,12 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
         // and the remedy are both specific: the selection covers a slice of
         // the journal, and widening it is what makes admission possible.
         WorkProductApplicationErrorV1::SelectionCoverageIncomplete => {
-            ApplicationProblem::InvalidRequest {
-                diagnostic: crate::SafeDiagnostic {
-                    code: "application.work-attempt.product-selection-coverage-incomplete"
-                        .to_owned(),
-                    message: "The Work selection covers only part of the owner's journal, so \
+            ApplicationProblem::invalid_request(
+                "application.work-attempt.product-selection-coverage-incomplete",
+                "The Work selection covers only part of the owner's journal, so \
                               no attempt can be admitted against it; widen the selection to \
-                              the relation scopes the excluded events were admitted under."
-                        .to_owned(),
-                },
-                retry: crate::RetryDirective::Never,
-                legal_actions: vec![crate::LegalAction::CorrectRequest],
-            }
+                              the relation scopes the excluded events were admitted under.",
+            )
         }
         WorkProductApplicationErrorV1::EventAuthorityUnavailable
         | WorkProductApplicationErrorV1::GraphAuthorityUnavailable
@@ -512,14 +496,10 @@ fn product_problem(error: WorkProductApplicationErrorV1) -> ApplicationProblem {
 }
 
 fn invalid_start_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: crate::SafeDiagnostic {
-            code: "application.work-attempt.invalid-product-admission".to_owned(),
-            message: "The Work attempt command is invalid.".to_owned(),
-        },
-        retry: crate::RetryDirective::Never,
-        legal_actions: vec![crate::LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work-attempt.invalid-product-admission",
+        "The Work attempt command is invalid.",
+    )
 }
 
 #[cfg(test)]

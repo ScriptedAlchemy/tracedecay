@@ -308,7 +308,7 @@ where
             .expected_revision
             .unwrap_or(0)
             .checked_add(1)
-            .ok_or_else(invalid_problem)?;
+            .ok_or_else(|| invalid_problem())?;
         self.storage
             .compare_and_record_leak(
                 &authority,
