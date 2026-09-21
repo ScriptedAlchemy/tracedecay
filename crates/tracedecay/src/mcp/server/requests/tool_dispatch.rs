@@ -362,6 +362,26 @@ impl McpServer {
                 .with_profile_session_refresh_serving(user_session_refresh_serving.as_ref()),
             },
         );
+        // A composed daemon serves one transcript home. The refresh schedulers
+        // already run their sweep under this pin; scoping the dispatch puts
+        // every hook-triggered ingest on the same reader instead of letting it
+        // resolve the process `$HOME` on its own. A production daemon resolves
+        // `$HOME` here, the value that reader would have found anyway.
+        let dispatch: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
+        > = match self
+            .profile_root
+            .as_deref()
+            .and_then(crate::daemon::daemon_transcript_source_home)
+        {
+            Some(transcript_source_home) => {
+                Box::pin(tracedecay_sessions::runtime::with_transcript_source_home(
+                    transcript_source_home,
+                    dispatch,
+                ))
+            }
+            None => dispatch,
+        };
         if let Some(read_flight) = read_flight {
             match read_flight {
                 ReadFlightClaim::Leader(leader) => match dispatch.await {

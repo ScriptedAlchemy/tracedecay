@@ -16,7 +16,7 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 };
 
 use crate::support::{
-    GLOBAL_DB_ENV_LOCK, HomeEnvGuard, ProductionCompositionFixture, production_composition_fixture,
+    HomeEnvGuard, ProductionCompositionFixture, lock_process_env, production_composition_fixture,
 };
 
 const ACTOR: &str = "skill-list-proof";
@@ -26,9 +26,9 @@ back to that CLI instead of querying .tracedecay databases directly.";
 
 #[tokio::test]
 async fn skill_list_returns_stored_skills_for_the_requested_state() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let home = TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(home.path());
+    let _home_guard = HomeEnvGuard::set(&env_lock, home.path());
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
     let profile_root_text = profile_root.display().to_string();
     fs::create_dir_all(&profile_root).unwrap();

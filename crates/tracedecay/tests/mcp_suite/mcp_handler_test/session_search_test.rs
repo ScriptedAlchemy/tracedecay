@@ -512,19 +512,17 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_codex_hook_ingest_survives_message_search_reopen() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
+    let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
     fixture::write_indexed_fixture_sources(&project);
     commit_worktree(&project, "production Codex transcript fixture");
-    // The hook route reads the process home, which is what this journey
-    // exercises. The composition's own sweep reads its isolated layout and
-    // finds nothing there, so the search below proves the hook's own commit.
-    write_production_codex_rollout(&home, &project);
+    write_production_codex_rollout(&transcripts, &project);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
         &isolation,
@@ -716,14 +714,71 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     restarted.shutdown().await;
 }
 
+/// Isolation is total: a composed daemon serves exactly one transcript home.
+///
+/// The composition pins that home, so no route it serves may reach a rollout
+/// that only exists under the ambient process `$HOME`. The hook ingest route
+/// resolved the process home on its own, which let a harness journey observe
+/// two different readers behind one daemon.
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn completed_session_import_immediately_searches_canonical_message() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+async fn production_hook_ingest_reads_only_the_pinned_transcript_home() {
+    let env_lock = lock_process_env().await;
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
+    let transcripts = composed_transcript_home(&isolation);
+    let project = isolation.join("project");
+    std::fs::create_dir_all(&project).expect("production composition project");
+    fixture::write_indexed_fixture_sources(&project);
+    commit_worktree(&project, "production Codex transcript fixture");
+    write_production_codex_rollout(&home, &project);
+    assert!(
+        !transcripts.join(".codex/sessions").exists(),
+        "the rollout must exist only under the process home for this journey"
+    );
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("production composition harness");
+    let ingest = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_hook_runtime",
+        json!({"action": "ingest_transcript", "provider": "codex", "format": "json"}),
+    )
+    .await;
+    assert_eq!(ingest["completed"], true, "{ingest}");
+    assert_eq!(
+        ingest["messages_upserted"], 0,
+        "hook ingest swept the ambient process home: {ingest}"
+    );
+    assert_ne!(
+        ingest["admission"]["status"], "committed",
+        "hook ingest committed a rollout outside the pinned transcript home: {ingest}"
+    );
+
+    let search = production_codex_message_search_once(&harness, &project).await;
+    assert_eq!(
+        search["results"],
+        Value::Array(Vec::new()),
+        "a rollout under the process home reached the composed daemon: {search}"
+    );
+    harness.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_session_import_immediately_searches_canonical_message() {
+    let env_lock = lock_process_env().await;
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let home = root.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     // `sessions_import` is the composition's own pass, so it reads the
     // isolated transcript layout rather than the process home.
     let transcripts = composed_transcript_home(&isolation);

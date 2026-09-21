@@ -164,10 +164,64 @@ pub fn lock_global_db_env() -> std::sync::MutexGuard<'static, ()> {
     lock_recovering_poison(&GLOBAL_DB_ENV_LOCK)
 }
 
-/// Serializes [`IsolatedEnv`] users within one test binary: storage isolation
-/// swaps process-wide env vars (`HOME`, `TRACEDECAY_DATA_DIR`, ...), so tests
-/// must not overlap.
-static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Proof that the holder owns [`PROCESS_ENV_LOCK`], the one lock every
+/// fixture in a binary uses to pin process-wide env vars.
+///
+/// The field is private, so [`lock_process_env`] and
+/// [`lock_process_env_blocking`] are the only ways to obtain one. A fixture
+/// that pins `HOME` takes this by reference, which is what makes "every
+/// `HOME` writer holds the same lock" a compile error to break rather than a
+/// convention: a suite that reached for a lock of its own interleaved with
+/// [`IsolatedEnv`] and read another fixture's home out of `$HOME`.
+pub struct ProcessEnvGuard(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
+
+/// Acquires [`PROCESS_ENV_LOCK`] for an async test.
+pub async fn lock_process_env() -> ProcessEnvGuard {
+    let guard = PROCESS_ENV_LOCK.lock().await;
+    pin_toolchain_environment();
+    ProcessEnvGuard(guard)
+}
+
+/// Sync counterpart of [`lock_process_env`]; panics inside an async context.
+pub fn lock_process_env_blocking() -> ProcessEnvGuard {
+    let guard = PROCESS_ENV_LOCK.blocking_lock();
+    pin_toolchain_environment();
+    ProcessEnvGuard(guard)
+}
+
+/// Resolves `RUSTUP_HOME` and `CARGO_HOME` to absolute paths before the first
+/// fixture in this binary swaps `$HOME`.
+///
+/// The rustup shims choose a toolchain through `RUSTUP_HOME`, falling back to
+/// `$HOME/.rustup`. A fixture that swaps `$HOME` therefore breaks `rustc` and
+/// `cargo` for every *other* test running at that moment, including ones that
+/// hold no lock and never touch the environment: five `mcp_suite` tests that
+/// shell out to the toolchain failed with "rustup could not choose a version
+/// of rustc to run" whenever a sibling held a swapped home. Resolving these
+/// once, here, takes `$HOME` out of that lookup for the rest of the run.
+fn pin_toolchain_environment() {
+    static PINNED: std::sync::Once = std::sync::Once::new();
+    PINNED.call_once(|| {
+        let home =
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+        for (key, directory) in [("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")] {
+            if std::env::var_os(key).is_some() {
+                continue;
+            }
+            let Some(resolved) = home.as_ref().map(|home| home.join(directory)) else {
+                continue;
+            };
+            if !resolved.is_dir() {
+                continue;
+            }
+            // SAFETY: the process env lock is held, this runs once, and it
+            // runs before any fixture in this binary has swapped `$HOME`.
+            unsafe {
+                std::env::set_var(key, resolved);
+            }
+        }
+    });
+}
 
 /// The canonical way to isolate env-mutating tests: serializes tests within
 /// one binary and keeps every test's project registration, store manifests,
@@ -191,11 +245,11 @@ pub struct IsolatedEnv {
     // cargo `target/test-profile` socket, and a swapped `HOME` emptied the
     // Claude transcript root under a running provider fixture.
     _global_db_env_lock: std::sync::MutexGuard<'static, ()>,
-    _env_lock: tokio::sync::MutexGuard<'static, ()>,
+    _env_lock: ProcessEnvGuard,
 }
 
 impl IsolatedEnv {
-    fn build(env_lock: tokio::sync::MutexGuard<'static, ()>) -> (Self, PathBuf) {
+    fn build(env_lock: ProcessEnvGuard) -> (Self, PathBuf) {
         let global_db_env_lock = lock_global_db_env();
         // Every fixture built on top of this guard eventually asks the shipped
         // daemon for a handshake, which reads the registered product runtime.
@@ -252,7 +306,7 @@ impl IsolatedEnv {
     }
 
     pub async fn acquire() -> (Self, PathBuf) {
-        Self::build(ISOLATED_ENV_LOCK.lock().await)
+        Self::build(lock_process_env().await)
     }
 
     /// Sync counterpart of [`IsolatedEnv::acquire`] for plain `#[test]` fns.
@@ -260,7 +314,7 @@ impl IsolatedEnv {
     /// Warning: this uses `blocking_lock`, which panics if called from within
     /// an async context, use [`IsolatedEnv::acquire`] there instead.
     pub fn acquire_blocking() -> (Self, PathBuf) {
-        Self::build(ISOLATED_ENV_LOCK.blocking_lock())
+        Self::build(lock_process_env_blocking())
     }
 
     pub fn home(&self) -> &Path {

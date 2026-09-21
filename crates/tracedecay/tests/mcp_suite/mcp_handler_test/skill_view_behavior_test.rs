@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::sync::MutexGuard;
 use tracedecay::mcp::McpServer;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
@@ -19,7 +18,7 @@ use crate::mcp_server_test::support::{
     jsonrpc_request, response_with_id, run_client_connection_with_messages,
 };
 use crate::support::{
-    GLOBAL_DB_ENV_LOCK, GlobalDbEnvGuard, HomeEnvGuard, TestTraceDecay,
+    GlobalDbEnvGuard, HomeEnvGuard, ProcessEnvGuard, TestTraceDecay, lock_process_env,
     open_active_project_scoped_runtime,
 };
 
@@ -56,17 +55,17 @@ struct SkillViewServer {
     _dir: TempDir,
     _home_guard: HomeEnvGuard,
     _global_db_guard: GlobalDbEnvGuard,
-    _env_lock: MutexGuard<'static, ()>,
+    _env_lock: ProcessEnvGuard,
 }
 
 async fn open_skill_view_server() -> SkillViewServer {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let dir = TempDir::new().expect("skill view temp dir");
     let project = dir.path().join("repo");
     std::fs::create_dir_all(project.join("src")).expect("fixture source dir");
     std::fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").expect("fixture source");
     let home = dir.path().join("home");
-    let home_guard = HomeEnvGuard::set(&home);
+    let home_guard = HomeEnvGuard::set(&env_lock, &home);
     let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let graph = TestTraceDecay::new(
         fixture::init_project_from_template(&project)

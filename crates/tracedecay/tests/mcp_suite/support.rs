@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "test-transport")]
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
@@ -63,7 +62,46 @@ use tracedecay_store::{
 #[cfg(feature = "test-transport")]
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+pub(crate) use crate::common::{ProcessEnvGuard, lock_process_env};
+
+/// `HOME` is one slot shared by every test in this binary, and the two
+/// fixtures that pin it ([`HomeEnvGuard`] and `common::IsolatedEnv`) both
+/// prove they hold `common::PROCESS_ENV_LOCK` to do so. A raw `set_var`
+/// bypasses that proof: the suite once pinned `HOME` under a second, private
+/// mutex and the Hermes bridge read a sibling fixture's home out of `$HOME`.
+#[test]
+fn home_is_pinned_only_through_the_process_env_guard() {
+    let suite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("mcp_suite");
+    let mut pending = vec![suite.clone()];
+    let mut offenders = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read mcp_suite directory") {
+            let path = entry.expect("mcp_suite directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|extension| extension == "rs")
+                && path != suite.join("support.rs")
+            {
+                let source = std::fs::read_to_string(&path).expect("read mcp_suite source");
+                if ["set_var(\"HOME\"", "set_var(\"USERPROFILE\""]
+                    .iter()
+                    .any(|needle| source.contains(needle))
+                {
+                    offenders.push(path);
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "pin HOME through HomeEnvGuard or common::IsolatedEnv, which hold \
+         common::PROCESS_ENV_LOCK; these set it directly: {offenders:?}"
+    );
+}
 
 #[cfg(feature = "test-transport")]
 pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = tracedecay_mcp::MAX_RESPONSE_CHARS;
@@ -932,7 +970,10 @@ pub(crate) struct HomeEnvGuard {
 }
 
 impl HomeEnvGuard {
-    pub(crate) fn set(home: &Path) -> Self {
+    /// Takes the process-env lock by reference: `HOME` is one process-wide
+    /// slot, so a caller that pins it without holding the lock every other
+    /// fixture holds reads a sibling's home instead of its own.
+    pub(crate) fn set(_process_env: &ProcessEnvGuard, home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
@@ -1031,7 +1072,7 @@ pub(crate) struct TestEnv {
     pub(crate) _global_db_guard: GlobalDbEnvGuard,
     // Drop order = declaration order: the env lock must outlive the guards
     // above so their env restores happen while the lock is still held.
-    pub(crate) _env_lock: MutexGuard<'static, ()>,
+    pub(crate) _env_lock: ProcessEnvGuard,
 }
 
 pub(crate) struct TestTraceDecay {
@@ -1121,9 +1162,9 @@ pub(crate) async fn close_test_graph(cg: TestTraceDecay) {
 }
 
 pub(crate) async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
+    let home_guard = HomeEnvGuard::set(&env_lock, &home);
     let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let cg = fixture::init_project_from_template(project).await.unwrap();
     (
