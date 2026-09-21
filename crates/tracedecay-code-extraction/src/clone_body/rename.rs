@@ -24,6 +24,11 @@ struct Binding {
 struct Analyzer<'tree, 'source> {
     language: &'source str,
     source: &'source [u8],
+    /// Every node of the body in preorder, with the field each occupies in
+    /// its parent. Three of the four passes over a body walk exactly this
+    /// sequence, and a tree-sitter cursor step is the single most expensive
+    /// thing extraction does, so the walk is paid for once.
+    nodes: Vec<(TreeSitterNode<'tree>, Option<&'static str>)>,
     callables: Vec<CallableSyntax<'tree>>,
     bindings: Vec<Binding>,
     python_bindings: HashMap<(ByteSpan, String), String>,
@@ -48,9 +53,15 @@ pub(super) fn normalize(
         };
     }
 
+    let mut preorder = SyntaxPreorder::new(syntax.body);
+    let mut nodes = Vec::new();
+    while let Some(node) = preorder.next() {
+        nodes.push((node, preorder.field_name()));
+    }
     let mut analyzer = Analyzer {
         language,
         source: source.as_bytes(),
+        nodes,
         callables: vec![syntax],
         bindings: Vec::new(),
         python_bindings: HashMap::new(),
@@ -78,8 +89,8 @@ pub(super) fn normalize(
 
 impl Analyzer<'_, '_> {
     fn collect_nested_callables(&mut self) {
-        let root_body = self.callables[0].body;
-        for node in SyntaxPreorder::new(root_body) {
+        for index in 0..self.nodes.len() {
+            let (node, _) = self.nodes[index];
             if is_callable(self.language, node.kind())
                 && let Some(body) = node.child_by_field_name("body")
             {
@@ -129,7 +140,8 @@ impl Analyzer<'_, '_> {
 
     fn collect_locals_and_issues(&mut self) {
         let root_body = self.callables[0].body;
-        for node in SyntaxPreorder::new(root_body) {
+        for index in 0..self.nodes.len() {
+            let (node, _) = self.nodes[index];
             match self.language {
                 "rust" => self.collect_rust_local(node, root_body),
                 "typescript" | "tsx" | "javascript" => {
@@ -372,11 +384,8 @@ impl Analyzer<'_, '_> {
 
     fn resolve_identifiers(&self) -> HashMap<ByteSpan, String> {
         let mut replacements = HashMap::new();
-        let mut preorder = SyntaxPreorder::new(self.callables[0].body);
-        while let Some(identifier) = preorder.next() {
-            if identifier.kind() != "identifier"
-                || is_preserved_identifier(identifier, preorder.field_name())
-            {
+        for &(identifier, field) in &self.nodes {
+            if identifier.kind() != "identifier" || is_preserved_identifier(identifier, field) {
                 continue;
             }
             let Some(name) = identifier.utf8_text(self.source).ok() else {
