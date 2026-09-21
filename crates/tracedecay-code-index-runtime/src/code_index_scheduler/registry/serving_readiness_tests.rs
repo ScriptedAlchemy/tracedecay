@@ -105,30 +105,48 @@ fn graph_off_text_owner_is_terminal_without_a_seat() {
 
 /// Park the background worker and wait out whatever pass is already in flight.
 ///
-/// The worker releases its admission permit after source reconciliation but
-/// keeps its owner-pass guard through text seating, so winning the permit only
-/// proves that no *new* pass can start. A pass still running past that point
-/// installs a serving generation and signals `serving_generation_changed`,
-/// which a test sampling that watch would then attribute to its own next step.
+/// The worker releases its admission permit after source reconciliation, so
+/// winning the permit only proves that no *new* pass can start. A pass still
+/// running past that point installs a serving generation, renews the source
+/// proof behind it, and signals `serving_generation_changed`, which a test
+/// sampling that watch would then attribute to its own next step.
+///
+/// `reconcile_in_progress` cannot bound that pass. It answers the narrower
+/// question of whether exact or lexical rebuild work is in flight, and a pass
+/// deliberately lowers it before optional graph work (#1103, #1339) while it
+/// still owns the seat and the proof. The build/publication lock is what the
+/// pass actually holds for its whole iteration, so hold that instead of
+/// sampling a flag.
 async fn quiesced_background_reconcile_admission(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
-) -> tokio::sync::OwnedSemaphorePermit {
+) -> (
+    tokio::sync::OwnedSemaphorePermit,
+    tokio::sync::OwnedMutexGuard<()>,
+) {
     let admission = registry
         .background_reconcile_admission()
         .acquire_owned()
         .await
         .expect("hold the background worker at its dequeue point");
-    let deadline = Instant::now() + OWNER_PASS_QUIESCENCE_CEILING;
-    while registry.reconcile_in_progress_for_test(project_root).await {
-        assert!(
-            Instant::now() <= deadline,
+    // Same order the worker takes them in, so this cannot invert against a
+    // pass that already owns the permit.
+    let build_publication = registry
+        .build_publication_lock_handle(project_root)
+        .await
+        .expect("mounted worktree");
+    let build_publication = tokio::time::timeout(
+        OWNER_PASS_QUIESCENCE_CEILING,
+        build_publication.lock_owned(),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
             "the owner pass for {} never finished",
             project_root.display()
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
-    admission
+        )
+    });
+    (admission, build_publication)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -241,7 +259,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .source_freshness
             .clone()
     };
-    let admission = quiesced_background_reconcile_admission(&registry, &project).await;
+    let parked_worker = quiesced_background_reconcile_admission(&registry, &project).await;
     {
         let mut state = freshness.state.lock().expect("freshness state");
         state.last_reconciled_at = std::time::Instant::now()
@@ -250,16 +268,26 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     }
     changes.borrow_and_update();
     let serving_seat_before_expiry = *serving_seats.borrow_and_update();
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(250),
-            registry.latest_complete_ready(&project)
-        )
-        .await
-        .expect("expired readiness returns without walking source")
-        .is_none(),
-        "an expired proof cannot be promoted current before the worker renews it"
-    );
+    // One sample at millisecond zero cannot tell a parked worker from a pass
+    // that advertised itself idle and is still about to publish its seat and
+    // renew the source proof. Sample the whole window.
+    let expiry_window = Instant::now() + Duration::from_millis(250);
+    loop {
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                registry.latest_complete_ready(&project)
+            )
+            .await
+            .expect("expired readiness returns without walking source")
+            .is_none(),
+            "an expired proof cannot be promoted current before the worker renews it"
+        );
+        if Instant::now() >= expiry_window {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert_eq!(
         *serving_seats.borrow(),
         serving_seat_before_expiry,
@@ -279,7 +307,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .is_some_and(|pending| pending != 0),
         "the read coalesces one verification wake on the retained worker"
     );
-    drop(admission);
+    drop(parked_worker);
     let ready = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             changes.changed().await.expect("source proof renewal");
@@ -295,7 +323,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         published.generation_id
     );
 
-    let admission = quiesced_background_reconcile_admission(&registry, &project).await;
+    let parked_worker = quiesced_background_reconcile_admission(&registry, &project).await;
     changes.borrow_and_update();
     let seat_epoch = {
         let mounted = registry.mounted.lock().await;
@@ -323,7 +351,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
         registry.latest_complete_ready(&project).await.is_none(),
         "a true source hint invalidates the seated proof even inside the fresh clock window"
     );
-    drop(admission);
+    drop(parked_worker);
     let revalidated = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             changes
