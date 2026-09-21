@@ -25,7 +25,6 @@ jobs:
     name: Distribution acceptance (x86_64-linux)
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
-    # Packaged acceptance has been observed near/over 180m on free ubuntu-latest.
     timeout-minutes: 240
     env:
       TARGET: x86_64-unknown-linux-gnu
