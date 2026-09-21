@@ -374,12 +374,12 @@ impl McpServer {
             .as_deref()
             .and_then(crate::daemon::daemon_transcript_source_home)
         {
-            Some(transcript_source_home) => Box::pin(
-                tracedecay_sessions::runtime::with_transcript_source_home(
+            Some(transcript_source_home) => {
+                Box::pin(tracedecay_sessions::runtime::with_transcript_source_home(
                     transcript_source_home,
                     dispatch,
-                ),
-            ),
+                ))
+            }
             None => dispatch,
         };
         if let Some(read_flight) = read_flight {
