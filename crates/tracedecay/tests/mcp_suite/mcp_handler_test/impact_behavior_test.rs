@@ -220,9 +220,9 @@ fn assert_radius(payload: &Value, complete: bool, node_count: u64, expected: &[V
         .as_array()
         .unwrap_or_else(|| panic!("impact nodes must be an array: {payload}"))
         .clone();
-    nodes.sort_by(|left, right| node_sort_key(left).cmp(&node_sort_key(right)));
+    nodes.sort_by_key(node_sort_key);
     let mut expected = expected.to_vec();
-    expected.sort_by(|left, right| node_sort_key(left).cmp(&node_sort_key(right)));
+    expected.sort_by_key(node_sort_key);
     assert_eq!(nodes, expected, "impact radius: {payload}");
 }
 

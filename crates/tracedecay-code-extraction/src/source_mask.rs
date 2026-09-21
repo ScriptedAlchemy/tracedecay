@@ -18,7 +18,7 @@
 //! delimiter walk over the remaining *code* bytes tracks which macro and which
 //! argument position each string sits at, so that only the real format-string
 //! literal earns the capture exception. Supported macros and their format-arg
-//! position (in top-level commas) are listed in [`format_macro_argument_index`].
+//! position (in top-level commas) are listed in `format_macro_argument_index`.
 
 use tree_sitter::{Node as TsNode, Parser};
 

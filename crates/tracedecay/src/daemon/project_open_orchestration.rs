@@ -119,9 +119,12 @@ pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
 }
 
 #[hotpath::measure(label = "daemon.project.enroll.route", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Registered route ensure is one lookup-or-open for the admitted project."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Registered route ensure is one lookup-or-open for the admitted project."
+    )
 )]
 pub(super) async fn ensure_registered_project_route(
     store_administration: &StoreAdministration,

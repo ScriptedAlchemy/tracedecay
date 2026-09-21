@@ -15,7 +15,7 @@ use crate::support::{
 };
 use serde_json::{Value, json};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
@@ -763,7 +763,7 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
     );
 }
 
-fn invalid_glob_message(project_root: &PathBuf) -> String {
+fn invalid_glob_message(project_root: &Path) -> String {
     let joined = project_root.join("[");
     let pattern = joined.to_string_lossy();
     let position = pattern.len() - 1;

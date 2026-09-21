@@ -3080,7 +3080,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.freshness_probe_verdict() != FreshnessProbeVerdictV1::Current
     }
 
-    /// [`Self::ensure_fresh_for_query`] with the O(store) rebuild moved off the
+    /// `Self::ensure_fresh_for_query` with the O(store) rebuild moved off the
     /// request path.
     ///
     /// Runs the identical ladder, unverified restore, tier-1 git metadata,
@@ -3088,7 +3088,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// `reconcile_now()` inline this only *requests* the background worker.
     /// The ladder's checks never extract or publish; its remedy does, and a
     /// query must never pay for it. Unlike
-    /// [`Self::latest_complete_ready_for_query_with`], this arm still sweeps
+    /// `Self::latest_complete_ready_for_query_with`, this arm still sweeps
     /// the source witness on an elapsed threshold, stat metadata first, then
     /// the sealed file digests when the metadata is unchanged, so a quiet
     /// repository can reset its clock without a capture.

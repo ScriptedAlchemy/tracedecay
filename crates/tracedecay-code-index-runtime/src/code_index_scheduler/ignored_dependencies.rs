@@ -823,7 +823,7 @@ fn checkpoint(control: &dyn CodeIndexExecutionControlV1) -> Result<(), CodeIndex
 /// reconcile to a dependency admission that never ran, and bypassed the
 /// superseded-reconcile retry that only recognizes the production
 /// interruption. The admission boundary maps the interruption back to its own
-/// refusal (see [`map_reconcile_interruption`]).
+/// refusal (see `map_reconcile_interruption`).
 pub fn checkpoint_if_present(
     control: Option<&dyn CodeIndexExecutionControlV1>,
 ) -> Result<(), CodeIndexSchedulerErrorV1> {

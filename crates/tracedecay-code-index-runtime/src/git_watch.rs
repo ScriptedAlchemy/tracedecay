@@ -12,11 +12,11 @@
 //!
 //! # Shape
 //!
-//! * One [`GitWatcher`] is held by the [`super::DaemonEngine`]; both the accept
-//!   loop and `project_server` reach it to lazily [`GitWatcher::ensure_watching`]
+//! * One [`GitWatcher`] is held by the `super::DaemonEngine`; both the accept
+//!   loop and `project_server` reach it to lazily `GitWatcher::ensure_watching`
 //!   freshly-handshaken projects.
 //! * Each repository common directory gets one supervised debounce task
-//!   ([`repository_task`]) and carries the exact roots and git directories of
+//!   (`repository_task`) and carries the exact roots and git directories of
 //!   every active linked worktree. Raw events wake the task via a
 //!   [`tokio::sync::Notify`];
 //!   the task sleeps until the quiet deadline
@@ -24,7 +24,7 @@
 //!   first, no busy polling.
 //! * Debounce drains submit exact-frontier freshness requests to the canonical
 //!   code-index scheduler. The watcher never opens or mutates a legacy graph.
-//! * The [`backstop`] timer is the freshness floor for every registered
+//! * The `backstop` timer is the freshness floor for every registered
 //!   repository: each due root submits a freshness request through the same
 //!   scheduler ingress. A live heartbeat proves only watcher-task liveness,
 //!   the watcher reacts to git metadata alone, so liveness never vetoes

@@ -3,9 +3,12 @@
 //! Each module was previously a standalone integration-test binary under
 //! `tests/<module>.rs`; every one of them linked the same dependency closure.
 //! Compiled as modules of one binary, each test keeps its old binary name as
-//! its module prefix (the sdk-conformance workflow selects the
-//! `production_daemon::` module by that prefix). `remote_client_proxy` stays
-//! its own binary because it mutates the process-wide proxy environment.
+//! its module prefix. `remote_client_proxy` stays its own binary because it
+//! mutates the process-wide proxy environment.
+//!
+//! The sdk-conformance `production-router` job runs this whole binary with
+//! `--run-ignored all`, so a `#[ignore]`d daemon test here is covered by CI
+//! without any further wiring.
 
 #[path = "../../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;

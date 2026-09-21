@@ -19,7 +19,7 @@
 //!    generated function changes, recording clone payload recomputation and
 //!    reuse;
 //! 5. drain the sealed generation through
-//!    [`VerifiedSealedLexicalPageSourceV1::next_page_batch_if`], which is
+//!    `VerifiedSealedLexicalPageSourceV1::next_page_batch_if`, which is
 //!    `code_index.lexical_source.batch_stage`;
 //! 6. ingest those pages into an isolated SQLite lexical artifact in bounded
 //!    batches and finalize it, which is `query.artifact.append_pages` and

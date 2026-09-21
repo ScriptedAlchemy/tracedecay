@@ -1643,7 +1643,7 @@ impl LatestCompleteCodeIndexV1 {
     ///
     /// Built at most once per generation and shared by every clone of this
     /// handle (and therefore by every concurrent query), the same way
-    /// [`Self::production_query_owners`] shares its lane owners. Serving a
+    /// `Self::production_query_owners` shares its lane owners. Serving a
     /// query never rebuilds the indices; only loading a new generation does.
     pub fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
         self.record_index
@@ -1713,7 +1713,7 @@ impl LatestCodeTextGenerationV1 {
     /// This is the sole readiness predicate for a publication's graph seat
     /// gate and for admitting a full sealed-generation graph replay. Clone
     /// fingerprint backfill may still be unfinished when this returns true,
-    /// that remaining work is [`Self::text_projection_needs_work`], not a
+    /// that remaining work is `Self::text_projection_needs_work`, not a
     /// seat or replay precondition.
     pub fn query_owners_are_ready(&self) -> bool {
         matches!(

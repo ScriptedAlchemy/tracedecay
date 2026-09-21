@@ -7,7 +7,7 @@
 //!
 //! Read-only is enforced structurally:
 //!
-//! - Every spawn goes through [`NativeGitIntelligence::run_git`], which admits
+//! - Every spawn goes through `NativeGitIntelligence::run_git`, which admits
 //!   only a closed list of read subcommands (`status`, `diff`, `log`, `blame`,
 //!   `rev-parse`, `symbolic-ref`, `ls-files`, `ls-tree`, `hash-object`
 //!   without `-w`, `config --get`, `check-attr`) and refuses everything else

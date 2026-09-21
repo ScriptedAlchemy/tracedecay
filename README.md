@@ -54,15 +54,22 @@ operating model](docs/V2-OPERATING-MODEL.md).
 
 ```bash
 cd /path/to/your/project
+tracedecay daemon install-service
 tracedecay init
 tracedecay install
-tracedecay daemon install-service
 tracedecay status
 ```
 
-`tracedecay status` reads the daemon and never starts it, so install the
-per-user service first. See [the user guide](docs/USER-GUIDE.md) for the
-daemon lifecycle commands.
+The daemon comes first. `tracedecay init` is brokered through the
+daemon-owned code-index scheduler, so without a running daemon it refuses
+before it writes anything:
+
+```
+Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
+```
+
+`tracedecay status` likewise reads the daemon and never starts it. See [the
+user guide](docs/USER-GUIDE.md) for the daemon lifecycle commands.
 
 `tracedecay install` auto-detects supported agents. To target one host:
 
@@ -92,6 +99,7 @@ the installed cache is loaded.
 ## Common Commands
 
 ```bash
+tracedecay daemon install-service   # install + start the daemon (required before init)
 tracedecay init [path]              # enroll a project and publish its first generation
 tracedecay sync [path]              # explicit administrative refresh
 tracedecay sync --force [path]      # explicit full generation refresh
@@ -210,6 +218,10 @@ separate daemon operation with its own preview, receipt, and recovery state.
 Common fixes:
 
 - Not initialized: run `tracedecay init` from the project root.
+- `code_index_scheduler_unavailable` from `init`: no daemon is accepting
+  connections for this profile. Run `tracedecay daemon install-service` (or
+  `tracedecay daemon start` if it is already installed), confirm with
+  `tracedecay daemon status`, then re-run `init`.
 - Agent does not see tools: run `tracedecay doctor`, then restart the agent.
 - Missing symbols: inspect `tracedecay status --json` for the selected
   generation and typed warming/refresh-required coverage; request an explicit

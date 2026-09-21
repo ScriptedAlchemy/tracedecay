@@ -237,7 +237,7 @@ impl KeywordMatcher {
 /// One compiled credential rule.
 ///
 /// The surface is unchanged from the hand-written era. [`Self::kind`],
-/// [`Self::is_match`], [`Self::ranges`], so every caller kept working. What
+/// [`Self::is_match`], `Self::ranges`, so every caller kept working. What
 /// changed is behind it: matches now pass a rule's entropy floor and its
 /// allowlists before they count.
 pub struct CredentialPattern {

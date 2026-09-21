@@ -19,7 +19,7 @@
 //!   for it is not an option that exists; this module must not invent one.
 //!
 //! The launch arguments both spellings use live in one place
-//! ([`MCP_SERVER_ARGS`]) so the CLI-driven registration and the
+//! (`MCP_SERVER_ARGS`) so the CLI-driven registration and the
 //! TraceDecay-owned readback cannot drift apart.
 
 use std::path::{Path, PathBuf};
@@ -112,7 +112,7 @@ impl AgentIntegration for CopilotIntegration {
     /// is `copilot mcp`, not TraceDecay. Naming that file (and its staged
     /// backup) here is what gives the component-set transaction rollback
     /// authority over the host command's effect; without it the observation
-    /// recorded in [`run_mcp_registry_step`] would have nothing to restore.
+    /// recorded in `run_mcp_registry_step` would have nothing to restore.
     /// Any other component set keeps the default inventory, which is the
     /// TraceDecay-written VS Code settings file.
     fn host_component_registration_paths(

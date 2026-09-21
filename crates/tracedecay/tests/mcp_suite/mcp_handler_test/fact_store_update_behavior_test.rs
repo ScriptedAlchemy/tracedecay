@@ -161,7 +161,7 @@ fn assert_committed_update(payload: &Value, fact_id: &Value, project_id: &Value,
         .unwrap_or_else(|| panic!("commit omitted event ids: {payload}"));
     assert_eq!(events.len() as u64, event_count, "{payload}");
     assert_eq!(
-        events.last().map(Value::clone),
+        events.last().cloned(),
         Some(payload["commit"]["last_event_id"].clone()),
         "{payload}"
     );

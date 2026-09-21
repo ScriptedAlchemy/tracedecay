@@ -6,7 +6,7 @@
 //!
 //! The embedded asset bundle is not generated here: the shipping binary crate
 //! embeds it and hands it to this library through the registered product
-//! runtime ([`crate::product_runtime`]). The canonical API crate owns the
+//! runtime ([`mod@crate::product_runtime`]). The canonical API crate owns the
 //! resulting HTTP router and transport policy.
 
 use tracedecay_dashboard_api::DashboardProjectContext;
