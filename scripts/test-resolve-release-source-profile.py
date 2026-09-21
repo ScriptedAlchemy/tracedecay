@@ -27,8 +27,22 @@ def run_fixture(manifest: str) -> FixtureResult:
         # The resolver reads the product package manifest, not the workspace
         # root: `crates/tracedecay/Cargo.toml` is where the feature table lives.
         product = source.joinpath("crates", "tracedecay")
-        product.mkdir(parents=True)
+        product.joinpath("src").mkdir(parents=True)
         product.joinpath("Cargo.toml").write_text(manifest, encoding="utf-8")
+        product.joinpath("src", "lib.rs").write_text("", encoding="utf-8")
+        # The resolver walks the resolved dependency graph with `cargo tree
+        # --locked`, so the fixture is a real workspace with a lockfile. It
+        # has no dependencies, so the lockfile resolves offline.
+        source.joinpath("Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/tracedecay"]\nresolver = "2"\n',
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["cargo", "generate-lockfile", "--offline"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+        )
         output = source / "github-output.txt"
         completed = subprocess.run(
             [

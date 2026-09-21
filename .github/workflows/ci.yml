@@ -1058,8 +1058,8 @@ jobs:
           # forks on the local feature while hotpath::io! expands on the backend.
           cargo check --workspace --all-targets --features hotpath/hotpath --locked
 
-      # One graph walk for the whole push. Release jobs only read the manifest;
-      # repeating cargo tree on every target does not change the binary.
+      # One graph walk per push. The release resolver repeats it on the tag it
+      # builds, since a release is dispatched without waiting on this run.
       - name: Check the production feature graph
         run: python3 scripts/check-production-feature-profile.py
 

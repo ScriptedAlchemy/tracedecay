@@ -63,13 +63,7 @@ def main() -> int:
     if "production" in features:
         checker = Path(__file__).with_name("check-production-feature-profile.py")
         subprocess.run(
-            [
-                sys.executable,
-                str(checker),
-                "--repo",
-                str(source),
-                "--manifest-only",
-            ],
+            [sys.executable, str(checker), "--repo", str(source)],
             check=True,
         )
         profile = "production"
