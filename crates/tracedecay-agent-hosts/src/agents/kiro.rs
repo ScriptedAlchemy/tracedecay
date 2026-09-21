@@ -146,7 +146,7 @@ fn kiro_home(home: &Path) -> PathBuf {
     home.join(".kiro")
 }
 
-fn mcp_config_path(home: &Path) -> PathBuf {
+pub(super) fn mcp_config_path(home: &Path) -> PathBuf {
     kiro_home(home).join("settings/mcp.json")
 }
 
@@ -162,7 +162,7 @@ fn steering_path(home: &Path) -> PathBuf {
     kiro_home(home).join("steering/tracedecay.md")
 }
 
-fn managed_skill_index_path(home: &Path) -> PathBuf {
+pub(super) fn managed_skill_index_path(home: &Path) -> PathBuf {
     kiro_home(home).join("steering/tracedecay-managed-skills.md")
 }
 
@@ -414,6 +414,16 @@ impl AgentIntegration for KiroIntegration {
             global_server.as_ref(),
         );
         doctor_advise_retired_global_artifacts(dc, &ctx.home);
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                managed_skill_index_path(&ctx.home),
+                ctx.project_path
+                    .join(".kiro/steering/tracedecay-managed-skills.md"),
+            ],
+            SkillInstallTarget::Kiro,
+        );
     }
 
     fn reports_absence_to_doctor(&self) -> bool {

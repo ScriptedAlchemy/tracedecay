@@ -82,6 +82,18 @@ impl AgentIntegration for CopilotIntegration {
             "VS Code Insiders",
         );
         doctor_check_cli_settings(dc, &ctx.home);
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                super::vscode_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md"),
+                super::vscode_insiders_data_dir(&ctx.home)
+                    .join("User/prompts/copilot-instructions.md"),
+                super::copilot_cli_dir(&ctx.home).join("copilot-instructions.md"),
+                ctx.project_path.join(".github/copilot-instructions.md"),
+            ],
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
+        );
     }
 
     fn is_detected(&self, home: &Path) -> bool {

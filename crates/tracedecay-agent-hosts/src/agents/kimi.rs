@@ -183,6 +183,15 @@ impl AgentIntegration for KimiIntegration {
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mKimi CLI integration\x1b[0m");
         doctor_check_plugin(dc, &ctx.home, &kimi_code_home(&ctx.home));
+        // Kimi exports only a project index: `export_managed_skills_local`
+        // writes `AGENTS.md` while the user-scope export stays the no-op
+        // default, so that one file is this host's whole index set.
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[ctx.project_path.join("AGENTS.md")],
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Kimi,
+        );
     }
 
     fn reports_absence_to_doctor(&self) -> bool {
