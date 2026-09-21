@@ -2461,6 +2461,21 @@ mod tests {
         tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
     }
 
+    /// The installed fixture has to resolve to the executable itself. A link
+    /// to a path that does not exist is created without error on Unix, and
+    /// host program resolution then reads it as no host CLI at all.
+    #[test]
+    fn installing_the_host_cli_fixture_resolves_to_an_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed =
+            super::host_cli_fixture::install_compiled_host_cli_fixture(dir.path(), "kiro-cli");
+        assert!(
+            installed.is_file(),
+            "installed host-CLI fixture at {} resolves to nothing",
+            installed.display()
+        );
+    }
+
     fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
         let config_path = home.join(".config/opencode/opencode.json");
         let core_path = home.join(".config/opencode/plugins/tracedecay.ts");
