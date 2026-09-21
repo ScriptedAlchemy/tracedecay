@@ -279,3 +279,46 @@ fn unsupported_languages_expose_no_rename_stream() {
     assert!(body.complete_rename_tokens().is_none());
     assert!(body.rename_issues.is_empty());
 }
+
+#[test]
+fn the_rename_stream_differs_from_the_conservative_one_only_at_renamed_identifiers() {
+    let artifact = RustExtractor.extract_artifact(
+        "src/lib.rs",
+        "fn copy(input: &str) -> bool { let result = parse(input); validate(result, \"read\") }",
+    );
+    let body = artifact.clone_bodies.first().expect("clone body");
+    let renamed = body.complete_rename_tokens().expect("rename tokens");
+
+    let differing: Vec<_> = std::iter::zip(body.conservative_tokens.iter(), renamed.iter())
+        .filter(|(conservative, renamed)| conservative != renamed)
+        .map(|(conservative, renamed)| match (conservative, renamed) {
+            (
+                ConservativeCloneTokenV1::Syntax { text: before, .. },
+                ConservativeCloneTokenV1::Syntax { text: after, .. },
+            ) => (before.clone(), after.clone()),
+            _ => panic!("the two streams disagree on token shape: {conservative:?} {renamed:?}"),
+        })
+        .collect();
+    assert_eq!(body.conservative_tokens.len(), renamed.len());
+    assert_eq!(
+        differing,
+        vec![
+            ("result".to_owned(), "local_0".to_owned()),
+            ("input".to_owned(), "arg_0".to_owned()),
+            ("result".to_owned(), "local_0".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_body_that_renames_nothing_shares_the_conservative_stream() {
+    let artifact =
+        RustExtractor.extract_artifact("src/lib.rs", "fn copy() -> bool { validate(\"read\") }");
+    let body = artifact.clone_bodies.first().expect("clone body");
+    let renamed = body.complete_rename_tokens().expect("rename tokens");
+    assert_eq!(renamed, body.conservative_tokens.as_ref());
+    assert!(
+        std::ptr::eq(renamed.as_ptr(), body.conservative_tokens.as_ptr()),
+        "a body with no renamed binding must not allocate a second token stream"
+    );
+}
