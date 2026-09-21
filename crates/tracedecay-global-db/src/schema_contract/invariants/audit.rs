@@ -845,6 +845,21 @@ async fn validate_message_projection_row(
             Err(ProjectionStoreError::OutputCollision {
                 provider,
                 message_id,
+            }) if !output_row_present
+                && owner_provenance.message_created == 1
+                && provider == owner_message.provider
+                && message_id == owner_message.message_id
+                && owner_provenance.output_provider == provider
+                && owner_provenance.output_message_id == message_id =>
+            {
+                // Provenance still says this observation created the row, and
+                // the row is gone. That is an interrupted write, not a retired
+                // output. Restore it from the immutable projection.
+                resolved.released.record(&owner_projection);
+            }
+            Err(ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
             }) if output_row_present
                 && provider == owner_projection.message().provider
                 && message_id == owner_projection.message().message_id
@@ -861,6 +876,23 @@ async fn validate_message_projection_row(
                 // not finish. Finish it on the released-rendering ledger. A
                 // body that matches neither rendering is tamper and falls
                 // through to the hard failure below.
+                resolved.released.record(&owner_projection);
+            }
+            Err(ProjectionStoreError::SessionOutputCollision {
+                provider,
+                session_id,
+                field: "row_missing",
+            }) if !output_row_present
+                && owner_provenance.message_created == 1
+                && provider == owner_projection.session().provider
+                && session_id == owner_projection.session().session_id
+                && owner_provenance.output_provider == owner_message.provider
+                && owner_provenance.output_message_id == owner_message.message_id =>
+            {
+                // The message batch is how sessions are loaded. A creator whose
+                // message row is gone therefore looks like a missing session
+                // even when the session row is still there. Restore both from
+                // the immutable projection.
                 resolved.released.record(&owner_projection);
             }
             Err(ProjectionStoreError::SessionOutputCollision {
@@ -2835,6 +2867,39 @@ mod tests {
         );
         assert_eq!(row.get::<i64>(1).unwrap(), 1);
         assert!(rows.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn projection_audit_restores_a_created_cursor_message_whose_row_is_gone() {
+        let directory = TempDir::new().unwrap();
+        let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        seed_projected_cursor_message(&runtime, "restored cursor message").await;
+        let database = runtime
+            .registered_database(crate::tests::harness::HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let transaction = database.begin_write_transaction().await.unwrap();
+        let deleted = transaction
+            .execute(
+                "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                params!["cursor", CURSOR_COLLISION_MESSAGE_ID],
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        transaction.commit().await.unwrap();
+
+        super::super::ensure_authority_invariants(database.runtime_database(), true, false)
+            .await
+            .expect("a created message with surviving provenance must be restored");
+
+        let restored = database
+            .get_session_message("cursor", CURSOR_COLLISION_MESSAGE_ID)
+            .await
+            .expect("read restored message")
+            .expect("restored message row");
+        assert_eq!(restored.text, "restored cursor message");
     }
 
     /// The audit's message path must stay correct while resolving each chunk's

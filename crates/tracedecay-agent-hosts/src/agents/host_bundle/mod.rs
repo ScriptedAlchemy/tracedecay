@@ -73,7 +73,7 @@ pub use planner::{
     dry_run_host_bundle_lifecycle_with_lifecycle_root_at,
     dry_run_host_component_set_lifecycle_with_lifecycle_root_at, inspect_install_target,
     plan_complete_lifecycle_mutation, plan_lifecycle_mutation,
-    plan_verified_complete_lifecycle_mutation, plan_verified_lifecycle_mutation,
+    plan_verified_complete_lifecycle_mutation,
 };
 pub use runtime::{
     FeedbackPathRestoreReceiptV1, FeedbackPathRollbackReceiptV1, FeedbackPathRollbackSwitchV1,

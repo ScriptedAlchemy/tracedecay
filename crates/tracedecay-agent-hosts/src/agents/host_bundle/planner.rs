@@ -27,21 +27,6 @@ use super::{
     validate_relative_install_path,
 };
 
-/// Verify embedded first-party catalog identity and content digests, then
-/// produce the lifecycle plan. This keeps the older closure-based planner
-/// compatible while giving production callers one concrete verification
-/// contract.
-pub fn plan_verified_lifecycle_mutation(
-    manifest: &HostBundleManifestV1,
-    request: &HostBundleLifecycleRequestV1,
-    observed: &[ObservedHostArtifactV1],
-    verifier: &impl HostBundleVerificationAdapterV1,
-) -> Result<HostBundleMutationPlanV1, HostBundleError> {
-    plan_lifecycle_mutation(manifest, request, observed, |manifest| {
-        verifier.verify_manifest(manifest)
-    })
-}
-
 /// Verify first, then produce the full immutable lifecycle plan, including
 /// receipt-derived orphan removals for update, repair, and uninstall.
 #[hotpath::measure(label = "hosts.agent.host_bundle.plan_complete")]
