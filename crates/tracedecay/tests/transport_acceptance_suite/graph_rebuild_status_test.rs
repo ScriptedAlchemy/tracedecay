@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay_mcp::JsonRpcResponse;
 
 use crate::common::mcp_response::tool_json;
 
