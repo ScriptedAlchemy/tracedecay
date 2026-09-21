@@ -191,20 +191,6 @@ impl ProximityContributionV1 {
         observed_at.0 >= self.expires_at.0
     }
 
-    /// Records presentation suppression without discarding the evidence,
-    /// threshold provenance, or expiry that produced the duplicate warning.
-    pub fn suppressed_duplicate(mut self) -> Result<Self, DomainError> {
-        self.validate()?;
-        if self.inclusion != ProximityInclusionV1::Included {
-            return Err(DomainError::NonCanonical {
-                field: "proximity duplicate suppression input",
-            });
-        }
-        self.inclusion = ProximityInclusionV1::SuppressedDuplicate;
-        self.validate()?;
-        Ok(self)
-    }
-
     pub fn validate(&self) -> Result<(), DomainError> {
         self.contribution_id.validate()?;
         self.warning_id.validate()?;

@@ -244,6 +244,17 @@ where
     let durability = SourceEditDurability::for_graph(graph);
     let _lock = durability.lock()?;
     let input_digest = request.input_digest().map_err(application_contract_error)?;
+    let refuse = |authority: &tracedecay_contracts::SourceEditAuthorizationAdmissionV1,
+                  state: PreEffectState| {
+        fail_pre_effect(
+            &durability,
+            operation,
+            &request,
+            authority,
+            &input_digest,
+            state,
+        )
+    };
     let requested_authority = tracedecay_contracts::SourceEditAuthorizationAdmissionV1::new(
         request.authority.clone(),
         request.proof.clone(),
@@ -276,23 +287,15 @@ where
     {
         Ok(admission) => admission,
         Err(_) => {
-            return fail_pre_effect(
-                &durability,
-                operation,
-                &request,
+            return refuse(
                 &requested_authority,
-                &input_digest,
                 PreEffectState::unpreviewed(request.expected_state.clone()),
             );
         }
     };
     if admission.receipt != request.authority || admission.proof != request.proof {
-        return fail_pre_effect(
-            &durability,
-            operation,
-            &request,
+        return refuse(
             &requested_authority,
-            &input_digest,
             PreEffectState::unpreviewed(request.expected_state.clone()),
         );
     }
@@ -302,12 +305,8 @@ where
     {
         Ok(authority) if authority_still_matches(&authority, &request) => authority,
         Ok(_) => {
-            return fail_pre_effect(
-                &durability,
-                operation,
-                &request,
+            return refuse(
                 &requested_authority,
-                &input_digest,
                 PreEffectState::unpreviewed(request.expected_state.clone()),
             );
         }
@@ -317,12 +316,8 @@ where
             {
                 return Err(application_problem(error));
             }
-            return fail_pre_effect(
-                &durability,
-                operation,
-                &request,
+            return refuse(
                 &admission,
-                &input_digest,
                 PreEffectState::unpreviewed(request.expected_state.clone()),
             );
         }
@@ -386,12 +381,8 @@ where
         .expected_state
         .ok_or_else(|| config_error("successful source edit preview omitted expected state"))?;
     if !request.edit.dry_run() && current_state != request.expected_state {
-        return fail_pre_effect(
-            &durability,
-            operation,
-            &request,
+        return refuse(
             &current_authority,
-            &input_digest,
             PreEffectState {
                 expected: request.expected_state.clone(),
                 predicted: Some(predicted_state),
@@ -430,12 +421,8 @@ where
         {
             Ok(authority) if authority_still_matches(&authority, &request) => authority,
             _ => {
-                return fail_pre_effect(
-                    &durability,
-                    operation,
-                    &request,
+                return refuse(
                     &current_authority,
-                    &input_digest,
                     PreEffectState {
                         expected: current_state,
                         predicted: Some(predicted_state),
@@ -469,12 +456,8 @@ where
     {
         Ok(authority) if authority_still_matches(&authority, &request) => authority,
         _ => {
-            return fail_pre_effect(
-                &durability,
-                operation,
-                &request,
+            return refuse(
                 &current_authority,
-                &input_digest,
                 PreEffectState {
                     expected: request.expected_state.clone(),
                     predicted: Some(predicted_state),
@@ -486,12 +469,8 @@ where
     let recaptured_state = match source_edit_state_digest(graph.project_root(), &candidate_files) {
         Ok(state) => state,
         Err(_) => {
-            return fail_pre_effect(
-                &durability,
-                operation,
-                &request,
+            return refuse(
                 &current_authority,
-                &input_digest,
                 PreEffectState {
                     expected: request.expected_state.clone(),
                     predicted: Some(predicted_state),
@@ -501,12 +480,8 @@ where
         }
     };
     if recaptured_state != request.expected_state {
-        return fail_pre_effect(
-            &durability,
-            operation,
-            &request,
+        return refuse(
             &current_authority,
-            &input_digest,
             PreEffectState {
                 expected: request.expected_state.clone(),
                 predicted: Some(predicted_state),

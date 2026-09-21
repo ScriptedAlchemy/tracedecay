@@ -44,13 +44,6 @@ impl MaskOptions {
     };
 }
 
-/// Returns a copy of `source` with comment and string/char literal contents
-/// blanked, preserving implicit format captures. Equivalent to
-/// [`masked_rust_source_with`] using [`MaskOptions::UNUSED_IMPORTS`].
-pub fn masked_rust_source(source: &str) -> String {
-    masked_rust_source_with(source, MaskOptions::UNUSED_IMPORTS)
-}
-
 /// Returns a copy of `source` with comments and string/char literals blanked.
 /// `opts` controls whether implicit format captures survive.
 /// Blanked bytes become ASCII spaces; newlines and total byte length are
@@ -408,7 +401,7 @@ fn format_capture_identifier_end(bytes: &[u8], start: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MaskOptions, masked_rust_source, masked_rust_source_with};
+    use super::{MaskOptions, masked_rust_source_with};
 
     /// Whole-token match used by the scanners: does `identifier` appear as a
     /// real token (non-identifier boundaries) anywhere on `line`? Mirrors the
@@ -436,7 +429,7 @@ mod tests {
 
     /// Does `identifier` survive default import-discovery masking of `source`?
     fn referenced(source: &str, identifier: &str) -> bool {
-        masked_rust_source(source)
+        masked_rust_source_with(source, MaskOptions::UNUSED_IMPORTS)
             .lines()
             .any(|line| contains_token(line, identifier))
     }
@@ -584,7 +577,7 @@ mod tests {
     #[test]
     fn masking_preserves_line_count_and_length() {
         let src = "fn f() {\n    // comment HashMap\n    let s = \"str\";\n}\n";
-        let masked = masked_rust_source(src);
+        let masked = masked_rust_source_with(src, MaskOptions::UNUSED_IMPORTS);
         assert_eq!(masked.len(), src.len());
         assert_eq!(masked.lines().count(), src.lines().count());
     }

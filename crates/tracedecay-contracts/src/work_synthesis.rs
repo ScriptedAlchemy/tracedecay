@@ -33,9 +33,9 @@ use crate::work_attempt::{
 };
 use crate::workflow_synthesis::WorkflowSynthesisDraft;
 use crate::{
-    ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic,
-    WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1, WorkProductBindingV1,
-    WorkProductOwnerAuthorizationPortV1, WorkProductRevisionPinsV1,
+    ApplicationProblem, RequestContext, SafeDiagnostic, WorkGraphReadPortV1,
+    WorkProductAttemptAdmissionPortV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
+    WorkProductRevisionPinsV1,
 };
 
 const WORK_SYNTHESIS_SOURCE_SET_DOMAIN: &str =
@@ -218,7 +218,7 @@ where
         registered_topology,
     )?;
     if command.sources.is_empty() {
-        return Err(invalid_problem(
+        return Err(ApplicationProblem::invalid_request(
             "application.work-synthesis.no-sources",
             "A synthesis attempt must name at least one source attempt.",
         ));
@@ -226,7 +226,7 @@ where
     let mut seen = BTreeSet::new();
     for source in &command.sources {
         if !seen.insert(source.clone()) {
-            return Err(invalid_problem(
+            return Err(ApplicationProblem::invalid_request(
                 "application.work-synthesis.duplicate-source",
                 "A synthesis source attempt was named more than once.",
             ));
@@ -235,7 +235,7 @@ where
             && source.run_id() == &command.start.run_id
             && source.attempt_id() == &command.start.attempt_id
         {
-            return Err(invalid_problem(
+            return Err(ApplicationProblem::invalid_request(
                 "application.work-synthesis.self-citation",
                 "A synthesis attempt cannot name itself as a source.",
             ));
@@ -392,17 +392,6 @@ fn evidence_groups(sources: &[WorkSynthesisSourceEnvelopeV1]) -> Vec<WorkSynthes
             .then_with(|| left.artifacts.cmp(&right.artifacts))
     });
     groups
-}
-
-fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
 }
 
 fn contract_problem() -> ApplicationProblem {

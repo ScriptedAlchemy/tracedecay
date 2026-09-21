@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use futures_util::stream::{self, StreamExt};
 
 use tracedecay_contracts::retained_surfaces::{
-    LcmDescribeRequestV1, LcmDescribeResultV1, LcmDescribeTargetV1, LcmExpandQueryRequestV1,
-    LcmExpandRequestV1, LcmExpandResultV1, LcmExpandTargetV1, LcmGrepRequestV1, LcmGrepResultV1,
-    LcmGrepSortV1, LcmLoadSessionRequestV1, LcmLoadSessionResultV1, LcmNodeIdV1, LcmSearchScopeV1,
-    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    HydrationStateResultV1, LcmDescribeRequestV1, LcmDescribeResultV1, LcmDescribeTargetV1,
+    LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmExpandResultV1, LcmExpandTargetV1,
+    LcmGrepRequestV1, LcmGrepResultV1, LcmGrepSortV1, LcmLoadSessionRequestV1,
+    LcmLoadSessionResultV1, LcmNodeIdV1, LcmSearchScopeV1, RetainedOutcomeStatusV1,
+    RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
@@ -29,7 +30,7 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use super::output;
 use super::{
     cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
-    role_name, session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
+    session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
 };
 use crate::retained::session_retrieval_unavailable_detail;
 use crate::session_retrieval::{
@@ -186,7 +187,7 @@ pub(super) async fn execute_grep(
     let message_type = message_type(request.message_type);
     let roles = request
         .role
-        .map(|role| vec![role_name(role).to_owned()])
+        .map(|role| vec![role.as_str().to_owned()])
         .unwrap_or_default();
     let start = request.start_time.as_ref().or(request.since.as_ref());
     let end = request.end_time.as_ref().or(request.until.as_ref());
@@ -357,7 +358,7 @@ pub(super) async fn execute_describe(
             provider: Some(provider.to_owned()),
             session_id: Some(session_id.as_str().to_owned()),
             grain: Some(grain.as_str().to_owned()),
-            state: Some(output::hydration(state)),
+            state: Some(HydrationStateResultV1::from(state)),
             lineage: Some(output::lineage(lineage)),
             retrieval: Some(output::retrieval(retrieval)),
             omitted: Some(retrieval.omitted()),
@@ -379,7 +380,7 @@ pub(super) async fn execute_describe(
             provider: Some(provider.to_owned()),
             session_id: Some(session_id.as_str().to_owned()),
             grain: Some(grain.as_str().to_owned()),
-            state: state.map(output::hydration),
+            state: state.map(HydrationStateResultV1::from),
             lineage: Some(output::lineage(lineage)),
             retrieval: Some(output::retrieval(retrieval)),
             omitted: Some(retrieval.omitted()),
@@ -908,7 +909,7 @@ fn expand_result(
         provider: Some(provider.to_owned()),
         session_id: Some(session_id.as_str().to_owned()),
         grain: grain.map(|value| value.as_str().to_owned()),
-        state: state.map(output::hydration),
+        state: state.map(HydrationStateResultV1::from),
         retrieval: Some(output::retrieval(retrieval)),
         omitted: Some(retrieval.omitted()),
         temporal: Some(output::temporal_fields(temporal)),

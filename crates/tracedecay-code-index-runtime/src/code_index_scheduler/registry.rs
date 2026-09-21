@@ -56,6 +56,8 @@ mod query_authority;
 mod reconcile_failure_isolation_tests;
 mod scope_identity;
 #[cfg(test)]
+mod seat_swap_tests;
+#[cfg(test)]
 mod serving_readiness_tests;
 mod serving_reads;
 
@@ -350,6 +352,15 @@ impl ServingSwapOutcomeV1 {
     pub const fn installs(self) -> bool {
         matches!(self, Self::Seated | Self::SeatedStale)
     }
+}
+
+/// An unfinished text projection withholds the serving seat only when exact
+/// or lexical owners are still missing.
+///
+/// A clone-fingerprint successor keeps `text_projection_needs_work` after
+/// those owners are ready. That is not `published_text_owner_unfinished`.
+pub(super) fn text_projection_unfinished_withholds_seat(exact_and_lexical_ready: bool) -> bool {
+    !exact_and_lexical_ready
 }
 
 #[cfg(any(test, feature = "test-helpers"))]

@@ -33,15 +33,6 @@ enum PersistHealthDeltaError {
     Other(TraceDecayError),
 }
 
-fn health_delta_now() -> UtcMicros {
-    let micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            duration.as_micros().min(i64::MAX as u128) as i64
-        });
-    UtcMicros(micros)
-}
-
 fn health_score_ppm(value: f64) -> u64 {
     (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u64
 }
@@ -418,7 +409,7 @@ pub async fn compute_verified_health_delta(
             label = "usecases.graph.health_delta.snapshot"
         )
         .await?;
-        let observed_at = health_delta_now();
+        let observed_at = tracedecay_contracts::now_micros();
         let dimensions = health_delta_dimensions(&snapshot);
         let watermark = health_delta_watermark(
             &scope,

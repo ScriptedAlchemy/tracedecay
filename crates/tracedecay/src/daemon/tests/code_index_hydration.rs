@@ -25,13 +25,7 @@ use tracedecay_query::retrieval::hydrate::{
     HydrationWorkPermitV1, LateHydrationSource,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn request(max_hydration_bytes: u64) -> RetrievalRequest {
     RetrievalRequest {

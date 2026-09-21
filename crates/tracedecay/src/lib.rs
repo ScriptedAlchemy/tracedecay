@@ -49,6 +49,11 @@ pub use tracedecay_application::git_query;
 mod hooks;
 #[cfg(test)]
 mod host_admission_test;
+/// Declared once for the crate: several test modules need the shared harness,
+/// and loading the same file as two modules is a clippy error.
+#[cfg(test)]
+#[path = "../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
 pub mod mcp;
 pub use tracedecay_project::product_runtime::{
     ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance, product_runtime,

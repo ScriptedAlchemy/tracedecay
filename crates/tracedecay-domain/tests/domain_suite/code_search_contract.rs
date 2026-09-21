@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 
 use tracedecay_domain::{
     CandidateContribution, CompactCandidate, EvidenceRole, ExactAdmissionProof,
@@ -11,13 +10,7 @@ use tracedecay_domain::{
 
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn freshness() -> SourceFreshness {
     SourceFreshness {

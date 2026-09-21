@@ -7,8 +7,7 @@
 > the daemon consumes it through
 > `src/daemon/code_index_scheduler/graph_activation.rs`; and the SQLite graph
 > authority was deleted in `79683eb527`. Treat the unchecked boxes as
-> historical planning, not open work. Residual graph work is tracked in
-> `NEXT.md` (Grafeo memory-relations restart/isolation journey).
+> historical planning, not open work.
 
 **Goal:** Replace custom adjacency structures and graph-shaped SQLite storage with one embedded Grafeo runtime boundary while retaining SQLite only for genuinely relational, transactional, and content-bearing records.
 
@@ -883,7 +882,6 @@ git diff --check
 - Modify: `scripts/tool-sweep.sh`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `docs/plans/tracedecay-v2/33-end-to-end-performance-optimization.md`
-- Modify: `docs/plans/tracedecay-v2/NEXT.md`
 
 **Interfaces:**
 - Consumes: final graph-db-backed production journeys.

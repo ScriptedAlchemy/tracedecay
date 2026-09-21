@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tracedecay_domain::{
-    CanonicalBoundaryKindV1, CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1,
-    CanonicalObservationEnvelopeV1, CanonicalObservationFactV1, CanonicalWorkflowEvidenceKindV1,
+    CanonicalBoundaryKindV1, CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1,
+    CanonicalObservationFactV1, CanonicalWorkflowEvidenceKindV1,
 };
 use tracedecay_runtime_core::logging::log_daemon_event;
 
@@ -179,7 +179,7 @@ pub(super) fn map_canonical_claude_record(
             .as_str()
             .to_owned(),
         session_id: context.session_id.to_owned(),
-        role: canonical_role(*role).to_owned(),
+        role: role.as_str().to_owned(),
         timestamp: timestamp.or_else(|| envelope.evidence().native_timestamp()),
         ordinal: offset,
         text,
@@ -489,16 +489,6 @@ fn insert_canonical_envelope(
                 Value::String(reason),
             );
         }
-    }
-}
-
-fn canonical_role(role: CanonicalMessageRoleV1) -> &'static str {
-    match role {
-        CanonicalMessageRoleV1::User => "user",
-        CanonicalMessageRoleV1::Assistant => "assistant",
-        CanonicalMessageRoleV1::System => "system",
-        CanonicalMessageRoleV1::Tool => "tool",
-        CanonicalMessageRoleV1::Unknown => "unknown",
     }
 }
 

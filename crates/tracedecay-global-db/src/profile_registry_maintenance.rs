@@ -10,8 +10,6 @@ use std::path::{Component, Path, PathBuf};
 use crate::{
     ProjectRegistryContext, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
     registry_maintenance::ForgetRegistryProjectRows, registry_maintenance::RegistryGcReport,
-    registry_maintenance::RegistryOrphanRelinkApplyReport,
-    registry_maintenance::RegistryOrphanRelinkReport,
     registry_maintenance::forget_registry_project,
 };
 
@@ -244,18 +242,6 @@ impl ProfileRegistryMaintenanceRuntime {
             kept_store_dirs,
             rows,
         })
-    }
-
-    #[hotpath::measure(label = "daemon.profile_registry.apply_orphan_relink", future = true)]
-    pub async fn apply_orphan_relink(
-        &self,
-        report: &RegistryOrphanRelinkReport,
-    ) -> std::result::Result<RegistryOrphanRelinkApplyReport, Vec<String>> {
-        crate::registry_maintenance::apply_registry_orphan_relink_report(
-            self.profile_database.as_ref(),
-            report,
-        )
-        .await
     }
 
     #[hotpath::measure(label = "daemon.profile_registry.gc", future = true)]

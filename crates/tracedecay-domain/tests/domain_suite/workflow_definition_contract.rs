@@ -4,27 +4,19 @@ use serde_json::json;
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     AttemptId, MAX_WORKFLOW_FAN_OUT, MAX_WORKFLOW_INPUTS, MAX_WORKFLOW_OUTPUTS,
-    MAX_WORKFLOW_PREDECESSORS, MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, ProviderId, RunId,
-    TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId,
-    WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition,
-    WorkflowDefinitionError, WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef,
-    WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt,
-    WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunProjection,
-    WorkflowRunStateError, WorkflowRunStatus, WorkflowStep, WorkflowStepEffectOutcome,
-    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput, WorkflowStepStatus,
+    MAX_WORKFLOW_PREDECESSORS, MAX_WORKFLOW_STEPS, ProjectId, ProviderId, RunId, TaskId, UtcMicros,
+    WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId, WorkProviderBackendV1,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionError,
+    WorkflowDefinitionId, WorkflowFanOut, WorkflowOperationRef, WorkflowOutputArtifact,
+    WorkflowOutputName, WorkflowOutputReference, WorkflowPlacementReceipt, WorkflowRunCommand,
+    WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunProjection, WorkflowRunStateError,
+    WorkflowRunStatus, WorkflowStep, WorkflowStepEffectOutcome, WorkflowStepEffectReceipt,
+    WorkflowStepId, WorkflowStepOutput, WorkflowStepStatus,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn step(
     step_id: &str,

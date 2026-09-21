@@ -90,7 +90,7 @@ async fn open_moved_project() -> MovedProject {
     fs::write(project.join("src/lib.rs"), LIB_RS).unwrap();
     fs::write(project.join("src/source.rs"), SOURCE_RS).unwrap();
     fs::write(project.join("src/dest.rs"), DEST_RS).unwrap();
-    let (fixture, _) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
     let server = fixture
         .harness
         .server(&fixture.project_root)
@@ -423,7 +423,7 @@ async fn source_edit_rollback_refuses_an_edit_without_retained_preimages() {
     let project = dir.path().join("project");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/main.rs"), "fn old_name() {}\n").unwrap();
-    let (fixture, _) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
 
     let preview = tool_payload(
         &call_tool(

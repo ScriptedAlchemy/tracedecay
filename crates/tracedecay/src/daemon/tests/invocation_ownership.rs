@@ -1,9 +1,7 @@
 #![cfg(unix)]
 
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
-use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{MemoryStatusRequestV1, RetainedSurfaceRequestV1};
@@ -29,16 +27,6 @@ use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
 use tracedecay_daemon_service::{
     DaemonInvocationProblem, ProjectRuntimePublicationStateV1, RegisteredRetainedRuntime,
 };
-
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?}");
-}
 
 async fn committed_fixture(
     label: &str,
@@ -74,14 +62,14 @@ async fn unopened_committed_fixture(
         .expect("committed invocation source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    git(&project, &["init", "--quiet"]);
-    git(&project, &["config", "user.name", "TraceDecay Test"]);
-    git(
+    super::git(&project, &["init", "--quiet"]);
+    super::git(&project, &["config", "user.name", "TraceDecay Test"]);
+    super::git(
         &project,
         &["config", "user.email", "tracedecay@example.invalid"],
     );
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "--quiet", "-m", "base"]);
+    super::git(&project, &["add", "."]);
+    super::git(&project, &["commit", "--quiet", "-m", "base"]);
     let project_alias = temp.path().join("project-alias");
     std::os::unix::fs::symlink(&project, &project_alias).expect("committed project alias");
     let handshake = DaemonHandshake {

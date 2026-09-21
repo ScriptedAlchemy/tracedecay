@@ -978,7 +978,7 @@ fn opencode_data_dir(home: &Path) -> PathBuf {
     }
 }
 
-fn scan_error(
+pub(super) fn scan_error(
     operation: &'static str,
     path: &Path,
     error: impl std::error::Error + Send + Sync + 'static,
@@ -990,7 +990,7 @@ fn scan_error(
     }
 }
 
-const fn invalid_frame() -> TranscriptIngestError {
+pub(super) const fn invalid_frame() -> TranscriptIngestError {
     TranscriptIngestError::InvalidFrameState { provider: PROVIDER }
 }
 

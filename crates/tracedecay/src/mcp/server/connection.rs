@@ -248,10 +248,7 @@ impl McpServer {
                                 )
                             {
                                 config.pending_upload = 0;
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
+                                let now = crate::project::current_timestamp();
                                 config.last_upload_at = now;
                             }
                             if let Err(err) = config.save() {

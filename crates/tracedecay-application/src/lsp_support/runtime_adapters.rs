@@ -392,7 +392,7 @@ fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayD
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tracedecay_domain::{CodeGenerationId, ContentDigest, ManifestDigest};
+    use tracedecay_domain::{CodeGenerationId, ContentDigest};
     use tracedecay_lsp::{
         AuthorizedLspWorkspace, CanonicalWorkspaceDiagnosticRefreshRequest,
         IndexedWorkspaceDocument, ManagedDiagnosticSnapshot,
@@ -400,9 +400,7 @@ mod tests {
 
     use super::*;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     struct PublishingWorkspaceIndex {
         reads: AtomicUsize,

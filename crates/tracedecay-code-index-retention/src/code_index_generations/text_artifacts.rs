@@ -34,7 +34,7 @@ use super::{
     validate_sealed_generation_identity, validate_text_artifact_descriptor,
 };
 
-const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
+pub(super) const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
     CodeTextArtifactRetentionTransactionV1,
 > = BoundedJournalSpec {
     file_name: TEXT_ARTIFACT_TRANSACTION_FILE,
@@ -44,7 +44,7 @@ const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
     validate: validate_text_artifact_transaction,
 };
 
-const TEXT_ARTIFACT_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
+pub(super) const TEXT_ARTIFACT_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     directory: TEXT_ARTIFACT_RECEIPTS_DIRECTORY,
     label: "text-artifact retention receipt",
 };
@@ -653,7 +653,7 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
         active_pointer: active_pointer.cloned(),
         receipt: receipt.clone(),
     };
-    persist_text_artifact_transaction(store_root, &transaction)?;
+    persist_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL, &transaction)?;
     let result = (|| {
         if observe_cancel(is_cancelled) {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -671,14 +671,24 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
         if observe_cancel(is_cancelled) {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
-        write_text_artifact_receipt(store_root, &receipt)?;
+        receipt_store::write_receipt(
+            store_root,
+            &TEXT_ARTIFACT_RECEIPT_STORE,
+            &receipt.receipt_digest,
+            &receipt,
+        )?;
         cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
-        clear_text_artifact_transaction(store_root)
+        clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
     })();
     if let Err(error) = result {
-        if !text_artifact_receipt_is_durable(store_root, &receipt)? {
+        if !receipt_store::receipt_is_durable(
+            store_root,
+            &TEXT_ARTIFACT_RECEIPT_STORE,
+            &receipt.receipt_digest,
+            &receipt,
+        )? {
             rollback_staged_text_artifact_transaction(store_root, &transaction)?;
-            clear_text_artifact_transaction(store_root)?;
+            clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)?;
         }
         return Err(error);
     }
@@ -688,15 +698,20 @@ pub(super) fn execute_text_artifact_retention_under_store_lock(
 pub(super) fn recover_pending_text_artifact_transaction_unlocked(
     store_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let Some(transaction) = load_text_artifact_transaction(store_root)? else {
+    let Some(transaction) = load_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)? else {
         return Ok(());
     };
-    if text_artifact_receipt_is_durable(store_root, &transaction.receipt)? {
+    if receipt_store::receipt_is_durable(
+        store_root,
+        &TEXT_ARTIFACT_RECEIPT_STORE,
+        &transaction.receipt.receipt_digest,
+        &transaction.receipt,
+    )? {
         cleanup_committed_text_artifact_transaction(store_root, &transaction)?;
     } else {
         rollback_staged_text_artifact_transaction(store_root, &transaction)?;
     }
-    clear_text_artifact_transaction(store_root)
+    clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn text_artifact_transaction_path(store_root: &Path) -> PathBuf {
@@ -710,19 +725,6 @@ pub(super) fn text_artifact_transaction_stage_root(
     store_root
         .join(TEXT_ARTIFACT_QUARANTINE_DIRECTORY)
         .join(&receipt.receipt_digest)
-}
-
-pub(super) fn persist_text_artifact_transaction(
-    store_root: &Path,
-    transaction: &CodeTextArtifactRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    persist_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL, transaction)
-}
-
-pub(super) fn load_text_artifact_transaction(
-    store_root: &Path,
-) -> Result<Option<CodeTextArtifactRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
-    load_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn validate_text_artifact_transaction(
@@ -813,18 +815,6 @@ pub(super) fn validate_text_artifact_candidate(
         ));
     }
     Ok(())
-}
-
-pub(super) fn text_artifact_receipt_is_durable(
-    store_root: &Path,
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    receipt_store::receipt_is_durable(
-        store_root,
-        &TEXT_ARTIFACT_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
 }
 
 #[cfg(test)]
@@ -1008,12 +998,6 @@ pub(super) fn ensure_text_artifact_transaction_liveness(
     Ok(())
 }
 
-pub(super) fn clear_text_artifact_transaction(
-    store_root: &Path,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    clear_journal(store_root, &TEXT_ARTIFACT_TRANSACTION_JOURNAL)
-}
-
 pub(super) fn build_text_artifact_receipt(
     plan: &CodeGenerationRetentionPlanV1,
     active_pointer: Option<&DurablePublicationPointerV1>,
@@ -1053,18 +1037,6 @@ pub(super) fn build_text_artifact_receipt(
         reclaimed_bytes,
         completed_at_micros: completed_at.0,
     })
-}
-
-pub(super) fn write_text_artifact_receipt(
-    store_root: &Path,
-    receipt: &CodeTextArtifactRetentionReceiptV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    receipt_store::write_receipt(
-        store_root,
-        &TEXT_ARTIFACT_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
 }
 
 pub(super) fn total_text_artifact_bytes(artifacts: &[CodeTextArtifactRetentionCandidateV1]) -> u64 {

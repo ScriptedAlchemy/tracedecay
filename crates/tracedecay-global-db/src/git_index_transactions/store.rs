@@ -1196,16 +1196,15 @@ fn receipt_outcome_code(outcome: GitIndexReceiptOutcomeV1) -> &'static str {
 }
 
 fn encode<T: serde::Serialize>(value: &T) -> GitIndexTransactionStoreResult<String> {
-    serde_json::to_string(value).map_err(|error| invalid(error.to_string()))
+    crate::sqlite_persist::encode_json(value).map_err(|error| invalid(error.to_string()))
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: &str) -> GitIndexTransactionStoreResult<T> {
-    serde_json::from_str(value).map_err(|error| invalid(error.to_string()))
+    crate::sqlite_persist::decode_json(value).map_err(|error| invalid(error.to_string()))
 }
 
 fn text(row: &Row, column: i32, field: &'static str) -> GitIndexTransactionStoreResult<String> {
-    row.get::<String>(column)
-        .map_err(|error| invalid(format!("read {field}: {error}")))
+    crate::sqlite_persist::row_text(row, column, field).map_err(invalid)
 }
 
 fn optional_text(
@@ -1213,8 +1212,7 @@ fn optional_text(
     column: i32,
     field: &'static str,
 ) -> GitIndexTransactionStoreResult<Option<String>> {
-    row.get::<Option<String>>(column)
-        .map_err(|error| invalid(format!("read {field}: {error}")))
+    crate::sqlite_persist::row_optional_text(row, column, field).map_err(invalid)
 }
 
 fn invalid(message: impl Into<String>) -> GitIndexTransactionStoreError {

@@ -38,6 +38,16 @@ impl Rows {
         }
     }
 
+    pub(super) fn from_exact(rows: tracedecay_rusqlite_runtime::exact_sql::ExactSqlRows) -> Self {
+        Self::from_parts(
+            rows.columns,
+            rows.rows
+                .into_iter()
+                .map(|row| Row::from_values(row.values.into_iter().map(Value::from).collect()))
+                .collect(),
+        )
+    }
+
     pub fn column_count(&self) -> i32 {
         i32::try_from(self.columns.len()).unwrap_or(i32::MAX)
     }

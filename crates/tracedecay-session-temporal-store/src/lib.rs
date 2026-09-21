@@ -11,6 +11,7 @@
 mod handle;
 mod schema_constants;
 mod support;
+pub use support::derive_projection;
 #[cfg(test)]
 mod test_registered_impls;
 #[cfg(test)]

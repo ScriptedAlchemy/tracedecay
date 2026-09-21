@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -440,11 +440,11 @@ pub(crate) fn measure_json_payload_bytes<T: Serialize + ?Sized>(value: &T) -> Op
 }
 
 pub(crate) fn elapsed_us(started: Instant) -> u64 {
-    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    tracedecay_runtime_core::tracedecay::saturating_duration_micros(started.elapsed())
 }
 
 fn duration_as_millis_u64(budget: Duration) -> u64 {
-    u64::try_from(budget.as_millis()).unwrap_or(u64::MAX)
+    tracedecay_runtime_core::tracedecay::saturating_duration_millis(budget)
 }
 
 fn bounded_identifier(value: &str) -> String {
@@ -698,10 +698,7 @@ fn append_private_jsonl(path: &Path, line: &str) {
 }
 
 fn now_unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
+    tracedecay_runtime_core::tracedecay::unix_millis()
 }
 
 mod readiness;

@@ -17,6 +17,7 @@ use tracedecay_contracts::retained_surfaces::{
 use tracedecay_tool_catalog::RouteExposureV1;
 
 use super::registered_http::{RegisteredHttpOperation, invoke_registered_http};
+use super::require_public_catalog_route;
 use tracedecay_daemon_protocol::ApplicationSurfaceAdapterError;
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
@@ -38,18 +39,11 @@ fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapterError> {
             tracedecay_api::retained_operation_id(operation),
         )
         .map_err(ApplicationSurfaceAdapterError::Identifier)?;
-        let Some(binding) = registry
-            .get(&operation_id)
-            .and_then(|availability| availability.binding())
-        else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        };
-        if route_path != &tracedecay_api::retained_application_route_path(operation) {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-        }
+        require_public_catalog_route(
+            &registry,
+            &operation_id,
+            &tracedecay_api::retained_application_route_path(operation),
+        )?;
     }
     Ok(())
 }

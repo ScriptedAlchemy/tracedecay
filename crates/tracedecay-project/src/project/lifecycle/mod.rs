@@ -433,13 +433,7 @@ impl TraceDecay {
             let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 ts.db.clone(),
                 project_id,
-                tracedecay_domain::UtcMicros(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(1, |duration| {
-                            duration.as_micros().min(i64::MAX as u128) as i64
-                        }),
-                ),
+                tracedecay_runtime_core::tracedecay::utc_now_or_one(),
                 None,
             )
             .await;
@@ -660,13 +654,7 @@ impl TraceDecay {
             let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 ts.db.clone(),
                 project_id,
-                tracedecay_domain::UtcMicros(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(1, |duration| {
-                            duration.as_micros().min(i64::MAX as u128) as i64
-                        }),
-                ),
+                tracedecay_runtime_core::tracedecay::utc_now_or_one(),
                 None,
             )
             .await;
@@ -713,11 +701,6 @@ impl TraceDecay {
     /// sentinels, clear markers, or rewrite corrupted DBs. It is intended for
     /// status/verification commands that must be able to inspect read-only
     /// stores without mutating them.
-    #[hotpath::skip]
-    pub async fn open_read_only(project_root: &Path) -> Result<Self> {
-        Self::open_read_only_with_options(project_root, TraceDecayOpenOptions::default()).await
-    }
-
     #[hotpath::skip]
     pub async fn open_read_only_with_options(
         project_root: &Path,
@@ -896,12 +879,7 @@ mod tests {
         tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
         tracedecay_contracts::context_scout::ContextScoutAddressV1,
     ) {
-        fn id<T: TryFrom<String>>(value: &str) -> T
-        where
-            T::Error: std::fmt::Debug,
-        {
-            T::try_from(value.to_owned()).unwrap()
-        }
+        use tracedecay_domain::test_fixtures::id;
 
         let observed_at = UtcMicros(10);
         let project_id = id::<tracedecay_domain::ProjectId>("project.scout.fixture");

@@ -27,16 +27,12 @@ pub(super) fn log_scheduler_pre_admission_problem(
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     problem: &tracedecay_contracts::ApplicationProblemEnvelope,
 ) {
-    let mut fields = vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-        ),
+    let mut fields = super::scheduler_project_task_fields(project_path, task);
+    fields.extend([
         ("request_id", problem.request_id.as_str().to_owned()),
         ("problem_kind", format!("{:?}", problem.problem.kind())),
         ("problem_code", problem.problem.code.clone()),
-    ];
+    ]);
     match serde_json::to_string(problem) {
         Ok(envelope) => fields.push(("application_problem", envelope)),
         Err(error) => fields.push(("observation_error", error.to_string())),
@@ -48,18 +44,12 @@ pub(super) fn log_scheduler_admission_conflict(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
 ) {
-    log_daemon_event(
-        "scheduler_task_automation_admission_conflict",
-        &[
-            ("project", project_path.display().to_string()),
-            (
-                "task",
-                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-            ),
-            ("outcome", "skipped".to_owned()),
-            ("reason", "durable_admission_conflict".to_owned()),
-        ],
-    );
+    let mut fields = super::scheduler_project_task_fields(project_path, task);
+    fields.extend([
+        ("outcome", "skipped".to_owned()),
+        ("reason", "durable_admission_conflict".to_owned()),
+    ]);
+    log_daemon_event("scheduler_task_automation_admission_conflict", &fields);
 }
 
 fn log_scheduler_schedule_skip(
@@ -70,18 +60,12 @@ fn log_scheduler_schedule_skip(
     // Not-due/disabled tasks never reach durable admission; without this
     // counter a silent schedule skip is indistinguishable from a lost tick.
     hotpath::gauge!("daemon.effect_admission.deferred_total").inc(1_u64);
-    log_daemon_event(
-        "scheduler_task",
-        &[
-            ("project", project_path.display().to_string()),
-            (
-                "task",
-                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-            ),
-            ("outcome", "skipped".to_owned()),
-            ("reason", reason.as_str().to_owned()),
-        ],
-    );
+    let mut fields = super::scheduler_project_task_fields(project_path, task);
+    fields.extend([
+        ("outcome", "skipped".to_owned()),
+        ("reason", reason.as_str().to_owned()),
+    ]);
+    log_daemon_event("scheduler_task", &fields);
 }
 
 #[hotpath::measure(label = "daemon.scheduler.fixed_task_decision", future = true)]

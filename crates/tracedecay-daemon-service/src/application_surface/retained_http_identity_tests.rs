@@ -23,9 +23,7 @@ use super::super::registered_http::{RegisteredHttpOperation, invoke_registered_h
 use super::validated_daemon_outcome;
 use tracedecay_api::WorkOperation;
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn retained_scope(seed: &str) -> ResolvedScope {
     ResolvedScope::new(

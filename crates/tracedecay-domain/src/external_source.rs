@@ -1689,9 +1689,7 @@ impl SourceSnapshotCompletionV1 {
 mod tests {
     use super::*;
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-    }
+    use crate::test_fixtures::digest;
 
     fn binding_identity() -> SourceBindingIdentityV1 {
         SourceBindingIdentityV1 {

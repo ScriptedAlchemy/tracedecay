@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use super::automation_authority_error_response;
 use super::exact_automation_authority;
 use super::{DashboardAutomationAuthorityErrorV1, DashboardState, RequestControl};
-use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
-use crate::read_model::DashboardDomainStateV1;
+use crate::memory_api::control::{
+    fact_read_control, request_terminal_state, terminal_read_response,
+};
 use tracedecay_automation_runtime::automation::managed_skills::list_managed_skills;
 use tracedecay_automation_runtime::automation::outcomes::{
     AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
@@ -29,15 +30,7 @@ pub async fn outcomes(
 ) -> (StatusCode, Json<Value>) {
     let result = outcomes_payload(&state, &fact_read_control(&control)).await;
     if let Some(state) = request_terminal_state(&control) {
-        let (code, detail) = terminal_read_code(state);
-        return (
-            if state == DashboardDomainStateV1::TimedOut {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::REQUEST_TIMEOUT
-            },
-            Json(json!({"detail": detail, "code": code})),
-        );
+        return terminal_read_response(state);
     }
     match result {
         Ok(payload) => (StatusCode::OK, Json(payload)),

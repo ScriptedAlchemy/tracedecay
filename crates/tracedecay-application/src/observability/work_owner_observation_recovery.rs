@@ -270,8 +270,8 @@ mod tests {
     };
     use tracedecay_domain::{
         ActorId, AttemptId, CoverageStateV1, DuplicateEffectOutcomeV1, DuplicateEffortKindV1,
-        ManifestDigest, ProjectId, ProjectionGenerationId, QuantityEvidenceClassV1, RepositoryId,
-        RunId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAuthority, WorkCommandId,
+        ProjectId, ProjectionGenerationId, QuantityEvidenceClassV1, RepositoryId, RunId, TaskId,
+        UtcMicros, WorkAttemptIdentityV1, WorkAuthority, WorkCommandId,
         WorkDuplicateAdjudicationCommandV1, WorkDuplicateAdjudicationEvidenceV1,
         WorkDuplicateAdjudicationQuantitiesV1, WorkDuplicateAdjudicationReceiptV1,
         WorkDuplicateAdjudicationRevisionV1, WorkTopologyGenerationRefV1, WorktreeId,
@@ -289,9 +289,7 @@ mod tests {
         T::try_from(value.into()).unwrap()
     }
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn attempt(ordinal: u32, suffix: &str) -> WorkAttemptIdentityV1 {
         WorkAttemptIdentityV1::new(

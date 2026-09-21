@@ -177,11 +177,11 @@ async fn brokered_init(
     include_folders: &[String],
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first".to_string(),
-        });
-    }
+    reject_brokered_folder_options(
+        skip_folders,
+        include_folders,
+        "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first",
+    )?;
     // Init deliberately triggers a cold project open behind this single
     // status call. The default warming-retry grace is far tighter than a cold
     // open can take on a debug build or slow shared runner, which surfaced as
@@ -244,6 +244,19 @@ async fn brokered_init(
         ),
     }
     Ok(())
+}
+
+fn reject_brokered_folder_options(
+    skip_folders: &[String],
+    include_folders: &[String],
+    message: &'static str,
+) -> tracedecay_domain::errors::Result<()> {
+    if skip_folders.is_empty() && include_folders.is_empty() {
+        return Ok(());
+    }
+    Err(tracedecay_domain::errors::TraceDecayError::Config {
+        message: message.to_owned(),
+    })
 }
 
 fn admin_sync_status(envelope: &serde_json::Value) -> Option<String> {
@@ -555,21 +568,16 @@ pub(crate) async fn handle_sync(
     doctor: bool,
     verbose: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first".to_string(),
-        });
-    }
+    reject_brokered_folder_options(
+        &skip_folders,
+        &include_folders,
+        "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first",
+    )?;
     let resolved = super::scope::resolve_project_scope(
         tracedecay_configuration::resolve_path_with_discovery(path),
     )
     .await?;
-    let handshake = tracedecay::daemon::handshake_for_current_client(
-        Some(resolved.project_path.clone()),
-        None,
-        false,
-        false,
-    )?;
+    let handshake = super::daemon::client_handshake(Some(&resolved.project_path))?;
     let result = tracedecay::daemon::call_default_tool(
         &handshake,
         "tracedecay_admin_sync",

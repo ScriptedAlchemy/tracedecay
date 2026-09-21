@@ -7,7 +7,7 @@
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
-use tracedecay_daemon_service::{DaemonInvocationService, Lease};
+use tracedecay_daemon_service::{DaemonInvocationService, DaemonLspSessionAccess, Lease};
 use tracedecay_mcp::BrokerSelectedResponseLease;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_memory::context::CancellationToken;
@@ -478,14 +478,14 @@ impl DaemonWorkDeliveryDescriptorV1 {
                         | WorkApplicationOutcomeV1::CancelAttempt(outcome),
                     ..
                 },
-            ) => application_outcome_payload(outcome).is_some(),
+            ) => outcome.payload().is_some(),
             (
                 DaemonWorkDeliveryKindV1::ArtifactPage,
                 DaemonInvocationOutcome::WorkApplication {
                     outcome: WorkApplicationOutcomeV1::HydrateArtifacts(outcome),
                     ..
                 },
-            ) => application_outcome_payload(outcome).is_some_and(|hydration| {
+            ) => outcome.payload().is_some_and(|hydration| {
                 matches!(
                     hydration,
                     tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
@@ -566,7 +566,7 @@ impl DaemonWorkDeliveryDescriptorV1 {
             return Vec::new();
         };
         let Some(tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }) =
-            application_outcome_payload(outcome)
+            outcome.payload()
         else {
             return Vec::new();
         };
@@ -574,16 +574,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
             .iter()
             .map(|attempt| attempt.identity.clone())
             .collect()
-    }
-}
-
-fn application_outcome_payload<T>(
-    outcome: &tracedecay_contracts::ApplicationOutcome<T>,
-) -> Option<&T> {
-    match outcome {
-        tracedecay_contracts::ApplicationOutcome::Evidence(result) => result.payload.as_ref(),
-        tracedecay_contracts::ApplicationOutcome::Preview(result) => result.payload.as_ref(),
-        tracedecay_contracts::ApplicationOutcome::Effect(result) => result.payload.as_ref(),
     }
 }
 
@@ -803,227 +793,237 @@ async fn serve_broker_socket_client(
     serve_broker_socket_client_inner(stream, engine, auth_token, admission_class).await
 }
 
+/// Drive one retained daemon-invocation connection: write each response,
+/// settle its delivery ACK, and keep reading until the peer or the daemon
+/// stops the connection.
+///
+/// Unix and portable brokers differ only in how a request becomes a response.
+/// The ACK state machine is one path so a dropped write, a missed deadline,
+/// and a mismatched ACK id settle the same attempts on both.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Delivery ACK settlement is one state machine shared by the Unix and portable brokers."
+)]
+async fn drive_retained_invocation_responses<'a>(
+    mut invocation: std::result::Result<DaemonInvocationRequest, DaemonInvocationResponse>,
+    transport: &mut BrokerStreamTransport,
+    service: &DaemonInvocationService,
+    handshake: &DaemonHandshake,
+    lifecycle: &DaemonLifecycle,
+    owned_lsp_sessions: &mut HashMap<String, DaemonLspSessionAccess>,
+    mut execute: impl FnMut(
+        DaemonInvocationRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = DaemonInvocationResponse> + Send + 'a>,
+    >,
+) -> Result<()> {
+    let mut pending_line = None;
+    loop {
+        let delivery = invocation
+            .as_ref()
+            .ok()
+            .and_then(|request| DaemonWorkDeliveryDescriptorV1::from_request(request, handshake));
+        let request_id = invocation
+            .as_ref()
+            .ok()
+            .map(|request| request.request_id.clone());
+        let ack_deadline = invocation
+            .as_ref()
+            .ok()
+            .and_then(|request| request.delivery_ack_deadline())
+            .cloned();
+        let session_transition = invocation
+            .as_ref()
+            .ok()
+            .and_then(invocation_lsp_session_transition);
+        let response = match invocation {
+            Ok(request) => execute(request).await,
+            Err(response) => response,
+        };
+        update_connection_lsp_sessions(owned_lsp_sessions, session_transition.as_ref(), &response);
+        let delivery = delivery.filter(|delivery| delivery.is_successful_delivery(&response));
+        // Resolve fan-out bindings before the socket response crosses
+        // the wire. The same immutable attempts are used for a
+        // Delivered or Dropped ACK; no mutable Work lookup occurs at
+        // terminal-ACK time.
+        let delivery_attempts = if let Some(delivery) = delivery {
+            Some(
+                delivery
+                    .attempts(service, handshake.project_path.as_deref(), &response)
+                    .await,
+            )
+        } else {
+            None
+        };
+        let write_result = write_daemon_invocation_response(transport, &response).await;
+        if let Err(error) = write_result {
+            let recorder = service
+                .delivery_settlement_recorder(handshake.project_path.as_deref())
+                .await;
+            let _ = settle_daemon_work_delivery(
+                delivery_attempts.as_deref(),
+                recorder.as_ref(),
+                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+            );
+            return Err(error);
+        }
+        if delivery_attempts.is_some() {
+            let recorder = service
+                .delivery_settlement_recorder(handshake.project_path.as_deref())
+                .await;
+            let ack_timeout = ack_deadline
+                .as_ref()
+                .and_then(tracedecay_daemon_protocol::deadline_remaining);
+            let Some(ack_timeout) = ack_timeout else {
+                let _ = settle_daemon_work_delivery(
+                    delivery_attempts.as_deref(),
+                    recorder.as_ref(),
+                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                    Some(tracedecay_domain::DeliveryDropReasonV1::Deadline),
+                );
+                return Ok(());
+            };
+            let delivery_cancellation = request_id
+                .as_deref()
+                .and_then(|request_id| service.request_cancellations().register(request_id));
+            let cancellation = delivery_cancellation.as_ref().map(Lease::token);
+            let ack_line = match await_daemon_delivery_ack(
+                transport,
+                ack_timeout,
+                cancellation,
+                lifecycle.wait_for_draining(),
+            )
+            .await
+            {
+                Ok(wait) => match classify_daemon_delivery_ack_wait(wait) {
+                    Ok(line) => line,
+                    Err(reason) => {
+                        let _ = settle_daemon_work_delivery(
+                            delivery_attempts.as_deref(),
+                            recorder.as_ref(),
+                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                            Some(reason),
+                        );
+                        return Ok(());
+                    }
+                },
+                Err(error) => {
+                    let _ = settle_daemon_work_delivery(
+                        delivery_attempts.as_deref(),
+                        recorder.as_ref(),
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                        Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                    );
+                    return Err(error);
+                }
+            };
+            match ack_line {
+                Some(line) => {
+                    let ack =
+                        tracedecay_daemon_protocol::parse_daemon_invocation_delivery_ack_request(
+                            &line,
+                        );
+                    if let Some(ack) = ack.filter(|ack| {
+                        request_id
+                            .as_deref()
+                            .is_some_and(|request_id| ack.target_request_id() == request_id)
+                    }) {
+                        let target_request_id = ack.target_request_id().to_owned();
+                        let (outcome, drop_reason) = ack.outcome();
+                        let settlement_result = settle_daemon_work_delivery(
+                            delivery_attempts.as_deref(),
+                            recorder.as_ref(),
+                            outcome,
+                            drop_reason,
+                        );
+                        let ack_response = match &settlement_result {
+                            Ok(()) => {
+                                tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::accepted(
+                                    target_request_id.clone(),
+                                )
+                            }
+                            Err(reason) => {
+                                tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::rejected(
+                                    target_request_id.clone(),
+                                    *reason,
+                                )
+                            }
+                        };
+                        write_daemon_delivery_ack_response(transport, &ack_response).await?;
+                        if let Err(reason) = settlement_result {
+                            return Err(TraceDecayError::Config {
+                                message: format!(
+                                    "daemon could not durably record Work delivery ACK: {reason:?}"
+                                ),
+                            });
+                        }
+                    } else {
+                        let _ = settle_daemon_work_delivery(
+                            delivery_attempts.as_deref(),
+                            recorder.as_ref(),
+                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                            Some(tracedecay_domain::DeliveryDropReasonV1::Invalid),
+                        );
+                        pending_line = Some(line);
+                    }
+                }
+                None => {
+                    let _ = settle_daemon_work_delivery(
+                        delivery_attempts.as_deref(),
+                        recorder.as_ref(),
+                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                        Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        let next_line = if let Some(line) = pending_line.take() {
+            Some(line)
+        } else {
+            tokio::select! {
+                result = read_line_handling_wire_oversized(transport) => result?,
+                () = lifecycle.wait_for_draining() => return Ok(()),
+            }
+        };
+        let Some(next_line) = next_line else {
+            return Ok(());
+        };
+        let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+            return Ok(());
+        };
+        invocation = next_invocation;
+    }
+}
+
 /// LSP sessions this connection owns are cleaned up exactly once, on every
 /// exit path of the invocation loop.
 #[cfg(unix)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "LSP sessions this connection owns are cleaned up exactly once, on every exit path of the invocation loop."
-)]
 async fn serve_retained_invocation_connection(
-    mut invocation: std::result::Result<DaemonInvocationRequest, DaemonInvocationResponse>,
+    invocation: std::result::Result<DaemonInvocationRequest, DaemonInvocationResponse>,
     mut transport: BrokerStreamTransport,
     engine: DaemonEngine,
     handshake: DaemonHandshake,
 ) -> Result<()> {
     let mut owned_lsp_sessions = HashMap::new();
-    let mut pending_line = None;
+    let service = engine.invocation.service.clone();
+    let lifecycle = engine.lifecycle.clone();
     // Keep the retained invocation loop out of the broker connection
     // future's inline state. With Hotpath enabled the surrounding
     // transport wrapper is polled on Tokio's ordinary worker stack;
     // embedding this loop there makes construction alone exceed that
     // stack before the first request can be served.
-    let result = boxed_broker_connection_phase(async {
-                loop {
-                    let delivery = invocation.as_ref().ok().and_then(|request| {
-                        DaemonWorkDeliveryDescriptorV1::from_request(request, &handshake)
-                    });
-                    let request_id = invocation
-                        .as_ref()
-                        .ok()
-                        .map(|request| request.request_id.clone());
-                    let ack_deadline = invocation
-                        .as_ref()
-                        .ok()
-                        .and_then(|request| request.delivery_ack_deadline())
-                        .cloned();
-                    let session_transition = invocation
-                        .as_ref()
-                        .ok()
-                        .and_then(invocation_lsp_session_transition);
-                    let response = match invocation {
-                        Ok(request) => {
-                            Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
-                        }
-                        Err(response) => response,
-                    };
-                    update_connection_lsp_sessions(
-                        &mut owned_lsp_sessions,
-                        session_transition.as_ref(),
-                        &response,
-                    );
-                    let delivery =
-                        delivery.filter(|delivery| delivery.is_successful_delivery(&response));
-                    // Resolve fan-out bindings before the socket response crosses
-                    // the wire. The same immutable attempts are used for a
-                    // Delivered or Dropped ACK; no mutable Work lookup occurs at
-                    // terminal-ACK time.
-                    let delivery_attempts = if let Some(delivery) = delivery {
-                        Some(
-                            delivery
-                                .attempts(
-                                    &engine.invocation.service,
-                                    handshake.project_path.as_deref(),
-                                    &response,
-                                )
-                                .await,
-                        )
-                    } else {
-                        None
-                    };
-                    let write_result =
-                        write_daemon_invocation_response(&mut transport, &response).await;
-                    if let Err(error) = write_result {
-                        let recorder = engine
-                            .invocation
-                            .service
-                            .delivery_settlement_recorder(handshake.project_path.as_deref())
-                            .await;
-                        let _ = settle_daemon_work_delivery(
-                            delivery_attempts.as_deref(),
-                            recorder.as_ref(),
-                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                            Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                        );
-                        return Err(error);
-                    }
-                    if delivery_attempts.is_some() {
-                        let recorder = engine
-                            .invocation
-                            .service
-                            .delivery_settlement_recorder(handshake.project_path.as_deref())
-                            .await;
-                        let ack_timeout = ack_deadline
-                            .as_ref()
-                            .and_then(tracedecay_daemon_protocol::deadline_remaining);
-                        let Some(ack_timeout) = ack_timeout else {
-                            let _ = settle_daemon_work_delivery(
-                                delivery_attempts.as_deref(),
-                                recorder.as_ref(),
-                                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                Some(tracedecay_domain::DeliveryDropReasonV1::Deadline),
-                            );
-                            return Ok(());
-                        };
-                        let delivery_cancellation = request_id.as_deref().and_then(|request_id| {
-                            engine
-                                .invocation
-                                .service
-                                .request_cancellations()
-                                .register(request_id)
-                        });
-                        let cancellation = delivery_cancellation
-                            .as_ref()
-                            .map(Lease::token);
-                        let ack_line = match await_daemon_delivery_ack(
-                            &mut transport,
-                            ack_timeout,
-                            cancellation,
-                            engine.lifecycle.wait_for_draining(),
-                        )
-                        .await
-                        {
-                            Ok(wait) => match classify_daemon_delivery_ack_wait(wait) {
-                                Ok(line) => line,
-                                Err(reason) => {
-                                    let _ = settle_daemon_work_delivery(
-                                        delivery_attempts.as_deref(),
-                                        recorder.as_ref(),
-                                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                        Some(reason),
-                                    );
-                                    return Ok(());
-                                }
-                            },
-                            Err(error) => {
-                                let _ = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                    Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                                );
-                                return Err(error);
-                            }
-                        };
-                        match ack_line {
-                            Some(line) => {
-                                let ack = tracedecay_daemon_protocol::parse_daemon_invocation_delivery_ack_request(
-                                    &line,
-                                );
-                                if let Some(ack) = ack.filter(|ack| {
-                                    request_id
-                                        .as_deref()
-                                        .is_some_and(|request_id| ack.target_request_id() == request_id)
-                                }) {
-                                    let target_request_id = ack.target_request_id().to_owned();
-                                    let (outcome, drop_reason) = ack.outcome();
-                                    let settlement_result = settle_daemon_work_delivery(
-                                        delivery_attempts.as_deref(),
-                                        recorder.as_ref(),
-                                        outcome,
-                                        drop_reason,
-                                    );
-                                    let ack_response = match &settlement_result {
-                                        Ok(()) => {
-                                            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::accepted(
-                                                target_request_id.clone(),
-                                            )
-                                        }
-                                        Err(reason) => {
-                                            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::rejected(
-                                                target_request_id.clone(),
-                                                *reason,
-                                            )
-                                        }
-                                    };
-                                    write_daemon_delivery_ack_response(&mut transport, &ack_response)
-                                        .await?;
-                                    if let Err(reason) = settlement_result {
-                                        return Err(TraceDecayError::Config {
-                                            message: format!(
-                                                "daemon could not durably record Work delivery ACK: {reason:?}"
-                                            ),
-                                        });
-                                    }
-                                } else {
-                                    let _ = settle_daemon_work_delivery(
-                                        delivery_attempts.as_deref(),
-                                        recorder.as_ref(),
-                                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                        Some(tracedecay_domain::DeliveryDropReasonV1::Invalid),
-                                    );
-                                    pending_line = Some(line);
-                                }
-                            }
-                            None => {
-                                let _ = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                    Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                                );
-                                return Ok(())
-                            }
-                        }
-                    }
-                    let next_line = if let Some(line) = pending_line.take() {
-                        Some(line)
-                    } else {
-                        tokio::select! {
-                            result = read_line_handling_wire_oversized(&mut transport) => result?,
-                            () = engine.lifecycle.wait_for_draining() => return Ok(()),
-                        }
-                    };
-                    let Some(next_line) = next_line else {
-                        return Ok(());
-                    };
-                    let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
-                        return Ok(());
-                    };
-                    invocation = next_invocation;
-                }
-            })
-            .await;
+    let result = boxed_broker_connection_phase(drive_retained_invocation_responses(
+        invocation,
+        &mut transport,
+        &service,
+        &handshake,
+        &lifecycle,
+        &mut owned_lsp_sessions,
+        |request| Box::pin(execute_daemon_invocation(&engine, &handshake, request)),
+    ))
+    .await;
     cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
     result
 }
@@ -1811,217 +1811,30 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     }
     if let Some(invocation_request) = parse_daemon_invocation_request(first_request.raw()) {
-        let mut invocation_request = invocation_request;
         let mut owned_lsp_sessions = HashMap::new();
-        let mut pending_line = None;
-        let result = async {
-            loop {
-                let delivery = invocation_request.as_ref().ok().and_then(|request| {
-                    DaemonWorkDeliveryDescriptorV1::from_request(request, &handshake)
-                });
-                let request_id = invocation_request
-                    .as_ref()
-                    .ok()
-                    .map(|request| request.request_id.clone());
-                let ack_deadline = invocation_request
-                    .as_ref()
-                    .ok()
-                    .and_then(|request| request.delivery_ack_deadline())
-                    .cloned();
-                let session_transition = invocation_request
-                    .as_ref()
-                    .ok()
-                    .and_then(invocation_lsp_session_transition);
-                let response = match invocation_request {
-                    Ok(request) => {
-                        Box::pin(execute_portable_daemon_invocation(
-                            lifecycle.clone(),
-                            store_administration.clone(),
-                            Arc::clone(&project_open_gates),
-                            &handshake,
-                            &invocation,
-                            http_application_registry.clone(),
-                            request,
-                            #[cfg(test)]
-                            project_open_attempts.clone(),
-                        ))
-                        .await
-                    }
-                    Err(response) => response,
-                };
-                update_connection_lsp_sessions(
-                    &mut owned_lsp_sessions,
-                    session_transition.as_ref(),
-                    &response,
-                );
-                let delivery =
-                    delivery.filter(|delivery| delivery.is_successful_delivery(&response));
-                // Resolve fan-out bindings before the socket response crosses
-                // the wire. The same immutable attempts are used for a
-                // Delivered or Dropped ACK; no mutable Work lookup occurs at
-                // terminal-ACK time.
-                let delivery_attempts = if let Some(delivery) = delivery {
-                    Some(
-                        delivery
-                            .attempts(
-                                &invocation.service,
-                                handshake.project_path.as_deref(),
-                                &response,
-                            )
-                            .await,
-                    )
-                } else {
-                    None
-                };
-                let write_result =
-                    write_daemon_invocation_response(&mut transport, &response).await;
-                if let Err(error) = write_result {
-                    let recorder = invocation
-                        .service
-                        .delivery_settlement_recorder(handshake.project_path.as_deref())
-                        .await;
-                    let _ = settle_daemon_work_delivery(
-                        delivery_attempts.as_deref(),
-                        recorder.as_ref(),
-                        tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                        Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                    );
-                    return Err(error);
-                }
-                if delivery_attempts.is_some() {
-                    let recorder = invocation
-                        .service
-                        .delivery_settlement_recorder(handshake.project_path.as_deref())
-                        .await;
-                    let ack_timeout = ack_deadline
-                        .as_ref()
-                        .and_then(tracedecay_daemon_protocol::deadline_remaining);
-                    let Some(ack_timeout) = ack_timeout else {
-                        let _ = settle_daemon_work_delivery(
-                            delivery_attempts.as_deref(),
-                            recorder.as_ref(),
-                            tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                            Some(tracedecay_domain::DeliveryDropReasonV1::Deadline),
-                        );
-                        return Ok(());
-                    };
-                    let delivery_cancellation = request_id.as_deref().and_then(|request_id| {
-                        invocation
-                            .service
-                            .request_cancellations()
-                            .register(request_id)
-                    });
-                    let cancellation = delivery_cancellation
-                        .as_ref()
-                        .map(Lease::token);
-                    let ack_line = match await_daemon_delivery_ack(
-                        &mut transport,
-                        ack_timeout,
-                        cancellation,
-                        lifecycle.wait_for_draining(),
-                    )
-                    .await
-                    {
-                        Ok(wait) => match classify_daemon_delivery_ack_wait(wait) {
-                            Ok(line) => line,
-                            Err(reason) => {
-                                let _ = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                    Some(reason),
-                                );
-                                return Ok(());
-                            }
-                        },
-                        Err(error) => {
-                            let _ = settle_daemon_work_delivery(
-                                delivery_attempts.as_deref(),
-                                recorder.as_ref(),
-                                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                            );
-                            return Err(error);
-                        }
-                    };
-                    match ack_line {
-                        Some(line) => {
-                            let ack = tracedecay_daemon_protocol::parse_daemon_invocation_delivery_ack_request(
-                                &line,
-                            );
-                            if let Some(ack) = ack.filter(|ack| {
-                                request_id
-                                    .as_deref()
-                                    .is_some_and(|request_id| ack.target_request_id() == request_id)
-                            }) {
-                                let target_request_id = ack.target_request_id().to_owned();
-                                let (outcome, drop_reason) = ack.outcome();
-                                let settlement_result = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    outcome,
-                                    drop_reason,
-                                );
-                                let ack_response = match &settlement_result {
-                                    Ok(()) => {
-                                        tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::accepted(
-                                            target_request_id.clone(),
-                                        )
-                                    }
-                                    Err(reason) => {
-                                        tracedecay_daemon_protocol::DaemonInvocationDeliveryAckResponse::rejected(
-                                            target_request_id.clone(),
-                                            *reason,
-                                        )
-                                    }
-                                };
-                                write_daemon_delivery_ack_response(&mut transport, &ack_response)
-                                    .await?;
-                                if let Err(reason) = settlement_result {
-                                    return Err(TraceDecayError::Config {
-                                        message: format!(
-                                            "daemon could not durably record Work delivery ACK: {reason:?}"
-                                        ),
-                                    });
-                                }
-                            } else {
-                                let _ = settle_daemon_work_delivery(
-                                    delivery_attempts.as_deref(),
-                                    recorder.as_ref(),
-                                    tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                    Some(tracedecay_domain::DeliveryDropReasonV1::Invalid),
-                                );
-                                pending_line = Some(line);
-                            }
-                        }
-                        None => {
-                            let _ = settle_daemon_work_delivery(
-                                delivery_attempts.as_deref(),
-                                recorder.as_ref(),
-                                tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
-                                Some(tracedecay_domain::DeliveryDropReasonV1::Disconnected),
-                            );
-                            return Ok(())
-                        }
-                    }
-                }
-                let next_line = if let Some(line) = pending_line.take() {
-                    Some(line)
-                } else {
-                    tokio::select! {
-                        result = read_line_handling_wire_oversized(&mut transport) => result?,
-                        () = lifecycle.wait_for_draining() => return Ok(()),
-                    }
-                };
-                let Some(next_line) = next_line else {
-                    return Ok(());
-                };
-                let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
-                    return Ok(());
-                };
-                invocation_request = next_invocation;
-            }
-        }
+        let service = invocation.service.clone();
+        let lifecycle = lifecycle.clone();
+        let result = Box::pin(drive_retained_invocation_responses(
+            invocation_request,
+            &mut transport,
+            &service,
+            &handshake,
+            &lifecycle,
+            &mut owned_lsp_sessions,
+            |request| {
+                Box::pin(execute_portable_daemon_invocation(
+                    lifecycle.clone(),
+                    store_administration.clone(),
+                    Arc::clone(&project_open_gates),
+                    &handshake,
+                    &invocation,
+                    http_application_registry.clone(),
+                    request,
+                    #[cfg(test)]
+                    project_open_attempts.clone(),
+                ))
+            },
+        ))
         .await;
         cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
         return result;

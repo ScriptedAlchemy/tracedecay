@@ -8,6 +8,7 @@ const allowedTypes = [
   "perf",
   "refactor",
   "revert",
+  "simplify",
   "style",
   "test",
 ];

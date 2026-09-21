@@ -257,19 +257,14 @@ fn permits_synchronous_exhaustive_scan(root: &Path) -> bool {
 }
 
 fn bounded_statement(statement: &str) -> String {
-    let cleaned: String = statement
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
+    let cleaned = tracedecay_domain::fold_control_characters(statement);
     let cleaned = cleaned.trim();
     if cleaned.len() <= DOCTOR_TEXT_LIMIT {
         return cleaned.to_string();
     }
-    let mut end = DOCTOR_TEXT_LIMIT;
-    while end > 0 && !cleaned.is_char_boundary(end) {
-        end -= 1;
-    }
-    cleaned[..end].trim().to_string()
+    tracedecay_domain::utf8_prefix_at_or_before(cleaned, DOCTOR_TEXT_LIMIT)
+        .trim()
+        .to_string()
 }
 
 fn orphan_store_doctor_finding(finding: &OrphanStoreFinding) -> Option<DoctorStorageFindingV1> {

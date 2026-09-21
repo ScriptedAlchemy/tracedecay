@@ -119,11 +119,6 @@ pub enum GitHubStackSignalAppendOutcomeV1 {
 
 impl GitHubStackSignalAppendOutcomeV1 {
     #[hotpath::skip]
-    pub const fn is_saturated(&self) -> bool {
-        matches!(self, Self::Saturated { .. })
-    }
-
-    #[hotpath::skip]
     pub const fn pending_count(&self) -> usize {
         match self {
             Self::Appended { pending_count, .. }

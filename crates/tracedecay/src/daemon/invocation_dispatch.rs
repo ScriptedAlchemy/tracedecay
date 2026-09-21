@@ -178,6 +178,43 @@ fn scope_set_cas_admission(
     Some((request, *observed_at, deadline, cancellation))
 }
 
+struct InvocationCancellation {
+    request_id: String,
+    scope_set_cas_lease: Option<Lease>,
+    lsp_lease: Option<Lease>,
+    lsp_cancellation: Option<CancellationToken>,
+    request_cancellation: Option<CancellationToken>,
+}
+
+fn invocation_cancellation(
+    request: &DaemonInvocationRequest,
+    service: &DaemonInvocationService,
+) -> Option<InvocationCancellation> {
+    let request_id = request.request_id.clone();
+    let request_cancellations = service.request_cancellations();
+    let scope_set_cas_lease = if scope_set_cas_admission(request).is_some() {
+        Some(request_cancellations.register(&request_id)?)
+    } else {
+        None
+    };
+    let lsp_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
+        Some(request_cancellations.register(&request_id)?)
+    } else {
+        None
+    };
+    let lsp_cancellation = lsp_lease.as_ref().map(Lease::token);
+    let request_cancellation = lsp_cancellation
+        .clone()
+        .or_else(|| scope_set_cas_lease.as_ref().map(Lease::token));
+    Some(InvocationCancellation {
+        request_id,
+        scope_set_cas_lease,
+        lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    })
+}
+
 fn selected_root_handshake(handshake: &DaemonHandshake, root: &Path) -> DaemonHandshake {
     DaemonHandshake {
         project_path: Some(root.to_path_buf()),
@@ -312,38 +349,21 @@ pub(super) async fn execute_portable_daemon_invocation(
     if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
     }
-    let request_id = request.request_id.clone();
-    let request_cancellations = invocation.service.request_cancellations();
-    let scope_set_cas_cancellation_lease = if scope_set_cas_admission(&request).is_some() {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
+    let InvocationCancellation {
+        request_id,
+        scope_set_cas_lease: _scope_set_cas_lease,
+        lsp_lease: _lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    } = match invocation_cancellation(&request, &invocation.service) {
+        Some(cancellation) => cancellation,
+        None => {
+            return DaemonInvocationResponse::problem(
+                request.request_id.clone(),
+                DaemonInvocationProblem::InvalidRequest,
+            );
         }
-    } else {
-        None
     };
-    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = lsp_cancellation
-        .clone()
-        .or_else(|| scope_set_cas_cancellation_lease.as_ref().map(Lease::token));
     let lsp_project_open_gates = Arc::clone(&project_open_gates);
     #[cfg(test)]
     let lsp_project_open_attempts = project_open_attempts.clone();
@@ -694,38 +714,21 @@ pub(super) async fn execute_daemon_invocation(
     if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
     }
-    let request_id = request.request_id.clone();
-    let request_cancellations = engine.invocation.service.request_cancellations();
-    let scope_set_cas_cancellation_lease = if scope_set_cas_admission(&request).is_some() {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
+    let InvocationCancellation {
+        request_id,
+        scope_set_cas_lease: _scope_set_cas_lease,
+        lsp_lease: _lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    } = match invocation_cancellation(&request, &engine.invocation.service) {
+        Some(cancellation) => cancellation,
+        None => {
+            return DaemonInvocationResponse::problem(
+                request.request_id.clone(),
+                DaemonInvocationProblem::InvalidRequest,
+            );
         }
-    } else {
-        None
     };
-    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = lsp_cancellation
-        .clone()
-        .or_else(|| scope_set_cas_cancellation_lease.as_ref().map(Lease::token));
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;

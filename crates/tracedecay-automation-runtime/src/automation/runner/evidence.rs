@@ -2,10 +2,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_domain::TemporalCoverageCountsV1;
 
-use crate::ports::session_evidence::{LcmGrepHit, LcmGrepSort, LcmScope};
+use tracedecay_lcm::{LcmGrepHit, LcmGrepSort, LcmScope};
 
 use crate::automation::artifacts::sha256_json;
 use crate::automation::managed_skills::list_managed_skills;
+use crate::automation::normalized_non_empty;
 use crate::automation::skill_usage::{
     DEFAULT_SKILL_OVERLAP_LIMIT, ingest_project_analytics_events, skill_overlap_candidates,
     stale_skill_recommendations, summarize_skill_usage,
@@ -278,15 +279,6 @@ fn session_reflector_replay_allowed(
     }
 
     matches!(scope, LcmScope::All) || session_id.is_some()
-}
-
-fn normalized_non_empty(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
 }
 
 fn compare_evidence_items(

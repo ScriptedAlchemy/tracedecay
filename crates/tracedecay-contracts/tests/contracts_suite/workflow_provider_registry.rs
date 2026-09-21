@@ -4,21 +4,13 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    ManifestDigest, ProviderId, RunId, WorkProviderBackendV1, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkflowStepId,
+    ProviderId, RunId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkflowStepId,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn registration(
     provider: &str,

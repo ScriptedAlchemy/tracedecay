@@ -274,14 +274,6 @@ impl SourceCanonicalRefetchAuthorityV1 {
         self.binding == *refresh.binding()
             && self.original_refresh_digest == *refresh.receipt_digest()
     }
-
-    /// Reports whether this opaque capability names the exact refresh.
-    ///
-    /// The capability still exposes no binding fields or constructor, so a
-    /// provider or transport cannot mint or retarget it.
-    pub fn authorizes(&self, refresh: &SourceRefreshReceiptV1) -> bool {
-        self.matches(refresh)
-    }
 }
 
 #[derive(Clone, Debug)]

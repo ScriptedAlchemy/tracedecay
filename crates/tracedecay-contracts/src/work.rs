@@ -9,7 +9,7 @@ use tracedecay_policy::work_loop::{
     WorkRouteOverrideV1,
 };
 
-use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
+use crate::{ApplicationProblem, RequestContext};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkRoutingSnapshotErrorV1 {
@@ -75,12 +75,10 @@ pub(crate) fn work_authority(
         context.actor().clone(),
         context.grant().digest.clone(),
     )
-    .map_err(|_| ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work.invalid-history".to_owned(),
-            message: "The Work command or stored history is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
+    .map_err(|_| {
+        ApplicationProblem::invalid_request(
+            "application.work.invalid-history",
+            "The Work command or stored history is invalid.",
+        )
     })
 }

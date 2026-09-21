@@ -77,15 +77,10 @@ fn scoped_retained_invalid_request_preserves_rejection_classification() {
     let response = DaemonInvocationResponse::retained_application_problem(
         "request.retained.observability",
         scope,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic::new(
-                "retained.observability.invalid",
-                "The retained observability fixture request is invalid",
-            )
-            .expect("diagnostic"),
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(
+            "retained.observability.invalid",
+            "The retained observability fixture request is invalid",
+        ),
     );
 
     assert_eq!(

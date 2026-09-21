@@ -10,8 +10,7 @@ pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolStat
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Statement;
 use super::{
-    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, Value,
-    WriteStatement,
+    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, WriteStatement,
 };
 
 const READER_WAIT: Duration = Duration::from_secs(5);
@@ -166,30 +165,14 @@ impl Connection {
         })
         .await
         .map_err(join_error)??;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        Ok(Rows::from_exact(rows))
     }
 
     #[hotpath::skip]
     pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
         let runtime = Arc::clone(&self.runtime);
         let rows = runtime.checkpoint_wal_truncate_async().await?;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        Ok(Rows::from_exact(rows))
     }
 
     #[hotpath::skip]
@@ -209,15 +192,6 @@ impl Connection {
         tokio::spawn(async move { runtime.release_connection_memory_async().await })
             .await
             .map_err(join_error)?
-            .map_err(Into::into)
-    }
-
-    #[hotpath::skip]
-    pub async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        runtime
-            .repair_incremental_auto_vacuum_async()
-            .await
             .map_err(Into::into)
     }
 

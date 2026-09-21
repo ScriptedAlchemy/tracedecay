@@ -1471,7 +1471,6 @@ fn is_known_local_filesystem(filesystem_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use std::fs;
 
     use tempfile::TempDir;
@@ -1481,13 +1480,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: Debug,
-    {
-        T::try_from(value.to_owned()).expect("canonical fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn incarnation() -> StoreIncarnationV1 {
         StoreIncarnationV1::new(1).expect("non-zero fixture incarnation")

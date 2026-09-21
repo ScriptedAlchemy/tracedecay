@@ -1,6 +1,8 @@
 #![allow(dead_code)] // shared test support: each suite binary compiles this module and uses a subset
 
 pub mod fixture;
+#[cfg(feature = "test-transport")]
+pub mod mcp_response;
 pub mod repository_layout;
 
 use std::ffi::{OsStr, OsString};
@@ -117,44 +119,10 @@ pub async fn open_test_database(
     Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Existing).await
 }
 
-/// Sets (or removes) an environment variable for its lifetime, restoring the
-/// previous value on drop.
-pub struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    pub fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-
-    /// Removes `key` for the guard's lifetime, so tests can exercise the
-    /// no-override path.
-    pub fn unset(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
+#[path = "../../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
+#[allow(unused_imports)] // each suite binary uses a subset
+pub use isolated_profile::{EnvVarGuard, apply_isolated_profile_env, run_ok};
 
 /// Query lanes a terminal code-index answer must report as `"complete"`.
 /// Daemon journeys and the MCP readiness wait share this set.

@@ -2,7 +2,7 @@
 //! partial-day boundary pages.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{CoverageStateV1, UtcMicros};
+use tracedecay_domain::CoverageStateV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::clock::now_micros;
@@ -10,7 +10,7 @@ use crate::observability::{
     ObservabilityFuture, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
 };
 use crate::work::work_authority;
-use crate::{ApplicationProblem, RequestAdmission, RequestContext, RetryDirective};
+use crate::{ApplicationProblem, RequestContext, RetryDirective};
 
 use super::projection::TELEMETRY_DROP_EVENT_KIND_V1;
 use super::rollup::{
@@ -20,7 +20,7 @@ use super::rollup::{
     canonical_execution_topology_rollup_fragment_bytes,
     project_execution_topology_fragments_with_boundaries,
 };
-use super::support::{invalid_problem, unavailable_model, unavailable_model_with_state_at};
+use super::support::{unavailable_model, unavailable_model_with_state_at};
 use super::{
     EXECUTION_TOPOLOGY_CAPABILITY_ID_V1, EXECUTION_TOPOLOGY_EVENT_KINDS_V1,
     EXECUTION_TOPOLOGY_USE_CASE_ID_V1, ExecutionMetricUnavailableV1,
@@ -77,7 +77,7 @@ where
 {
     validate_request(request)?;
     let observed_at = now_micros();
-    admit(context, observed_at)?;
+    ApplicationProblem::ensure_admitted(context, observed_at)?;
     authorize(context)?;
     let authorized_scope_ref = work_authority(context)?.project_id().as_str().to_owned();
     let observed_at_micros = observed_at.0;
@@ -106,7 +106,7 @@ where
                 ExecutionMetricUnavailableV1::EventBudgetExceeded,
             ));
         }
-        admit(context, now_micros())?;
+        ApplicationProblem::ensure_admitted(context, now_micros())?;
         let page = match observations
             .query(boundary_query(
                 &authorized_scope_ref,
@@ -182,7 +182,7 @@ where
     }
 
     let fragments = if let Some(horizon) = full_days {
-        admit(context, now_micros())?;
+        ApplicationProblem::ensure_admitted(context, now_micros())?;
         let page = match rollups
             .query_rollup_fragments(ExecutionTopologyRollupFragmentQueryV1 {
                 authorized_scope_ref: authorized_scope_ref.clone(),
@@ -227,13 +227,13 @@ where
 
 fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), ApplicationProblem> {
     if request.horizon.until_micros <= request.horizon.since_micros {
-        return Err(invalid_problem(
+        return Err(ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-horizon",
             "The execution topology metrics horizon must end after it starts.",
         ));
     }
     if request.max_events == 0 || request.max_events > MAX_EXECUTION_TOPOLOGY_EVENTS_V1 {
-        return Err(invalid_problem(
+        return Err(ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-event-budget",
             "The execution topology metrics event budget must be between 1 and 10000.",
         ));
@@ -241,23 +241,15 @@ fn validate_request(request: &ExecutionTopologyMetricsRequestV1) -> Result<(), A
     Ok(())
 }
 
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
-}
-
 fn authorize(context: &RequestContext) -> Result<(), ApplicationProblem> {
     let capability = CapabilityId::new(EXECUTION_TOPOLOGY_CAPABILITY_ID_V1).map_err(|_| {
-        invalid_problem(
+        ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-authority",
             "The execution topology metrics authority is unavailable.",
         )
     })?;
     let use_case = UseCaseId::new(EXECUTION_TOPOLOGY_USE_CASE_ID_V1).map_err(|_| {
-        invalid_problem(
+        ApplicationProblem::invalid_request(
             "application.execution-topology-rollup.invalid-authority",
             "The execution topology metrics authority is unavailable.",
         )

@@ -68,6 +68,23 @@ impl DaemonLivenessProbe for AuthorityLivenessProbe {
     }
 }
 
+fn connection_from_record(record: authority::DaemonAuthorityRecord) -> ResolvedDaemonConnection {
+    ResolvedDaemonConnection {
+        endpoint: record.endpoint.clone(),
+        auth_token: Some(record.auth_token.clone()),
+        authority_record: Some(record),
+    }
+}
+
+#[cfg(unix)]
+fn unix_endpoint_matches_socket(endpoint: &DaemonEndpoint, socket_path: &Path) -> bool {
+    let DaemonEndpoint::Unix(authority_path) = endpoint else {
+        return false;
+    };
+    authority::canonical_identity_path(authority_path).ok()
+        == authority::canonical_identity_path(socket_path).ok()
+}
+
 fn ensure_record_current(
     expected: &authority::DaemonAuthorityRecord,
     request_label: &str,
@@ -113,33 +130,24 @@ pub fn current_daemon_connection() -> Result<ResolvedDaemonConnection> {
                 "TraceDecay daemon authority record is not available. Start or restart the daemon."
                     .to_string(),
         })?;
-    Ok(ResolvedDaemonConnection {
-        endpoint: record.endpoint.clone(),
-        auth_token: Some(record.auth_token.clone()),
-        authority_record: Some(record),
-    })
+    Ok(connection_from_record(record))
 }
 
 #[cfg(unix)]
 pub fn connection_for_socket_path(socket_path: &Path) -> ResolvedDaemonConnection {
     if let Ok(connection) = current_daemon_connection()
-        && let DaemonEndpoint::Unix(authority_path) = &connection.endpoint
-        && authority::canonical_identity_path(authority_path).ok()
-            == authority::canonical_identity_path(socket_path).ok()
+        && connection
+            .authority_record
+            .as_ref()
+            .is_some_and(|record| unix_endpoint_matches_socket(&record.endpoint, socket_path))
     {
         return connection;
     }
     if let Some(profile_root) = socket_path.parent()
         && let Ok(Some(record)) = authority::current_record(profile_root)
-        && let DaemonEndpoint::Unix(authority_path) = &record.endpoint
-        && authority::canonical_identity_path(authority_path).ok()
-            == authority::canonical_identity_path(socket_path).ok()
+        && unix_endpoint_matches_socket(&record.endpoint, socket_path)
     {
-        return ResolvedDaemonConnection {
-            endpoint: record.endpoint.clone(),
-            auth_token: Some(record.auth_token.clone()),
-            authority_record: Some(record),
-        };
+        return connection_from_record(record);
     }
     // Explicit paths are retained for test harnesses and legacy one-shot
     // callers without a discoverable authority record. Default production

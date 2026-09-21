@@ -1366,13 +1366,7 @@ mod attach_same_source_decisions_tests {
     use super::*;
     use tracedecay_domain::{EvidenceRole, FreshnessCompatibilityV1};
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn freshness() -> SourceFreshness {
         SourceFreshness {

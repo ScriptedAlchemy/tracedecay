@@ -327,13 +327,7 @@ mod tests {
 
     use super::{QueryMcpAdmissionUnavailableV1, admit_query_mcp_read_at};
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("typed fixture id")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn scoped(
         project: &str,

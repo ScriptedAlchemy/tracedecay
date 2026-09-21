@@ -525,9 +525,7 @@ mod tests {
         }
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot_for(session: &str, access: char, projection: u64) -> TemporalExecutionSnapshot {
         snapshot_for_key(session, access, projection, "key-1", 1)

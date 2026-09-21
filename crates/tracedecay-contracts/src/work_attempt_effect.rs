@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracedecay_domain::{UtcMicros, WorkAttemptIdentityV1, WorkAuthority, WorkEffectStateV1};
 
 use crate::work::work_authority;
-use crate::{ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic};
+use crate::{ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic};
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum WorkAttemptEffectHolderErrorV1 {
@@ -257,15 +257,10 @@ fn effect_problem(error: WorkAttemptEffectStorageErrorV1) -> ApplicationProblem 
         WorkAttemptEffectStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkAttemptEffectStorageErrorV1::Conflict => ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic {
-                code: "application.work-attempt-effect.conflict".to_owned(),
-                message: "The Work attempt effect receipt conflicts with its prior dispatch."
-                    .to_owned(),
-            },
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        WorkAttemptEffectStorageErrorV1::Conflict => ApplicationProblem::conflict(
+            "application.work-attempt-effect.conflict",
+            "The Work attempt effect receipt conflicts with its prior dispatch.",
+        ),
         WorkAttemptEffectStorageErrorV1::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "application.work-attempt-effect.unavailable".to_owned(),
@@ -276,14 +271,10 @@ fn effect_problem(error: WorkAttemptEffectStorageErrorV1) -> ApplicationProblem 
 }
 
 fn invalid_holder_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-attempt-effect.invalid-holder".to_owned(),
-            message: "The Work attempt effect lifecycle time is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work-attempt-effect.invalid-holder",
+        "The Work attempt effect lifecycle time is invalid.",
+    )
 }
 
 #[cfg(test)]

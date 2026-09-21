@@ -57,19 +57,6 @@ jobs:
           echo "TRACEDECAY_SKIP_DASHBOARD_BUILD=1" >> "$GITHUB_ENV"
           echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
 
-      - name: Validate portable distribution harnesses
-        run: |
-          python3 scripts/test-check-packaged-lsp-bridge.py
-          python3 scripts/test-build-mcpb.py
-          python3 scripts/test-resolve-installed-binary.py
-          python3 scripts/test-check-packaged-mcp-stdio.py
-          python3 scripts/test-check-distribution-feature-wiring.py
-          python3 scripts/test-resolve-release-source-profile.py
-          python3 scripts/test-package-release-archive.py
-          bash scripts/test-check-distribution-clean-source.sh
-          bash scripts/test-check-distribution-snapshot.sh
-          bash scripts/test-check-distribution-reuse.sh
-
       # rust-toolchain.toml is the only compiler this job may install. See
       # release-beta.yml: floating stable fragments rust-cache's env key.
       - name: Resolve pinned toolchain
@@ -95,6 +82,16 @@ jobs:
         with:
           mold-version: 2.41.0
           make-default: true
+
+      # The acceptance script runs the packaged suites through nextest, and
+      # the MCP suite's structural-rewrite proof shells out to ast-grep.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: "0.44.0"
 
       - name: Build release binary for packaging
         run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked

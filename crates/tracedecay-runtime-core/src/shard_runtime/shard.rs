@@ -1043,7 +1043,6 @@ impl Drop for ShardRuntimeQueuedWork<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use std::sync::Barrier;
 
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
@@ -1087,13 +1086,7 @@ mod tests {
         ShardRuntimeLeaseKind::Client,
     ];
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: Debug,
-    {
-        T::try_from(value.to_owned()).expect("canonical fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn binding() -> StoreRuntimeBindingV1 {
         StoreRuntimeBindingV1::new(

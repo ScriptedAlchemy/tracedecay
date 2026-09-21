@@ -13,7 +13,7 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, TaskHandoffTokenStateV1,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RepositoryId, TaskId, UtcMicros, WorkVersion, WorktreeId,
+    ActorId, ProjectId, RepositoryId, TaskId, UtcMicros, WorkVersion, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -37,17 +37,9 @@ impl HandoffOpenTargetPort for CurrentTarget {
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(fill: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", fill.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context(request_id: &str) -> RequestContext {
     context_for_actor(request_id, "actor.handoff.runtime-store")

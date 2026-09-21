@@ -16,8 +16,8 @@ use tracedecay_domain::{
 
 use crate::work::work_authority;
 use crate::{
-    ApplicationProblem, CancellationStage, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic,
+    ApplicationProblem, CancellationStage, LegalAction, RequestContext, RetryDirective,
+    SafeDiagnostic,
 };
 
 pub const MAX_WORK_LEAK_EVIDENCE_REFS_V1: usize = 8;
@@ -269,7 +269,7 @@ where
         scan_started_at: UtcMicros,
         scan_deadline: UtcMicros,
     ) -> Result<WorkLeakAdjudicationOutcomeV1, ApplicationProblem> {
-        admit(context, scan_started_at)?;
+        ApplicationProblem::ensure_admitted(context, scan_started_at)?;
         if !command.validate()
             || scan_deadline.0 < scan_started_at.0
             || u64::try_from(scan_deadline.0.saturating_sub(scan_started_at.0))
@@ -296,7 +296,7 @@ where
             .inspect(&authority, &command, scan_started_at, scan_deadline)
             .map_err(evidence_problem)?;
         if !evidence.validate_for(&command, scan_started_at, scan_deadline) {
-            return Err(conflict_problem(
+            return Err(ApplicationProblem::conflict(
                 "application.work-leak.evidence-conflict",
                 "The bounded leak scan did not prove a valid verdict.",
             ));
@@ -334,34 +334,11 @@ fn canonical_label(value: &str, maximum: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'-' | b'_'))
 }
 
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
-}
-
 fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-leak.invalid".to_owned(),
-            message: "The Work leak adjudication request is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
-}
-
-fn conflict_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::Conflict {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::AfterRevalidate,
-        legal_actions: vec![LegalAction::Refresh],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work-leak.invalid",
+        "The Work leak adjudication request is invalid.",
+    )
 }
 
 fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
@@ -369,7 +346,7 @@ fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
         WorkLeakEvidenceErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkLeakEvidenceErrorV1::Conflict => conflict_problem(
+        WorkLeakEvidenceErrorV1::Conflict => ApplicationProblem::conflict(
             "application.work-leak.evidence-conflict",
             "The Work leak evidence changed during inspection.",
         ),
@@ -390,11 +367,11 @@ fn storage_problem(error: WorkLeakAdjudicationStorageErrorV1) -> ApplicationProb
         WorkLeakAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkLeakAdjudicationStorageErrorV1::RevisionConflict => conflict_problem(
+        WorkLeakAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(
             "application.work-leak.revision-conflict",
             "The Work leak adjudication changed before publication.",
         ),
-        WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => conflict_problem(
+        WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => ApplicationProblem::conflict(
             "application.work-leak.idempotency-conflict",
             "The Work leak command identity was already used with different input.",
         ),

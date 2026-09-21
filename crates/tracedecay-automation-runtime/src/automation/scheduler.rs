@@ -9,7 +9,6 @@ use cap_std::fs::Dir;
 use cap_std::fs::OpenOptionsExt;
 use cap_std::time::SystemClock;
 use serde::{Deserialize, Serialize};
-use tracedecay_automation::config::validate_schedule as validate_leaf_schedule;
 pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
 use tracedecay_automation::evidence_budget::{
     SessionEvidenceBudgetBackoff, SessionEvidenceBudgetExceeded, SessionEvidenceBudgetGate,
@@ -749,10 +748,6 @@ pub fn stale_lock_secs(config: &AutomationConfig, task: AgentTaskKind) -> Option
         .or(Some(DEFAULT_STALE_LOCK_SECS))
 }
 
-pub fn validate_schedule(schedule: Option<&str>) -> Result<()> {
-    Ok(validate_leaf_schedule(schedule)?)
-}
-
 /// User jobs carry their own schedule/enabled state (see
 /// `automation::jobs`), so the fixed-task config lookup falls back to a
 /// disabled default that makes the fixed-task gates skip them.
@@ -816,7 +811,7 @@ fn parse_started_at(record: &AutomationRunLedgerRecord) -> Result<i64> {
     canonical_record_started_at_seconds(record, &format!("run '{}' started_at", record.run_id))
 }
 
-fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
+pub(crate) fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
     if now_secs < completed_at {
         return 0;
     }

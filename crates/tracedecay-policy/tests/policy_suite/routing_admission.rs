@@ -5,7 +5,7 @@ use tracedecay_domain::configuration::{
     AnalyzerLanguageSelectionV1, AnalyzerPrivacyClassV1, AnalyzerResourceLimitsV1,
     AnalyzerRestartPolicyV1, AnalyzerSettingsV1,
 };
-use tracedecay_domain::{CapabilityId, ManifestDigest, UtcMicros};
+use tracedecay_domain::{CapabilityId, UtcMicros};
 use tracedecay_policy::analyzer::{
     AnalyzerAdmissionDispositionV1, AnalyzerAdmissionEvaluator, AnalyzerAdmissionEvaluatorV1,
     AnalyzerAdmissionInputV1, AnalyzerAdmissionSnapshotV1, AnalyzerAvailabilityV1,
@@ -26,18 +26,9 @@ use tracedecay_policy::routing::{
     TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identifier")
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-        .expect("valid fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn analyzer_settings() -> AnalyzerSettingsV1 {
     AnalyzerSettingsV1 {

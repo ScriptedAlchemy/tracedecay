@@ -147,189 +147,6 @@ pub(crate) fn traverse(
     }
 }
 
-pub(crate) struct RelationIdReadContext<'a> {
-    database: &'a GrafeoDB,
-    ensure_projection_readable:
-        &'a dyn Fn(&GraphNamespace, &GraphProjectionId) -> Result<(), GraphDbError>,
-    label_keys_cache: &'a LabelKeyCache,
-    adjacency_ids: &'a AdjacencyIdIndexCache,
-}
-
-impl<'a> RelationIdReadContext<'a> {
-    pub(crate) fn new(
-        database: &'a GrafeoDB,
-        ensure_projection_readable: &'a dyn Fn(
-            &GraphNamespace,
-            &GraphProjectionId,
-        ) -> Result<(), GraphDbError>,
-        label_keys_cache: &'a LabelKeyCache,
-        adjacency_ids: &'a AdjacencyIdIndexCache,
-    ) -> Self {
-        Self {
-            database,
-            ensure_projection_readable,
-            label_keys_cache,
-            adjacency_ids,
-        }
-    }
-}
-
-pub(crate) fn outgoing_relation_ids(
-    context: RelationIdReadContext<'_>,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    max_relations: usize,
-    cancellation: &dyn GraphCancellation,
-) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-    directed_relation_ids(
-        context.database,
-        namespace,
-        starts,
-        relation_kinds,
-        max_relations,
-        false,
-        cancellation,
-        context.ensure_projection_readable,
-        context.label_keys_cache,
-        context.adjacency_ids,
-        RelationFanoutOverflow::Refuse,
-        None,
-    )
-}
-
-pub(crate) fn outgoing_relation_ids_page(
-    context: RelationIdReadContext<'_>,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    after: Option<&GraphRelationId>,
-    limit: usize,
-    cancellation: &dyn GraphCancellation,
-) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-    directed_relation_ids(
-        context.database,
-        namespace,
-        starts,
-        relation_kinds,
-        limit,
-        false,
-        cancellation,
-        context.ensure_projection_readable,
-        context.label_keys_cache,
-        context.adjacency_ids,
-        RelationFanoutOverflow::Truncate,
-        after,
-    )
-}
-
-/// Bulk kind-filtered incoming fan-out: the exact counterpart of
-/// [`outgoing_relation_ids`], carrying the same batch, cancellation, dedupe,
-/// and `max_relations` budget semantics.
-///
-/// Plan 39 G7b needs this so an interactive caller/impact read can resolve
-/// reverse adjacency through the graph store instead of a SQL `edges` join.
-/// Only the traversal direction differs from the outgoing form, so both
-/// delegate to [`directed_relations`].
-pub(crate) fn incoming_relation_ids(
-    context: RelationIdReadContext<'_>,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    max_relations: usize,
-    cancellation: &dyn GraphCancellation,
-) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-    directed_relation_ids(
-        context.database,
-        namespace,
-        starts,
-        relation_kinds,
-        max_relations,
-        true,
-        cancellation,
-        context.ensure_projection_readable,
-        context.label_keys_cache,
-        context.adjacency_ids,
-        RelationFanoutOverflow::Refuse,
-        None,
-    )
-}
-
-pub(crate) fn incoming_relation_ids_page(
-    context: RelationIdReadContext<'_>,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    after: Option<&GraphRelationId>,
-    limit: usize,
-    cancellation: &dyn GraphCancellation,
-) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-    directed_relation_ids(
-        context.database,
-        namespace,
-        starts,
-        relation_kinds,
-        limit,
-        true,
-        cancellation,
-        context.ensure_projection_readable,
-        context.label_keys_cache,
-        context.adjacency_ids,
-        RelationFanoutOverflow::Truncate,
-        after,
-    )
-}
-
-pub(crate) fn outgoing_relations(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    max_relations: usize,
-    cancellation: &dyn GraphCancellation,
-    ensure_projection_readable: &dyn Fn(
-        &GraphNamespace,
-        &GraphProjectionId,
-    ) -> Result<(), GraphDbError>,
-) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-    directed_relations(
-        database,
-        namespace,
-        starts,
-        relation_kinds,
-        max_relations,
-        Direction::Outgoing,
-        cancellation,
-        ensure_projection_readable,
-        RelationFanoutOverflow::Refuse,
-    )
-}
-
-pub(crate) fn outgoing_relations_truncated(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    max_relations: usize,
-    cancellation: &dyn GraphCancellation,
-    ensure_projection_readable: &dyn Fn(
-        &GraphNamespace,
-        &GraphProjectionId,
-    ) -> Result<(), GraphDbError>,
-) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-    directed_relations(
-        database,
-        namespace,
-        starts,
-        relation_kinds,
-        max_relations,
-        Direction::Outgoing,
-        cancellation,
-        ensure_projection_readable,
-        RelationFanoutOverflow::Truncate,
-    )
-}
-
 pub(crate) fn outgoing_relation_targets(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -442,57 +259,6 @@ pub(crate) fn visit_outgoing_relation_targets(
     Ok(visited)
 }
 
-/// Bulk kind-filtered incoming fan-out. See [`incoming_relation_ids`].
-pub(crate) fn incoming_relations(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    max_relations: usize,
-    cancellation: &dyn GraphCancellation,
-    ensure_projection_readable: &dyn Fn(
-        &GraphNamespace,
-        &GraphProjectionId,
-    ) -> Result<(), GraphDbError>,
-) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-    directed_relations(
-        database,
-        namespace,
-        starts,
-        relation_kinds,
-        max_relations,
-        Direction::Incoming,
-        cancellation,
-        ensure_projection_readable,
-        RelationFanoutOverflow::Refuse,
-    )
-}
-
-pub(crate) fn incoming_relations_truncated(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    starts: &[GraphEntityId],
-    relation_kinds: &BTreeSet<GraphRelationKind>,
-    max_relations: usize,
-    cancellation: &dyn GraphCancellation,
-    ensure_projection_readable: &dyn Fn(
-        &GraphNamespace,
-        &GraphProjectionId,
-    ) -> Result<(), GraphDbError>,
-) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-    directed_relations(
-        database,
-        namespace,
-        starts,
-        relation_kinds,
-        max_relations,
-        Direction::Incoming,
-        cancellation,
-        ensure_projection_readable,
-        RelationFanoutOverflow::Truncate,
-    )
-}
-
 /// How [`ordered_relation_ids`] admits a start's neighborhood.
 enum RelationIdIndexMode {
     /// Walk every incident edge, sort, and publish the epoch index.
@@ -505,7 +271,7 @@ enum RelationIdIndexMode {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn directed_relation_ids(
+pub(crate) fn directed_relation_ids(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
     starts: &[GraphEntityId],
@@ -708,7 +474,7 @@ fn relation_projection_cached(
 /// [`RelationFanoutOverflow::Truncate`] stops and returns the prefix.
 #[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "graph_db.compact.directed_relations")]
-fn directed_relations(
+pub(crate) fn directed_relations(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
     starts: &[GraphEntityId],

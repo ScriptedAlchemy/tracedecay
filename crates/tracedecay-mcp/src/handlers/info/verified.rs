@@ -83,14 +83,13 @@ pub(super) fn symbols_in_dir(
     directory: &str,
     kinds: &[NodeKind],
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+    // Trim every trailing slash first. `repository_path_matches_scope` treats
+    // a leftover `/` as a literal character, so `src/` would miss `src/lib.rs`.
     let prefix = directory.trim_end_matches('/');
     let mut selected = Vec::new();
     for symbol in all_symbols(graph)? {
         let (metadata, path) = required_symbol_parts(&symbol)?;
-        let path_matches = path == prefix
-            || path
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('/'));
+        let path_matches = tracedecay_domain::repository_path_matches_scope(path, Some(prefix));
         let kind_matches =
             NodeKind::from_str(&metadata.kind).is_some_and(|kind| kinds.contains(&kind));
         if path_matches && kind_matches {

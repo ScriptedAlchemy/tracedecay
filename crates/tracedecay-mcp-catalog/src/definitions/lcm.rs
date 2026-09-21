@@ -1,8 +1,11 @@
 //! LCM session-store and session health-baseline tool definitions.
 
 use serde_json::json;
+use tracedecay_contracts::retained_surfaces::{
+    LcmRoleV1, MessageRelationshipScopeV1, MessageTypeFilterV1,
+};
 
-use super::{def, git_scope};
+use super::{def, string_property};
 use crate::ToolDefinition;
 
 pub(super) fn def_lcm_status() -> ToolDefinition {
@@ -139,12 +142,12 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "relationship_scope": {
                     "type": "string",
-                    "enum": ["all", "parents_only", "subagents_only"],
+                    "enum": MessageRelationshipScopeV1::WIRE,
                     "description": "Optional parent/subagent relationship filter across sessions. Default: all."
                 },
                 "message_type": {
                     "type": "string",
-                    "enum": ["all", "direct_user", "tool_result"],
+                    "enum": MessageTypeFilterV1::WIRE,
                     "description": "Semantic raw-message filter. direct_user excludes provider-mislabeled tool results; tool_result recognizes role, kind, and tool-event metadata. Default: all."
                 },
                 "session_id": {
@@ -168,7 +171,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "role": {
                     "type": "string",
-                    "enum": ["system", "user", "assistant", "tool", "unknown"],
+                    "enum": LcmRoleV1::WIRE,
                     "description": "Optional raw-message role filter. When supplied, summary results are omitted."
                 },
                 "start_time": {
@@ -220,9 +223,9 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                     "minimum": 0,
                     "description": "Required cutoff in UTC microseconds when temporal_mode=as_of."
                 },
-                "branch": git_scope::branch_schema("Optional git branch filter: only LCM snippets from sessions active on this branch (via the session-git correlation index)."),
-                "worktree": git_scope::worktree_schema("Optional git worktree root path filter: only LCM snippets from sessions active in this worktree (via the session-git correlation index)."),
-                "commit": git_scope::commit_schema("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index).")
+                "branch": string_property("Optional git branch filter: only LCM snippets from sessions active on this branch (via the session-git correlation index)."),
+                "worktree": string_property("Optional git worktree root path filter: only LCM snippets from sessions active in this worktree (via the session-git correlation index)."),
+                "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only LCM snippets from sessions attributed to this commit (via the session-git correlation index).")
             },
             "required": ["query"]
         }),

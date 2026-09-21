@@ -15,12 +15,12 @@ use std::{
 
 use rusqlite::{Connection, DropBehavior, ErrorCode, Transaction, TransactionBehavior};
 
-use super::guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
+use super::guard::with_exact_sql_guard;
 use super::{
     EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlAttachment,
     ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
     ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
-    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database, execute_batch,
+    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database,
     execute_query_unchecked, execute_request, publish_last_insert_rowid, sqlite_error,
     verify_write_authority,
 };
@@ -44,10 +44,6 @@ pub(crate) enum WriterCommand {
     },
     CheckpointWalTruncate {
         reply: async_channel::Sender<Result<ExactSqlRows, ExactSqlError>>,
-        authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
-    },
-    Vacuum {
-        reply: async_channel::Sender<Result<(), ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
 }
@@ -362,62 +358,6 @@ pub(crate) fn run_writer_command(
             });
             let _ = reply.try_send(result);
         }
-        WriterCommand::Vacuum { reply, authority } => {
-            let Some(authority) = authority else {
-                let _ = reply.try_send(Err(ExactSqlError::AuthorityDenied(
-                    "exclusive-maintenance vacuum requires attached write authority".to_owned(),
-                )));
-                return;
-            };
-            if let Err(error) =
-                verify_write_authority(Some(authority.as_ref()), ExactSqlWriteIntent::Vacuum)
-            {
-                let _ = reply.try_send(Err(error));
-                return;
-            }
-            let previous_attachment_limit =
-                match connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1) {
-                    Ok(previous) => previous,
-                    Err(error) => {
-                        let _ = reply.try_send(Err(sqlite_error(
-                            "open exclusive-maintenance vacuum attachment slot",
-                            error,
-                        )));
-                        return;
-                    }
-                };
-            let mut result = hotpath::measure_block!("rusqlite.exact_sql.vacuum", {
-                with_exact_sql_guard(
-                    connection,
-                    false,
-                    true,
-                    Some(Arc::clone(shutdown_requested)),
-                    None,
-                    true,
-                    Some((Arc::clone(&authority), ExactSqlWriteIntent::Vacuum)),
-                    crate::connection::authorize_writer,
-                    true,
-                    Some(AuthorizedDatabaseOperation::Vacuum),
-                    None,
-                    || {
-                        execute_batch(connection, "PRAGMA auto_vacuum = INCREMENTAL; VACUUM")
-                            .map(|_| ())
-                    },
-                )
-            });
-            if let Err(error) =
-                connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, previous_attachment_limit)
-            {
-                shutdown_requested.store(true, Ordering::Release);
-                if result.is_ok() {
-                    result = Err(sqlite_error(
-                        "restore exclusive-maintenance vacuum attachment limit",
-                        error,
-                    ));
-                }
-            }
-            let _ = reply.try_send(result);
-        }
     }
 }
 
@@ -430,9 +370,6 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
             let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::CheckpointWalTruncate { reply, .. } => {
-            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
-        }
-        WriterCommand::Vacuum { reply, .. } => {
             let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
     }

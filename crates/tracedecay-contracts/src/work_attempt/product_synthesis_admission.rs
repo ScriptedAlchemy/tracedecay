@@ -16,7 +16,7 @@ use crate::{
 use super::{
     CurrentWorkProductAttemptGraphV1, StartWorkAttemptCommand, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkSynthesisAdmissionStoragePort, WorkSynthesisInsertOutcome,
-    accepted_attempt_draft, admit_product_attempt_request, conflict_problem, contract_problem,
+    accepted_attempt_draft, admit_product_attempt_request, contract_problem,
     current_work_product_attempt_graph, denied_problem, not_found_problem,
     product_admission_problem, product_attempt_projection_binding, storage_problem,
 };
@@ -259,7 +259,7 @@ where
 }
 
 fn identity_conflict() -> ApplicationProblem {
-    conflict_problem(
+    ApplicationProblem::conflict(
         "application.work-attempt.identity-conflict",
         "The Work attempt identity was already used with different content.",
     )

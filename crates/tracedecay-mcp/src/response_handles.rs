@@ -392,7 +392,7 @@ fn timestamp_json(value: i64) -> Value {
 }
 
 fn duration_micros_u64(duration: Duration) -> u64 {
-    duration.as_micros().min(u128::from(u64::MAX)) as u64
+    tracedecay_runtime_core::tracedecay::saturating_duration_micros(duration)
 }
 
 fn error_class(error: &TraceDecayError) -> &'static str {

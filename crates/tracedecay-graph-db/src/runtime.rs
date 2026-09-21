@@ -503,33 +503,51 @@ impl GraphDb {
         Ok(result)
     }
 
-    #[hotpath::measure(label = "graph_db.traversal.outgoing_ids", impl_type = "GraphDb")]
-    pub fn outgoing_relation_ids(
+    #[allow(clippy::too_many_arguments)]
+    fn fanout_relation_rows(
         &self,
         namespace: &GraphNamespace,
         starts: &[GraphEntityId],
         relation_kinds: &BTreeSet<GraphRelationKind>,
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        direction: grafeo_core::graph::Direction,
+        overflow: traversal::RelationFanoutOverflow,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        self.fanout_batches(namespace, starts, |database, approve, _, _| {
+            traversal::directed_relations(
+                database,
+                namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                direction,
+                cancellation.as_ref(),
+                approve,
+                overflow,
+            )
+        })
+    }
+
+    fn fanout_batches<T>(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        read: impl FnOnce(
+            &GrafeoDB,
+            &dyn Fn(&GraphNamespace, &GraphProjectionId) -> Result<(), GraphDbError>,
+            &crate::epoch_cache::LabelKeyCache,
+            &crate::adjacency_id_index::AdjacencyIdIndexCache,
+        ) -> Result<Vec<Vec<T>>, GraphDbError>,
+    ) -> Result<Vec<Vec<T>>, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         self.ensure_start_projections_readable(database, namespace, starts)?;
-        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
-            self.approve_projection(namespace, projection)
-        };
-        let batches = traversal::outgoing_relation_ids(
-            traversal::RelationIdReadContext::new(
-                database,
-                &approve_projection,
-                &self.inner.label_keys,
-                &self.inner.adjacency_ids,
-            ),
-            namespace,
-            starts,
-            relation_kinds,
-            max_relations,
-            cancellation.as_ref(),
+        let batches = read(
+            database,
+            &|namespace, projection| self.approve_projection(namespace, projection),
+            &self.inner.label_keys,
+            &self.inner.adjacency_ids,
         )?;
         #[cfg(feature = "hotpath")]
         {
@@ -540,6 +558,37 @@ impl GraphDb {
             );
         }
         Ok(batches)
+    }
+
+    #[hotpath::measure(label = "graph_db.traversal.outgoing_ids", impl_type = "GraphDb")]
+    pub fn outgoing_relation_ids(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        self.fanout_batches(
+            namespace,
+            starts,
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    false,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Refuse,
+                    None,
+                )
+            },
+        )
     }
 
     /// Bulk kind-filtered incoming fan-out: the counterpart of
@@ -554,34 +603,26 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
-            self.approve_projection(namespace, projection)
-        };
-        let batches = traversal::incoming_relation_ids(
-            traversal::RelationIdReadContext::new(
-                database,
-                &approve_projection,
-                &self.inner.label_keys,
-                &self.inner.adjacency_ids,
-            ),
+        self.fanout_batches(
             namespace,
             starts,
-            relation_kinds,
-            max_relations,
-            cancellation.as_ref(),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    max_relations,
+                    true,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Refuse,
+                    None,
+                )
+            },
+        )
     }
 
     /// Cursor-exclusive ID page over outgoing adjacency.
@@ -598,35 +639,26 @@ impl GraphDb {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
-            self.approve_projection(namespace, projection)
-        };
-        let batches = traversal::outgoing_relation_ids_page(
-            traversal::RelationIdReadContext::new(
-                database,
-                &approve_projection,
-                &self.inner.label_keys,
-                &self.inner.adjacency_ids,
-            ),
+        self.fanout_batches(
             namespace,
             starts,
-            relation_kinds,
-            after,
-            limit,
-            cancellation.as_ref(),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    limit,
+                    false,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Truncate,
+                    after,
+                )
+            },
+        )
     }
 
     /// Cursor-exclusive ID page over incoming adjacency. See
@@ -641,35 +673,26 @@ impl GraphDb {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let approve_projection = |namespace: &GraphNamespace, projection: &GraphProjectionId| {
-            self.approve_projection(namespace, projection)
-        };
-        let batches = traversal::incoming_relation_ids_page(
-            traversal::RelationIdReadContext::new(
-                database,
-                &approve_projection,
-                &self.inner.label_keys,
-                &self.inner.adjacency_ids,
-            ),
+        self.fanout_batches(
             namespace,
             starts,
-            relation_kinds,
-            after,
-            limit,
-            cancellation.as_ref(),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            |database, approve, label_keys, adjacency_ids| {
+                traversal::directed_relation_ids(
+                    database,
+                    namespace,
+                    starts,
+                    relation_kinds,
+                    limit,
+                    true,
+                    cancellation.as_ref(),
+                    approve,
+                    label_keys,
+                    adjacency_ids,
+                    traversal::RelationFanoutOverflow::Truncate,
+                    after,
+                )
+            },
+        )
     }
 
     #[hotpath::measure(label = "graph_db.traversal.outgoing", impl_type = "GraphDb")]
@@ -681,27 +704,15 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relations(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Outgoing,
+            traversal::RelationFanoutOverflow::Refuse,
+        )
     }
 
     /// Same shape as [`Self::outgoing_relations`], but stops at `max_relations`
@@ -715,27 +726,15 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relations_truncated(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Outgoing,
+            traversal::RelationFanoutOverflow::Truncate,
+        )
     }
 
     #[hotpath::measure(label = "graph_db.traversal.outgoing_targets", impl_type = "GraphDb")]
@@ -747,27 +746,17 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationTarget>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::outgoing_relation_targets(
-            database,
-            namespace,
-            starts,
-            relation_kinds,
-            max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+        self.fanout_batches(namespace, starts, |database, approve, _, _| {
+            traversal::outgoing_relation_targets(
+                database,
+                namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation.as_ref(),
+                approve,
+            )
+        })
     }
 
     #[hotpath::measure(
@@ -815,27 +804,15 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::incoming_relations(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Incoming,
+            traversal::RelationFanoutOverflow::Refuse,
+        )
     }
 
     /// Same shape as [`Self::incoming_relations`], but stops at `max_relations`
@@ -849,27 +826,15 @@ impl GraphDb {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        let guard = self.read_guard()?;
-        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        self.ensure_start_projections_readable(database, namespace, starts)?;
-        let batches = traversal::incoming_relations_truncated(
-            database,
+        self.fanout_relation_rows(
             namespace,
             starts,
             relation_kinds,
             max_relations,
-            cancellation.as_ref(),
-            &|namespace, projection| self.approve_projection(namespace, projection),
-        )?;
-        #[cfg(feature = "hotpath")]
-        {
-            let edges = batches.iter().map(Vec::len).sum();
-            crate::hotpath_observe::record_counts(starts.len(), edges, 0, 0);
-            crate::hotpath_observe::record_hydration_source(
-                crate::hotpath_observe::HydrationSource::Live,
-            );
-        }
-        Ok(batches)
+            cancellation,
+            grafeo_core::graph::Direction::Incoming,
+            traversal::RelationFanoutOverflow::Truncate,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -15,35 +15,25 @@ use tracedecay_domain::{
     GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
     GitObjectFormatV1, GitOidV1, GitOperationStateV1, GitTopologyAnchorTargetV1,
     GitTopologyGenerationRefV1, GitTopologySourceRoleV1, IntegrationReceiptAnchorRefV1,
-    ManifestDigest, NativeGitObjectAnchorRefV1, NativeGitObjectKindV1, ObservationScopeV1,
-    PayloadAccessState, PreflightPreviewAnchorRefV1, PrivacyDomainBoundLocatorDigest,
-    PrivacyDomainId, ProjectId, ProjectionGenerationId, PullRequestSnapshotAnchorRefV1, RefId,
-    RefSnapshotAnchorRefV1, RefSnapshotKindV1, RepositoryCaptureAnchorRefV1,
-    RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryIndexSnapshotV1,
-    RepositoryIndexStateV1, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
-    RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
-    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, ShardId, UtcMicros,
-    VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, canonical_sha256,
-    derive_git_topology_anchor_id,
+    NativeGitObjectAnchorRefV1, NativeGitObjectKindV1, ObservationScopeV1, PayloadAccessState,
+    PreflightPreviewAnchorRefV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
+    ProjectionGenerationId, PullRequestSnapshotAnchorRefV1, RefId, RefSnapshotAnchorRefV1,
+    RefSnapshotKindV1, RepositoryCaptureAnchorRefV1, RepositoryDirtyStateV1, RepositoryEvidenceV1,
+    RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryProvenanceV1,
+    RepositoryRemoteIdentityV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
+    RepositoryWorkingTreeStateV1, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    ScopeResolutionId, ShardId, UtcMicros, VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId,
+    canonical_sha256, derive_git_topology_anchor_id,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture id is canonical")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture oid is canonical")
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
-        .expect("fixture digest is canonical")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn snapshot(epoch: u64, head: char) -> RepositoryStateSnapshotV1 {
     RepositoryStateSnapshotV1::new(

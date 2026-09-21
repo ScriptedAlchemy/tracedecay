@@ -402,13 +402,9 @@ fn dispatch_cli_application_surface_inner(
         let request = match parse_application_surface_request(operation, tool_args.clone()) {
             Ok(request) => request,
             Err(error) => {
-                if let Ok(handshake) = tracedecay::daemon::handshake_for_current_client(
-                    project.clone(),
-                    None,
-                    false,
-                    false,
-                ) && let Ok(client) =
-                    tracedecay_daemon_identity::invocation_client_for_current(handshake)
+                if let Ok(handshake) = crate::commands::client_handshake(project.as_deref())
+                    && let Ok(client) =
+                        tracedecay_daemon_identity::invocation_client_for_current(handshake)
                 {
                     observe_surface_argument_rejection(
                         Some(&client),

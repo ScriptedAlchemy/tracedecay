@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use tree_sitter::{Node as TsNode, Tree};
 
-use crate::common::local_node_id;
+use crate::common::{ExtractionState, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -18,58 +18,7 @@ use crate::types::{
 /// Extracts code graph nodes and edges from COBOL source files using tree-sitter.
 pub struct CobolExtractor;
 
-/// Internal state used during AST traversal.
-struct ExtractionState<'s> {
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    unresolved_refs: Vec<UnresolvedRef>,
-    errors: Vec<String>,
-    /// Stack of (name, `node_id`) for building qualified names and parent edges.
-    node_stack: Vec<(String, String)>,
-    file_path: String,
-    source: &'s [u8],
-    timestamp: u64,
-}
-
 impl<'s> ExtractionState<'s> {
-    fn new(file_path: &str, source: &'s str) -> Self {
-        let timestamp = crate::common::unix_timestamp_secs();
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            node_stack: Vec::new(),
-            file_path: file_path.to_string(),
-            source: source.as_bytes(),
-            timestamp,
-        }
-    }
-
-    /// Returns the current qualified name prefix from the node stack.
-    ///
-    /// The file root is pushed onto `node_stack` as the first frame when
-    /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment. Prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
-    fn qualified_prefix(&self) -> String {
-        self.node_stack
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    /// Returns the current parent node ID, or None if at file root level.
-    fn parent_node_id(&self) -> Option<&str> {
-        self.node_stack.last().map(|(_, id)| id.as_str())
-    }
-
-    /// Gets the text of a tree-sitter node from the source.
-    fn node_text(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
-
     /// Extracts the full source line at a given byte offset.
     ///
     /// COBOL comment nodes in tree-sitter-cobol have zero-width byte ranges,

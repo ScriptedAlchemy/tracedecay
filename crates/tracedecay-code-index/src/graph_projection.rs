@@ -478,25 +478,12 @@ impl InMemoryCodeGraphProjectionBuilder {
         freshness: SourceFreshness,
         cancellation: &CancellationSignal,
     ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
-        let snapshot = self
-            .snapshot
-            .read()
-            .map_err(|_| {
-                CodeGraphProjectionError::Unavailable(
-                    "code graph verified snapshot lock is poisoned".to_owned(),
-                )
-            })?
-            .clone()
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Unavailable(
-                    "code graph generation is not published".to_owned(),
-                )
-            })?;
-        CodeGraphProjectionStore::from_verified_snapshot(
-            snapshot.as_ref().clone(),
-            generation.clone(),
-        )?
-        .evidence_reader(generation, repository_id, freshness, cancellation)
+        self.verified_store(generation)?.evidence_reader(
+            generation,
+            repository_id,
+            freshness,
+            cancellation,
+        )
     }
 }
 

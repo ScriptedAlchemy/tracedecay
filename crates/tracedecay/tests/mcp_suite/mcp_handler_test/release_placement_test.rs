@@ -8,8 +8,9 @@
 #![cfg(all(feature = "test-transport", unix))]
 
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::common::fixture::git_run as git;
 
 use serde_json::{Value, json};
 
@@ -43,20 +44,6 @@ fn now_micros() -> i64 {
             .as_micros(),
     )
     .expect("current time fits UtcMicros")
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Command::new(crate::common::git_program())
-        .args(args)
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|error| panic!("git {args:?} in {}: {error}", root.display()));
-    assert!(
-        output.status.success(),
-        "git {args:?} in {} failed: {}",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 fn path_arg(path: &Path) -> String {

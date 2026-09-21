@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore, CodeGraphSymbolBindingV1,
@@ -26,6 +25,7 @@ use tracedecay_domain::{
     SanitizedCodeFileV1, SanitizerRevision, SessionId, SnapshotFileDispositionV1, SourceSpan,
     SymbolIdentityDigest, SymbolOccurrenceId, TemporalModeV1, UtcMicros, WorktreeId,
 };
+use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
     GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationManifest, GraphGenerationRelation,
     GraphLabel, GraphNamespace, GraphProjectorRevision, GraphProperty, GraphPropertyName,
@@ -816,14 +816,6 @@ fn symbol_entity(
         )]),
     )
     .expect("symbol entity")
-}
-
-fn stable_identity(kind: &str, value: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(kind.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
 fn digest<T>(byte: char) -> T

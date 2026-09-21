@@ -1303,7 +1303,7 @@ async fn read_stored_observations_from_snapshot(
             .map_err(|error| runtime_storage_error(operation, error))?;
         let expected_repository_owner = repository_anchor
             .as_ref()
-            .map(|anchor: &RetrievalAnchorRecordV2| serde_json::to_string(anchor.owner()))
+            .map(RetrievalAnchorRecordV2::owner_column_json)
             .transpose()
             .map_err(|error| runtime_storage_error(operation, error))?;
         if repository_owner != expected_repository_owner {

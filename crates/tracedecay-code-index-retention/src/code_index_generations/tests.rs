@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
+use super::{journal, receipt_store};
 use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
@@ -1304,8 +1305,12 @@ fn text_artifact_recovery_rolls_back_before_receipt_and_commits_after_receipt() 
         active_pointer: plan.active_pointer.clone(),
         receipt: receipt.clone(),
     };
-    persist_text_artifact_transaction(store.path(), &transaction)
-        .expect("journal artifact retention");
+    journal::persist_journal(
+        store.path(),
+        &TEXT_ARTIFACT_TRANSACTION_JOURNAL,
+        &transaction,
+    )
+    .expect("journal artifact retention");
     stage_collectable_text_artifacts(store.path(), &transaction).expect("quarantine artifact");
     assert!(!orphan_path.exists());
     recover_code_generation_retention(store.path(), &BTreeSet::new(), None)
@@ -1315,11 +1320,21 @@ fn text_artifact_recovery_rolls_back_before_receipt_and_commits_after_receipt() 
         "uncommitted artifact staging must roll back"
     );
 
-    persist_text_artifact_transaction(store.path(), &transaction)
-        .expect("journal second transaction");
+    journal::persist_journal(
+        store.path(),
+        &TEXT_ARTIFACT_TRANSACTION_JOURNAL,
+        &transaction,
+    )
+    .expect("journal second transaction");
     stage_collectable_text_artifacts(store.path(), &transaction)
         .expect("quarantine second artifact");
-    write_text_artifact_receipt(store.path(), &receipt).expect("durably commit artifact receipt");
+    receipt_store::write_receipt(
+        store.path(),
+        &TEXT_ARTIFACT_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        &receipt,
+    )
+    .expect("durably commit artifact receipt");
     recover_code_generation_retention(store.path(), &BTreeSet::new(), None)
         .expect("finish a committed artifact transaction");
     assert!(
@@ -1352,8 +1367,12 @@ fn cancellable_recovery_preserves_pending_artifact_journal_for_retry() {
         active_pointer: plan.active_pointer.clone(),
         receipt,
     };
-    persist_text_artifact_transaction(store.path(), &transaction)
-        .expect("journal artifact retention");
+    journal::persist_journal(
+        store.path(),
+        &TEXT_ARTIFACT_TRANSACTION_JOURNAL,
+        &transaction,
+    )
+    .expect("journal artifact retention");
     stage_collectable_text_artifacts(store.path(), &transaction)
         .expect("quarantine uncommitted candidate");
     assert!(!orphan_path.exists());
@@ -1781,7 +1800,8 @@ fn recovery_restores_quarantined_generations_without_a_durable_receipt() {
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
     let staged_root = transaction_stage_root(store.path(), &receipt);
 
-    persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist transaction journal");
     stage_collectable_generations(store.path(), &transaction).expect("stage generation");
     assert!(!generations_root.join(&collectable.generation_file).exists());
     assert!(staged_root.join(&collectable.generation_file).is_file());
@@ -2366,7 +2386,8 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     let staged_root = scope_stage_root(store.path(), &receipt);
 
     // Crash exactly between quarantine and the durable receipt.
-    persist_scope_transaction(store.path(), &transaction).expect("persist journal");
+    journal::persist_journal(store.path(), &SCOPE_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist journal");
     quarantine
         .stage(&transaction.receipt.collected_scopes)
         .expect("quarantine stranded scope");
@@ -2412,11 +2433,18 @@ fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
 
     // Crash after the receipt is durable but before the quarantine is
     // unlinked: the decision is committed, so recovery rolls forward.
-    persist_scope_transaction(store.path(), &transaction).expect("persist journal");
+    journal::persist_journal(store.path(), &SCOPE_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist journal");
     quarantine
         .stage(&transaction.receipt.collected_scopes)
         .expect("quarantine stranded scope");
-    write_scope_receipt(store.path(), &receipt).expect("commit reconciliation receipt");
+    receipt_store::write_receipt(
+        store.path(),
+        &SCOPE_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        &receipt,
+    )
+    .expect("commit reconciliation receipt");
 
     recover_scope_root_retention(store.path()).expect("recover committed reconciliation");
 
@@ -2999,7 +3027,8 @@ fn pointer_rewrite_fixture() -> PointerRewriteFixture {
         active_pointer: Some(original.clone()),
         receipt,
     };
-    persist_transaction(store.path(), &transaction).expect("journal the collection unit");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("journal the collection unit");
     PointerRewriteFixture {
         store,
         original,
@@ -3077,8 +3106,13 @@ fn recovery_keeps_the_rewritten_index_once_the_receipt_is_durable() {
     .expect("publish the rewritten index");
     stage_collectable_generations(fixture.store.path(), &fixture.transaction)
         .expect("quarantine the collectable generations");
-    write_receipt(fixture.store.path(), &fixture.transaction.receipt)
-        .expect("commit the deletion receipt");
+    receipt_store::write_receipt(
+        fixture.store.path(),
+        &GENERATION_RECEIPT_STORE,
+        &fixture.transaction.receipt.receipt_digest,
+        &fixture.transaction.receipt,
+    )
+    .expect("commit the deletion receipt");
 
     recover_code_generation_retention(fixture.store.path(), &BTreeSet::new(), None)
         .expect("finish a committed collection unit");
@@ -3099,8 +3133,13 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
     let fixture = pointer_rewrite_fixture();
     stage_collectable_generations(fixture.store.path(), &fixture.transaction)
         .expect("quarantine the collectable generations");
-    write_receipt(fixture.store.path(), &fixture.transaction.receipt)
-        .expect("commit the deletion receipt");
+    receipt_store::write_receipt(
+        fixture.store.path(),
+        &GENERATION_RECEIPT_STORE,
+        &fixture.transaction.receipt.receipt_digest,
+        &fixture.transaction.receipt,
+    )
+    .expect("commit the deletion receipt");
     assert_eq!(
         read_active_pointer(fixture.store.path()).expect("read pointer"),
         fixture.original,

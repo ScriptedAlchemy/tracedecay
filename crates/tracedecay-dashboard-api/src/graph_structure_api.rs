@@ -1109,14 +1109,8 @@ fn line_for_byte_offset(source: &[u8], byte_offset: u64) -> Option<u32> {
 }
 
 fn simple_symbol_name(qualified_name: &str) -> &str {
-    match qualified_name
-        .rsplit("::")
-        .next()
-        .and_then(|name| name.rsplit('.').next())
-    {
-        Some(name) => name,
-        None => qualified_name,
-    }
+    let segment = qualified_name.rsplit("::").next().unwrap_or(qualified_name);
+    segment.rsplit('.').next().unwrap_or(segment)
 }
 
 fn is_callable_kind(kind: &str) -> bool {

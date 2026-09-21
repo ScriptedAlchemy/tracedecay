@@ -9,7 +9,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -17,7 +16,7 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 
 use crate::support::{
-    TestTempDir, extract_real_server_text, handle_real_server_tool_call,
+    TestTempDir, commit_worktree, extract_real_server_text, handle_real_server_tool_call,
     handle_real_server_tool_call_raw, production_composition_fixture, test_temp_dir,
 };
 
@@ -293,32 +292,7 @@ fn assert_problem(response: &Value, expected: Value) {
 fn initialize_fact_project(root: &Path) {
     fs::create_dir_all(root).expect("fact project root");
     crate::fixture::write_indexed_fixture_sources(root);
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .expect("git init");
-    assert!(init.success(), "git init should succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(root)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add should succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "fact search fixture",
-        ])
-        .current_dir(root)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit should succeed");
+    commit_worktree(root, "fact search fixture");
 }
 
 struct CrossProject {

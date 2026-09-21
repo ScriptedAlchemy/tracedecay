@@ -234,13 +234,6 @@ impl TreeSitterExtractor {
         }
     }
 
-    /// Create the adapter over an existing extraction registry.
-    pub fn from_registry(parsers: tracedecay_code_extraction::LanguageRegistry) -> Self {
-        Self {
-            parsers: Arc::new(parsers),
-        }
-    }
-
     /// Share one generation-scoped registry with downstream chunking.
     pub fn from_shared_registry(
         parsers: Arc<tracedecay_code_extraction::LanguageRegistry>,

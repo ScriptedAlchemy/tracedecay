@@ -24,8 +24,8 @@ use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{
     ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
-    AuthorityReceipt, EvidencePacket, LegalAction, OpaqueCursor, OperationReceipt,
-    OperationTermination, PageCursor, RetrievalEvidence, RetryDirective, SafeDiagnostic,
+    AuthorityReceipt, EvidencePacket, OpaqueCursor, OperationReceipt, OperationTermination,
+    PageCursor, RetrievalEvidence, RetryDirective, SafeDiagnostic,
 };
 use crate::retrieval::{
     AnchorExpandRequest, AnchorExpandResult, PageRequest, RetrievalPortOutcome,
@@ -605,14 +605,10 @@ fn invalid_request<T>(
     problem_envelope(
         context,
         operation,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic::new(
-                "application.feedback.invalid-request",
-                "The feedback read request is invalid.",
-            )?,
-            retry: RetryDirective::Never,
-            legal_actions: Vec::<LegalAction>::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(
+            "application.feedback.invalid-request",
+            "The feedback read request is invalid.",
+        ),
     )
 }
 
@@ -688,9 +684,7 @@ mod invocation_tests {
         FeedbackFindingId, FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackResultId,
         FeedbackScopeV1, ProviderEvaluationStateV1,
     };
-    use tracedecay_domain::{
-        CommitId, ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, WorktreeId,
-    };
+    use tracedecay_domain::{CommitId, ProjectId, RepositoryId, RetrievalAnchorId, WorktreeId};
 
     use super::{
         CanonicalAffectedTestsProjectionV1, CanonicalFeedbackImpactProjectionV1,
@@ -841,7 +835,5 @@ mod invocation_tests {
         FeedbackCycleId::new("cycle.feedback-test").expect("cycle")
     }
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 }

@@ -136,18 +136,6 @@ pub fn unregister_registered_context_scout_owner(
 }
 
 impl ProjectContextScoutOwnerV1 {
-    pub async fn startup_configured(
-        database: Database,
-        project_id: [u8; 16],
-        now: UtcMicros,
-        pin: ContextScoutConfigurationPinV1,
-        model_config: Option<&AutomationConfig>,
-    ) -> Option<Arc<Self>> {
-        let owner = Self::startup(database, project_id, now, model_config).await?;
-        owner.install_configuration(pin, model_config).await.ok()?;
-        Some(owner)
-    }
-
     #[hotpath::measure(
         future = true,
         label = "hosts.agent.context_scout.startup",
@@ -851,24 +839,6 @@ impl ProjectContextScoutOwnerV1 {
         let status = self.runtime.lock().await.status(control)?;
         let recent = self.recent_project_state(STARTUP_RECOVERY_LIMIT).await?;
         Ok(status_with_recent(status, &recent))
-    }
-
-    pub async fn configure_model(&self, config: &AutomationConfig) {
-        let configuration = self.configuration.read().await;
-        let Some(control) = configuration
-            .as_ref()
-            .map(ContextScoutConfigurationPinV1::control)
-        else {
-            return;
-        };
-        let model = context_scout_model_assistant_from_project_config(Some(config));
-        if control
-            .model_path
-            .is_some_and(|expected| expected != model.backend())
-        {
-            return;
-        }
-        self.runtime.lock().await.replace_model(model);
     }
 
     pub async fn claim(

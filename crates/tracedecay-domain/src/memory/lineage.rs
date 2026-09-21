@@ -288,12 +288,7 @@ mod tests {
     };
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use crate::test_fixtures::id;
 
     fn fact_id(operation: &str) -> FactId {
         fact_id_for(&FactOwnerV1::Profile, operation)

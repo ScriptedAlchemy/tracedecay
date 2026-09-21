@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::util::http_detail;
+use super::util::{internal_error, json_error};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, find_run_record,
     read_published_artifact_chain, read_run_artifact_payload,
@@ -57,7 +57,7 @@ pub async fn run_list(
                 })),
             )
         }
-        Err(err) => internal_error(&format!("Failed to read automation run ledger: {err}")),
+        Err(err) => internal_error(format!("Failed to read automation run ledger: {err}")),
     }
 }
 
@@ -129,8 +129,11 @@ pub async fn artifact_list(
                 })),
             )
         }
-        Ok(None) => not_found(&format!("automation run '{run_id}' not found")),
-        Err(err) => internal_error(&format!("Failed to load automation run artifacts: {err}")),
+        Ok(None) => json_error(
+            StatusCode::NOT_FOUND,
+            format!("automation run '{run_id}' not found"),
+        ),
+        Err(err) => internal_error(format!("Failed to load automation run artifacts: {err}")),
     }
 }
 
@@ -142,16 +145,20 @@ pub async fn artifact_payload(
     let record = match find_run_record(&state.dashboard_root, &run_id).await {
         Ok(Some(record)) => record,
         Ok(None) => {
-            return not_found(&format!("automation run '{run_id}' not found"));
+            return json_error(
+                StatusCode::NOT_FOUND,
+                format!("automation run '{run_id}' not found"),
+            );
         }
         Err(err) => {
-            return internal_error(&format!("Failed to load automation run artifact: {err}"));
+            return internal_error(format!("Failed to load automation run artifact: {err}"));
         }
     };
     let Some(artifact) = find_artifact(&record.artifacts, &kind) else {
-        return not_found(&format!(
-            "automation run artifact '{kind}' not found for run '{run_id}'"
-        ));
+        return json_error(
+            StatusCode::NOT_FOUND,
+            format!("automation run artifact '{kind}' not found for run '{run_id}'"),
+        );
     };
     // Heavy per-run payloads (proposed/applied ops, validation reports) are
     // read and parsed here; this span scales with artifact size while the
@@ -171,19 +178,8 @@ pub async fn artifact_payload(
                 "error": "",
             })),
         ),
-        Err(err) => internal_error(&format!("Failed to read automation run artifact: {err}")),
+        Err(err) => internal_error(format!("Failed to read automation run artifact: {err}")),
     }
-}
-
-fn not_found(message: &str) -> (StatusCode, Json<Value>) {
-    (StatusCode::NOT_FOUND, Json(http_detail(message)))
-}
-
-fn internal_error(message: &str) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(message)),
-    )
 }
 
 fn find_artifact<'a>(

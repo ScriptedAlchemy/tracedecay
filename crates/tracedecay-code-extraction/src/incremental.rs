@@ -599,15 +599,6 @@ impl RetainedParseDocument {
         self.reparse_normalized(next_identity, new_source.into(), None, None)
     }
 
-    pub fn reparse_prepared(
-        &mut self,
-        next_identity: ParseDocumentIdentity,
-        new_source: impl Into<String>,
-        new_parsed_source: impl Into<String>,
-    ) -> Result<ParseReport, ParseError> {
-        self.reparse_prepared_with_control(next_identity, new_source, new_parsed_source, None)
-    }
-
     pub fn reparse_prepared_with_control(
         &mut self,
         next_identity: ParseDocumentIdentity,

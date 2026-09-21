@@ -317,6 +317,11 @@ pub fn mcp_connection_request_id(id: &Value, connection_scope: &str) -> Option<R
     .ok()
 }
 
+/// Owned form of [`mcp_connection_request_id`] for maps and cancellation keys.
+pub fn mcp_connection_request_key(id: &Value, connection_scope: &str) -> Option<String> {
+    mcp_connection_request_id(id, connection_scope).map(|request_id| request_id.as_str().to_owned())
+}
+
 pub struct McpConnectionIdentityAuthority {
     instance_id: Option<String>,
     next_connection: AtomicU64,
@@ -468,6 +473,10 @@ mod tests {
             "request.mcp.connection.6b86b273ff34fce19d6b804eff5a3f57"
         );
         assert!(mcp_connection_request_id(&Value::Null, "connection").is_none());
+        assert_eq!(
+            mcp_connection_request_key(&json!(1), "connection").as_deref(),
+            Some(numeric.as_str())
+        );
     }
 
     #[test]

@@ -1,8 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::TraceDecayError;
 
 use super::{CancellationStage, EffectReceipt, EffectTermination};
+use crate::context::{RequestAdmission, RequestContext};
 use crate::error::ApplicationContractError;
 
 /// Diagnostic code for an admitted route whose owner is still registering
@@ -688,6 +690,24 @@ impl ApplicationProblem {
         }
     }
 
+    /// Invalid request that offers no recovery action. Never retries.
+    ///
+    /// Empty legal actions are part of the refusal: adapters must not invent
+    /// `CorrectRequest` for these problems.
+    pub fn invalid_request_without_action(
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    }
+
     pub fn cancelled_before_admission() -> Self {
         Self::Cancelled {
             stage: CancellationStage::BeforeAdmission,
@@ -701,6 +721,42 @@ impl ApplicationProblem {
             stage: CancellationStage::BeforeAdmission,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
+        }
+    }
+
+    /// Admitted requests continue. Cancellation and deadline expiry become
+    /// the matching pre-admission problems.
+    pub fn ensure_admitted(context: &RequestContext, observed_at: UtcMicros) -> Result<(), Self> {
+        match context.admission_at(observed_at) {
+            RequestAdmission::Admitted => Ok(()),
+            RequestAdmission::Cancelled => Err(Self::cancelled_before_admission()),
+            RequestAdmission::TimedOut => Err(Self::timed_out_before_admission()),
+        }
+    }
+
+    /// Conflict that must be revalidated. Retry is `AfterRevalidate` and the
+    /// only legal action is `Refresh`.
+    pub fn conflict(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Conflict {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        }
+    }
+
+    /// Invalid request that must not be retried unchanged. The only legal
+    /// action is `CorrectRequest`.
+    pub fn invalid_request(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::InvalidRequest {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
         }
     }
 
@@ -806,6 +862,18 @@ impl ApplicationProblem {
             diagnostic,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+        }
+    }
+
+    /// Capacity refusal. Retry only after a delay.
+    pub fn saturated(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Saturated {
+            diagnostic: SafeDiagnostic {
+                code: code.into(),
+                message: message.into(),
+            },
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
         }
     }
 

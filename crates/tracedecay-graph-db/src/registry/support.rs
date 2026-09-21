@@ -14,6 +14,7 @@ use super::{
 };
 use crate::error::rollback_failure;
 use crate::location::PersistentGraphStoreState;
+use crate::projection::check_cancelled;
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
     GraphDbRuntimeState, GraphDurability, GraphFormatVersion,
@@ -192,14 +193,6 @@ fn registered_open_options(
         expected_format,
         durability: GraphDurability::WalSync,
         cancellation,
-    }
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
-    } else {
-        Ok(())
     }
 }
 

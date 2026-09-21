@@ -1,6 +1,7 @@
 use serde_json::{Value, json};
+use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
-use super::{def, def_rw, git_scope, project_selector_object};
+use super::{def, def_rw, project_selector_object, string_property};
 use crate::ToolDefinition;
 
 pub(super) fn def_session_refresh_begin(input_schema: Value) -> ToolDefinition {
@@ -85,13 +86,13 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "type": "string",
                     "default": "all",
                     "description": "Relationship scope for search results (default: all).",
-                    "enum": ["all", "parents_only", "subagents_only"]
+                    "enum": MessageRelationshipScopeV1::WIRE,
                 },
                 "message_type": {
                     "type": "string",
                     "default": "all",
                     "description": "Semantic message filter. direct_user excludes provider-mislabeled tool results; tool_result includes role-, kind-, and metadata-identified tool output. Default: all.",
-                    "enum": ["all", "direct_user", "tool_result"]
+                    "enum": MessageTypeFilterV1::WIRE,
                 },
                 "limit": {
                     "type": "integer",
@@ -108,9 +109,9 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "description": "all_registered fans the search out over every registered project's durable session store (bounded, deterministic merge, per-root provenance). Cannot be combined with project_selector, cursor, or catch_up.",
                     "enum": ["all_registered"]
                 },
-                "branch": git_scope::branch_schema("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
-                "worktree": git_scope::worktree_schema("Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."),
-                "commit": git_scope::commit_schema("Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."),
+                "branch": string_property("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
+                "worktree": string_property("Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."),
+                "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."),
                 "workflow_run": workflow_run_scope_schema(),
                 "workflow_agent": workflow_agent_scope_schema(),
                 "format": {
@@ -187,9 +188,9 @@ pub(super) fn def_workflows() -> ToolDefinition {
                     "type": "string",
                     "description": "With run_id, drill into a single agent of that run by its label (e.g. 'mine:claude-transcripts')."
                 },
-                "branch": git_scope::branch_schema("List workflow runs whose parent session was active on this git branch (via the session-git correlation index)."),
-                "worktree": git_scope::worktree_schema("List workflow runs whose parent session was active in this git worktree root path."),
-                "commit": git_scope::commit_schema("List workflow runs whose parent session was attributed to this commit sha (full or >=6-char hex prefix)."),
+                "branch": string_property("List workflow runs whose parent session was active on this git branch (via the session-git correlation index)."),
+                "worktree": string_property("List workflow runs whose parent session was active in this git worktree root path."),
+                "commit": string_property("List workflow runs whose parent session was attributed to this commit sha (full or >=6-char hex prefix)."),
                 "limit": {
                     "type": "integer",
                     "minimum": 1,

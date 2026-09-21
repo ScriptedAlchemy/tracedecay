@@ -10,5 +10,4 @@
 
 pub mod codex_app_server;
 pub mod project_runtime;
-pub mod session_evidence;
 pub mod session_store;

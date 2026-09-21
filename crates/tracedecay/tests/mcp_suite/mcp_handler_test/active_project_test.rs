@@ -4,8 +4,9 @@
 #![cfg(feature = "test-transport")]
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
+
+use crate::common::fixture::git_run as git;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
@@ -258,17 +259,4 @@ async fn open_checkout() -> OpenedCheckout {
         profile_root: isolation_root.join("profile"),
         _isolation: isolation,
     }
-}
-
-fn git(project: &Path, args: &[&str]) {
-    let status = Command::new(crate::common::git_program())
-        .args(args)
-        .current_dir(project)
-        .status()
-        .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
-    assert!(
-        status.success(),
-        "git {args:?} exited {status} in {}",
-        project.display()
-    );
 }

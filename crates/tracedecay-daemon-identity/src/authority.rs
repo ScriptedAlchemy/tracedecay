@@ -1,3 +1,4 @@
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::fs::File;
 #[cfg(not(windows))]
@@ -5,9 +6,6 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{BrainId, UserProfileId};
 use tracedecay_runtime_core::path_safety::{
     canonicalize_existing_prefix, collapse_relative_components,
@@ -165,13 +163,10 @@ impl DaemonAuthority {
         let profile_identity =
             crate::profile_identity::load_or_create_pinned(&profile_root, pinned_identity)?;
         let prior_epoch = prior_record.as_ref().map_or(0, |record| record.epoch);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
         let record = DaemonAuthorityRecord {
             pid: std::process::id(),
             process_run_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
-            started_at_unix_secs: i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+            started_at_unix_secs: tracedecay_runtime_core::tracedecay::saturating_unix_secs(),
             epoch: prior_epoch.saturating_add(1),
             version: version.to_string(),
             endpoint: canonical_endpoint(endpoint)?,

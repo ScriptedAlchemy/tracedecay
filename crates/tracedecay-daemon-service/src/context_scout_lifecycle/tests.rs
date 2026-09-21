@@ -18,12 +18,7 @@ use super::*;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
-fn id<T: TryFrom<String>>(value: &str) -> T
-where
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn complete_native_observation() -> CanonicalObservationEnvelopeV1 {
     let relations = CanonicalObservationRelationsV1::new(id::<SessionId>("session.native.codex"))

@@ -6,7 +6,8 @@ use std::path::Path;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracedecay_contracts::{
-    ApplicationProblem, ApplicationResult, LegalAction, RetryDirective, SafeDiagnostic,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, LegalAction,
+    ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -29,17 +30,13 @@ impl ApplicationKind {
     }
 
     pub(crate) fn invalid_request(self) -> ApplicationProblem {
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: format!("invalid_{}_request", self.1),
-                message: format!(
-                    "The {} request does not match its operation contract",
-                    self.0
-                ),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        }
+        ApplicationProblem::invalid_request(
+            format!("invalid_{}_request", self.1),
+            format!(
+                "The {} request does not match its operation contract",
+                self.0
+            ),
+        )
     }
 
     pub(crate) fn daemon_problem(self, problem: DaemonInvocationProblem) -> ApplicationProblem {
@@ -76,6 +73,14 @@ impl ApplicationKind {
             }
         }
     }
+}
+
+pub(crate) fn problem_envelope(
+    result_contract: ResultContractRef,
+    request_id: tracedecay_contracts::RequestId,
+    problem: ApplicationProblem,
+) -> Result<ApplicationProblemEnvelope> {
+    ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
 pub(crate) fn read_request(path: &Path, kind: ApplicationKind) -> Result<Value> {

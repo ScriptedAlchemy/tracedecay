@@ -27,13 +27,14 @@ use crate::context::{
     application_observed_at, application_request_interruption,
     run_application_request_interruptible,
 };
-use crate::session::ports::{
-    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError, SessionTemporalExecutionPort,
-};
 use crate::session::types::{
     SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
     SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+};
+use tracedecay_session_temporal_store::execution::{
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
+    SessionTemporalExecutionPort, SessionTemporalExecutionReport,
 };
 
 mod task_session;
@@ -425,7 +426,7 @@ fn temporal_authorized_root(
 }
 
 fn map_report(
-    report: crate::session::ports::SessionTemporalExecutionReport,
+    report: SessionTemporalExecutionReport,
     freshness_policy: SessionFreshnessPolicy,
 ) -> SessionRetrievalOutcome<TemporalKernelResult> {
     let (result, freshness) = report.into_parts();

@@ -35,13 +35,7 @@ impl GraphCancellation for TestCancellation {
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn occurrence_id(seed: &str) -> MessageOccurrenceIdV1 {
     let digest = Sha256::digest(seed.as_bytes());

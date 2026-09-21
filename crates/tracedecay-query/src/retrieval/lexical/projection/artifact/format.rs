@@ -138,12 +138,12 @@ impl PageBaseSectionReceiptBuilderV1 {
 
     pub(super) fn text(&mut self, value: &str) -> Result<(), CodeLexicalArtifactErrorV1> {
         self.hasher.update([3]);
-        hash_receipt_bytes(&mut self.hasher, value.as_bytes())
+        hash_bytes(&mut self.hasher, value.as_bytes())
     }
 
     pub(super) fn blob(&mut self, value: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
         self.hasher.update([4]);
-        hash_receipt_bytes(&mut self.hasher, value)
+        hash_bytes(&mut self.hasher, value)
     }
 
     pub(super) fn finish(
@@ -162,13 +162,20 @@ impl PageBaseSectionReceiptBuilderV1 {
     }
 }
 
-fn hash_receipt_bytes(hasher: &mut Sha256, value: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
+pub(super) fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
+    CodeLexicalArtifactErrorV1::Contract(error.to_string())
+}
+
+pub(super) fn hash_bytes(
+    hasher: &mut Sha256,
+    bytes: &[u8],
+) -> Result<(), CodeLexicalArtifactErrorV1> {
     hasher.update(
-        u64::try_from(value.len())
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?
+        u64::try_from(bytes.len())
+            .map_err(contract_number)?
             .to_le_bytes(),
     );
-    hasher.update(value);
+    hasher.update(bytes);
     Ok(())
 }
 
@@ -217,7 +224,7 @@ pub(super) fn initial_base_section_receipt_fold()
         .map(|name| {
             let mut hasher = Sha256::new();
             hasher.update(b"tracedecay.code-lexical-artifact-base-receipt-fold.v1\0initial");
-            hash_receipt_bytes(&mut hasher, name.as_bytes())?;
+            hash_bytes(&mut hasher, name.as_bytes())?;
             Ok(hasher.finalize().to_vec())
         })
         .collect::<Result<Vec<_>, CodeLexicalArtifactErrorV1>>()?;
@@ -246,10 +253,10 @@ pub(super) fn absorb_page_base_sections_receipt(
         })?;
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay.code-lexical-artifact-base-receipt-fold.v1\0page");
-        hash_receipt_bytes(&mut hasher, section.name.as_bytes())?;
+        hash_bytes(&mut hasher, section.name.as_bytes())?;
         hasher.update(page_ordinal.to_le_bytes());
         hasher.update(section.row_count.to_le_bytes());
-        hash_receipt_bytes(&mut hasher, section.digest.as_str().as_bytes())?;
+        hash_bytes(&mut hasher, section.digest.as_str().as_bytes())?;
         hasher.update(previous);
         accumulators[ordinal] = hasher.finalize().to_vec();
         row_counts[ordinal] = row_counts[ordinal]
@@ -287,7 +294,7 @@ pub(super) fn finish_base_section_receipt_fold(
                 })?;
             let mut hasher = Sha256::new();
             hasher.update(b"tracedecay.code-lexical-artifact-base-receipt-fold.v1\0final");
-            hash_receipt_bytes(&mut hasher, name.as_bytes())?;
+            hash_bytes(&mut hasher, name.as_bytes())?;
             hasher.update(row_counts[ordinal].to_le_bytes());
             hasher.update(accumulator);
             let digest = ManifestDigest::from_sha256_bytes(&hasher.finalize())

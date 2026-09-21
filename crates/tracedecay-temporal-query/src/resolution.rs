@@ -12,7 +12,7 @@ pub use self::summary::{
     evaluate_summary_lineage_eligibility, evaluate_summary_lineage_eligibility_controlled,
 };
 pub use self::types::{
-    ResolutionAssertion, ResolutionCertainty, ResolutionCheckpoint, ResolutionEvidence,
-    ResolutionInputError, ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolutionOccurrence,
-    ResolvedOccurrence, TemporalResolution, ValidatedAuthorization,
+    ResolutionAssertion, ResolutionCheckpoint, ResolutionEvidence, ResolutionInputError,
+    ResolutionLineageEdge, ResolutionLineageEdgeKind, ResolutionOccurrence, ResolvedOccurrence,
+    TemporalResolution, ValidatedAuthorization,
 };

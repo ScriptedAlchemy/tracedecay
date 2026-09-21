@@ -10,10 +10,9 @@
 //!
 //! ## Dependency edges
 //!
-//! Depends on `tracedecay-runtime-core` (kernel db/errors/storage/config),
+//! Depends on `tracedecay-runtime-core` (kernel db/errors/storage/config) and
 //! `tracedecay-sessions` (session runtime, `lcm::contracts`,
-//! `retrieval_content`), and `tracedecay-semantic` (resource ceilings, default
-//! embedding model). All three are proven acyclic, `cargo tree -p <dep> -e
+//! `retrieval_content`). Both edges are acyclic: `cargo tree -p <dep> -e
 //! normal` never names this crate. `RuntimeExternalSourceStore` and
 //! `GlobalDbObservationStore` is deliberately a root-owned adapter. It takes
 //! a guarded database client issued by the registered owner, so the composition
@@ -63,8 +62,6 @@ pub use observation_projection::{
     converge_projection_predecessor, project_observation, project_queued_observations,
     rebuild_projection,
 };
-#[cfg(test)]
-pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 pub use tracedecay_domain::CoverageStateV1;
 pub use workflow_adapter::GlobalDbWorkflowStore;
 mod observation_store;

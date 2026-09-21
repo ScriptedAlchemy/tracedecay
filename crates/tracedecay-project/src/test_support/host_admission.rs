@@ -952,15 +952,13 @@ impl HostAdmissionTestRuntimeV1 {
 
     pub fn facade(&self) -> HostAdmissionFacade<'_> {
         let authorities = match (self.project_id.as_ref(), self.project_registered.as_ref()) {
-            (Some(project_id), Some(project_registered)) => {
-                HostAdmissionAuthorities::registered_for_project(
-                    self.brain_id.clone(),
-                    self.profile_id.clone(),
-                    project_id.clone(),
-                    project_registered,
-                )
-                .with_profile_registered(self.profile_id.clone(), self.profile_registered.as_ref())
-            }
+            (Some(project_id), Some(project_registered)) => HostAdmissionAuthorities::for_project(
+                self.brain_id.clone(),
+                self.profile_id.clone(),
+                project_id.clone(),
+                project_registered,
+            )
+            .with_profile_registered(self.profile_id.clone(), self.profile_registered.as_ref()),
             _ => HostAdmissionAuthorities::for_profile(
                 self.brain_id.clone(),
                 self.profile_id.clone(),

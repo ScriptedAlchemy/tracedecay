@@ -915,16 +915,7 @@ pub async fn publish_compiler_diagnostics_through_code_index_v1(
 /// a producer's text always satisfies `validate_sanitized_message`.
 #[must_use]
 pub fn bounded_notice(message: &str) -> String {
-    let collapsed: String = message
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
+    let collapsed = tracedecay_domain::fold_control_characters(message);
     let collapsed = collapsed.trim();
     if collapsed.is_empty() {
         return "diagnostic reported without a message".to_owned();
@@ -937,17 +928,9 @@ pub fn bounded_notice(message: &str) -> String {
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     pub(crate) fn scope(generation: &str) -> CleanGenerationDiagnosticScopeV1 {
         CleanGenerationDiagnosticScopeV1 {

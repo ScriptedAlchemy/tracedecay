@@ -747,9 +747,7 @@ mod tests {
         ManifestDigest::new(format!("sha256:{}", "5".repeat(64))).expect("policy digest")
     }
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(try_git_program().expect("resolve the git program"))

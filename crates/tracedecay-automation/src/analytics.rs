@@ -7,7 +7,8 @@
 //!
 //! Host MCP namespaces are restated here as literals so this contracts leaf
 //! does not depend on `tracedecay-agent-hosts`. They must stay aligned with
-//! `tracedecay_agent_hosts::tool_name::ALL_TOOL_PREFIXES`.
+//! the namespaces hosts still emit, including the prior plugin key and the
+//! flattened separator.
 
 use std::collections::{BTreeMap, BTreeSet};
 

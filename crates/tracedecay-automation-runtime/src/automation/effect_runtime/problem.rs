@@ -220,9 +220,7 @@ mod tests {
         CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
         ResolvedScope,
     };
-    use tracedecay_domain::{
-        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
-    };
+    use tracedecay_domain::{ActorId, ProjectId, RepositoryId, UtcMicros, WorktreeId};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::{failed_ledger_problem, failure_class_problem, runtime_problem};
@@ -245,10 +243,7 @@ mod tests {
         .expect("failed ledger")
     }
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
-            .expect("fixture digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn context_with_deadline(deadline: UtcMicros) -> RequestContext {
         let scope = ResolvedScope::new(

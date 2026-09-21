@@ -31,6 +31,7 @@ use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
+use super::util::json_error;
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 use tracedecay_session_memory::context::CancellationToken;
@@ -269,27 +270,19 @@ fn new_run_id() -> Option<String> {
 }
 
 fn bad_request(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({"detail": message.into()})),
-    )
-        .into_response()
+    json_error(StatusCode::BAD_REQUEST, message).into_response()
 }
 
 fn not_found(run_id: &str) -> Response {
-    (
+    json_error(
         StatusCode::NOT_FOUND,
-        Json(json!({"detail": format!("explorer query run not found: {run_id}")})),
+        format!("explorer query run not found: {run_id}"),
     )
-        .into_response()
+    .into_response()
 }
 
 fn internal_error(message: impl Into<String>) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"detail": message.into()})),
-    )
-        .into_response()
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
 }
 
 fn validate_query(request: &mut ExplorerQueryRequestV1) -> Result<(), &'static str> {
@@ -423,11 +416,11 @@ pub async fn create_query(
                 return bad_request(message);
             }
             let Some(owner) = run_owner(&state) else {
-                return (
+                return json_error(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"detail": "exact registered project scope is unavailable"})),
+                    "exact registered project scope is unavailable",
                 )
-                    .into_response();
+                .into_response();
             };
             let Some(run_id) = new_run_id() else {
                 return internal_error("could not allocate explorer query run identity");
@@ -491,11 +484,11 @@ pub async fn cancel_query(
     };
     let mut run = stored.run.write().await;
     if run.state != ExplorerRunStateV1::Pending {
-        return (
+        return json_error(
             StatusCode::CONFLICT,
-            Json(json!({"detail": format!("explorer query run is already terminal: {run_id}")})),
+            format!("explorer query run is already terminal: {run_id}"),
         )
-            .into_response();
+        .into_response();
     }
     stored.cancellation.cancel();
     mark_cancelled(&mut run);

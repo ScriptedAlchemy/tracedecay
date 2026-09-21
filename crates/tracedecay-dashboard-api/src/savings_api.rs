@@ -502,12 +502,8 @@ fn price_deltas<'a>(
     price_provider_usage(&aggregate, prices, 0)
 }
 
-fn count_i64(value: usize) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-fn count_u64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
+fn count_i64(value: impl TryInto<i64>) -> i64 {
+    value.try_into().unwrap_or(i64::MAX)
 }
 
 fn cost_basis_label(cost_usd: Option<f64>) -> &'static str {
@@ -594,9 +590,9 @@ fn provider_spend(
             summary.unpriced_events,
             subtotal.priced_events,
         ),
-        usage_events: count_u64(summary.usage_events),
-        priced_events: count_u64(subtotal.priced_events),
-        unpriced_events: count_u64(summary.unpriced_events),
+        usage_events: count_i64(summary.usage_events),
+        priced_events: count_i64(subtotal.priced_events),
+        unpriced_events: count_i64(summary.unpriced_events),
         unknown_model_events: count_i64(
             deltas.iter().filter(|delta| delta.model.is_none()).count(),
         ),
@@ -629,9 +625,9 @@ fn provider_day_point(
     SavingsProviderDayPointV1 {
         day,
         provider: provider.to_owned(),
-        usage_events: count_u64(summary.usage_events),
-        priced_events: count_u64(subtotal.priced_events),
-        unpriced_events: count_u64(summary.unpriced_events),
+        usage_events: count_i64(summary.usage_events),
+        priced_events: count_i64(subtotal.priced_events),
+        unpriced_events: count_i64(summary.unpriced_events),
         priced_cost_usd: subtotal.priced_cost_usd,
         total_cost_usd: summary.total_cost_usd,
         total_tokens: total_tokens_of(actual.as_ref()),
@@ -712,7 +708,7 @@ fn provider_usage_attribution(
                 SavingsProviderModelSpendV1 {
                     provider,
                     model: (!model.is_empty()).then_some(model),
-                    usage_events: count_u64(priced.usage_events),
+                    usage_events: count_i64(priced.usage_events),
                     cost_usd: priced.total_cost_usd,
                     total_tokens: total_tokens_of(actual.as_ref()),
                     cost_basis: cost_basis_label(priced.total_cost_usd).to_owned(),
@@ -728,7 +724,7 @@ fn provider_usage_attribution(
                 let (_, actual) = actual_for_deltas(deltas.into_iter());
                 SavingsProviderDaySpendV1 {
                     day,
-                    usage_events: count_u64(priced.usage_events),
+                    usage_events: count_i64(priced.usage_events),
                     cost_usd: priced.total_cost_usd,
                     total_tokens: total_tokens_of(actual.as_ref()),
                     provider_actual: actual,

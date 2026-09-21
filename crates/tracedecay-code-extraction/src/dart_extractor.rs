@@ -51,8 +51,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment. Prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -68,10 +67,6 @@ impl<'s> ExtractionState<'s> {
 
     /// Gets the text of a tree-sitter node from the source.
     fn node_text(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
-
-    fn node_str(&self, node: TsNode<'_>) -> &'s str {
         node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 
@@ -1273,7 +1268,7 @@ impl DartExtractor {
 
         let visibility = Self::dart_visibility(&name);
         let docstring = Self::extract_docstring(state, decl_node);
-        let text = state.node_str(decl_node);
+        let text = state.node_text(decl_node);
         let signature = if let Some(body) = decl_node.child_by_field_name("body") {
             Some(
                 state
@@ -1346,7 +1341,7 @@ impl DartExtractor {
     // ----------------------------------
 
     fn visit_operator(state: &mut ExtractionState, decl_node: TsNode<'_>, _sig_node: TsNode<'_>) {
-        let text = state.node_str(decl_node);
+        let text = state.node_text(decl_node);
         let name = text.find("operator").map_or_else(
             || "operator".to_string(),
             |pos| {
@@ -1701,7 +1696,7 @@ impl DartExtractor {
                 .trim()
                 .to_string();
         }
-        let text = state.node_str(node);
+        let text = state.node_text(node);
         if let Some(brace_pos) = text.find('{') {
             text[..brace_pos].trim().to_string()
         } else {

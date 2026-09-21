@@ -89,7 +89,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tree-sitter = "0.26"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = "0.5"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lite", "test-helpers"] }

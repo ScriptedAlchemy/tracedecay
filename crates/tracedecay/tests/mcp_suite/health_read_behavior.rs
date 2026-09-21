@@ -12,7 +12,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
@@ -164,33 +163,7 @@ async fn open_health_project() -> HealthProject {
 fn seed_project(project_root: &Path) {
     fs::create_dir_all(project_root.join("src")).expect("project source directory");
     fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n").expect("source file");
-    let git = crate::common::git_program();
-    let init = Command::new(&git)
-        .args(["init", "-q"])
-        .current_dir(project_root)
-        .status()
-        .expect("git init");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(&git)
-        .args(["add", "."])
-        .current_dir(project_root)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(&git)
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "health read fixture",
-        ])
-        .current_dir(project_root)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit must succeed");
+    crate::support::commit_worktree(project_root, "health read fixture");
 }
 
 async fn seal_serving_database(fixture: HealthProject) -> HealthProject {

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use tracedecay_rusqlite_runtime::read_consistency::{CommitWatermarkSource, WatermarkSourceState};
-use tracedecay_store::{CommitSequenceV1, RuntimeSubmitOutcomeV1};
+use tracedecay_store::RuntimeSubmitOutcomeV1;
 
 use super::runtime_test_support::{
-    Probe, TestDatabase, outbox_request, run, writer, writer_runtime_fixture,
+    Probe, TestDatabase, outbox_request, run, shard_watermark, writer, writer_runtime_fixture,
 };
 
 #[test]
@@ -53,12 +53,7 @@ fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks(
     assert_eq!(sequences, fixture.commit_sequences.to_vec());
     assert_eq!(
         watermarks.current(&fixture.origin_binding.shard_id),
-        WatermarkSourceState::Available(tracedecay_store::ShardWatermarkV1 {
-            shard_id: fixture.origin_binding.shard_id.clone(),
-            incarnation: fixture.origin_binding.incarnation,
-            authority_epoch: fixture.origin_binding.authority_epoch,
-            commit_sequence: CommitSequenceV1(2),
-        })
+        WatermarkSourceState::Available(shard_watermark(&fixture.origin_binding, 2))
     );
 
     Arc::try_unwrap(writer)

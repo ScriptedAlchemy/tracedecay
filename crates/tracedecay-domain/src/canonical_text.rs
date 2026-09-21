@@ -150,6 +150,18 @@ pub fn sha256_hex_suffix(value: &str) -> Option<&str> {
     value.strip_prefix("sha256:")
 }
 
+/// First eight bytes of a SHA-256 digest as a non-negative integer.
+///
+/// Lexical artifact row ids and clone fingerprints both need a value that
+/// fits in a signed 64-bit integer, so the high bit is cleared. `digest`
+/// must be at least eight bytes; a full SHA-256 digest is 32.
+#[must_use]
+pub fn nonnegative_sha256_prefix(digest: &[u8]) -> u64 {
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(prefix) & i64::MAX as u64
+}
+
 /// The hex body of a `sha256:`-tagged digest, without the algorithm tag.
 ///
 /// Identities that embed a digest under their own namespace all need the
@@ -431,6 +443,15 @@ mod tests {
         assert_eq!(
             validate_canonical_identity("", "field"),
             Err(DomainError::NonCanonical { field: "field" })
+        );
+    }
+
+    #[test]
+    fn nonnegative_sha256_prefix_clears_the_high_bit() {
+        assert_eq!(nonnegative_sha256_prefix(&[0xff; 32]), i64::MAX as u64);
+        assert_eq!(
+            nonnegative_sha256_prefix(&[0x01, 0, 0, 0, 0, 0, 0, 2]),
+            0x0100_0000_0000_0002
         );
     }
 

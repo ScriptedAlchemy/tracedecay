@@ -296,8 +296,9 @@ fn protocol_exit_status<T>(response: &RemoteProtocolResponseV1<T>) -> Result<()>
         Ok(_) => Ok(()),
         Err(problem) => Err(TraceDecayError::Config {
             message: format!(
-                "Remote Brain request {} failed: {}: {}",
-                response.request_id, problem.problem.code, problem.problem.message
+                "Remote Brain request {} failed: {}",
+                response.request_id,
+                problem.problem.summary()
             ),
         }),
     }
@@ -483,7 +484,7 @@ Recovery required: {}\n",
 fn render_protocol_response<T>(response: &RemoteProtocolResponseV1<T>) -> String {
     let outcome = match &response.result {
         Ok(_) => "ok".to_owned(),
-        Err(problem) => format!("{}: {}", problem.problem.code, problem.problem.message),
+        Err(problem) => problem.problem.summary(),
     };
     format!(
         "Request: {}\nAuthority: {}\nOutcome: {}\n",
@@ -628,7 +629,7 @@ mod tests {
         let Err(problem) = &response.result else {
             panic!("expected typed protocol problem");
         };
-        let outcome = format!("{}: {}", problem.problem.code, problem.problem.message);
+        let outcome = problem.problem.summary();
         assert_eq!(
             render_protocol_response(&response),
             format!("Request: request.cli.remote.7\nAuthority: unavailable\nOutcome: {outcome}\n")

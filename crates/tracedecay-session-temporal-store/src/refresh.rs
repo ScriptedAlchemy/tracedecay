@@ -26,8 +26,8 @@ use super::projection::{
     validate_final_projection_receipt,
 };
 use super::query::{
-    encode_watermarks, frontier_i64, generation_i64, now_micros, read_generation, storage,
-    storage_message,
+    decode_generation_i64, encode_watermarks, frontier_i64, generation_i64, now_micros,
+    read_generation, storage, storage_message,
 };
 use super::rebuild::{
     checkpoint_relation_rebuild_control, rebuild_candidate_session_relations,
@@ -1257,14 +1257,6 @@ async fn next_generation(
         .get(0)
         .map_err(|error| storage(BEGIN_REFRESH, error))?;
     decode_generation_i64(value, BEGIN_REFRESH)
-}
-
-fn decode_generation_i64(
-    value: i64,
-    operation: &'static str,
-) -> SessionStoreResult<SessionProjectionGenerationV1> {
-    let value = u64::try_from(value).map_err(|error| storage(operation, error))?;
-    SessionProjectionGenerationV1::new(value).map_err(SessionStoreError::from)
 }
 
 const SQLITE_CONSTRAINT: i32 = 19;

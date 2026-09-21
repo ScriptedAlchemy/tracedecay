@@ -58,7 +58,8 @@ impl RegisteredGitTopologyAnchorAuthorityV2 {
             }
             let anchor_json = serde_json::to_string(&candidate)
                 .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
-            let owner_json = serde_json::to_string(candidate.owner())
+            let owner_json = candidate
+                .owner_column_json()
                 .map_err(|_| GitTopologyAnchorAuthorityErrorV2::Conflict)?;
             transaction
                 .execute(
@@ -209,7 +210,7 @@ fn decode_record(
     record
         .validate()
         .map_err(|_| GitTopologyAnchorAuthorityErrorV2::ResetRequired)?;
-    if serde_json::to_string(record.owner()).ok().as_deref() != Some(owner_json)
+    if !record.owner_column_matches(owner_json)
         || record.projection_generation().as_str() != projection_generation
     {
         return Err(GitTopologyAnchorAuthorityErrorV2::ResetRequired);

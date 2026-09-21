@@ -8,8 +8,11 @@
 //! settle the child recovery is supposed to find still open, so the live
 //! daemon is a separate process stopped with SIGKILL.
 
+use crate::common::fixture::git_capture;
 use crate::fixture;
-use crate::support::{extract_real_server_text, handle_real_server_tool_call, test_temp_dir};
+use crate::support::{
+    commit_worktree, extract_real_server_text, handle_real_server_tool_call, test_temp_dir,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -688,16 +691,7 @@ async fn start_attempt(
 }
 
 fn fixture_commit(project_root: &Path) -> String {
-    let commit = Command::new(crate::common::git_program())
-        .args(["rev-parse", "HEAD"])
-        .current_dir(project_root)
-        .output()
-        .expect("read fixture commit");
-    assert!(commit.status.success(), "git rev-parse must succeed");
-    String::from_utf8(commit.stdout)
-        .expect("commit is UTF-8")
-        .trim()
-        .to_owned()
+    git_capture(project_root, &["rev-parse", "HEAD"])
 }
 
 async fn configure_hold_provider(
@@ -791,39 +785,7 @@ async fn configure_hold_provider(
 fn seed_project(project_root: &Path) {
     std::fs::create_dir_all(project_root).expect("project root");
     fixture::write_indexed_fixture_sources(project_root);
-    let git = crate::common::git_program();
-    assert!(
-        Command::new(&git)
-            .args(["init", "-q"])
-            .current_dir(project_root)
-            .status()
-            .expect("git init")
-            .success()
-    );
-    assert!(
-        Command::new(&git)
-            .args(["add", "."])
-            .current_dir(project_root)
-            .status()
-            .expect("git add")
-            .success()
-    );
-    assert!(
-        Command::new(git)
-            .args([
-                "-c",
-                "user.name=TraceDecay Test",
-                "-c",
-                "user.email=tracedecay@example.invalid",
-                "commit",
-                "-qm",
-                "resume attempts fixture",
-            ])
-            .current_dir(project_root)
-            .status()
-            .expect("git commit")
-            .success()
-    );
+    commit_worktree(project_root, "resume attempts fixture");
 }
 
 fn now_micros() -> i64 {

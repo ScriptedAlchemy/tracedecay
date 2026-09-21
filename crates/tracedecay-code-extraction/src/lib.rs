@@ -365,6 +365,15 @@ pub struct LanguageRegistry {
     by_extension: HashMap<String, usize>,
 }
 
+/// Required by `clippy::new_without_default` for the argument-less `new`
+/// below, so this is API surface the lint owns rather than an uncalled entry
+/// point a dead-surface pass may drop.
+impl Default for LanguageRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LanguageRegistry {
     /// Creates a new registry with all built-in language extractors.
     pub fn new() -> Self {
@@ -482,12 +491,6 @@ impl LanguageRegistry {
         }
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub fn from_extractors_for_test(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
-        Self::from_extractors(extractors)
-    }
-
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
         let extractor = path.rsplit('.').next().and_then(|ext| {
@@ -507,11 +510,5 @@ impl LanguageRegistry {
             .iter()
             .flat_map(|e| e.extensions().iter().copied())
             .collect()
-    }
-}
-
-impl Default for LanguageRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }

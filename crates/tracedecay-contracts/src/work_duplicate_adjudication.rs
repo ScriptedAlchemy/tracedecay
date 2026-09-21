@@ -14,10 +14,7 @@ use tracedecay_domain::{
 };
 
 use crate::work::work_authority;
-use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
-};
+use crate::{ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic};
 
 pub fn work_duplicate_adjudication_input_digest(
     command: &WorkDuplicateAdjudicationCommandV1,
@@ -200,7 +197,7 @@ where
         context: &RequestContext,
         command: WorkDuplicateAdjudicationCommandV1,
     ) -> Result<WorkDuplicateAdjudicationAppendOutcomeV1, ApplicationProblem> {
-        admit(context, command.occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, command.occurred_at)?;
         let authority = work_authority(context)?;
         let command = command.canonicalized();
         command.validate().map_err(|_| invalid_problem())?;
@@ -240,7 +237,7 @@ where
         command_id: WorkCommandId,
         occurred_at: UtcMicros,
     ) -> Result<WorkDuplicateAdjudicationCommandV1, ApplicationProblem> {
-        admit(context, occurred_at)?;
+        ApplicationProblem::ensure_admitted(context, occurred_at)?;
         let authority = work_authority(context)?;
         if request.first_attempt == request.second_attempt {
             return Err(invalid_problem());
@@ -274,7 +271,7 @@ where
         context: &RequestContext,
         request: WorkDuplicateAttemptClassificationRequestV1,
     ) -> Result<WorkDuplicateAttemptClassificationReadV1, ApplicationProblem> {
-        admit(context, request.observed_at)?;
+        ApplicationProblem::ensure_admitted(context, request.observed_at)?;
         let authority = work_authority(context)?;
         let mut attempts = request.attempts;
         attempts.sort();
@@ -402,23 +399,11 @@ fn classify_complete_attempt_relations(
     }
 }
 
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
-}
-
 fn invalid_problem() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work.duplicate-adjudication.invalid".to_owned(),
-            message: "The duplicate Work adjudication is invalid.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(
+        "application.work.duplicate-adjudication.invalid",
+        "The duplicate Work adjudication is invalid.",
+    )
 }
 
 fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> ApplicationProblem {
@@ -426,25 +411,15 @@ fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> Applicatio
         WorkDuplicateAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic {
-                code: "application.work.duplicate-adjudication.revision-conflict".to_owned(),
-                message: "The duplicate Work adjudication changed after this command was prepared."
-                    .to_owned(),
-            },
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(
+            "application.work.duplicate-adjudication.revision-conflict",
+            "The duplicate Work adjudication changed after this command was prepared.",
+        ),
         WorkDuplicateAdjudicationStorageErrorV1::IdempotencyConflict => {
-            ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic {
-                    code: "application.work.duplicate-adjudication.idempotency-conflict".to_owned(),
-                    message: "The duplicate Work adjudication command identity was already used with different input."
-                        .to_owned(),
-                },
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            }
+            ApplicationProblem::conflict(
+                "application.work.duplicate-adjudication.idempotency-conflict",
+                "The duplicate Work adjudication command identity was already used with different input.",
+            )
         }
         WorkDuplicateAdjudicationStorageErrorV1::Unavailable => {
             ApplicationProblem::unavailable(SafeDiagnostic {
@@ -465,13 +440,7 @@ mod tests {
         WorkTopologyGenerationRefV1,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn attempt(name: &str) -> WorkAttemptIdentityV1 {
         WorkAttemptIdentityV1::new(

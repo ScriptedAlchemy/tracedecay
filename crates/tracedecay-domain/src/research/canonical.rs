@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -116,6 +117,20 @@ pub fn canonical_json_bytes_and_sha256<T: Serialize>(
     let digest_bytes = Sha256::digest(&bytes);
     let digest = ManifestDigest::from_sha256_bytes(&digest_bytes)?;
     Ok((bytes, digest))
+}
+
+/// Decode a stored JSON payload and require its canonical digest to match the
+/// column that was persisted with it. Journal rows use this so a rewritten
+/// payload cannot reuse another row's digest.
+pub fn decode_with_canonical_digest<T>(payload: &str, stored_digest: &str) -> Option<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let value: T = serde_json::from_str(payload).ok()?;
+    match canonical_sha256(&value) {
+        Ok(digest) if digest.as_str() == stored_digest => Some(value),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

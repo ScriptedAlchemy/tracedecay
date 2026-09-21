@@ -334,7 +334,7 @@ where
     }
 }
 
-fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
+pub fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
     match kind {
         ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
         ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
@@ -416,11 +416,7 @@ pub(crate) fn invalid_request_problem(
     let diagnostic = SafeDiagnostic::new(code, message)?;
     adapter_problem(
         request_id,
-        ApplicationProblem::InvalidRequest {
-            diagnostic,
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(diagnostic.code, diagnostic.message),
     )
 }
 

@@ -102,13 +102,7 @@ fn controller(
     .expect("fake driver configures")
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 /// Test authority that admits one externally canonical publication and issues
 /// a permit only from an observed clear drain. It never derives an identity

@@ -359,13 +359,10 @@ fn append_tool_result(
 }
 
 fn canonical_role(role: &str) -> Result<CanonicalMessageRoleV1, ObservationRecordParseErrorV1> {
-    match role {
-        "user" => Ok(CanonicalMessageRoleV1::User),
-        "assistant" => Ok(CanonicalMessageRoleV1::Assistant),
-        "system" | "_system_prompt" => Ok(CanonicalMessageRoleV1::System),
-        "tool" => Ok(CanonicalMessageRoleV1::Tool),
-        _ => Err(invalid()),
+    if role == "_system_prompt" {
+        return Ok(CanonicalMessageRoleV1::System);
     }
+    CanonicalMessageRoleV1::from_known_label(role).ok_or_else(invalid)
 }
 
 fn content_text(content: &Value) -> Option<&str> {

@@ -67,12 +67,12 @@ pub use text_artifacts::{
 };
 
 use generation_transactions::{
-    GENERATION_RECEIPT_STORE, acquire_graph_replay_pool_lock_checked,
-    cleanup_committed_transaction, cleanup_committed_transaction_under_graph_replay_pool_lock,
-    clear_transaction, expose_staged_generations_under_graph_replay_pool_lock, load_transaction,
-    open_file_sha256_hex_cancellable, path_still_names_open_file, persist_transaction,
-    receipt_is_durable, regular_file_exists, remove_empty_stage_root, rollback_staged_transaction,
-    stage_collectable_generations, transaction_path, write_receipt,
+    GENERATION_RECEIPT_STORE, GENERATION_TRANSACTION_JOURNAL,
+    acquire_graph_replay_pool_lock_checked, cleanup_committed_transaction,
+    cleanup_committed_transaction_under_graph_replay_pool_lock,
+    expose_staged_generations_under_graph_replay_pool_lock, open_file_sha256_hex_cancellable,
+    path_still_names_open_file, regular_file_exists, remove_empty_stage_root,
+    rollback_staged_transaction, stage_collectable_generations, transaction_path,
 };
 #[cfg(test)]
 use generation_transactions::{
@@ -84,14 +84,14 @@ use receipt_store::receipt_digest_file_component;
 use scope_roots::is_code_index_scope_hash;
 #[cfg(test)]
 use scope_roots::{
-    ScopeRootRetentionTransactionV1, build_scope_receipt, persist_scope_transaction,
-    scope_receipt_digest, scope_receipt_path, scope_stage_root, scope_transaction_path,
-    validate_scope_transaction, write_scope_receipt,
+    SCOPE_RECEIPT_STORE, SCOPE_TRANSACTION_JOURNAL, ScopeRootRetentionTransactionV1,
+    build_scope_receipt, scope_receipt_digest, scope_receipt_path, scope_stage_root,
+    scope_transaction_path, validate_scope_transaction,
 };
 #[cfg(test)]
 use text_artifacts::{
-    build_text_artifact_receipt, persist_text_artifact_transaction,
-    stage_collectable_text_artifacts, total_text_artifact_bytes, write_text_artifact_receipt,
+    TEXT_ARTIFACT_RECEIPT_STORE, TEXT_ARTIFACT_TRANSACTION_JOURNAL, build_text_artifact_receipt,
+    stage_collectable_text_artifacts, total_text_artifact_bytes,
 };
 use text_artifacts::{
     execute_text_artifact_retention_under_store_lock, plan_collectable_text_artifacts_cancellable,
@@ -1553,7 +1553,7 @@ pub fn execute_code_generation_retention_cancellable(
             )?),
             None => None,
         };
-        persist_transaction(store_root, &transaction)?;
+        journal::persist_journal(store_root, &GENERATION_TRANSACTION_JOURNAL, &transaction)?;
 
         let result = (|| {
             // Durable before the first unlink: the pointer must never name a
@@ -1579,7 +1579,12 @@ pub fn execute_code_generation_retention_cancellable(
             // the replay reconciler never observes a receipt whose pool
             // survival events are missing.
             graph_replay_release::write_events(store_root, &receipt)?;
-            write_receipt(store_root, &receipt)?;
+            receipt_store::write_receipt(
+                store_root,
+                &GENERATION_RECEIPT_STORE,
+                &receipt.receipt_digest,
+                &receipt,
+            )?;
             cleanup_committed_transaction_under_graph_replay_pool_lock(
                 store_root,
                 &transaction,
@@ -1592,13 +1597,18 @@ pub fn execute_code_generation_retention_cancellable(
                     graph_replay_pool_root,
                     is_cancelled,
                 )?;
-            clear_transaction(store_root)
+            journal::clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
         })();
         if let Err(error) = result {
             drop(graph_replay_pool_lock);
-            if !receipt_is_durable(store_root, &receipt)? {
+            if !receipt_store::receipt_is_durable(
+                store_root,
+                &GENERATION_RECEIPT_STORE,
+                &receipt.receipt_digest,
+                &receipt,
+            )? {
                 rollback_staged_transaction(store_root, &transaction, graph_replay_pool_root)?;
-                clear_transaction(store_root)?;
+                journal::clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)?;
             }
             return Err(error);
         }
@@ -1769,11 +1779,17 @@ fn recover_pending_transaction_unlocked(
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let Some(transaction) = load_transaction(store_root)? else {
+    let Some(transaction) = journal::load_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)?
+    else {
         return Ok(());
     };
 
-    if receipt_is_durable(store_root, &transaction.receipt)? {
+    if receipt_store::receipt_is_durable(
+        store_root,
+        &GENERATION_RECEIPT_STORE,
+        &transaction.receipt.receipt_digest,
+        &transaction.receipt,
+    )? {
         cleanup_committed_transaction(
             store_root,
             &transaction,
@@ -1784,7 +1800,7 @@ fn recover_pending_transaction_unlocked(
     } else {
         rollback_staged_transaction(store_root, &transaction, graph_replay_pool_root)?;
     }
-    clear_transaction(store_root)
+    journal::clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
 fn read_active_pointer(

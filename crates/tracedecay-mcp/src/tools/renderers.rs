@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 
 use serde_json::Value;
+use tracedecay_domain::collapse_whitespace;
 
 use super::render::{self, Md};
 
@@ -243,10 +244,7 @@ fn append_skill_item(md: &mut Md, skill: &Value) {
 
     let summary = value_str(metadata, "/summary");
     if !summary.is_empty() {
-        md.line(&format!(
-            "  summary: {}",
-            summary.split_whitespace().collect::<Vec<_>>().join(" ")
-        ));
+        md.line(&format!("  summary: {}", collapse_whitespace(summary)));
     }
     let category = value_str(metadata, "/category");
     let targets = string_array(metadata.get("targets"));

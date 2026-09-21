@@ -240,15 +240,6 @@ pub struct CollectionPlan {
     pub unverifiable: Vec<OrphanStoreFinding>,
 }
 
-impl CollectionPlan {
-    /// Total bytes that collecting [`Self::collect`] would reclaim.
-    pub fn collectable_bytes(&self) -> u64 {
-        self.collect
-            .iter()
-            .fold(0u64, |acc, f| acc.saturating_add(f.size_bytes))
-    }
-}
-
 /// Partition findings under a retention window. Live stores are dropped from
 /// the plan entirely, they are never a retention concern. Pure.
 pub fn plan_collection(findings: Vec<OrphanStoreFinding>, retention_secs: i64) -> CollectionPlan {

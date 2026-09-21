@@ -283,10 +283,7 @@ impl McpServer {
                 return;
             }
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = crate::project::current_timestamp();
         self.last_staleness_check_at.store(now, Ordering::Release);
 
         self.startup_catch_up.settle();
@@ -336,10 +333,7 @@ impl McpServer {
             return;
         }
         let cg = self.cg_snapshot().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = crate::project::current_timestamp();
         let previous = self.last_staleness_check_at.load(Ordering::Acquire);
         if previous != 0 && now.saturating_sub(previous) < 30 {
             return;

@@ -9,13 +9,13 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tracedecay_api::WorkflowOperation;
 use tracedecay_contracts::{
-    ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
-    ApplicationResult, CancellationSignal, Deadline, ResultContractRef, SafeDiagnostic,
-    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
-    WorkflowDefinitionValidateRequest, workflow_executable_binding_registry,
+    ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationResult,
+    CancellationSignal, Deadline, ResultContractRef, SafeDiagnostic, TaskHandoffIssueRequest,
+    TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
+    workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -30,29 +30,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::application_cli::{WORKFLOW, config_error};
 
-fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
-    let operation_id =
-        OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
-    let registry = workflow_executable_binding_registry().map_err(config_error)?;
-    let binding = registry
-        .get(&operation_id)
-        .and_then(|availability| availability.binding())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "Workflow operation {} is not advertised by this build",
-                operation_id.as_str()
-            ),
-        })?;
-    let maximum_micros = i64::try_from(
-        std::time::Duration::from_millis(binding.deadline().maximum_millis()).as_micros(),
-    )
-    .map_err(|_| TraceDecayError::Config {
-        message: "The canonical Workflow deadline exceeds the domain clock".to_owned(),
-    })?;
-    Deadline::new(UtcMicros(observed_at.0.saturating_add(maximum_micros))).map_err(config_error)
-}
-
-fn workflow_result_contract(operation: WorkflowOperation) -> Result<ResultContractRef> {
+fn workflow_catalog(operation: WorkflowOperation) -> Result<(ResultContractRef, u64)> {
     let operation_id =
         OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
     let registry = workflow_executable_binding_registry().map_err(config_error)?;
@@ -67,9 +45,26 @@ fn workflow_result_contract(operation: WorkflowOperation) -> Result<ResultContra
             ),
         });
     };
-    Ok(ResultContractRef::from_schema(
-        binding.result_schema().schema_ref(),
+    Ok((
+        ResultContractRef::from_schema(binding.result_schema().schema_ref()),
+        binding.deadline().maximum_millis(),
     ))
+}
+
+#[cfg(test)]
+fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
+    let (_, maximum_millis) = workflow_catalog(operation)?;
+    deadline_from_maximum_millis(maximum_millis, observed_at)
+}
+
+fn deadline_from_maximum_millis(maximum_millis: u64, observed_at: UtcMicros) -> Result<Deadline> {
+    let maximum_micros = i64::try_from(
+        std::time::Duration::from_millis(maximum_millis).as_micros(),
+    )
+    .map_err(|_| TraceDecayError::Config {
+        message: "The canonical Workflow deadline exceeds the domain clock".to_owned(),
+    })?;
+    Deadline::new(UtcMicros(observed_at.0.saturating_add(maximum_micros))).map_err(config_error)
 }
 
 fn decode_workflow_invocation(
@@ -185,20 +180,20 @@ pub async fn invoke_workflow_cli(
     operation: WorkflowOperation,
     body: Value,
 ) -> Result<ApplicationResult<Value>> {
-    let result_contract = workflow_result_contract(operation)?;
+    let (result_contract, maximum_millis) = workflow_catalog(operation)?;
     let request_id =
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate a Workflow CLI request id".to_owned(),
         })?;
     let observed_at = invocation_now_micros();
-    let deadline = workflow_cli_deadline(operation, observed_at)?;
+    let deadline = deadline_from_maximum_millis(maximum_millis, observed_at)?;
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .map_err(config_error)?;
     let invocation = match decode_workflow_invocation(operation, body) {
         Ok(invocation) => invocation,
         Err(_) => {
-            return Ok(Err(workflow_problem(
+            return Ok(Err(crate::application_cli::problem_envelope(
                 result_contract,
                 request_id,
                 WORKFLOW.invalid_request(),
@@ -212,8 +207,7 @@ pub async fn invoke_workflow_cli(
         deadline.clone(),
         cancellation.context(),
     );
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
+    let handshake = crate::commands::client_handshake(Some(&project_root))?;
     let response = match tracedecay_daemon_identity::invocation_client_for_current(handshake)?
         .invoke_controlled(
             request,
@@ -225,7 +219,7 @@ pub async fn invoke_workflow_cli(
     {
         Ok(response) => response,
         Err(error) => {
-            return Ok(Err(workflow_problem(
+            return Ok(Err(crate::application_cli::problem_envelope(
                 result_contract,
                 request_id,
                 error.into_application_problem(),
@@ -243,15 +237,17 @@ pub async fn invoke_workflow_cli(
                 outcome: erase_workflow_outcome(outcome)?,
             }))
         }
-        DaemonInvocationOutcome::ApplicationProblem { problem } => {
-            Ok(Err(workflow_problem(result_contract, request_id, problem)?))
+        DaemonInvocationOutcome::ApplicationProblem { problem } => Ok(Err(
+            crate::application_cli::problem_envelope(result_contract, request_id, problem)?,
+        )),
+        DaemonInvocationOutcome::Problem { problem } => {
+            Ok(Err(crate::application_cli::problem_envelope(
+                result_contract,
+                request_id,
+                WORKFLOW.daemon_problem(problem),
+            )?))
         }
-        DaemonInvocationOutcome::Problem { problem } => Ok(Err(workflow_problem(
-            result_contract,
-            request_id,
-            WORKFLOW.daemon_problem(problem),
-        )?)),
-        _ => Ok(Err(workflow_problem(
+        _ => Ok(Err(crate::application_cli::problem_envelope(
             result_contract,
             request_id,
             ApplicationProblem::unavailable(SafeDiagnostic {
@@ -284,14 +280,6 @@ fn erase_workflow_outcome(
         | WorkflowApplicationOutcome::GetRun(outcome) => serde_json::to_value(outcome),
     }?;
     serde_json::from_value(outcome).map_err(Into::into)
-}
-
-fn workflow_problem(
-    result_contract: ResultContractRef,
-    request_id: tracedecay_contracts::RequestId,
-    problem: ApplicationProblem,
-) -> Result<ApplicationProblemEnvelope> {
-    ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
 fn decode<T>(body: Value) -> Result<T>
