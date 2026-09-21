@@ -225,17 +225,24 @@ async fn release_one_idle_project_server_before_open(
     Ok(capacity_admission)
 }
 
-// Gated exactly like the `production_harness` module that owns the isolated
-// layout: an integration test links this crate without `cfg(test)`, so a
-// `cfg(test)`-only pin left `mcp_suite` compositions sweeping the developer's
-// real `$HOME` transcripts.
+/// The one home a composed daemon reads host transcripts from.
+///
+/// Both readers resolve it here: the composition pins it onto the session
+/// refresh schedulers that own the background sweep, and the MCP server scopes
+/// every tool dispatch to it so a hook-triggered ingest cannot resolve a
+/// different one.
+///
+/// Gated exactly like the `production_harness` module that owns the isolated
+/// layout: an integration test links this crate without `cfg(test)`, so a
+/// `cfg(test)`-only pin left `mcp_suite` compositions sweeping the developer's
+/// real `$HOME` transcripts.
 #[cfg(any(test, feature = "test-transport"))]
-pub(super) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
+pub(crate) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
     profile_root.parent().map(Path::to_path_buf)
 }
 
 #[cfg(not(any(test, feature = "test-transport")))]
-pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
+pub(crate) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
     tracedecay_sessions::runtime::home_dir()
 }
 

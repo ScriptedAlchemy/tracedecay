@@ -517,14 +517,12 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
     let _home_guard = HomeEnvGuard::set(&home);
+    let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
     fixture::write_indexed_fixture_sources(&project);
     commit_worktree(&project, "production Codex transcript fixture");
-    // The hook route reads the process home, which is what this journey
-    // exercises. The composition's own sweep reads its isolated layout and
-    // finds nothing there, so the search below proves the hook's own commit.
-    write_production_codex_rollout(&home, &project);
+    write_production_codex_rollout(&transcripts, &project);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
         &isolation,
