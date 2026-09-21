@@ -317,7 +317,7 @@ fn healthcheck_advises_shipped_heading_steering_as_retired() {
 
 #[cfg(unix)]
 #[test]
-fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
+fn global_activate_sweeps_retired_artifacts_and_clears_their_advisories() {
     use crate::agents::host_bundle::HostComponentV1;
     use crate::agents::{AgentIntegration, InstallContext};
 
@@ -336,7 +336,18 @@ fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
     )
     .unwrap();
 
-    let mut counters = DoctorCounters::new();
+    let agent = managed_agent_path(home.path());
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "name": KIRO_AGENT_NAME,
+            "description": OWNED_AGENT_DESCRIPTION,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
     // Pretend MCP is already installed so doctor reaches retired-artifact advisories.
     let mcp_path = mcp_config_path(home.path());
     std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
@@ -345,6 +356,8 @@ fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
         br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
     )
     .unwrap();
+
+    let mut counters = DoctorCounters::new();
     KiroIntegration.healthcheck(
         &mut counters,
         &HealthcheckContext {
@@ -354,8 +367,8 @@ fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
     );
     assert_eq!(counters.issues, 0);
     assert_eq!(
-        counters.warnings, 1,
-        "precondition: legacy steering emits a migration advisory"
+        counters.warnings, 2,
+        "precondition: retired steering and managed agent each emit an advisory"
     );
 
     KiroIntegration
@@ -369,22 +382,20 @@ fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
                 dashboard: false,
             },
         )
-        .expect("global activate must converge leftover steering");
+        .expect("global activate must sweep retired artifacts");
 
-    let converged = std::fs::read_to_string(&steering).unwrap();
     assert!(
-        !converged.contains("You MUST use tracedecay."),
-        "activate must replace the shipped heading block"
+        !agent.exists(),
+        "activate must remove the retired managed agent it advises removing"
     );
     assert!(
-        converged.contains("<!-- tracedecay:kiro:start -->")
-            && converged.contains("<!-- tracedecay:kiro:end -->"),
-        "activate must leave the current ownership sentinels"
+        !steering.exists() || owned_steering_ranges(&std::fs::read_to_string(&steering).unwrap())
+            .is_empty(),
+        "activate must leave no owned steering block behind"
     );
-    assert_eq!(
-        owned_steering_ranges(&converged).len(),
-        1,
-        "activate must leave exactly one owned block"
+    assert!(
+        mcp_registry_has_tracedecay(&mcp_path),
+        "sweeping retired artifacts must not disturb the MCP registration"
     );
 
     let mut counters = DoctorCounters::new();
@@ -397,8 +408,8 @@ fn global_activate_converges_legacy_steering_but_doctor_still_advises() {
     );
     assert_eq!(counters.issues, 0);
     assert_eq!(
-        counters.warnings, 1,
-        "converged leftover steering remains a retired global artifact until uninstall sweeps it"
+        counters.warnings, 0,
+        "the advised remedy must actually clear every advisory it named"
     );
 }
 

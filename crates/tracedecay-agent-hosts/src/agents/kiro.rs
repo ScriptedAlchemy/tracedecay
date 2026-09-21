@@ -470,14 +470,15 @@ impl AgentIntegration for KiroIntegration {
         ctx: &InstallContext,
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
+            // Catalog-native global install is MCP-only, so the steering file,
+            // the managed agent and the managed skill index prior releases
+            // wrote are retired by definition. Sweep them before the Kiro CLI
+            // is required: converging them is local file work, and welding it
+            // to uninstall left the only remedy one that also tears out the
+            // MCP registration this very pass is installing.
+            remove_retired_global_artifacts(&ctx.home)?;
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
-            // Catalog-native global install stays MCP-only and does not create
-            // `~/.kiro/steering/tracedecay.md`. Prior releases did write that
-            // file; when it is still present, converge the owned block so the
-            // leftover is current while doctor keeps advising migration until
-            // uninstall sweeps it.
-            reconcile_legacy_global_steering(&ctx.home)?;
         }
         Ok(())
     }
@@ -727,23 +728,6 @@ fn install_steering_rules(path: &Path) -> Result<()> {
             existing, &ranges, &block,
         ))
     })
-}
-
-/// Converge a leftover global steering file from a prior release. Absence is
-/// the catalog-native end state and is left alone; presence must reconcile or
-/// return a typed inspection failure.
-fn reconcile_legacy_global_steering(home: &Path) -> Result<()> {
-    let path = steering_path(home);
-    match std::fs::metadata(&path) {
-        Ok(_) => install_steering_rules(&path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(TraceDecayError::Config {
-            message: format!(
-                "failed to inspect Kiro global steering {}: {error}",
-                path.display()
-            ),
-        }),
-    }
 }
 
 fn steering_block_text() -> String {
@@ -1077,7 +1061,7 @@ fn doctor_advise_retired_steering(dc: &mut DoctorCounters, home: &Path) {
         Err(error) => {
             dc.warn(&format!(
                 "migration advisory: retired Kiro global steering at {} is unreadable ({error}); \
-                 remove it manually or run `tracedecay uninstall --agent kiro` after fixing permissions",
+                 remove it manually or run `tracedecay install --agent kiro` after fixing permissions",
                 path.display()
             ));
             return;
@@ -1090,7 +1074,7 @@ fn doctor_advise_retired_steering(dc: &mut DoctorCounters, home: &Path) {
     dc.warn(&format!(
         "migration advisory: retired Kiro global steering still present at {} \
          ({} owned block(s)); global install is MCP-only, remove with \
-         `tracedecay uninstall --agent kiro` or delete the owned block(s)",
+         `tracedecay install --agent kiro` or delete the owned block(s)",
         path.display(),
         ranges.len()
     ));
@@ -1106,7 +1090,7 @@ fn doctor_advise_retired_managed_agent(dc: &mut DoctorCounters, home: &Path) {
     }
     dc.warn(&format!(
         "migration advisory: retired Kiro managed agent still present at {}; \
-         global install is MCP-only, remove with `tracedecay uninstall --agent kiro`",
+         global install is MCP-only, remove with `tracedecay install --agent kiro`",
         path.display()
     ));
 }
