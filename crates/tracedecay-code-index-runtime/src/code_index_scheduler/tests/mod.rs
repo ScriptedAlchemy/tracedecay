@@ -1460,6 +1460,12 @@ fn scheduler_with_policy(
 /// budget: the waiter still blocks on the seating signal, and a seat that
 /// arrives at any time before the ceiling succeeds. The bound exists only so
 /// a worktree that can never seat fails with a diagnostic instead of hanging.
+///
+/// Every positive wait in this suite shares it, including the dashboard and
+/// event-to-ready waits below, which are the same fact read from a later
+/// projection. Those two carried five seconds of their own, which is less
+/// than a loaded host needs to project one Fresh/Complete pass, so they
+/// reported a busy owner as an owner that never got there.
 const SERVING_SEAT_FAILURE_CEILING: Duration = Duration::from_mins(2);
 
 async fn serving_seat_wait_diagnostic(
@@ -1646,7 +1652,7 @@ async fn wait_for_live_complete_generation_by_polling(
 }
 
 async fn wait_for_dashboard_ready(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, async {
         loop {
             let ready = registry
                 .dashboard_freshness(path)
@@ -1769,7 +1775,7 @@ async fn wait_for_generation_change(
 async fn wait_for_event_to_ready(
     registry: &CodeIndexSchedulerRegistryV1,
 ) -> super::CodeIndexEventToReadyReceiptV1 {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
         if let Some(receipt) = registry.latest_event_to_ready_receipt() {
             return receipt;
