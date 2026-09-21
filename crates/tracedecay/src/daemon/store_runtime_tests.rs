@@ -39,6 +39,16 @@ use tracedecay_store_runtime::{
     registry_open_error,
 };
 
+/// Bound for the assertions in this file that read "must not wait for
+/// background recovery" or "must settle".
+///
+/// The regression each one catches is an operation that never returns, and no
+/// finite bound reaches that, so the value only has to exceed the honest
+/// latency of the operation itself. At two seconds it did not: a machine
+/// running the whole lib suite across its cores opens a session database
+/// slower than that, and the bound reported a loaded host as a blocked one.
+const MUST_NOT_BLOCK: std::time::Duration = std::time::Duration::from_mins(1);
+
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
 
 impl RemoteSpoolKeyringV1 for TestRemoteKeyring {
@@ -1352,12 +1362,9 @@ async fn foreground_project_open_defers_historical_convergence_until_full_public
         .expect("foreground project-open writer probe rolls back");
 
     drop(foreground);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        convergence_gate.wait_until_blocked(),
-    )
-    .await
-    .expect("historical convergence starts after full publication");
+    tokio::time::timeout(MUST_NOT_BLOCK, convergence_gate.wait_until_blocked())
+        .await
+        .expect("historical convergence starts after full publication");
     convergence_gate.release();
 }
 
@@ -1469,13 +1476,10 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
     convergence_gate.wait_until_blocked().await;
 
     registry.cancel_terminal_tasks();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        registry.shutdown_terminal_tasks(),
-    )
-    .await
-    .expect("terminal shutdown must not wait for cancelled convergence work")
-    .expect("session runtime terminal tasks shut down cleanly");
+    tokio::time::timeout(MUST_NOT_BLOCK, registry.shutdown_terminal_tasks())
+        .await
+        .expect("terminal shutdown must not wait for cancelled convergence work")
+        .expect("session runtime terminal tasks shut down cleanly");
     convergence_gate.release();
     tokio::task::yield_now().await;
 
@@ -1770,7 +1774,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     .expect("manifest");
     let idempotency = GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
 
-    let publication_operation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let publication_operation = tokio::time::timeout(MUST_NOT_BLOCK, async {
         loop {
             match project_database.issue_memory_graph_runtime_operation() {
                 Ok(operation) => break operation,
@@ -2045,7 +2049,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     )
     .expect("reopened project database authority");
     let reopened = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.project_graph(
             &project_root,
             project_id.clone(),
@@ -2066,7 +2070,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     // window is asserting a race. Wait for the settled outcome instead, and
     // keep refusing the one result that would mean the relational owner was
     // damaged.
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(MUST_NOT_BLOCK, async {
         loop {
             match reopened.issue_memory_graph_runtime_operation() {
                 Ok(_) => return,
@@ -2084,7 +2088,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     .expect("derived graph recovery rebinds the memory graph to its relational owner");
     drop(reopened);
     tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.retire_project_memory_graph(&project_id),
     )
     .await
@@ -2135,7 +2139,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
         .await
         .expect("reopened session runtime registry");
     let reopened = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        MUST_NOT_BLOCK,
         reopened_registry.project_sessions(project_id.clone(), [project_root]),
     )
     .await

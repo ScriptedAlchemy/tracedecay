@@ -248,6 +248,10 @@ pub enum AutomationSkillsAction {
     Archive { id: String },
     /// Restore an archived skill to active state.
     Restore { id: String },
+    /// Redeploy active managed skills to every integrated host, refreshing the
+    /// per-host prompt index blocks and materialized skill files against the
+    /// store without mutating any skill.
+    Deploy,
 }
 
 #[derive(Subcommand)]

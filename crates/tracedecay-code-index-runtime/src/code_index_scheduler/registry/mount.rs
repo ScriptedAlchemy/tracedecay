@@ -2043,17 +2043,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ServingSwapOutcomeV1::Offered => {}
                             }
                             // A seated owner whose exact and lexical serving
-                            // are ready has at most the clone-fingerprint
-                            // backfill left. That is demand-driven work: a
-                            // query over pending clone work requests the
-                            // background pass that drives it (see
-                            // `query_admission_serves_v14_while_clone_successor_is_pending`),
-                            // as does the ordinary cadence, so the worker
-                            // stays idle after the seat. Only an owner still
-                            // short of ready owners needs the follow-up now.
-                            if text_latest.text_projection_needs_work()
-                                && !text_latest.query_owners_are_ready()
-                            {
+                            // are ready still owes its clone-fingerprint
+                            // backfill, and this worker owns that slice.
+                            // Leaving it for query demand only looked free:
+                            // the worker has no cadence timer, it blocks on
+                            // `wake.notified()`, so the next search had to
+                            // stamp the pending-wake slot to deliver it, and
+                            // the freshness ladder reads that slot as
+                            // `refresh_in_flight` and answered `verifying`
+                            // for a seat whose source proof was current.
+                            // Stamp what the two sibling publication sites
+                            // above already stamp.
+                            if text_latest.text_projection_needs_work() {
                                 Self::note_visible_worker_continuation(
                                     &worker_reconcile_in_progress,
                                     &worker_pending_wake,

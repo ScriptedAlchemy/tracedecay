@@ -32,24 +32,6 @@ pub fn normalize_cursor_composer_observation(
     )
 }
 
-pub fn normalize_cursor_composer_observation_with_projected_message_id(
-    native: &Value,
-    composer_id: &str,
-    stable_record_id: ObservationId,
-    projected_message_id: ObservationId,
-    range: tracedecay_domain::ObservationSourceRangeV1,
-    position: u64,
-) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    normalize_cursor_composer_observation_with_message_id(
-        native,
-        composer_id,
-        stable_record_id,
-        projected_message_id,
-        range,
-        position,
-    )
-}
-
 pub fn normalize_cursor_composer_observation_with_message_id(
     native: &Value,
     composer_id: &str,
@@ -85,7 +67,7 @@ fn normalize_composer_bubble_record(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let timestamp = bubble_epoch(native, "createdAt");
+    let timestamp = epoch_ms_to_secs(native.get("createdAt").and_then(Value::as_i64));
     let mut relations = CanonicalObservationRelationsV1::new(
         SessionId::new(composer_id)
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
@@ -368,23 +350,6 @@ fn append_composer_todo_lifecycle_facts(
     }
 }
 
-pub fn composer_todos_have_admittable_items(native: &Value) -> bool {
-    native
-        .get("todos")
-        .and_then(Value::as_array)
-        .is_some_and(|todos| {
-            todos.iter().any(|todo| {
-                todo.get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| !id.trim().is_empty())
-                    && todo
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .is_some_and(|content| !content.trim().is_empty())
-            })
-        })
-}
-
 pub fn normalize_cursor_composer_envelope_observation(
     native: &Value,
     composer_id: &str,
@@ -419,7 +384,7 @@ fn normalize_composer_envelope_record(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let timestamp = bubble_epoch(native, "createdAt");
+    let timestamp = epoch_ms_to_secs(native.get("createdAt").and_then(Value::as_i64));
     let mut relations = CanonicalObservationRelationsV1::new(
         SessionId::new(composer_id)
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
@@ -609,10 +574,6 @@ pub fn cursor_composer_envelope_native_record_id(
         sha256_hex(&hasher.finalize())
     ))
     .map_err(|error| format!("invalid Cursor composer envelope native identity: {error}"))
-}
-
-fn bubble_epoch(bubble: &Value, key: &str) -> Option<i64> {
-    epoch_ms_to_secs(bubble.get(key).and_then(Value::as_i64))
 }
 
 fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {

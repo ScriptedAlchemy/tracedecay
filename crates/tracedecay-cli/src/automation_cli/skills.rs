@@ -46,6 +46,11 @@ pub(super) async fn handle_automation_skills_command(
             }
             return Ok(());
         }
+        AutomationSkillsAction::Deploy => {
+            let deployment = deploy_skills_to_current_project(&profile_root)?;
+            println!("{}", serde_json::to_string_pretty(&deployment)?);
+            return Ok(());
+        }
         AutomationSkillsAction::Create {
             id,
             title,

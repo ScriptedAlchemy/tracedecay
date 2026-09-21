@@ -146,7 +146,7 @@ fn kiro_home(home: &Path) -> PathBuf {
     home.join(".kiro")
 }
 
-fn mcp_config_path(home: &Path) -> PathBuf {
+pub(super) fn mcp_config_path(home: &Path) -> PathBuf {
     kiro_home(home).join("settings/mcp.json")
 }
 
@@ -162,7 +162,7 @@ fn steering_path(home: &Path) -> PathBuf {
     kiro_home(home).join("steering/tracedecay.md")
 }
 
-fn managed_skill_index_path(home: &Path) -> PathBuf {
+pub(super) fn managed_skill_index_path(home: &Path) -> PathBuf {
     kiro_home(home).join("steering/tracedecay-managed-skills.md")
 }
 
@@ -414,6 +414,16 @@ impl AgentIntegration for KiroIntegration {
             global_server.as_ref(),
         );
         doctor_advise_retired_global_artifacts(dc, &ctx.home);
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                managed_skill_index_path(&ctx.home),
+                ctx.project_path
+                    .join(".kiro/steering/tracedecay-managed-skills.md"),
+            ],
+            SkillInstallTarget::Kiro,
+        );
     }
 
     fn reports_absence_to_doctor(&self) -> bool {
@@ -470,14 +480,15 @@ impl AgentIntegration for KiroIntegration {
         ctx: &InstallContext,
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
+            // Catalog-native global install is MCP-only, so the steering file,
+            // the managed agent and the managed skill index prior releases
+            // wrote are retired by definition. Sweep them before the Kiro CLI
+            // is required: converging them is local file work, and welding it
+            // to uninstall left the only remedy one that also tears out the
+            // MCP registration this very pass is installing.
+            remove_retired_global_agent_artifacts(&ctx.home)?;
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
-            // Catalog-native global install stays MCP-only and does not create
-            // `~/.kiro/steering/tracedecay.md`. Prior releases did write that
-            // file; when it is still present, converge the owned block so the
-            // leftover is current while doctor keeps advising migration until
-            // uninstall sweeps it.
-            reconcile_legacy_global_steering(&ctx.home)?;
         }
         Ok(())
     }
@@ -729,23 +740,6 @@ fn install_steering_rules(path: &Path) -> Result<()> {
     })
 }
 
-/// Converge a leftover global steering file from a prior release. Absence is
-/// the catalog-native end state and is left alone; presence must reconcile or
-/// return a typed inspection failure.
-fn reconcile_legacy_global_steering(home: &Path) -> Result<()> {
-    let path = steering_path(home);
-    match std::fs::metadata(&path) {
-        Ok(_) => install_steering_rules(&path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(TraceDecayError::Config {
-            message: format!(
-                "failed to inspect Kiro global steering {}: {error}",
-                path.display()
-            ),
-        }),
-    }
-}
-
 fn steering_block_text() -> String {
     STEERING_SENTINELS.render(&steering_guidance_text())
 }
@@ -825,16 +819,42 @@ fn uninstall_managed_agent(path: &Path) {
 /// is left alone: clearing it needs a strict cli.json rewrite that this
 /// MCP-only lifecycle does not own; doctor tells the operator to clear it.
 fn remove_retired_global_artifacts(home: &Path) -> Result<()> {
-    let steering = steering_path(home);
-    if steering.exists() {
-        remove_steering_rules(&steering)?;
-    }
-    uninstall_managed_agent(&managed_agent_path(home));
+    remove_retired_global_agent_artifacts(home)?;
     let skill_index = managed_skill_index_path(home);
     if skill_index.exists() {
         remove_kiro_managed_skill_index(home, &skill_index)?;
     }
     Ok(())
+}
+
+/// The retired artifacts doctor advises removing: the steering block and the
+/// managed agent.
+///
+/// The managed skill index is deliberately not one of them. It is live state
+/// the managed-skill export owns and rewrites, so sweeping it on install would
+/// only fight that export on the next deploy.
+fn remove_retired_global_agent_artifacts(home: &Path) -> Result<()> {
+    let steering = steering_path(home);
+    if steering.exists() {
+        remove_steering_rules(&steering)?;
+    }
+    uninstall_managed_agent(&managed_agent_path(home));
+    Ok(())
+}
+
+/// True while a retired global artifact is still present.
+///
+/// Global install is MCP-only, so an install carrying one is not in its
+/// canonical shape. Saying so is what makes `tracedecay install --agent kiro`
+/// run the sweep at all: an install whose MCP entry already reads `Current`
+/// short-circuits before activation, which is precisely the state every
+/// profile holding these leftovers is in. Self-limiting, the sweep clears it.
+fn retired_global_agent_artifacts_present(home: &Path) -> bool {
+    if is_owned_agent_file(&managed_agent_path(home)) {
+        return true;
+    }
+    std::fs::read_to_string(steering_path(home))
+        .is_ok_and(|contents| !owned_steering_ranges(&contents).is_empty())
 }
 
 fn is_owned_agent_file(path: &Path) -> bool {
@@ -879,7 +899,7 @@ fn kiro_context_mcp_registration_state(
             .and_then(serde_json::Value::as_array)
             .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
         && server.get("disabled").and_then(serde_json::Value::as_bool) != Some(true);
-    if !mcp_current {
+    if !mcp_current || retired_global_agent_artifacts_present(home) {
         return State::Repairable;
     }
     State::Current
@@ -1077,7 +1097,7 @@ fn doctor_advise_retired_steering(dc: &mut DoctorCounters, home: &Path) {
         Err(error) => {
             dc.warn(&format!(
                 "migration advisory: retired Kiro global steering at {} is unreadable ({error}); \
-                 remove it manually or run `tracedecay uninstall --agent kiro` after fixing permissions",
+                 remove it manually or run `tracedecay install --agent kiro` after fixing permissions",
                 path.display()
             ));
             return;
@@ -1090,7 +1110,7 @@ fn doctor_advise_retired_steering(dc: &mut DoctorCounters, home: &Path) {
     dc.warn(&format!(
         "migration advisory: retired Kiro global steering still present at {} \
          ({} owned block(s)); global install is MCP-only, remove with \
-         `tracedecay uninstall --agent kiro` or delete the owned block(s)",
+         `tracedecay install --agent kiro` or delete the owned block(s)",
         path.display(),
         ranges.len()
     ));
@@ -1106,7 +1126,7 @@ fn doctor_advise_retired_managed_agent(dc: &mut DoctorCounters, home: &Path) {
     }
     dc.warn(&format!(
         "migration advisory: retired Kiro managed agent still present at {}; \
-         global install is MCP-only, remove with `tracedecay uninstall --agent kiro`",
+         global install is MCP-only, remove with `tracedecay install --agent kiro`",
         path.display()
     ));
 }

@@ -332,6 +332,24 @@ pub fn deploy_managed_skills_to_project(
     deploy_managed_skills(host_io, profile_root, Some(project_root))
 }
 
+/// Deploys managed skills for an explicitly resolved `home`.
+///
+/// Lifecycle passes (`install`, `update`, `reinstall`) call this so both halves
+/// of a managed skill converge on the store: the host-loadable `SKILL.md` files
+/// and the per-host prompt index blocks. Those passes previously reconciled the
+/// materialized files alone, leaving a prompt index that only ever converged as
+/// a side effect of a successful store mutation, so a store that emptied
+/// without one left every host advertising skills that no longer exist.
+#[hotpath::measure(label = "hosts.automation.managed_skill.deploy_at")]
+pub fn deploy_managed_skills_at(
+    host_io: &HostIo,
+    home: &Path,
+    profile_root: &Path,
+    project_root: &Path,
+) -> ManagedSkillDeploymentReceipt {
+    deploy_managed_skills_with_home(host_io, home, profile_root, Some(project_root))
+}
+
 #[hotpath::measure(label = "hosts.automation.managed_skill.deploy")]
 fn deploy_managed_skills(
     host_io: &HostIo,
@@ -348,6 +366,16 @@ fn deploy_managed_skills(
             retry_required: true,
         };
     };
+    deploy_managed_skills_with_home(host_io, &home, profile_root, project_root)
+}
+
+fn deploy_managed_skills_with_home(
+    host_io: &HostIo,
+    home: &Path,
+    profile_root: &Path,
+    project_root: Option<&Path>,
+) -> ManagedSkillDeploymentReceipt {
+    let home = home.to_path_buf();
     let exports = project_root.map_or_else(
         || host_io.export_managed_skills_to_agents(&home, profile_root),
         |project_root| {
