@@ -548,6 +548,15 @@ impl<'tree> SyntaxPreorder<'tree> {
             finished: false,
         }
     }
+
+    /// The field the node just yielded occupies in its parent.
+    ///
+    /// The walk already holds this. Recovering it afterwards costs a
+    /// `Node::parent`, which tree-sitter answers by re-descending from the
+    /// root, and then a scan of that parent's children per field tried.
+    pub(super) fn field_name(&self) -> Option<&'static str> {
+        self.cursor.field_name()
+    }
 }
 
 impl<'tree> Iterator for SyntaxPreorder<'tree> {

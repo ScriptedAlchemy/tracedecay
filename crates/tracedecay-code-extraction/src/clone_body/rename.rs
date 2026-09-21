@@ -372,9 +372,13 @@ impl Analyzer<'_, '_> {
 
     fn resolve_identifiers(&self) -> HashMap<ByteSpan, String> {
         let mut replacements = HashMap::new();
-        for identifier in SyntaxPreorder::new(self.callables[0].body)
-            .filter(|node| node.kind() == "identifier" && !is_preserved_identifier(*node))
-        {
+        let mut preorder = SyntaxPreorder::new(self.callables[0].body);
+        while let Some(identifier) = preorder.next() {
+            if identifier.kind() != "identifier"
+                || is_preserved_identifier(identifier, preorder.field_name())
+            {
+                continue;
+            }
             let Some(name) = identifier.utf8_text(self.source).ok() else {
                 continue;
             };
@@ -456,35 +460,30 @@ fn is_callable(language: &str, kind: &str) -> bool {
     }
 }
 
-fn is_preserved_identifier(identifier: TreeSitterNode<'_>) -> bool {
-    let Some(parent) = identifier.parent() else {
-        return false;
-    };
-    for field in ["field", "property", "attribute"] {
-        if parent
-            .child_by_field_name(field)
-            .is_some_and(|child| child.id() == identifier.id())
-        {
-            return true;
-        }
+/// Whether an identifier names something the rename pass must leave alone: a
+/// member being selected, or the declared name of a callable or class.
+///
+/// `field` is the identifier's own field in its parent, read from the cursor
+/// that is already standing on it.
+fn is_preserved_identifier(identifier: TreeSitterNode<'_>, field: Option<&str>) -> bool {
+    match field {
+        Some("field" | "property" | "attribute") => true,
+        Some("name") => identifier.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                "function_item"
+                    | "function_definition"
+                    | "function_declaration"
+                    | "function_expression"
+                    | "generator_function"
+                    | "generator_function_declaration"
+                    | "method_definition"
+                    | "class_definition"
+                    | "keyword_argument"
+            )
+        }),
+        _ => false,
     }
-    (matches!(
-        parent.kind(),
-        "function_item"
-            | "function_definition"
-            | "function_declaration"
-            | "function_expression"
-            | "generator_function"
-            | "generator_function_declaration"
-            | "method_definition"
-    ) || parent.kind() == "class_definition")
-        && parent
-            .child_by_field_name("name")
-            .is_some_and(|child| child.id() == identifier.id())
-        || parent.kind() == "keyword_argument"
-            && parent
-                .child_by_field_name("name")
-                .is_some_and(|child| child.id() == identifier.id())
 }
 
 fn span(node: TreeSitterNode<'_>) -> ByteSpan {
