@@ -899,6 +899,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     "code-index background reconcile pass started"
                 );
                 let shutting_down = Arc::clone(&worker_shutting_down);
+                let bind_serving_generation = Arc::clone(&worker_serving_generation);
+                let bind_serving_source_witness = Arc::clone(&worker_serving_source_witness);
+                let bind_source_freshness = worker_source_freshness.clone();
                 let source_result = hotpath::future!(
                     tokio::task::spawn_blocking(move || {
                         let mut scheduler =
@@ -952,7 +955,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 },
                             ));
                         }
-                        if let Some(metadata) = retained_text_metadata {
+                        let outcome = if let Some(metadata) = retained_text_metadata {
                             match scheduler.reconcile_retained_text_generation_with(
                                 &metadata,
                                 !graph_activation_enabled,
@@ -968,7 +971,28 @@ impl CodeIndexSchedulerRegistryV1 {
                             scheduler.activate_or_reconcile()
                         } else {
                             scheduler.reconcile_now()
+                        }?;
+                        // A seat whose publishing pass could not prove its
+                        // source (`code_index_post_projection_source_unverified`)
+                        // installs without a currency witness. The swap arm
+                        // re-proves such a seat as `Offered`, but a retained
+                        // native graph that already serves skips the graph
+                        // prepare and with it the swap, so no later pass ever
+                        // reached that arm. This unchanged pass verified
+                        // exactly the snapshot the seat was sealed from, so
+                        // bind that proof here, while this pass still holds
+                        // the scheduler: a reader that holds the scheduler to
+                        // keep a seat unproven must not see the proof land
+                        // after the pass has already let go.
+                        if let CodeIndexReconcileOutcomeV1::Noop(evidence) = &outcome {
+                            Self::bind_unproven_seat_to_verified_source(
+                                &bind_serving_generation,
+                                &bind_serving_source_witness,
+                                &bind_source_freshness,
+                                &evidence.snapshot_content_identity,
+                            );
                         }
+                        Ok(outcome)
                     }),
                     // Sealing moved inside this blocking reconcile pipeline.
                     // Keep the outer future labeled so default reports retain
@@ -2115,25 +2139,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         && worker_source_freshness
                             .ready_without_stat(&worker_project_root, &worker_shutting_down)
                     {
-                        // A seat whose publishing pass could not prove its
-                        // source (`code_index_post_projection_source_unverified`)
-                        // installs without a currency witness. The swap arm
-                        // re-proves such a seat as `Offered`, but a retained
-                        // native graph that already serves skips the graph
-                        // prepare and with it the swap, so no later pass ever
-                        // reached that arm: every ready probe kept requesting a
-                        // reconcile and the route stayed `stale / verifying`
-                        // indefinitely. This unchanged pass verified exactly
-                        // the snapshot the seat was sealed from, so bind that
-                        // proof here.
-                        if let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome {
-                            Self::bind_unproven_seat_to_verified_source(
-                                &worker_serving_generation,
-                                &worker_serving_source_witness,
-                                &worker_source_freshness,
-                                &evidence.snapshot_content_identity,
-                            );
-                        }
+                        // The pass bound the seat's source proof under the
+                        // scheduler lock; announce the change now that the
+                        // proof is public.
                         worker_serving_generation_changed.send_replace(());
                         // The clone-backfill continuation was stamped before
                         // this pass dropped `reconcile_in_progress`.
