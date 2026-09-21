@@ -131,6 +131,15 @@ impl AgentIntegration for OpenCodeIntegration {
         doctor_check_config(dc, &ctx.home);
         doctor_check_prompt(dc, &ctx.home);
         doctor_check_plugin(dc, &ctx.home);
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                opencode_prompt_path(&ctx.home),
+                ctx.project_path.join("AGENTS.md"),
+            ],
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
+        );
     }
 
     fn host_component_registration(
@@ -425,7 +434,7 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
 /// A user whose rules already live in the legacy `~/AGENTS.md` keeps that file;
 /// everyone else gets the modern config-dir path, whose parent the write path
 /// creates on demand.
-fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
+pub(super) fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
     if let Some(xdg) = ambient_xdg_config_home(home)
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute())

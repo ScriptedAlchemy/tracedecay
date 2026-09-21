@@ -141,40 +141,49 @@ pub(crate) fn remove_managed_skill_prompt_index(
     retired_memory_digest::remove_prompt_block(prompt_path)
 }
 
-/// Warns when a host's managed-skill prompt index still advertises skills the
-/// profile's store no longer holds.
+/// Warns for each of a host's managed-skill prompt indexes that still
+/// advertises skills the profile's store no longer holds.
 ///
-/// The index converges only when a lifecycle pass re-exports it. A stale block
-/// therefore means the host is reading a skill list the store cannot serve, so
-/// doctor names the deploy command that reconverges it. Doctor never repairs.
+/// A host owns a *set* of index files (per-user and per-project spellings, and
+/// for some hosts one per installed editor profile), and each converges only
+/// when a lifecycle pass re-exports that file. Taking the whole set keeps one
+/// call per host answering for every index that host writes, so an unchecked
+/// spelling cannot survive by being the one the call site forgot.
+///
+/// A stale block means the host is reading a skill list the store cannot
+/// serve, so doctor names the deploy command that reconverges it. Absent files
+/// and files with no managed block read as converged, so a host the operator
+/// does not use stays silent. Doctor never repairs.
 #[hotpath::measure(label = "agent_hosts.agents.managed_skill.doctor_index")]
-pub(crate) fn doctor_check_managed_skill_prompt_index(
+pub(crate) fn doctor_check_managed_skill_prompt_indexes(
     dc: &mut DoctorCounters,
     profile_home: &Path,
-    prompt_path: &Path,
+    prompt_paths: &[PathBuf],
     target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
 ) {
     let profile_root =
         tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
             profile_home,
         );
-    match tracedecay_automation_runtime::automation::skill_targets::stale_prompt_index_ids(
-        &profile_root,
-        prompt_path,
-        target,
-    ) {
-        Ok(stale) if stale.is_empty() => {}
-        Ok(stale) => dc.warn(&format!(
-            "managed-skill index in {} still lists {} skill(s) absent from the managed-skill \
-             store ({}); run `tracedecay automation skills deploy` to refresh it",
-            prompt_path.display(),
-            stale.len(),
-            stale.join(", ")
-        )),
-        Err(err) => dc.warn(&format!(
-            "could not check the managed-skill index in {}: {err}",
-            prompt_path.display()
-        )),
+    for prompt_path in prompt_paths {
+        match tracedecay_automation_runtime::automation::skill_targets::stale_prompt_index_ids(
+            &profile_root,
+            prompt_path,
+            target,
+        ) {
+            Ok(stale) if stale.is_empty() => {}
+            Ok(stale) => dc.warn(&format!(
+                "managed-skill index in {} still lists {} skill(s) absent from the managed-skill \
+                 store ({}); run `tracedecay automation skills deploy` to refresh it",
+                prompt_path.display(),
+                stale.len(),
+                stale.join(", ")
+            )),
+            Err(err) => dc.warn(&format!(
+                "could not check the managed-skill index in {}: {err}",
+                prompt_path.display()
+            )),
+        }
     }
 }
 
@@ -947,5 +956,194 @@ mod select_detected_integrations_tests {
 
         assert!(!to_install.iter().any(|id| id == "cursor"));
         assert!(to_install.iter().any(|id| id == "claude"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod managed_skill_prompt_index_doctor_tests {
+    use super::{DoctorCounters, HealthcheckContext, get_integration};
+    use std::path::{Path, PathBuf};
+
+    /// One managed-skill index a host writes, and what it takes for that
+    /// host's `healthcheck` to reach the index check at all.
+    struct IndexRow {
+        integration: &'static str,
+        /// Which of the host's index files this row exercises, so a failure
+        /// names the spelling that went unchecked.
+        scope: &'static str,
+        /// Marker slug the target's block is written under.
+        slug: &'static str,
+        index_path: fn(&Path, &Path) -> PathBuf,
+        /// Minimum state that makes the host read as installed.
+        seed: fn(&Path, &Path),
+    }
+
+    fn seed_nothing(_home: &Path, _project: &Path) {}
+
+    /// Kiro's healthcheck returns before every installed-only check unless its
+    /// registry carries the tracedecay server.
+    fn seed_kiro_registry(home: &Path, _project: &Path) {
+        let mcp_path = super::kiro::mcp_config_path(home);
+        std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mcp_path,
+            br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
+        )
+        .unwrap();
+    }
+
+    /// A managed block listing exactly `entries`, so the baseline and the
+    /// stale-index run differ in nothing but the listed ids.
+    fn write_index_block(path: &Path, slug: &str, entries: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "<!-- TRACEDECAY MANAGED SKILLS START {slug} -->\n{entries}\
+                 <!-- TRACEDECAY MANAGED SKILLS END {slug} -->\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    const GHOST_ENTRY: &str = "- `ghost-skill`: Ghost Skill. Summary: no longer in the store.\n";
+
+    fn index_rows() -> Vec<IndexRow> {
+        vec![
+            IndexRow {
+                integration: "claude",
+                scope: "user CLAUDE.md",
+                slug: "claude",
+                index_path: |home, _| home.join(".claude").join("CLAUDE.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "claude",
+                scope: "project CLAUDE.md",
+                slug: "claude",
+                index_path: |_, project| project.join(".claude/CLAUDE.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "vibe",
+                scope: "user prompts/cli.md",
+                slug: "agents",
+                index_path: |home, _| super::vibe::vibe_prompt_path(home),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "vibe",
+                scope: "project prompts/cli.md",
+                slug: "agents",
+                index_path: |_, project| project.join(".vibe/prompts/cli.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "copilot",
+                scope: "CLI copilot-instructions.md",
+                slug: "agents",
+                index_path: |home, _| super::copilot_cli_dir(home).join("copilot-instructions.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "copilot",
+                scope: "project copilot-instructions.md",
+                slug: "agents",
+                index_path: |_, project| project.join(".github/copilot-instructions.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "opencode",
+                scope: "user AGENTS.md",
+                slug: "opencode",
+                index_path: |home, _| super::opencode::opencode_prompt_path(home),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "opencode",
+                scope: "project AGENTS.md",
+                slug: "opencode",
+                index_path: |_, project| project.join("AGENTS.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "kimi",
+                scope: "project AGENTS.md",
+                slug: "kimi",
+                index_path: |_, project| project.join("AGENTS.md"),
+                seed: seed_nothing,
+            },
+            IndexRow {
+                integration: "kiro",
+                scope: "user steering index",
+                slug: "kiro",
+                index_path: |home, _| super::kiro::managed_skill_index_path(home),
+                seed: seed_kiro_registry,
+            },
+            IndexRow {
+                integration: "kiro",
+                scope: "project steering index",
+                slug: "kiro",
+                index_path: |_, project| {
+                    project.join(".kiro/steering/tracedecay-managed-skills.md")
+                },
+                seed: seed_kiro_registry,
+            },
+        ]
+    }
+
+    /// Every prompt index a host writes must also be read back by that host's
+    /// own `healthcheck`.
+    ///
+    /// Asserting the warning delta across two runs of the same healthcheck,
+    /// rather than an absolute count, keeps the unrelated warnings these hosts
+    /// emit for an unconfigured home out of the verdict. The baseline run
+    /// already has the index file in place holding an empty managed block, so
+    /// the ghost id is the only thing that changes on disk between the runs
+    /// and a rise can come from nowhere but the index check. Creating the file
+    /// only for the second run would not do: several hosts also read these
+    /// paths for their prompt rules, and vibe reclassifies an absent prompt
+    /// (warning) as a prompt missing rules (issue) once one appears, which
+    /// leaves the warning count flat while the index check is firing.
+    ///
+    /// A host wired for only some of its index files fails on the spelling it
+    /// skipped, which a check of `stale_prompt_index_ids` in isolation would
+    /// not catch.
+    #[test]
+    fn every_prompt_index_a_host_writes_is_read_back_by_its_healthcheck() {
+        for row in index_rows() {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let (home, project) = (home.path(), project.path());
+            let case = format!("{} ({})", row.integration, row.scope);
+
+            // An empty store makes every id the index lists stale.
+            std::fs::create_dir_all(home.join(".tracedecay/agent_managed/skills")).unwrap();
+            (row.seed)(home, project);
+
+            let integration = get_integration(row.integration).unwrap();
+            let ctx = HealthcheckContext {
+                home: home.to_path_buf(),
+                project_path: project.to_path_buf(),
+            };
+            let index = (row.index_path)(home, project);
+            write_index_block(&index, row.slug, "");
+            let mut before = DoctorCounters::new();
+            integration.healthcheck(&mut before, &ctx);
+
+            write_index_block(&index, row.slug, GHOST_ENTRY);
+            let mut after = DoctorCounters::new();
+            integration.healthcheck(&mut after, &ctx);
+
+            assert!(
+                after.warnings > before.warnings,
+                "{case} healthcheck must warn about the stale managed-skill index at {} \
+                 (warnings {} -> {})",
+                index.display(),
+                before.warnings,
+                after.warnings
+            );
+        }
     }
 }

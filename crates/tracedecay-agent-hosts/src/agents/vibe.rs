@@ -46,7 +46,7 @@ fn vibe_config_path(home: &Path) -> PathBuf {
     vibe_home(home).join("config.toml")
 }
 
-fn vibe_prompt_path(home: &Path) -> PathBuf {
+pub(super) fn vibe_prompt_path(home: &Path) -> PathBuf {
     vibe_home(home).join("prompts/cli.md")
 }
 
@@ -95,6 +95,15 @@ impl AgentIntegration for VibeIntegration {
                 &project_home.join("prompts/cli.md"),
             );
         }
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                vibe_prompt_path(&ctx.home),
+                project_home.join("prompts/cli.md"),
+            ],
+            SkillInstallTarget::Agents,
+        );
     }
 
     fn host_component_registration(

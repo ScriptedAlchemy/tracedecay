@@ -389,8 +389,8 @@ fn global_activate_sweeps_retired_artifacts_and_clears_their_advisories() {
         "activate must remove the retired managed agent it advises removing"
     );
     assert!(
-        !steering.exists() || owned_steering_ranges(&std::fs::read_to_string(&steering).unwrap())
-            .is_empty(),
+        !steering.exists()
+            || owned_steering_ranges(&std::fs::read_to_string(&steering).unwrap()).is_empty(),
         "activate must leave no owned steering block behind"
     );
     assert!(
