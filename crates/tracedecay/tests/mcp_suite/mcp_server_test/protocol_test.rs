@@ -1001,6 +1001,15 @@ async fn test_blank_lines_skipped() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_server_stats_include_response_handle_metrics() {
+    // `resolve_response_handle_root` answers from the ambient process profile,
+    // not from the composition's own isolated one, so this test's direct
+    // `store_response_handle` writes and its terminal
+    // `cleanup_expired_response_handles` sweep land wherever the process is
+    // pointed. Under `cargo test` that is the profile every other test in the
+    // run shares, and anything resolving without `TRACEDECAY_DATA_DIR` reaches
+    // the developer's real `~/.tracedecay`. A throwaway home keeps the sweep
+    // inside this test.
+    let (isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let fixture = crate::support::production_composition_fixture().await;
     let server = fixture
         .harness
@@ -1011,6 +1020,14 @@ async fn test_server_stats_include_response_handle_metrics() {
     let baseline_counter = |key: &str| baseline_handles[key].as_u64().unwrap_or(0);
 
     let cg = server.cg().await;
+    let handle_root = response_handle_dir(&cg);
+    assert!(
+        handle_root.starts_with(isolated_env.home()),
+        "this test writes and sweeps response handles, so its root must be \
+         inside its own home '{}', not '{}'",
+        isolated_env.home().display(),
+        handle_root.display()
+    );
     let mut last_fact = None;
     for i in 0..35 {
         let added = crate::support::handle_real_server_tool_call(
