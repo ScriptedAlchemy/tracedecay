@@ -277,7 +277,7 @@ fn build_batch_receipt_with(
         source_manifest_digest: request.changes.manifest_digest.clone(),
         receipts,
         reused_count,
-        publication_digest: placeholder_digest(),
+        publication_digest: crate::generations::placeholder_digest(),
     };
     batch.publication_digest = expected_publication_digest(&batch)
         .map_err(|error| ProjectionReceiptErrorV1::Contract(error.to_string()))?;
@@ -560,10 +560,6 @@ fn check_decision(
 
 /// A well-formed placeholder digest, replaced by the computed publication
 /// digest before the batch is returned.
-fn placeholder_digest() -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-        .expect("a zeroed sha256 digest is canonical")
-}
 
 #[cfg(test)]
 mod tests {

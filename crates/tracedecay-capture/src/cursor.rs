@@ -484,7 +484,7 @@ pub fn cursor_observation_identity(
     range: tracedecay_domain::ObservationSourceRangeV1,
 ) -> Result<CursorObservationIdentityV1, ObservationRecordParseErrorV1> {
     let has_native_id = cursor_native_record_id(value).is_some();
-    let primary = observation_native_record_id("cursor", session_id, value)?;
+    let primary = observation_native_record_id(session_id, value)?;
     let collision_disambiguation = if has_native_id {
         None
     } else {
@@ -501,26 +501,25 @@ pub fn cursor_observation_identity(
 }
 
 pub fn observation_native_record_id(
-    provider: &str,
     session_id: &str,
     value: &Value,
 ) -> Result<ObservationId, ObservationRecordParseErrorV1> {
     let mut hasher = Sha256::new();
     if let Some(native_id) = cursor_native_record_id(value) {
         hasher.update(b"tracedecay.provider-native-record.native-id.v1\0");
-        hasher.update(provider.as_bytes());
+        hasher.update(b"cursor");
         hasher.update([0]);
         hasher.update(session_id.as_bytes());
         hasher.update([0]);
         hasher.update(native_id.as_bytes());
         return ObservationId::new(format!(
-            "{provider}.native.sha256:{}",
+            "cursor.native.sha256:{}",
             sha256_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed);
     }
     hasher.update(b"tracedecay.provider-native-record.v1\0");
-    hasher.update(provider.as_bytes());
+    hasher.update(b"cursor");
     hasher.update([0]);
     hasher.update(session_id.as_bytes());
     hasher.update([0]);
@@ -529,7 +528,7 @@ pub fn observation_native_record_id(
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
     );
     ObservationId::new(format!(
-        "{provider}.native.sha256:{}",
+        "cursor.native.sha256:{}",
         sha256_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)

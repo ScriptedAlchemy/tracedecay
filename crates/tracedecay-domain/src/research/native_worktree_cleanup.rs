@@ -98,7 +98,7 @@ impl NativeWorktreeCleanupTransactionV1 {
             });
         }
         let mut unsigned = self.clone();
-        unsigned.transaction_digest = zero_digest()?;
+        unsigned.transaction_digest = ManifestDigest::zero()?;
         if canonical_sha256(&unsigned)? != self.transaction_digest {
             return Err(DomainError::DigestMismatch);
         }
@@ -106,7 +106,7 @@ impl NativeWorktreeCleanupTransactionV1 {
     }
 
     pub fn seal(mut self) -> Result<Self, DomainError> {
-        self.transaction_digest = zero_digest()?;
+        self.transaction_digest = ManifestDigest::zero()?;
         self.transaction_digest = canonical_sha256(&self)?;
         self.validate()?;
         Ok(self)
@@ -147,7 +147,7 @@ impl NativeWorktreeCleanupReceiptV1 {
             });
         }
         let mut unsigned = self.clone();
-        unsigned.receipt_digest = zero_digest()?;
+        unsigned.receipt_digest = ManifestDigest::zero()?;
         if canonical_sha256(&unsigned)? != self.receipt_digest {
             return Err(DomainError::DigestMismatch);
         }
@@ -155,14 +155,10 @@ impl NativeWorktreeCleanupReceiptV1 {
     }
 
     pub fn seal(mut self) -> Result<Self, DomainError> {
-        self.receipt_digest = zero_digest()?;
+        self.receipt_digest = ManifestDigest::zero()?;
         self.receipt_digest = canonical_sha256(&self)?;
         self.validate()?;
         Ok(self)
     }
 }
 
-/// All-zero SHA-256 digest used as the unsigned placeholder while sealing.
-pub fn zero_digest() -> Result<ManifestDigest, DomainError> {
-    ManifestDigest::zero()
-}

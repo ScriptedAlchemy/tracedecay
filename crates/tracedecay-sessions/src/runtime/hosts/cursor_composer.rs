@@ -60,10 +60,7 @@ pub use outcome::{
     CursorComposerSweepFailure, CursorComposerSweepOutcome, CursorComposerSweepResult,
 };
 #[cfg(any(test, feature = "test-helpers"))]
-pub use tracedecay_capture::cursor_composer::{
-    normalize_cursor_composer_observation,
-    normalize_cursor_composer_observation_with_projected_message_id,
-};
+pub use tracedecay_capture::cursor_composer::normalize_cursor_composer_observation;
 
 /// Provider id shared with the JSONL Cursor source so both land in the same
 /// per-project `sessions.db` namespace and dedupe by `(provider, message_id)`.

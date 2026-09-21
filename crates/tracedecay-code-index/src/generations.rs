@@ -666,7 +666,7 @@ fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(Strin
 /// A well-formed placeholder digest, replaced by the computed seal before the
 /// manifest is returned. The seal payload excludes the seal itself, so the
 /// placeholder never influences the computed digest.
-fn placeholder_digest() -> ManifestDigest {
+pub(crate) fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")
 }

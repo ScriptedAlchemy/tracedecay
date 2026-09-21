@@ -51,7 +51,7 @@ pub fn codex_current_user_message(payload: &Value) -> Option<CodexCurrentUserMes
         .filter(|item_id| !item_id.is_empty())?;
     ObservationId::new(item_id).ok()?;
     let content = item.get("content")?;
-    let visible_text = codex_message_visible_text(content);
+    let visible_text = tracedecay_store::codex_message_visible_text(content);
     if visible_text.trim().is_empty() {
         return None;
     }
@@ -76,7 +76,7 @@ pub fn codex_response_goal_context(payload: &Value) -> Option<CodexResponseGoalC
         return None;
     }
     let content = payload.get("content")?;
-    let visible_text = codex_message_visible_text(content);
+    let visible_text = tracedecay_store::codex_message_visible_text(content);
     tracedecay_store::codex_goal_context_from_text(&visible_text)?;
     Some(CodexResponseGoalContext {
         item_id,
@@ -86,10 +86,6 @@ pub fn codex_response_goal_context(payload: &Value) -> Option<CodexResponseGoalC
 }
 
 /// Collect the visible text carried by current and legacy Codex content bags.
-pub fn codex_message_visible_text(value: &Value) -> String {
-    tracedecay_store::codex_message_visible_text(value)
-}
-
 pub fn codex_observation_record_supported(value: &Value) -> bool {
     let native_kind = value.get("type").and_then(Value::as_str);
     if native_kind == Some("event_msg") {

@@ -224,7 +224,7 @@ fn cursor_checked_in_tool_fixture_preserves_projection() {
     )
     .unwrap();
     let record_id =
-        cursor::observation_native_record_id("cursor", "cursor-tool-fixture", &native).unwrap();
+        cursor::observation_native_record_id("cursor-tool-fixture", &native).unwrap();
     let actual = serde_json::to_value(
         cursor::normalize_cursor_observation(
             &native,
