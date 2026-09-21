@@ -1159,7 +1159,6 @@ async fn a_proven_seat_serves_v14_without_asking_for_the_pending_clone_successor
     // test reads belongs to the query alone.
     drain_clone_backfill(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
     {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted
@@ -1215,7 +1214,13 @@ async fn a_proven_seat_serves_v14_without_asking_for_the_pending_clone_successor
         .expect("mounted serving witness")
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(witness);
-    registry.clear_pending_wake_for_scope(&scope).await;
+    // Not cleared: the slot is the only place an outstanding worker tail is
+    // visible, and wiping it here would hide the very state this test reads.
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "the fixture must reach the search with nothing outstanding"
+    );
 
     let executed = registry
         .execute_query_search(&scope, core_search_request("alpha"))

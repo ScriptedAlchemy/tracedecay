@@ -1234,10 +1234,19 @@ async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &
 /// pass. A query over pending clone work requests that pass, so a test that
 /// pins query admission or wake accounting against a *settled* seat drains
 /// the backfill first with plain wakes.
+///
+/// It returns only once the pending-wake slot reads empty under held
+/// admission, so a caller that then seats a crafted owner cannot lose to a
+/// worker tail that was still owed a pass.
 async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
     let canonical = path.canonicalize().expect("canonical project");
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
+        assert!(
+            Instant::now() <= deadline,
+            "the clone backfill for {} never finished",
+            path.display()
+        );
         let text = {
             let mounted = registry.mounted.lock().await;
             mounted
@@ -1250,17 +1259,23 @@ async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Pa
         };
         if text.is_none_or(|text| !text.text_projection_needs_work()) {
             let admission = quiesced_background_reconcile_admission(registry, path).await;
+            // A settled owner is not a settled worktree. A successor-only
+            // clone projection releases the worker's pass guard before it
+            // awaits the task, so its tail reads as an idle worker while it
+            // still owes a continuation. The tail stamps that continuation
+            // before the guard drops, so the slot, not the pass counter, is
+            // what an outstanding tail shows up in. Observe it empty under
+            // held admission. A stamped slot means the worker still owes the
+            // pass that clears it, so hand the permit back and let it run.
+            if registry.pending_wake_micros_for_root(path).await == Some(0) {
+                return;
+            }
             drop(admission);
-            return;
+        } else {
+            // Complete-generation demand is an ordinary wake; the pass it
+            // starts drives the pending successor on the retained path.
+            registry.request_complete_generation(path).await;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "the clone backfill for {} never finished",
-            path.display()
-        );
-        // Complete-generation demand is an ordinary wake; the pass it starts
-        // drives the pending successor on the retained path.
-        registry.request_complete_generation(path).await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
