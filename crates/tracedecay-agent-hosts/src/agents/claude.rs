@@ -144,6 +144,12 @@ impl AgentIntegration for ClaudeIntegration {
         eprintln!("\n\x1b[1mClaude Code integration\x1b[0m");
         doctor_check_plugin(dc, &ctx.home);
         doctor_check_permissions_json(dc, &ctx.home);
+        super::doctor_check_managed_skill_prompt_index(
+            dc,
+            &ctx.home,
+            &ctx.home.join(".claude").join("CLAUDE.md"),
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
+        );
         doctor_check_local_config(dc, &ctx.project_path);
     }
 

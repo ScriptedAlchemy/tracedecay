@@ -712,32 +712,45 @@ async fn run_post_update_mutations(
                 Ok(())
             }
         };
-    reconcile_materialized_managed_skills_after_update();
+    deploy_managed_skills_after_lifecycle();
     reinstall_result
 }
 
-/// Reconciles already-Active managed skills into every detected host skills
-/// directory on `tracedecay update`, so a skill approved before this binary
-/// shipped (or a body update applied since the last activation) still lands as
-/// a real, host-loadable `SKILL.md`. Fork-protected and best-effort: a failure
-/// here never fails the update.
-fn reconcile_materialized_managed_skills_after_update() {
+/// Redeploys managed skills after a lifecycle pass (`update`, `reinstall`,
+/// `install`), so both halves of a managed skill converge on the store: the
+/// host-loadable `SKILL.md` files and the per-host prompt index blocks.
+///
+/// Reconciling only the materialized files left the prompt index converging
+/// solely as a side effect of a successful store mutation, so a store that
+/// emptied without one kept advertising skills that no longer exist. Deploying
+/// here makes the lifecycle converge the index whatever the store did.
+/// Best-effort: a failure never fails the lifecycle pass.
+pub(crate) fn deploy_managed_skills_after_lifecycle() {
     let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         return;
     };
-    let start = std::env::current_dir()
-        .ok()
-        .or_else(tracedecay_agent_hosts::agents::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+        return;
+    };
+    let start = std::env::current_dir().ok().unwrap_or_else(|| home.clone());
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
             &start,
         );
-    tracedecay_automation_runtime::automation::skill_materialization::reconcile_after_activation(
+    let receipt = tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_at(
         &tracedecay_agent_hosts::host_io(),
+        &home,
         &profile_root,
         &project_root,
     );
+    for error in &receipt.errors {
+        tracing::warn!(%error, "managed skill deployment failed");
+    }
+    for report in receipt.exports.iter() {
+        if let Some(error) = &report.error {
+            tracing::warn!(agent = %report.agent, %error, "managed skill export failed");
+        }
+    }
 }
 
 #[cfg(test)]
