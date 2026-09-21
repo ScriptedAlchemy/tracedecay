@@ -31,8 +31,8 @@ use crate::runtime::claude::{
     ClaudeFrameCoverage, ClaudeSkippedFrame, ClaudeSkippedFrameReason, ClaudeSource,
     ClaudeSourceFrame, identify_claude_source, try_scan_claude_source_frames_with_resume,
 };
-use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::observation::jsonl_observation_admission::is_deterministic_content_refusal;
+use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     HostProviderCoverage, JsonlResumeState, STRICT_JSONL_BATCH_BYTES, TranscriptDiscoveryBounds,
@@ -406,8 +406,7 @@ async fn capture_frame<A: HostAdmission + ?Sized>(
             // Same convergence rule as JSONL and Hermes: a refusal that
             // re-fails identically must cover past the frame. Failing the
             // source leaves history blocked on a record that cannot commit.
-            if is_deterministic_content_refusal(&error) && !context.cancellation.is_cancelled()
-            {
+            if is_deterministic_content_refusal(&error) && !context.cancellation.is_cancelled() {
                 let reason = if error.reason_code == Some("observation_identity_collision") {
                     NonDurableFrameReason::ObservationIdentityCollision
                 } else {
@@ -1233,11 +1232,7 @@ async fn scheduled_source_paths<A: HostAdmission + ?Sized>(
     let total = paths.len();
     let start = usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % total;
     paths.rotate_left(start);
-    let deferred = claude_rotation_deferred(
-        total,
-        frontier.byte_offset,
-        discovery_truncated,
-    );
+    let deferred = claude_rotation_deferred(total, frontier.byte_offset, discovery_truncated);
     paths.truncate(MAX_CLAUDE_SOURCES_PER_PASS);
     Ok((paths, deferred))
 }
@@ -1322,13 +1317,17 @@ where
                 // failed; the pass stays retryable so the others keep moving.
                 let retryable = failure.retryable
                     || failure.reason_code == "observation_cursor_advance_collision";
-                let summary = source_failures.get_or_insert((0_u64, failure.reason_code, retryable));
+                let summary =
+                    source_failures.get_or_insert((0_u64, failure.reason_code, retryable));
                 summary.0 = summary.0.saturating_add(1);
                 if !retryable {
                     summary.2 = false;
                 }
                 tracing::warn!(
-                    source = path.file_name().and_then(|name| name.to_str()).unwrap_or("unknown"),
+                    source = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("unknown"),
                     reason_code = failure.reason_code,
                     retryable,
                     "Claude observation source ingest failed"

@@ -395,8 +395,11 @@ impl GlobalDbObservationStore {
         let receipt_id = advance
             .sanitization_receipt()
             .map(|receipt| receipt.receipt().receipt_id().as_str());
-        if !cursor_advance_ledger_row_matches(ledger.as_ref(), advance.reason().as_str(), receipt_id)
-        {
+        if !cursor_advance_ledger_row_matches(
+            ledger.as_ref(),
+            advance.reason().as_str(),
+            receipt_id,
+        ) {
             transaction
                 .rollback()
                 .await

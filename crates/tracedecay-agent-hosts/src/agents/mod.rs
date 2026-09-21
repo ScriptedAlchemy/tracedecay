@@ -75,10 +75,10 @@ pub use host_config_io::{
     HostFileMetadataIdentityV1, JsonConfigDialect, backup_config_file, capture_host_file_metadata,
     config_backup_path, copilot_cli_dir, home_dir, host_config_write_intent_path, kiro_data_dir,
     load_json_file, load_json_file_strict, load_jsonc_file, load_jsonc_file_strict, load_toml_file,
-    parse_jsonc, restore_host_file_metadata, safe_remove_host_file,
-    safe_write_bytes_file, safe_write_bytes_file_with_metadata, safe_write_json_file,
-    safe_write_text_file, vscode_data_dir, vscode_insiders_data_dir, which_tracedecay,
-    which_tracedecay_path, with_host_config_write_intents,
+    parse_jsonc, restore_host_file_metadata, safe_remove_host_file, safe_write_bytes_file,
+    safe_write_bytes_file_with_metadata, safe_write_json_file, safe_write_text_file,
+    vscode_data_dir, vscode_insiders_data_dir, which_tracedecay, which_tracedecay_path,
+    with_host_config_write_intents,
 };
 pub(crate) use host_config_io::{
     JsonConfigMutation, collect_regular_files, ensure_project_local_safe_path,

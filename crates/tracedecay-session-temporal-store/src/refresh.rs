@@ -24,7 +24,6 @@ use super::projection::{
     persist_session_temporal_projection_batch_in_transaction,
     session_temporal_projection_record_count, validate_final_projection_receipt,
 };
-use crate::sql::GENERATION_COPY_STATEMENTS;
 use super::query::{
     decode_generation_i64, encode_watermarks, frontier_i64, generation_i64, now_micros,
     read_generation, storage, storage_message,
@@ -37,6 +36,7 @@ use crate::handle::{
     SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb,
     SessionTemporalWriteTxn,
 };
+use crate::sql::GENERATION_COPY_STATEMENTS;
 
 const BEGIN_REFRESH: &str = "begin or join session refresh";
 const PERSIST_REFRESH: &str = "persist session refresh progress";
@@ -464,7 +464,10 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let active = generation_i64(batch.watermarks().active_generation(), PERSIST_REFRESH)?;
         for statement in GENERATION_COPY_STATEMENTS {
             let table = generation_copy_source_table(statement).ok_or_else(|| {
-                storage_message(PERSIST_REFRESH, "generation copy statement has no source table")
+                storage_message(
+                    PERSIST_REFRESH,
+                    "generation copy statement has no source table",
+                )
             })?;
             let insert_sql = generation_copy_page_insert_sql(statement);
             let page_end_sql = generation_copy_page_end_sql(table);
@@ -473,14 +476,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 .read_snapshot()
                 .await
                 .map_err(|error| storage(PERSIST_REFRESH, error))?;
-            let Some(next_source_rowid) = copy_page_end_rowid(
-                &snapshot,
-                &resume_sql,
-                session_id,
-                active,
-                candidate,
-            )
-            .await?
+            let Some(next_source_rowid) =
+                copy_page_end_rowid(&snapshot, &resume_sql, session_id, active, candidate).await?
             else {
                 continue;
             };
@@ -492,14 +489,9 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                     .read_snapshot()
                     .await
                     .map_err(|error| storage(PERSIST_REFRESH, error))?;
-                let page_end = copy_page_end_rowid(
-                    &snapshot,
-                    &page_end_sql,
-                    session_id,
-                    active,
-                    after_rowid,
-                )
-                .await?;
+                let page_end =
+                    copy_page_end_rowid(&snapshot, &page_end_sql, session_id, active, after_rowid)
+                        .await?;
                 let Some(page_end) = page_end else {
                     break;
                 };

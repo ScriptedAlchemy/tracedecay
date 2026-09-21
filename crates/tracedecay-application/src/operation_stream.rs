@@ -1065,9 +1065,7 @@ impl OperationEventAuthority {
         }
         let already_requested = record.cancellation.borrow().is_some();
         if !already_requested {
-            record
-                .cancellation
-                .send_replace(Some(now_micros()));
+            record.cancellation.send_replace(Some(now_micros()));
         }
         Ok(if already_requested {
             OperationCancelOutcome::AlreadyRequested

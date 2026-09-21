@@ -449,8 +449,7 @@ async fn handle_status_command_within(
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
-    let show_online =
-        stdout_is_terminal && upload_enabled;
+    let show_online = stdout_is_terminal && upload_enabled;
     // The worldwide counter and country flags are decoration served from the
     // local cache: the render below never waits on the network. When a cache
     // has expired, one refresh for the next invocation starts here so its

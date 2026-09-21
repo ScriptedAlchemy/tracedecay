@@ -177,9 +177,7 @@ impl AuthorityInvariantTransactionProvider for Database {
             .read_snapshot()
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        Ok(Some(
-            foreign_key_table_violates(&snapshot, table).await?,
-        ))
+        Ok(Some(foreign_key_table_violates(&snapshot, table).await?))
     }
 }
 
