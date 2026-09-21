@@ -239,6 +239,6 @@
   ],
   "not_run": {
     "tracedecay-global-db::schema_convergence_hotpath": "requires hotpath-alloc, which no test lane enables; the hotpath workflows own it",
-    "tracedecay-hotpath-guard::functions_limit_live": "requires hotpath and hotpath-mcp to start a live MCP server, which no test lane enables; the hotpath graph check compiles it"
+    "tracedecay-hotpath-guard::functions_limit_live": "requires hotpath/hotpath and hotpath/hotpath-mcp to start a live MCP server, which no test lane enables; the hotpath graph check compiles it"
   }
 }

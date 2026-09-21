@@ -883,12 +883,24 @@ fn map_transfer_persistence_error(
 }
 
 fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStorageErrorV1> {
+    // Scoped to the remote contract's own tables: a registered store also
+    // carries the runtime writer ledger, which this contract does not own.
+    let contract_tables = schema::REMOTE_NODE_LOCAL_TABLES
+        .iter()
+        .map(|name| text(*name))
+        .collect::<Vec<_>>();
+    let placeholders = (1..=schema::REMOTE_NODE_LOCAL_TABLES.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let rows = query(
         handle,
-        "SELECT name FROM sqlite_master
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-         ORDER BY name",
-        Vec::new(),
+        &format!(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name IN ({placeholders})
+             ORDER BY name"
+        ),
+        contract_tables.clone(),
     )
     .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
     let names = rows
@@ -904,12 +916,14 @@ fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStor
     }
     let columns = query(
         handle,
-        "SELECT tables.name, columns.name
-         FROM sqlite_master AS tables
-         JOIN pragma_table_info(tables.name) AS columns
-         WHERE tables.type = 'table' AND tables.name NOT LIKE 'sqlite_%'
-         ORDER BY tables.name, columns.cid",
-        Vec::new(),
+        &format!(
+            "SELECT tables.name, columns.name
+             FROM sqlite_master AS tables
+             JOIN pragma_table_info(tables.name) AS columns
+             WHERE tables.type = 'table' AND tables.name IN ({placeholders})
+             ORDER BY tables.name, columns.cid"
+        ),
+        contract_tables,
     )
     .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
     let columns = columns
