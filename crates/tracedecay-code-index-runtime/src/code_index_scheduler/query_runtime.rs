@@ -715,9 +715,15 @@ where
         let sanitized = RawRetrievalRequestV1::new(input.query, request)
             .sanitize(input.sanitizer_revision, input.normalization_revision)?;
         let readiness = text.query_owner_readiness();
-        if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_))
-            || text.text_projection_needs_work()
-        {
+        // Only this search's own owners decide whether it needs the worker.
+        // A clone-fingerprint successor keeps `text_projection_needs_work`
+        // true long after exact and lexical are ready, and asking for it here
+        // stamped the pending-wake slot on a seat whose source proof was
+        // current: the freshness ladder reads that slot as
+        // `refresh_in_flight`, so the very response that stamped it answered
+        // `verifying`. The successor is the worker's own continuation, and
+        // the similarity path that consumes it still requests it directly.
+        if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_)) {
             match schedulers.request_query_background_reconcile(scope).await {
                 CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
                     return Err(QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
