@@ -120,7 +120,7 @@ fn attach_hotpath_allocations(report: &mut Value, report_path: &PathBuf) {
             let calls = entry["call_count"].as_u64().unwrap_or_default();
             let allocated_bytes = entry["total_poll_alloc_bytes"].as_u64();
             json!({
-                "state": allocated_bytes.is_some().then_some("measured").unwrap_or("unavailable"),
+                "state": if allocated_bytes.is_some() { "measured" } else { "unavailable" },
                 "label": RMCP_DISPATCH_LABEL,
                 "dispatches": calls,
                 "allocated_bytes": allocated_bytes,
