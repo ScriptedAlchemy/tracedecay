@@ -21,18 +21,30 @@ on:
 permissions:
   contents: read
 
-# One run per pull request (or per pushed ref), and a newer head always
-# supersedes the run in flight: its verdict is for a commit nobody can merge
-# or ship any more, and on 20 free runner slots every job it still holds is a
-# job the current head waits for. Master is not exempt. Keeping master runs
-# to completion never bought a verdict per tip: GitHub holds one pending run
-# per group, so intermediate pushes were queued and cancelled anyway (runs
-# 34311300344, 34312118984, 34313237349 never scheduled a job) and only the
-# head at the moment the old run ended got a verdict, ~100 min late. The tip
-# is what ships; it is the only master commit that needs a verdict.
+# A run belongs to a commit on master and to a branch everywhere else.
+#
+# Off master a newer head supersedes the run in flight. Its verdict is for a
+# commit nobody can merge or ship any more, and on 20 free runner slots every
+# job it still holds is a job the current head waits for.
+#
+# On master the commit is the unit, because merge commits are permanent
+# history that branches fork from and releases cut from. One group per ref
+# cannot give each of them a verdict. Three merges landed 11 seconds apart on
+# 2026-09-19 (cee96d39e0, ee548c4032, d5081969b1), the first two were
+# cancelled before proving anything, and the union shipped untested.
+# `cancel-in-progress: false` does not fix it either, because GitHub keeps one
+# pending run per group, so intermediate pushes queue and are evicted anyway
+# (runs 34311300344, 34312118984, 34313237349 never scheduled a job). Keying
+# by SHA gives each merge commit a group of one that no later push can cancel.
+#
+# Master runs then serialize on the account's 20-job cap instead of on this
+# group. One master push spends 16 jobs, so the next starts only as the first
+# drains, and a burst of N merges delays the last verdict by roughly (N-1)
+# lane wall times of about 27 min. The repository pays that to learn which
+# merge broke master instead of bisecting for it afterwards.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   CARGO_TERM_COLOR: always
