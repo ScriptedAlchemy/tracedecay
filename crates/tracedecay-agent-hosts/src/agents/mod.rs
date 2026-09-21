@@ -141,6 +141,43 @@ pub(crate) fn remove_managed_skill_prompt_index(
     retired_memory_digest::remove_prompt_block(prompt_path)
 }
 
+/// Warns when a host's managed-skill prompt index still advertises skills the
+/// profile's store no longer holds.
+///
+/// The index converges only when a lifecycle pass re-exports it. A stale block
+/// therefore means the host is reading a skill list the store cannot serve, so
+/// doctor names the deploy command that reconverges it. Doctor never repairs.
+#[hotpath::measure(label = "agent_hosts.agents.managed_skill.doctor_index")]
+pub(crate) fn doctor_check_managed_skill_prompt_index(
+    dc: &mut DoctorCounters,
+    profile_home: &Path,
+    prompt_path: &Path,
+    target: tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget,
+) {
+    let profile_root =
+        tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(
+            profile_home,
+        );
+    match tracedecay_automation_runtime::automation::skill_targets::stale_prompt_index_ids(
+        &profile_root,
+        prompt_path,
+        target,
+    ) {
+        Ok(stale) if stale.is_empty() => {}
+        Ok(stale) => dc.warn(&format!(
+            "managed-skill index in {} still lists {} skill(s) absent from the managed-skill \
+             store ({}); run `tracedecay automation skills deploy` to refresh it",
+            prompt_path.display(),
+            stale.len(),
+            stale.join(", ")
+        )),
+        Err(err) => dc.warn(&format!(
+            "could not check the managed-skill index in {}: {err}",
+            prompt_path.display()
+        )),
+    }
+}
+
 pub(crate) fn uses_default_user_profile(home: &Path, profile_root: &Path) -> bool {
     profile_root == home.join(".tracedecay")
 }

@@ -1358,6 +1358,11 @@ pub(crate) async fn handle_install_command(
             })?;
     }
 
+    // An install pass is a lifecycle pass: converge the managed-skill exports
+    // (prompt indexes and materialized files) against the store, so a host is
+    // never left advertising a skill the store no longer holds.
+    crate::update_cmd::deploy_managed_skills_after_lifecycle();
+
     if git_hook {
         install_requested_git_hook()?;
     } else {
