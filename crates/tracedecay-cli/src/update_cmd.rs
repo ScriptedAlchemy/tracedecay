@@ -732,9 +732,7 @@ pub(crate) fn deploy_managed_skills_after_lifecycle() {
     let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
         return;
     };
-    let start = std::env::current_dir()
-        .ok()
-        .unwrap_or_else(|| home.clone());
+    let start = std::env::current_dir().ok().unwrap_or_else(|| home.clone());
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
             &start,

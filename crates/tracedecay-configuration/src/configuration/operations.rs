@@ -900,7 +900,11 @@ mod tests {
         };
         let clock = Clock;
         let operations = ConfigurationControlPlaneOperations::new(
-            &registry, &store, &scope, &authorization, &clock,
+            &registry,
+            &store,
+            &scope,
+            &authorization,
+            &clock,
         );
 
         let key =
@@ -915,7 +919,10 @@ mod tests {
 
         assert_eq!(resolved.key, key);
         assert_eq!(resolved.effective_value, expected);
-        assert_eq!(resolved.effective_value, ConfigurationValueV1::Boolean(false));
+        assert_eq!(
+            resolved.effective_value,
+            ConfigurationValueV1::Boolean(false)
+        );
         assert!(
             resolved.candidates.is_empty(),
             "a default carries no layer candidate"
