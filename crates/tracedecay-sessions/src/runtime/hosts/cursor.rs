@@ -873,7 +873,6 @@ pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session
     .await
 }
 
-#[hotpath::measure(label = "sessions.hosts.cursor.sweep_admit", future = true)]
 fn retryable_cursor_conflict(error: &TranscriptIngestError) -> bool {
     matches!(
         error,
@@ -885,6 +884,7 @@ fn retryable_cursor_conflict(error: &TranscriptIngestError) -> bool {
     )
 }
 
+#[hotpath::measure(label = "sessions.hosts.cursor.sweep_admit", future = true)]
 async fn admit_cursor_sweep_observations_with_session_ids(
     source: &CursorSweepSource,
     project_root: &Path,
