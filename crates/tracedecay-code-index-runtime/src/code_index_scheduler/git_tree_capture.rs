@@ -333,7 +333,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .try_into_commit()
             .map_err(Self::unavailable)?;
         let actual_tree = commit.tree_id().map_err(Self::unavailable)?;
-        if actual_tree.to_string() != expected_tree {
+        if actual_tree != expected_tree {
             return Err(Self::unavailable(
                 "durable code-generation index commit tree does not match Git",
             ));
@@ -459,7 +459,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let tree = commit
             .tree()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-        if tree.id().to_string() != source.tree.as_str() {
+        if tree.id() != source.tree.as_str() {
             return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
         let mut entries = tree

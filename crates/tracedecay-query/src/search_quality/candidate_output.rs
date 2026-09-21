@@ -560,7 +560,7 @@ fn validate_source_bindings(
     let tree_id = commit.tree_id().map_err(|error| {
         CandidateOutputError::Contract(format!("resolve fixture source tree: {error}"))
     })?;
-    if tree_id.to_string() != workload.source_repository_tree {
+    if tree_id != workload.source_repository_tree {
         return Err(CandidateOutputError::Contract(format!(
             "fixture source tree mismatch: declared {}, resolved {tree_id}",
             workload.source_repository_tree

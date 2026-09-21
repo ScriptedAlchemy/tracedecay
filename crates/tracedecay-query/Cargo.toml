@@ -10,7 +10,7 @@ include = ["/src/**", "/assets/**"]
 
 [dependencies]
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
-gix = { version = "=0.86.0", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
+gix = { version = "=0.87.1", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
 hex = "0.4"
 hmac = "0.13.0"
 hotpath.workspace = true
