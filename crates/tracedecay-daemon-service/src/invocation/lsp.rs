@@ -17,6 +17,16 @@ pub(super) use workspace_diagnostics::PublishedCodeIndexWorkspaceDocuments;
 pub const LSP_WORKSPACE_CAPABILITY_ID_V1: &str = "capability.application.lsp.workspace-folders";
 pub const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.workspace-folders";
 
+/// The admitted-root URIs for a set of registered roots, in the one spelling
+/// managed test runs are retained under.
+fn admitted_root_uris(roots: &[std::path::PathBuf]) -> std::collections::BTreeSet<String> {
+    roots
+        .iter()
+        .filter_map(|root| url::Url::from_directory_path(root).ok())
+        .map(|root_uri| root_uri.to_string())
+        .collect()
+}
+
 pub(super) fn admit_lsp_control(
     request_id: String,
     deadline: &Deadline,
@@ -375,10 +385,16 @@ impl DaemonInvocationService {
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         step("lsp_registries_cleared");
+        // Read before the drain: afterwards the registry no longer knows which
+        // roots this daemon served, and those roots are exactly the operations
+        // it may retire.
+        let retired_roots = admitted_root_uris(&self.project_runtimes.registered_roots());
         let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
         step("project_runtimes_shut_down");
         self.session_holder_databases.lock().await.clear();
-        self.operation_events.expire_all().await;
+        self.operation_events
+            .expire_admitted_roots(&retired_roots)
+            .await;
         step("operation_events_expired");
         let lease_shutdown_clean = lease_shutdown.is_ok();
         if let Err(problem) = lease_shutdown {

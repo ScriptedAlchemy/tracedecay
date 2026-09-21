@@ -1571,6 +1571,13 @@ impl ProjectRuntimeRegistryV1 {
         self.lock_runtimes().is_empty()
     }
 
+    /// The registered roots this registry serves right now. Read before a
+    /// shutdown drains them, this is what the daemon can truthfully claim to
+    /// have retired.
+    pub(crate) fn registered_roots(&self) -> Vec<PathBuf> {
+        self.lock_runtimes().keys().cloned().collect()
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn is_root_fenced(&self, project_root: &Path) -> bool {
         self.lock_root_fences().contains(project_root)

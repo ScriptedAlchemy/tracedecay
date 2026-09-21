@@ -1190,13 +1190,39 @@ impl OperationEventAuthority {
         })
     }
 
-    /// Drops all memory-retained frontiers. Existing streams close; reconnects
-    /// receive `FrontierExpired` rather than a fabricated snapshot.
-    #[hotpath::measure(label = "usecases.operation.expire_all", future = true)]
-    pub async fn expire_all(&self) {
+    /// Drops the memory-retained frontiers of the admitted roots a retiring
+    /// daemon served. Streams over those operations close and reconnects
+    /// receive `FrontierExpired` rather than a fabricated snapshot, while an
+    /// operation admitted for a root this daemon never served keeps running:
+    /// one process can host more than one daemon, and a retirement speaks only
+    /// for the roots it retired. Request-bound operations carry no admitted
+    /// root and are left to ordinary terminal eviction.
+    #[hotpath::measure(label = "usecases.operation.expire_admitted_roots", future = true)]
+    pub async fn expire_admitted_roots(&self, root_uris: &BTreeSet<String>) {
+        if root_uris.is_empty() {
+            return;
+        }
+        let retired = |root_uri: &str| {
+            root_uris
+                .iter()
+                .any(|retired| retired.trim_end_matches('/') == root_uri.trim_end_matches('/'))
+        };
         let mut state = self.inner.state.lock().await;
-        state.operations.clear();
-        state.insertion_order.clear();
+        let expired = state
+            .operations
+            .iter()
+            .filter(|(_, record)| match &record.binding.authorization {
+                OperationAuthorization::ProjectRoot { root_uri, .. } => retired(root_uri),
+                OperationAuthorization::Request { .. } => false,
+            })
+            .map(|(operation_id, _)| operation_id.clone())
+            .collect::<BTreeSet<_>>();
+        state
+            .operations
+            .retain(|operation_id, _| !expired.contains(operation_id));
+        state
+            .insertion_order
+            .retain(|operation_id| !expired.contains(operation_id));
     }
 
     #[hotpath::measure(label = "usecases.operation.emit_progress", future = true)]
@@ -1782,7 +1808,7 @@ fn operation_resume_verification_error(error: CursorError) -> OperationEventErro
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use tracedecay_contracts::{
         ApplicationProblemKind, Deadline, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
@@ -1813,6 +1839,62 @@ mod tests {
         assert_eq!(
             expired.problem.code,
             "operation_event.resume_expired".to_owned()
+        );
+    }
+
+    /// One process can host more than one daemon. A daemon retiring the roots
+    /// it served must not expire a managed test run admitted for a root it
+    /// never served: that run is still emitting, and taking its frontier away
+    /// answers the caller `FrontierExpired` for a daemon that never left.
+    #[tokio::test]
+    async fn retiring_one_roots_operations_leaves_another_roots_run_emitting() {
+        let authority = OperationEventAuthority::default();
+        let begin = |root_uri: &str, request_id: &str| {
+            authority.begin_managed_test_run(
+                root_uri.to_owned(),
+                RequestId::new(request_id.to_owned()).expect("request id"),
+                None,
+                None,
+                BTreeMap::new(),
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+        };
+        let retired = begin("file:///retired/", "request.test-run.retired")
+            .await
+            .expect("retired root run");
+        let serving = begin("file:///serving/", "request.test-run.serving")
+            .await
+            .expect("serving root run");
+
+        authority
+            .expire_admitted_roots(&BTreeSet::from(["file:///retired/".to_owned()]))
+            .await;
+
+        assert_eq!(
+            serving
+                .test_result("suite::passes".to_owned(), true)
+                .await
+                .map(|event| event.sequence),
+            Ok(1),
+            "a root this retirement never served keeps its in-flight run"
+        );
+        assert_eq!(
+            retired
+                .test_result("suite::passes".to_owned(), true)
+                .await
+                .map(|event| event.sequence),
+            Err(OperationEventError::FrontierExpired),
+            "the retired root's frontier is gone"
+        );
+        assert_eq!(
+            authority.latest_managed_test_run("file:///retired/").await,
+            Err(OperationEventError::FrontierExpired)
+        );
+        assert!(
+            authority
+                .latest_managed_test_run("file:///serving/")
+                .await
+                .is_ok()
         );
     }
 
