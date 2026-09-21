@@ -1068,7 +1068,10 @@ jobs:
           # Lights the hotpath backend without any crate's own hotpath feature.
           # The two lines above keep them in sync, which hides a type that
           # forks on the local feature while hotpath::io! expands on the backend.
-          cargo check --workspace --all-targets --features hotpath/hotpath --locked
+          # It also carries tracedecay-hotpath-guard's live MCP proof, whose
+          # required-features name these two dependency features. That guard is
+          # a leaf and holds no backend feature of its own (see its manifest).
+          cargo check --workspace --all-targets --features hotpath/hotpath,hotpath/hotpath-mcp --locked
 
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.
