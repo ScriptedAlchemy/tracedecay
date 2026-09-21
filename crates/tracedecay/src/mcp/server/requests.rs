@@ -1464,9 +1464,14 @@ impl McpServer {
         cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> JsonRpcResponse {
         let started = timings_enabled.then(std::time::Instant::now);
-        let mut response = self
-            .handle_tools_call_inner(id, params, timings_enabled, connection, cancellation)
-            .await;
+        let mut response = Box::pin(self.handle_tools_call_inner(
+            id,
+            params,
+            timings_enabled,
+            connection,
+            cancellation,
+        ))
+        .await;
         Self::attach_missing_response_timing(
             &mut response,
             started.map(|started| started.elapsed().as_micros() as u64),
