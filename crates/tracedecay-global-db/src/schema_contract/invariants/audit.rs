@@ -817,9 +817,11 @@ async fn validate_message_projection_row(
         resolved.released,
     )? == StoredProvenanceRendering::Current
     {
-        // Convergence supersedes an existing output row; it never inserts one.
-        // A vanished message stays a hard failure. Session repair is only the
-        // uniquely owned current output whose session row is absent.
+        // Convergence supersedes an existing output row, and reinserts a
+        // vanished one only where provenance still names this observation as
+        // its creator. A surviving body that disagrees with the deterministic
+        // output stays a hard failure. Session repair is only the uniquely
+        // owned current output whose session row is absent.
         let owner_message = owner_projection.message();
         let output_row_present = resolved
             .projection_rows
