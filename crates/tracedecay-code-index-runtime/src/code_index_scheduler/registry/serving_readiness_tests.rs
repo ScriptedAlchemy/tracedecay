@@ -250,16 +250,26 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
     }
     changes.borrow_and_update();
     let serving_seat_before_expiry = *serving_seats.borrow_and_update();
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(250),
-            registry.latest_complete_ready(&project)
-        )
-        .await
-        .expect("expired readiness returns without walking source")
-        .is_none(),
-        "an expired proof cannot be promoted current before the worker renews it"
-    );
+    // One sample at millisecond zero cannot tell a parked worker from a pass
+    // that advertised itself idle and is still about to publish its seat and
+    // renew the source proof. Sample the whole window.
+    let expiry_window = Instant::now() + Duration::from_millis(250);
+    loop {
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                registry.latest_complete_ready(&project)
+            )
+            .await
+            .expect("expired readiness returns without walking source")
+            .is_none(),
+            "an expired proof cannot be promoted current before the worker renews it"
+        );
+        if Instant::now() >= expiry_window {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     assert_eq!(
         *serving_seats.borrow(),
         serving_seat_before_expiry,
