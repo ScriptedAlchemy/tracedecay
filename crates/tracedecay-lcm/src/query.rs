@@ -993,30 +993,19 @@ fn grep_order_by(
     recency_column: &str,
     role_penalty_expr: Option<&str>,
 ) -> String {
-    match sort {
-        LcmGrepSort::Relevance => match role_penalty_expr {
-            Some(role_penalty_expr) => {
-                format!("rank ASC, {role_penalty_expr} ASC, {recency_column} DESC")
-            }
-            None => format!("rank ASC, {recency_column} DESC"),
-        },
-        LcmGrepSort::Hybrid => {
-            let blended = format!(
+    let (leading, trailing) = match sort {
+        LcmGrepSort::Relevance => ("rank ASC".to_string(), format!("{recency_column} DESC")),
+        LcmGrepSort::Hybrid => (
+            format!(
                 "(rank / (1 + (MAX(0.0, ((strftime('%s','now') - {recency_column}) / 3600.0)) * {AGE_DECAY_RATE})))"
-            );
-            match role_penalty_expr {
-                Some(role_penalty_expr) => {
-                    format!("{blended} ASC, {role_penalty_expr} ASC, {recency_column} DESC")
-                }
-                None => format!("{blended} ASC, {recency_column} DESC"),
-            }
-        }
-        LcmGrepSort::Recency => match role_penalty_expr {
-            Some(role_penalty_expr) => {
-                format!("{recency_column} DESC, {role_penalty_expr} ASC, rank ASC")
-            }
-            None => format!("{recency_column} DESC, rank ASC"),
-        },
+            ),
+            format!("{recency_column} DESC"),
+        ),
+        LcmGrepSort::Recency => (format!("{recency_column} DESC"), "rank ASC".to_string()),
+    };
+    match role_penalty_expr {
+        Some(penalty) => format!("{leading}, {penalty} ASC, {trailing}"),
+        None => format!("{leading}, {trailing}"),
     }
 }
 

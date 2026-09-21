@@ -481,12 +481,6 @@ fn sanitize_metadata(value: &str) -> String {
     const MAX_METADATA_BYTES: usize = 256;
 
     let mut sanitized = value.replace(['\t', '\r', '\n'], " ");
-    if sanitized.len() > MAX_METADATA_BYTES {
-        let mut boundary = MAX_METADATA_BYTES;
-        while !sanitized.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        sanitized.truncate(boundary);
-    }
+    sanitized.truncate(sanitized.floor_char_boundary(MAX_METADATA_BYTES));
     sanitized
 }

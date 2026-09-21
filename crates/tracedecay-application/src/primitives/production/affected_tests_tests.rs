@@ -79,9 +79,7 @@ fn generation(value: &str) -> CodeGenerationId {
     CodeGenerationId::new(value).expect("generation")
 }
 
-fn digest(value: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", value.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn content(value: char) -> ContentDigest {
     ContentDigest::new(format!("sha256:{}", value.to_string().repeat(64))).expect("content")

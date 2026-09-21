@@ -1,18 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
-    LocatorDigest, ManifestDigest, PrivacyDomainId, ProjectId, ProviderId,
-    SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
-    SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
-    SourceCoverageV1, SourceCursorV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
-    SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1, SourceObjectRevisionV1,
-    SourcePartitionFrontierV1, SourcePartitionIdV1, SourceRefetchStrategyV1, SourceSnapshotIdV1,
-    UserProfileId, canonical_sha256,
+    LocatorDigest, PrivacyDomainId, ProjectId, ProviderId, SourceAcquisitionCapabilitiesV1,
+    SourceAcquisitionContractV1, SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1,
+    SourceCaptureModeV1, SourceContentStateV1, SourceCoverageV1, SourceCursorV1,
+    SourceDefinitionV1, SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1,
+    SourceObjectObservationV1, SourceObjectRevisionV1, SourcePartitionFrontierV1,
+    SourcePartitionIdV1, SourceRefetchStrategyV1, SourceSnapshotIdV1, UserProfileId,
+    canonical_sha256,
 };
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn definition() -> SourceDefinitionV1 {
     let capabilities = SourceAcquisitionCapabilitiesV1::new(

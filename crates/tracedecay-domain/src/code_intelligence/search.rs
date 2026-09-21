@@ -181,6 +181,18 @@ pub enum CodeSearchChunkGrainV1 {
     FileWindow,
 }
 
+impl CodeSearchChunkGrainV1 {
+    /// Row-codec grain ordinal. Append new grains; reordering changes sealed
+    /// artifact bytes. Capability emission sorts a filtered copy of this list.
+    pub const ORDER: [Self; 5] = [
+        Self::SymbolSignature,
+        Self::SymbolBody,
+        Self::SymbolMember,
+        Self::FilePreamble,
+        Self::FileWindow,
+    ];
+}
+
 /// Where one chunk lives inside one generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -245,6 +257,26 @@ pub enum ExactTechnicalTermKindV1 {
     ToolName,
     ConfigurationKey,
     CommitIdentifier,
+}
+
+impl ExactTechnicalTermKindV1 {
+    /// Lexical row-codec ordinal and the capability manifest's kind set.
+    ///
+    /// The codec stores the index in this array. Append new kinds; reordering
+    /// changes sealed artifact bytes.
+    pub const ORDER: [Self; 11] = [
+        Self::WholeSymbol,
+        Self::QualifiedName,
+        Self::Path,
+        Self::CompilerErrorCode,
+        Self::CompilerErrorText,
+        Self::RuntimeErrorCode,
+        Self::RuntimeErrorText,
+        Self::CliFlag,
+        Self::ToolName,
+        Self::ConfigurationKey,
+        Self::CommitIdentifier,
+    ];
 }
 
 /// One whole exact technical term extracted as evidence. Extraction
@@ -1052,15 +1084,6 @@ impl ChangedCodeChunkSetV1 {
         Ok((reused.len() as u64, reused_digest))
     }
 
-    /// Like [`Self::seal_reused_partition_refs`], but skips per-row identity
-    /// validation. Callers must pass already-validated manifest rows.
-    pub fn seal_reused_partition_refs_trusted(
-        reused: &[(&CodeSearchChunkId, &ContentDigest)],
-    ) -> Result<(u64, ManifestDigest), DomainError> {
-        let reused_digest = code_reused_partition_digest_refs_trusted(reused)?;
-        Ok((reused.len() as u64, reused_digest))
-    }
-
     /// Seal Arc-shared reuse from the parent full-replay commitment.
     ///
     /// Use at Arc-share publish only. Pair-list sealing stays on the mixed /
@@ -1581,17 +1604,9 @@ mod tests {
     use crate::code_intelligence::language::EdgeAuthorityV1;
     use crate::research::id::{PrivacyDomainId, SanitizationReceiptId};
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use crate::test_fixtures::repeated_sha256_text as digest;
 
     #[test]
     fn ephemeral_query_view_is_bounded_and_redacts_its_text() {

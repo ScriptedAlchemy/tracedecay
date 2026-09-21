@@ -18,7 +18,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_daemon_service::application_surface::retained::decode_request;
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, ComponentVersion, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -31,9 +31,7 @@ use crate::cli::Cli;
 
 const PROFILE_ID: &str = "profile.0f2f1c3d4e5f60718293a4b5c6d7e8f9";
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scope() -> ResolvedScope {
     ResolvedScope::new(

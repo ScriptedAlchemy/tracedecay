@@ -301,12 +301,7 @@ use crate::research::{
 };
 
 #[cfg(test)]
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String, Error = DomainError>,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use crate::test_fixtures::id;
 
 #[cfg(test)]
 pub(in crate::memory) fn fact_id_for(owner: &FactOwnerV1, operation: &str) -> FactId {

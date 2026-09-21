@@ -744,7 +744,7 @@ fn append_codex_response_item_facts(
                     return;
                 }
                 facts.push(CanonicalObservationFactV1::Message {
-                    role: canonical_message_role(role),
+                    role: crate::content::canonical_message_role(role),
                     content,
                     model: payload
                         .get("model")
@@ -893,16 +893,6 @@ fn timestamp_from_record(record: &Value) -> Option<i64> {
         .get("timestamp")
         .and_then(Value::as_str)
         .and_then(parse_rfc3339_timestamp)
-}
-
-fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
 }
 
 fn canonical_native_observation_id(

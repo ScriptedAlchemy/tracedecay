@@ -27,6 +27,7 @@ use std::sync::{Arc, RwLock};
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+use crate::projection::check_cancelled;
 use crate::projection_read::IdentityScope;
 use crate::schema::{has_native_label, nodes_with_label};
 use crate::{GraphCancellation, GraphDbError};
@@ -219,12 +220,4 @@ fn build_identity_index(
         identities: identities.into_boxed_slice(),
         node_count,
     }))
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
-    } else {
-        Ok(())
-    }
 }

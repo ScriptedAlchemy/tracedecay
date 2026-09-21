@@ -111,23 +111,7 @@ impl CursorComposerSource {
         .await
     }
 
-    #[hotpath::skip]
-    pub async fn ingest_user(
-        &self,
-        admission: &dyn crate::admission::HostAdmission,
-        registered_roots: &[std::path::PathBuf],
-        envelope_cap: usize,
-    ) -> CursorComposerSweepResult {
-        self.ingest_user_capped(
-            admission,
-            registered_roots,
-            envelope_cap,
-            Some(sqlite::DEFAULT_COMPOSER_SWEEP_BYTES),
-        )
-        .await
-    }
-
-    /// [`Self::ingest_user`] with an aggregate serialized-payload byte budget.
+    /// User-scope ingest with an aggregate serialized-payload byte budget.
     #[hotpath::skip]
     pub async fn ingest_user_capped(
         &self,

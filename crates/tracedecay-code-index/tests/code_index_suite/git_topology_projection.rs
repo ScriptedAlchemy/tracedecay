@@ -7,7 +7,7 @@ use tracedecay_code_index::git_projection::{
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitHeadStateV1, GitHistoryV1,
-    GitOidV1, ManifestDigest, RefId, RepositoryId, UtcMicros,
+    GitOidV1, RefId, RepositoryId, UtcMicros,
 };
 use tracedecay_graph_db::{
     GraphNamespace, GraphProjectorRevision, NeverCancelled, VerifiedGraphSnapshot,
@@ -17,9 +17,7 @@ fn oid(label: char) -> GitOidV1 {
     GitOidV1::new(label.to_string().repeat(40)).expect("oid")
 }
 
-fn digest(label: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", label.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn commit(label: char, parents: &[char]) -> GitCommitMetadataV1 {
     let identity = GitCommitIdentityV1 {

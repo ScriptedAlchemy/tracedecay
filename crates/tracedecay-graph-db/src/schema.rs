@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::{Edge, Node};
+use sha2::{Digest, Sha256};
 
 use crate::limits::{
     MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS, MAX_GRAPH_IDENTIFIER_BYTES,
@@ -72,6 +73,21 @@ pub(crate) const INDEXED_PROPERTIES: [&str; 6] = [
     PUBLICATION_KEY_PROPERTY,
     QUARANTINE_KEY_PROPERTY,
 ];
+
+/// Durable `{kind}:{sha256}` stem used for graph entity and relation ids.
+///
+/// Kind and value are separated by a NUL byte so a kind cannot be smuggled
+/// in as a prefix of the value. Code-graph symbols, git topology, and
+/// workflow topology all mint ids through this function; the byte layout is
+/// already sealed in stored graphs.
+#[must_use]
+pub fn graph_stable_identity(kind: &str, value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(kind.as_bytes());
+    digest.update([0]);
+    digest.update(value.as_bytes());
+    format!("{kind}:{}", hex::encode(digest.finalize()))
+}
 
 pub(crate) fn encoded_namespace_key(namespace: &GraphNamespace) -> String {
     hex::encode(namespace.as_str().as_bytes())
@@ -817,5 +833,22 @@ fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod graph_stable_identity_tests {
+    use super::graph_stable_identity;
+
+    #[test]
+    fn kind_and_value_stay_separated_by_a_nul() {
+        assert_eq!(
+            graph_stable_identity("symbol", "occ"),
+            "symbol:199f069a8ccddbb90bd0626b5904f52fbb2d92879bdbbf2c5dc29c1ea4ab66fb"
+        );
+        assert_ne!(
+            graph_stable_identity("symbol", "occ"),
+            graph_stable_identity("symbolo", "cc")
+        );
     }
 }

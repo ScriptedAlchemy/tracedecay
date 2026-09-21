@@ -842,7 +842,7 @@ async fn open_occurrence_content(
 
 fn content_matches_descriptor(content: &[u8], descriptor: &PayloadDescriptor) -> bool {
     content.len() == descriptor.byte_count
-        && content_hash_matches(&descriptor.content_hash, content)
+        && content_hash_equals(&descriptor.content_hash, &sha256_hex(content))
 }
 
 pub(super) fn hydration_failure(error: impl std::fmt::Display) -> HydrationError {
@@ -1415,10 +1415,6 @@ fn nonnegative_usize(value: Option<i64>) -> Result<usize, HydrationError> {
     value
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| hydration_failure("payload size is not a nonnegative usize"))
-}
-
-fn content_hash_matches(expected: &str, bytes: &[u8]) -> bool {
-    content_hash_equals(expected, &sha256_hex(bytes))
 }
 
 fn content_hash_equals(expected: &str, actual_hex: &str) -> bool {
@@ -2150,9 +2146,7 @@ mod tests {
         RetrievalAnchorId::new("anchor-1").expect("anchor")
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot(control: ExecutionControl) -> TemporalExecutionSnapshot {
         TemporalExecutionSnapshot::new_authorized(

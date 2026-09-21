@@ -19,8 +19,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
-    ManifestDigest, ProjectId, ProvenanceId, RepositoryId, RunId, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ProjectId, ProvenanceId, RepositoryId, RunId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::EffectClass;
 
@@ -42,9 +41,7 @@ impl crate::automation::backend::AgentTaskBackend for NeverAutomationBackend {
     }
 }
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn exact_publication(seed: char, payload_len: u64) -> ExactRunPublication {
     serde_json::from_value(json!({

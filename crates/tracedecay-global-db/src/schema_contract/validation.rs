@@ -215,43 +215,43 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
             || name.eq_ignore_ascii_case("idx_session_refresh_operations_one_running")
             || name.eq_ignore_ascii_case("idx_observations_valid_session_sequence")
     });
-    expected
+    if expected
         .name
-        .is_none_or(|name| actual.name.eq_ignore_ascii_case(name))
-        && actual.unique == expected.unique
-        && actual.origin.eq_ignore_ascii_case(expected.origin)
-        && actual.partial == expected_partial
-        && actual.columns.len() == expected.columns.len()
-        && actual
-            .columns
+        .is_some_and(|name| !actual.name.eq_ignore_ascii_case(name))
+        || actual.unique != expected.unique
+        || !actual.origin.eq_ignore_ascii_case(expected.origin)
+        || actual.partial != expected_partial
+        || actual.columns.len() != expected.columns.len()
+    {
+        return false;
+    }
+    let descending = expected.name.and_then(|name| {
+        INDEX_DESCENDING_COLUMNS
             .iter()
-            .zip(expected.columns)
-            .all(|(actual, expected_column)| {
-                if expected_column.eq_ignore_ascii_case(INDEX_EXPRESSION_COLUMN) {
-                    actual.cid == -2 && actual.name.is_none()
-                } else {
-                    actual.cid >= 0
-                        && actual.descending
-                            == expected
-                                .name
-                                .and_then(|name| {
-                                    INDEX_DESCENDING_COLUMNS
-                                        .iter()
-                                        .find(|(index, _)| index.eq_ignore_ascii_case(name))
-                                        .map(|(_, columns)| *columns)
-                                })
-                                .is_some_and(|columns| {
-                                    columns
-                                        .iter()
-                                        .any(|column| column.eq_ignore_ascii_case(expected_column))
-                                })
-                        && actual.collation.eq_ignore_ascii_case("BINARY")
-                        && actual
-                            .name
-                            .as_deref()
-                            .is_some_and(|name| name.eq_ignore_ascii_case(expected_column))
-                }
-            })
+            .find(|(index, _)| index.eq_ignore_ascii_case(name))
+            .map(|(_, columns)| *columns)
+    });
+    actual
+        .columns
+        .iter()
+        .zip(expected.columns)
+        .all(|(actual, expected_column)| {
+            if expected_column.eq_ignore_ascii_case(INDEX_EXPRESSION_COLUMN) {
+                return actual.cid == -2 && actual.name.is_none();
+            }
+            actual.cid >= 0
+                && actual.descending
+                    == descending.is_some_and(|columns| {
+                        columns
+                            .iter()
+                            .any(|column| column.eq_ignore_ascii_case(expected_column))
+                    })
+                && actual.collation.eq_ignore_ascii_case("BINARY")
+                && actual
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(expected_column))
+        })
 }
 
 fn primary_key_index_columns(contract: &Table) -> Option<Vec<&str>> {

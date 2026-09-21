@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove default and explicit production Cargo profiles resolve identically."""
+"""Prove the production Cargo graph does not enable test-transport."""
 
 from __future__ import annotations
 
@@ -66,35 +66,23 @@ def main() -> int:
         raise SystemExit("production feature set lost a required member")
     if "test-transport" in features["production"]:
         raise SystemExit("production feature directly enables test-transport")
-
-    # `cargo metadata` unifies dev-dependency features across the workspace and
-    # therefore makes test-only transports look production-reachable. Inspect
-    # the root package's normal/build tree so this check matches the artifact
-    # that `cargo build` actually produces.
-    default_graph = resolved_features(repo)
+    # `default` is exactly `["production"]`, so a second default-feature walk
+    # repeats this graph. `cargo metadata` unifies dev-dependency features
+    # across the workspace and makes test-only transports look reachable;
+    # this normal/build tree is the artifact `cargo build` produces.
     production_graph = resolved_features(
         repo, "--no-default-features", "--features", "production"
     )
-    if default_graph.keys() != production_graph.keys():
-        raise SystemExit("default and production resolve different package graphs")
-
     root_id = next(
-        (package_id for package_id in default_graph if package_id.startswith("tracedecay ")),
+        (
+            package_id
+            for package_id in production_graph
+            if package_id.startswith("tracedecay ")
+        ),
         None,
     )
     if root_id is None:
         raise SystemExit("cargo tree omitted the tracedecay root package")
-    default_graph[root_id].discard("default")
-    mismatches = [
-        package_id
-        for package_id in sorted(default_graph)
-        if default_graph[package_id] != production_graph[package_id]
-    ]
-    if mismatches:
-        raise SystemExit(
-            "default and production resolve different features for: "
-            + ", ".join(mismatches)
-        )
     contaminated = [
         package_id
         for package_id, package_features in production_graph.items()
@@ -105,7 +93,7 @@ def main() -> int:
             "production graph enables test-transport for: " + ", ".join(contaminated)
         )
 
-    print("default and production Cargo feature graphs are identical")
+    print("production Cargo feature graph excludes test-transport")
     return 0
 
 

@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fmt::Debug;
 
 use tracedecay_code_index::capabilities::expected_seal_digest;
 use tracedecay_code_index::generations::{
@@ -15,13 +14,7 @@ use tracedecay_domain::{
     UtcMicros, canonical_sha256,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn content_digest(byte: char) -> ContentDigest {
     id(&format!("sha256:{}", byte.to_string().repeat(64)))

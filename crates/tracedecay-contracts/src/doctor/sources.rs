@@ -77,26 +77,14 @@ fn source_finding(
 fn bounded_statement(statement: &str) -> String {
     const STATEMENT_LIMIT_BYTES: usize = 512;
     const TRUNCATION_MARK: &str = "…";
-    let sanitized = statement
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
+    let sanitized = tracedecay_domain::fold_control_characters(statement);
     let sanitized = sanitized.trim();
     if sanitized.len() <= STATEMENT_LIMIT_BYTES {
         return sanitized.to_owned();
     }
     let budget = STATEMENT_LIMIT_BYTES - TRUNCATION_MARK.len();
-    let mut cut = budget;
-    while cut > 0 && !sanitized.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}{TRUNCATION_MARK}", sanitized[..cut].trim_end())
+    let cut = tracedecay_domain::utf8_prefix_at_or_before(sanitized, budget);
+    format!("{}{TRUNCATION_MARK}", cut.trim_end())
 }
 
 /// Build an honest non-healthy finding for an unobservable source read.

@@ -15,8 +15,8 @@ use tracedecay_contracts::{
     OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, FactOwnerV1, ManifestDigest, ProjectId, RepositoryId, RunId,
-    UtcMicros, WorktreeId, canonical_sha256,
+    ActorId, ComponentVersion, FactOwnerV1, ProjectId, RepositoryId, RunId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::EffectClass;
 
@@ -41,9 +41,7 @@ impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend
     }
 }
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scope() -> ResolvedScope {
     ResolvedScope::new(

@@ -3,7 +3,6 @@
 //! lane input with anchor-named evidence.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, EvidenceRole, ExactTechnicalTermKindV1, FixedPointScore,
@@ -23,13 +22,7 @@ use crate::retrieval::lexical::{
 };
 use crate::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError};
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn anchors(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()

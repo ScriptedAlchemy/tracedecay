@@ -13,10 +13,6 @@ use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 /// Creates a temporary Rust project and returns a direct protocol server.
 ///
 /// Graph journeys use [`crate::support::production_composition_fixture`]
@@ -403,11 +399,4 @@ pub(crate) fn analytics_metadata(event: &tracedecay_global_db::AnalyticsEventRec
             .expect("analytics event metadata"),
     )
     .expect("analytics event metadata is JSON")
-}
-
-// ---------------------------------------------------------------------------
-// Repository setup used by routed hook journeys.
-// ---------------------------------------------------------------------------
-pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
-    crate::common::fixture::git_run(project, args);
 }

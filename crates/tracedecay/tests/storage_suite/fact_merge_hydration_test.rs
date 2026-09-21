@@ -55,12 +55,7 @@ async fn setup_db() -> TestDb {
     TestDb { db, _dir: dir }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String, Error = DomainError>,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn sqlite_text_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))

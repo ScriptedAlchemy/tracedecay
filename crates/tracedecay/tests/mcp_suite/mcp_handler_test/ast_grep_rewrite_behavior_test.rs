@@ -68,7 +68,7 @@ async fn open_project(files: &[(&str, &str)]) -> (ProductionSourceEditFixture, T
         fs::create_dir_all(path.parent().expect("fixture file has a parent")).unwrap();
         fs::write(&path, contents).unwrap();
     }
-    let (fixture, _) = init_production_source_edit_project(&project).await;
+    let fixture = init_production_source_edit_project(&project).await;
     (fixture, dir)
 }
 

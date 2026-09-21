@@ -75,7 +75,7 @@ placement, workflow definitions, automation execution, expertise/calibration,
 fan-out/synthesis/recovery, and host/LSP handoff. Session-derived tasks, an
 independent Kanban database, or dashboard-owned task authority remain rejected.
 
-Roadmap Markdown, `NEXT.md`, PR sequences, contributor checklists, and
+Roadmap Markdown, PR sequences, contributor checklists, and
 completion ledgers are documentation and Git evidence only. The workflow runtime never parses,
 imports, schedules, or executes them. Product work enters through explicit
 application commands or an authorized product-data import.

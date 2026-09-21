@@ -18,6 +18,7 @@ use std::time::Instant;
 use tree_sitter::{Node as TsNode, Parser, Range, Tree};
 
 use crate::common::local_node_id;
+use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, Visibility,
     generate_node_id,
@@ -448,7 +449,7 @@ impl MarkdownExtractor {
         match node.kind() {
             "inline_link" => Self::visit_link(state, node),
             "image" => {
-                if child_of_kind(node, "link_destination").is_some() {
+                if find_direct_child_by_kind(node, "link_destination").is_some() {
                     Self::visit_link(state, node);
                 } else {
                     Self::queue_reference_link(state, node);
@@ -471,10 +472,10 @@ impl MarkdownExtractor {
     }
 
     fn visit_reference_definition(state: &mut ExtractionState, node: TsNode<'_>) {
-        let Some(label_node) = child_of_kind(node, "link_label") else {
+        let Some(label_node) = find_direct_child_by_kind(node, "link_label") else {
             return;
         };
-        let Some(dest_node) = child_of_kind(node, "link_destination") else {
+        let Some(dest_node) = find_direct_child_by_kind(node, "link_destination") else {
             return;
         };
         let label = normalize_link_label(&strip_label_brackets(state.node_text(label_node)));
@@ -495,12 +496,15 @@ impl MarkdownExtractor {
             return;
         };
         let label = match node.kind() {
-            "full_reference_link" | "image" => child_of_kind(node, "link_label")
+            "full_reference_link" | "image" => find_direct_child_by_kind(node, "link_label")
                 .map(|n| strip_label_brackets(state.node_text(n)))
                 .or_else(|| {
-                    child_of_kind(node, "link_text").map(|n| state.node_text(n).to_string())
+                    find_direct_child_by_kind(node, "link_text")
+                        .map(|n| state.node_text(n).to_string())
                 }),
-            _ => child_of_kind(node, "link_text").map(|n| state.node_text(n).to_string()),
+            _ => {
+                find_direct_child_by_kind(node, "link_text").map(|n| state.node_text(n).to_string())
+            }
         };
         let Some(label) = label.map(|raw| normalize_link_label(&raw)) else {
             return;
@@ -526,7 +530,7 @@ impl MarkdownExtractor {
     }
 
     fn visit_link(state: &mut ExtractionState, node: TsNode<'_>) {
-        let Some(url_node) = child_of_kind(node, "link_destination") else {
+        let Some(url_node) = find_direct_child_by_kind(node, "link_destination") else {
             return;
         };
         let Some(parent_id) = state
@@ -560,22 +564,6 @@ impl MarkdownExtractor {
             line: Some(line),
         });
     }
-}
-
-fn child_of_kind<'tree>(node: TsNode<'tree>, kind: &str) -> Option<TsNode<'tree>> {
-    let mut cursor = node.walk();
-    if cursor.goto_first_child() {
-        loop {
-            let child = cursor.node();
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    None
 }
 
 /// CommonMark label matching: trim, collapse whitespace, case-fold.

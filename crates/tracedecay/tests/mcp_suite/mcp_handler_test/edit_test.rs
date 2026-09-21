@@ -35,7 +35,7 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let initial = b"fn old_name() {}\r\n// exact \xE2\x98\x83\n";
     let applied = b"fn new_name() {}\r\n// exact \xE2\x98\x83\n";
     fs::write(project.join("src/main.rs"), initial).unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let preview = handle_tool_call(
         &cg,
@@ -153,7 +153,7 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -179,7 +179,7 @@ async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
     fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
     fs::write(dir.path().join("outside.rs"), "fn leaked() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -207,7 +207,7 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
     fs::write(indexed_src.join("lib.rs"), "pub fn through_symlink() {}\n").unwrap();
     unix_fs::symlink(&indexed_src, project.join("src")).unwrap();
 
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
     wait_for_source_generation(&cg, "through_symlink").await;
 
     let read = handle_tool_call(
@@ -274,7 +274,7 @@ async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_ava
     let dir = test_temp_dir();
     let project = dir.path().join("project");
     crate::fixture::write_indexed_fixture_sources(&project);
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
     wait_for_source_generation(&cg, "helper").await;
     let result = handle_tool_call(
         &cg,
@@ -329,7 +329,7 @@ async fn outline_markdown_section_carries_preview_handle_and_checklist_state() {
         ),
     )
     .unwrap();
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -414,7 +414,7 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
     .unwrap();
     unix_fs::symlink(&outside_dir, project.join("escape")).unwrap();
 
-    let (cg, _env) = init_test_project(&project).await;
+    let cg = init_test_project(&project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -460,7 +460,7 @@ async fn test_str_replace_not_found() {
 
     fs::write(project.join("src/main.rs"), "fn hello() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -491,7 +491,7 @@ async fn test_str_replace_multiple_matches_fails() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -527,7 +527,7 @@ async fn test_multi_str_replace_atomic_failure() {
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn baz() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -571,7 +571,7 @@ async fn test_multi_str_replace_unicode_preview_does_not_panic() {
     let original = "fn main() {}\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let missing_old = format!("{}é", "a".repeat(19));
     let result = handle_tool_call(
@@ -620,7 +620,7 @@ async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -664,7 +664,7 @@ async fn test_multi_str_replace_overlapping_ranges_error() {
     let original = "abcdef\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -716,7 +716,7 @@ async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -766,7 +766,7 @@ async fn test_insert_at_symbol_before_lands_above_attribute() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -816,7 +816,7 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
         "stylesheet fixture must exist before dispatch"
     );
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     wait_for_source_generation(&cg, "source_edit_anchor").await;
 
     let result = handle_tool_call(
@@ -860,7 +860,7 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_ast_grep_rewrite",
@@ -896,7 +896,7 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_ast_grep_rewrite",
@@ -939,7 +939,7 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn foo() {}\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_ast_grep_rewrite",
@@ -991,7 +991,7 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
         "stylesheet fixture must exist before dispatch"
     );
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     wait_for_source_generation(&cg, "source_edit_anchor").await;
 
     let result = handle_tool_call(
@@ -1043,7 +1043,7 @@ async fn test_insert_at_string_anchor_before() {
     let applied = b"line one\nfirst inserted\nsecond inserted\nline two\nline three\n";
     fs::write(project.join("src/main.rs"), initial).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let preview = handle_tool_call(
         &cg,
@@ -1098,7 +1098,7 @@ async fn test_insert_at_line_number() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -1141,7 +1141,7 @@ async fn test_insert_at_anchor_not_found() {
 
     fs::write(project.join("src/main.rs"), "line one\nline two\n").unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -1174,7 +1174,7 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
     let original = "line one\nline two\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let long_anchor = format!("{}é", "a".repeat(99));
     let result = handle_tool_call(
@@ -1214,7 +1214,7 @@ async fn test_insert_at_ambiguous_anchor() {
     )
     .unwrap();
 
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,

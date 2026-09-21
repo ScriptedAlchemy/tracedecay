@@ -23,7 +23,7 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::GraphCancellation;
 
-use super::queries::{GraphQueryManager, NodeMetrics, VerifiedHealthFileAggregateV1};
+use super::queries::GraphQueryManager;
 use super::source_authority::{
     AdmittedSourceAuthority, graph_source_scope_mismatch, graph_source_unbound,
 };
@@ -113,15 +113,6 @@ impl VerifiedGraphQueryPort for AdmittedVerifiedGraphQueryPort {
             self.source.as_ref(),
         ))
     }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-#[must_use]
-pub fn admitted_verified_graph_query_port(
-    admission: Arc<dyn CodeGraphReadAdmissionPort>,
-    projection: Arc<dyn CodeGraphProjectionReadPort>,
-) -> Arc<dyn VerifiedGraphQueryPort> {
-    admitted_verified_graph_query_port_with_source(admission, projection, None)
 }
 
 #[must_use]
@@ -223,24 +214,14 @@ impl VerifiedGraphQuery {
     #[hotpath::skip]
     async fn await_bound<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
         self.refuse_if_bound_closed()?;
-        match run_deadline_signal_interruptible(
+        let result = await_graph_port_wait(
             self.request_context.deadline(),
             &self.live_cancellation,
             future,
         )
-        .await
-        {
-            Ok(result) => {
-                self.refuse_if_bound_closed()?;
-                result
-            }
-            Err(RequestInterruption::Cancelled) => Err(map_code_graph_read_runtime_error(
-                super::CodeGraphReadError::Cancelled,
-            )),
-            Err(RequestInterruption::DeadlineExceeded) => Err(map_code_graph_read_runtime_error(
-                super::CodeGraphReadError::TimedOut,
-            )),
-        }
+        .await?;
+        self.refuse_if_bound_closed()?;
+        result
     }
 
     pub fn project_root(&self) -> Result<&Path> {
@@ -298,27 +279,6 @@ impl VerifiedGraphQuery {
             .await
     }
 
-    #[hotpath::measure(label = "usecases.graph.verified.file_dependencies", future = true)]
-    pub async fn get_file_dependencies(&self, file_path: &str) -> Result<Vec<String>> {
-        self.await_bound(self.manager().get_file_dependencies(file_path))
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.node_metrics", future = true)]
-    pub async fn get_node_metrics(&self, node_id: &str) -> Result<NodeMetrics> {
-        self.await_bound(self.manager().get_node_metrics(node_id))
-            .await
-    }
-
-    #[hotpath::measure(label = "usecases.graph.verified.health_aggregates", future = true)]
-    pub async fn health_file_aggregates(
-        &self,
-        path_prefix: Option<&str>,
-    ) -> Result<Vec<VerifiedHealthFileAggregateV1>> {
-        self.await_bound(self.manager().health_file_aggregates(path_prefix))
-            .await
-    }
-
     #[hotpath::measure(label = "usecases.graph.verified.health_snapshot", future = true)]
     pub async fn verified_health_snapshot(
         &self,
@@ -370,11 +330,6 @@ impl VerifiedGraphQuery {
             file_path,
             kinds,
         )
-    }
-
-    pub fn render_signatures(&self, file_path: &str) -> Result<Value> {
-        self.refuse_if_bound_closed()?;
-        read_modes::render_signatures(&self.reader, Arc::clone(&self.cancellation), file_path)
     }
 
     pub fn generation(&self) -> &CodeGenerationId {
@@ -607,7 +562,7 @@ impl VerifiedGraphQuery {
         max_relations: usize,
     ) -> Result<HashSet<String>> {
         self.refuse_if_bound_closed()?;
-        let (symbols, scoped) = match logical_paths {
+        let symbols = match logical_paths {
             Some(requested) => {
                 let mut symbols = Vec::new();
                 for path in requested {
@@ -628,7 +583,7 @@ impl VerifiedGraphQuery {
                     }
                     symbols.append(&mut in_file);
                 }
-                (symbols, true)
+                symbols
             }
             None => {
                 let page = self.symbols_page(None, max_symbols)?;
@@ -637,7 +592,7 @@ impl VerifiedGraphQuery {
                         "verified test-attribution census exceeded its symbol budget",
                     ));
                 }
-                (page.symbols, false)
+                page.symbols
             }
         };
         let mut paths = HashMap::new();
@@ -657,7 +612,7 @@ impl VerifiedGraphQuery {
                 test_markers.insert(symbol.occurrence.clone());
             }
         }
-        if scoped {
+        if logical_paths.is_some() {
             if test_markers.is_empty() {
                 return Ok(HashSet::new());
             }
@@ -671,7 +626,6 @@ impl VerifiedGraphQuery {
                 .into_iter()
                 .flatten()
                 .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
-                .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
                 .collect());
         }
         let occurrences = symbols
@@ -687,7 +641,6 @@ impl VerifiedGraphQuery {
             .into_iter()
             .filter(|edge| test_markers.contains(&edge.from_occurrence))
             .filter_map(|edge| paths.get(&edge.to_occurrence).cloned())
-            .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
             .collect())
     }
 }

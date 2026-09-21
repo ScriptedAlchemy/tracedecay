@@ -7,9 +7,8 @@ tests, and normal CI remain active delivery work. The repository is not green.
 This file is the sole authority for V2 precedence, rejected mechanisms,
 delivery order, and acceptance. Numbered plans own semantic product behavior,
 failure semantics, fresh-store cutover, and direct acceptance; they are not independent
-queues and do not require one delivery branch per document. `NEXT.md` tracks
-current outcomes and blockers only. Historical gap ledgers and contract-spine
-artifacts are records, not parallel authorities.
+queues and do not require one delivery branch per document. Historical gap
+ledgers and contract-spine artifacts are records, not parallel authorities.
 
 The `TraceDecay V2` roadmap name is independent of contract/schema versioning.
 Only an actually independently released public wire/API protocol may retain an

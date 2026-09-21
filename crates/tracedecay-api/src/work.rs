@@ -375,10 +375,6 @@ impl WorkOperation {
     pub const fn is_dashboard_operation(self) -> bool {
         !matches!(self, Self::StartAttempt)
     }
-
-    fn parse(segment: &str) -> Option<Self> {
-        Self::from_route_segment(segment)
-    }
 }
 
 impl FromStr for WorkOperation {
@@ -497,7 +493,7 @@ where
     let request = match hotpath::measure_block!("api.http.admission", {
         // An operation this build does not mount is concealed the same way an
         // unauthorised one is, so probing a path cannot reveal what exists.
-        match WorkOperation::parse(&segment) {
+        match WorkOperation::from_route_segment(&segment) {
             None => Err(adapter_problem_response(
                 request_id,
                 ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),

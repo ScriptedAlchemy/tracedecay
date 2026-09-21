@@ -10,17 +10,6 @@ import sys
 import tomllib
 
 
-def production_release_features(
-    _features: dict[str, object], _target: str | None
-) -> tuple[str, ...]:
-    """Return the artifact feature set for a production-capable source tag."""
-    # Hotpath 0.24 uses Cargo features as its process-wide activation
-    # authority. Feature-enabled gauges, futures, and instrumented locks start
-    # collectors independently of TraceDecay's process guard, so a release
-    # executable cannot truthfully make those facilities dormant at runtime.
-    return ("production",)
-
-
 def expand_local_features(
     features: dict[str, list[str]], selected: list[str]
 ) -> set[str]:
@@ -78,10 +67,11 @@ def main() -> int:
             check=True,
         )
         profile = "production"
-        cargo_features = ",".join(
-            production_release_features(features, arguments.target)
-        )
-        cargo_args = f"--no-default-features --features {cargo_features}"
+        # Hotpath uses Cargo features as its process-wide activation authority,
+        # so a release binary does not carry them and then try to switch them
+        # off at runtime.
+        cargo_features = "production"
+        cargo_args = "--no-default-features --features production"
     else:
         resolved_defaults = expand_local_features(features, defaults)
         if "test-transport" in resolved_defaults:

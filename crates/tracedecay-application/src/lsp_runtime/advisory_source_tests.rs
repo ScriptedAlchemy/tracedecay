@@ -65,9 +65,7 @@ use crate::source_authorization::ProjectSourceAccessSnapshot;
 
 const SOURCE: &str = "fn reviewed() {}\n";
 
-fn digest(fill: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", fill.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scope() -> ResolvedScope {
     ResolvedScope::new(

@@ -5,10 +5,31 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
-use super::memory_fact_assertions::assert_fact_list;
+fn assert_fact_list(payload: &Value, included: &str, excluded: &str, context: &str) {
+    let facts = payload["facts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{context} must return canonical facts: {payload}"));
+    assert_eq!(facts.len(), 1, "{context}: {payload}");
+    let contents: Vec<&str> = facts
+        .iter()
+        .map(|projection| {
+            assert_eq!(projection["kind"], "available", "{context}: {payload}");
+            projection["fact"]["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{context} fact content: {payload}"))
+        })
+        .collect();
+    assert!(
+        contents.iter().any(|content| content.contains(included)),
+        "{context}: {payload}"
+    );
+    assert!(
+        contents.iter().all(|content| !content.contains(excluded)),
+        "{context}: {payload}"
+    );
+}
 
 /// The fact-store surfaces are daemon-owned application operations. Keep these
 /// tests on the production composition so they cannot accidentally exercise
@@ -148,32 +169,7 @@ impl FactStoreCrossProjectFixture {
 fn initialize_production_fact_project(root: &Path) {
     fs::create_dir_all(root).expect("cross-project fact fixture root");
     crate::fixture::write_indexed_fixture_sources(root);
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .expect("initialize cross-project fact fixture");
-    assert!(init.success(), "git init should succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(root)
-        .status()
-        .expect("stage cross-project fact fixture");
-    assert!(add.success(), "git add should succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production fact-store fixture",
-        ])
-        .current_dir(root)
-        .status()
-        .expect("commit cross-project fact fixture");
-    assert!(commit.success(), "git commit should succeed");
+    commit_worktree(root, "production fact-store fixture");
 }
 
 pub(super) async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {

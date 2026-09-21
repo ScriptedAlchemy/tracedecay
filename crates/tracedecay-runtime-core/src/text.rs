@@ -7,15 +7,7 @@
 /// This is the safe replacement for `&s[..max_bytes]` when `s` may contain
 /// non-ASCII text and the caller has a byte budget rather than a char budget.
 pub fn utf8_prefix_at_or_before(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) && end > 0 {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..s.floor_char_boundary(max_bytes)]
 }
 
 /// Formats a token count as a compact string (e.g. "1.2M", "45.3k").

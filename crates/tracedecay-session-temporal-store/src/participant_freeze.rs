@@ -539,9 +539,7 @@ mod tests {
         .expect("valid authorized root")
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn execution_request() -> AuthorizedTemporalExecutionRequest {
         let snapshot = TemporalSnapshotRequest::new(

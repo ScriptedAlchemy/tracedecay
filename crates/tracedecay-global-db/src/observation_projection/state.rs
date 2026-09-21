@@ -12,6 +12,9 @@ use tracedecay_lcm::LcmStorageKind;
 use tracedecay_lcm::retrieval_content::{derived_text_for_index, projected_content_hash};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
+use tracedecay_sessions::runtime::store_access::{
+    message_record_from_row, session_record_from_row,
+};
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
@@ -277,31 +280,9 @@ pub(super) async fn read_session(
     else {
         return Ok(None);
     };
-    macro_rules! cell {
-        ($index:literal) => {
-            row.get($index)
-                .map_err(|error| storage("decode projected session", error))?
-        };
-        ($index:literal, $ty:ty) => {
-            row.get::<$ty>($index)
-                .map_err(|error| storage("decode projected session", error))?
-        };
-    }
-    Ok(Some(SessionRecord {
-        provider: cell!(0),
-        session_id: cell!(1),
-        project_key: cell!(2),
-        project_path: cell!(3),
-        title: cell!(4),
-        started_at: cell!(5),
-        ended_at: cell!(6),
-        transcript_path: cell!(7),
-        metadata_json: cell!(8),
-        parent_session_id: cell!(9),
-        is_subagent: cell!(10, i64) != 0,
-        agent_id: cell!(11),
-        parent_tool_use_id: cell!(12),
-    }))
+    session_record_from_row(&row)
+        .map(Some)
+        .map_err(|error| storage("decode projected session", error.source))
 }
 
 pub(super) async fn read_message(
@@ -325,27 +306,9 @@ pub(super) async fn read_message(
     else {
         return Ok(None);
     };
-    macro_rules! cell {
-        ($index:literal) => {
-            row.get($index)
-                .map_err(|error| storage("decode projected message", error))?
-        };
-    }
-    Ok(Some(SessionMessageRecord {
-        provider: cell!(0),
-        message_id: cell!(1),
-        session_id: cell!(2),
-        role: cell!(3),
-        timestamp: cell!(4),
-        ordinal: cell!(5),
-        text: cell!(6),
-        kind: cell!(7),
-        model: cell!(8),
-        tool_names: cell!(9),
-        source_path: cell!(10),
-        source_offset: cell!(11),
-        metadata_json: cell!(12),
-    }))
+    message_record_from_row(&row, 0)
+        .map(Some)
+        .map_err(|error| storage("decode projected message", error.source))
 }
 
 fn output_owner_lookup_sql(select_expr: &str, ordering: &str) -> String {
@@ -893,27 +856,8 @@ pub(in super::super) async fn read_projection_rows_batch(
             .await
             .map_err(|error| storage("read projected messages", error))?
         {
-            macro_rules! cell {
-                ($index:literal) => {
-                    row.get($index)
-                        .map_err(|error| storage("decode projected messages", error))?
-                };
-            }
-            let message = SessionMessageRecord {
-                provider: cell!(0),
-                message_id: cell!(1),
-                session_id: cell!(2),
-                role: cell!(3),
-                timestamp: cell!(4),
-                ordinal: cell!(5),
-                text: cell!(6),
-                kind: cell!(7),
-                model: cell!(8),
-                tool_names: cell!(9),
-                source_path: cell!(10),
-                source_offset: cell!(11),
-                metadata_json: cell!(12),
-            };
+            let message = message_record_from_row(&row, 0)
+                .map_err(|error| storage("decode projected messages", error.source))?;
             messages.insert(
                 (message.provider.clone(), message.message_id.clone()),
                 message,
@@ -1006,31 +950,8 @@ pub(in super::super) async fn read_projection_rows_batch(
             .await
             .map_err(|error| storage("read projected sessions", error))?
         {
-            macro_rules! cell {
-                ($index:literal) => {
-                    row.get($index)
-                        .map_err(|error| storage("decode projected sessions", error))?
-                };
-                ($index:literal, $ty:ty) => {
-                    row.get::<$ty>($index)
-                        .map_err(|error| storage("decode projected sessions", error))?
-                };
-            }
-            let session = SessionRecord {
-                provider: cell!(0),
-                session_id: cell!(1),
-                project_key: cell!(2),
-                project_path: cell!(3),
-                title: cell!(4),
-                started_at: cell!(5),
-                ended_at: cell!(6),
-                transcript_path: cell!(7),
-                metadata_json: cell!(8),
-                parent_session_id: cell!(9),
-                is_subagent: cell!(10, i64) != 0,
-                agent_id: cell!(11),
-                parent_tool_use_id: cell!(12),
-            };
+            let session = session_record_from_row(&row)
+                .map_err(|error| storage("decode projected sessions", error.source))?;
             sessions.insert(
                 (session.provider.clone(), session.session_id.clone()),
                 session,

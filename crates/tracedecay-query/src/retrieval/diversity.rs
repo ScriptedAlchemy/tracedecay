@@ -280,13 +280,7 @@ mod cap_key_tests {
         FreshnessCompatibilityV1, RetrievalAnchorId, SourceFreshness, UtcMicros,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn occurrence(name: &str, file: &str) -> OccurrenceProvenance {
         OccurrenceProvenance {

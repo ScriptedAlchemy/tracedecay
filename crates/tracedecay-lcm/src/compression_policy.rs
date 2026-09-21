@@ -203,12 +203,7 @@ pub fn forced_overflow_pressure(
     current_tokens: Option<i64>,
     max_assembly_tokens: Option<i64>,
 ) -> bool {
-    match (current_tokens, max_assembly_tokens) {
-        (Some(current_tokens), Some(max_assembly_tokens)) if max_assembly_tokens > 0 => {
-            current_tokens >= max_assembly_tokens
-        }
-        _ => false,
-    }
+    threshold_pressure(current_tokens, max_assembly_tokens)
 }
 
 pub fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {

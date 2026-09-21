@@ -215,6 +215,19 @@ pub(crate) enum AutomationRunLedgerPublication {
     DeferredUntilApplicationSettlement,
 }
 
+pub(crate) async fn publish_ledger_record(
+    publication: AutomationRunLedgerPublication,
+    dashboard_root: &Path,
+    record: &AutomationRunLedgerRecord,
+) -> Result<()> {
+    match publication {
+        AutomationRunLedgerPublication::Immediate => {
+            append_run_record(dashboard_root, record).await
+        }
+        AutomationRunLedgerPublication::DeferredUntilApplicationSettlement => Ok(()),
+    }
+}
+
 impl From<TraceDecayError> for AutomationRunError {
     fn from(error: TraceDecayError) -> Self {
         Self::Runtime(error)
@@ -453,12 +466,7 @@ impl<'a> AgentTaskRunContext<'a> {
     }
 
     async fn publish_terminal_record(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
-        match self.ledger_publication {
-            AutomationRunLedgerPublication::Immediate => {
-                append_run_record(&self.dashboard_root, record).await
-            }
-            AutomationRunLedgerPublication::DeferredUntilApplicationSettlement => Ok(()),
-        }
+        publish_ledger_record(self.ledger_publication, &self.dashboard_root, record).await
     }
 }
 
@@ -850,12 +858,7 @@ impl<'a> AgentRunFinalizer<'a> {
     }
 
     async fn publish_terminal_record(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
-        match self.ledger_publication {
-            AutomationRunLedgerPublication::Immediate => {
-                append_run_record(self.dashboard_root, record).await
-            }
-            AutomationRunLedgerPublication::DeferredUntilApplicationSettlement => Ok(()),
-        }
+        publish_ledger_record(self.ledger_publication, self.dashboard_root, record).await
     }
 
     #[must_use]

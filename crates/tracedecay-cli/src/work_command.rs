@@ -33,27 +33,17 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::er
     let mut stdout = std::io::stdout().lock();
     let write_result = write_work_output(&mut stdout, rendered.as_bytes());
     drop(stdout);
-    let delivery_settlement = classify_work_output(&write_result);
     match write_result {
         Ok(()) => {
             if let Some(delivery) = response.take_delivery() {
-                match delivery_settlement {
-                    WorkOutputSettlement::Delivered => delivery.acknowledge_delivered().await?,
-                    WorkOutputSettlement::Dropped(reason) => {
-                        let _ = delivery.acknowledge_dropped(reason).await;
-                    }
-                }
+                delivery.acknowledge_delivered().await?;
             }
         }
         Err(error) => {
             if let Some(delivery) = response.take_delivery() {
-                let reason = match delivery_settlement {
-                    WorkOutputSettlement::Dropped(reason) => reason,
-                    WorkOutputSettlement::Delivered => {
-                        tracedecay_domain::DeliveryDropReasonV1::Disconnected
-                    }
-                };
-                let _ = delivery.acknowledge_dropped(reason).await;
+                let _ = delivery
+                    .acknowledge_dropped(tracedecay_domain::DeliveryDropReasonV1::Disconnected)
+                    .await;
             }
             return Err(error.into());
         }
@@ -61,29 +51,15 @@ pub(crate) async fn run(invocation: WorkInvocationArgs) -> tracedecay_domain::er
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorkOutputSettlement {
-    Delivered,
-    Dropped(tracedecay_domain::DeliveryDropReasonV1),
-}
-
 fn write_work_output<W: Write>(writer: &mut W, rendered: &[u8]) -> std::io::Result<()> {
     writer.write_all(rendered).and_then(|()| writer.flush())
-}
-
-fn classify_work_output(result: &std::io::Result<()>) -> WorkOutputSettlement {
-    if result.is_ok() {
-        WorkOutputSettlement::Delivered
-    } else {
-        WorkOutputSettlement::Dropped(tracedecay_domain::DeliveryDropReasonV1::Disconnected)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
 
-    use super::{WorkOutputSettlement, classify_work_output, write_work_output};
+    use super::write_work_output;
 
     #[test]
     fn work_json_line_preserves_the_canonical_typed_problem() {
@@ -116,14 +92,6 @@ mod tests {
                 .expect_err("broken pipe should fail output")
                 .kind(),
             io::ErrorKind::BrokenPipe
-        );
-        assert_eq!(
-            classify_work_output(&write_result),
-            WorkOutputSettlement::Dropped(tracedecay_domain::DeliveryDropReasonV1::Disconnected)
-        );
-        assert_ne!(
-            classify_work_output(&write_result),
-            WorkOutputSettlement::Delivered
         );
     }
 }

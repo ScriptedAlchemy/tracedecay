@@ -1147,9 +1147,16 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let descendant_pid_path = temp.path().join("descendant.pid");
+        // `>` creates the pid file before the shell writes into it, and a poll
+        // that only checks the path can read it empty. Write to a sibling and
+        // rename so the file appears with its pid already in it.
         let mut command = Command::new("sh");
         command
-            .args(["-c", "sleep 30 & echo $! > \"$1\"; wait", "sh"])
+            .args([
+                "-c",
+                "sleep 30 & echo $! > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; wait",
+                "sh",
+            ])
             .arg(&descendant_pid_path);
         let child = spawn_codex_app_server(&mut command, "sh").expect("spawn child");
         let mut child = ChildGuard {

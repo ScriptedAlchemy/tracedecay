@@ -59,8 +59,7 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay_domain::e
                 .map(|binding| binding.project_root.clone())
         })
         .ok_or_else(|| bridge_config_error("LSP initialize did not identify a workspace root"))?;
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
+    let handshake = crate::commands::client_handshake(Some(&project_root))?;
     let invocation = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     let mut session = DaemonLspSessionClient::open(

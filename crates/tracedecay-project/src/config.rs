@@ -6,8 +6,8 @@ use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationLayerIdV1, ConfigurationRevisionId,
-    ConfigurationSnapshotV1, ConfigurationValueV1, SOURCE_BINDINGS_SETTING_KEY, SettingKey,
-    UserProfileId,
+    ConfigurationSnapshotV1, ConfigurationValueV1, SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding,
+    SettingKey, UserProfileId,
 };
 
 use tracedecay_configuration::{
@@ -15,7 +15,9 @@ use tracedecay_configuration::{
     load_config_from_path,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_global_db::configuration::contracts::ports::ConfigurationControlStore;
+use tracedecay_global_db::configuration::contracts::ports::{
+    ConfigurationControlStore, ConfigurationCurrentStateV1,
+};
 use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 use tracedecay_global_db::configuration::{
     GlobalDbConfigurationControlStore, ProfileCodeIndexWorkerConfigurationStore,
@@ -455,18 +457,8 @@ async fn initialize_canonical_project_configuration(
         .map_err(|error| {
             config_error(format!("invalid initial configuration revision: {error}"))
         })?;
-    let daemon_binding =
-        tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
-            &target.project_id,
-            &target.project_root,
-        )
-        .map_err(|error| {
-            config_error(format!(
-                "daemon project source binding could not be derived: {error}"
-            ))
-        })?;
-    let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
-        .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
+    let daemon_binding = daemon_project_source_binding(target)?;
+    let source_bindings_key = source_bindings_setting_key()?;
     let resolution = resolver::resolve_configuration(
         &registry,
         &[resolver::ConfigurationLayerV1 {
@@ -489,10 +481,6 @@ async fn initialize_canonical_project_configuration(
         .map_err(map_configuration_error)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Open converges the durable current revision and verifies the daemon-owned source binding before any caller sees the pin."
-)]
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
     store: &GlobalDbConfigurationControlStore<'_>,
@@ -507,29 +495,16 @@ async fn open_runtime_configuration_from_store(
         }
         initialize_canonical_project_configuration(store, &target).await?;
     }
-    let daemon_binding =
-        tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
-            &target.project_id,
-            &target.project_root,
-        )
-        .map_err(|error| {
-            config_error(format!(
-                "daemon project source binding could not be derived: {error}"
-            ))
-        })?;
+    let daemon_binding = daemon_project_source_binding(&target)?;
     let current = store.current().await.map_err(map_configuration_error)?;
     let mut current = match store
         .converge_registered_registry_shape(&current.revision_id, now_micros())
         .await
     {
         Ok(state) => state,
-        Err(ConfigurationError::RevisionConflict) => {
-            store.current().await.map_err(map_configuration_error)?
-        }
-        Err(error) => return Err(map_configuration_error(error)),
+        Err(error) => current_after_conflict(store, error).await?,
     };
-    let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
-        .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
+    let source_bindings_key = source_bindings_setting_key()?;
     enum SourceBindingCheck {
         Verified,
         LocatorDigestDrift,
@@ -576,6 +551,8 @@ async fn open_runtime_configuration_from_store(
             // instead of demanding a reset.
             SourceBindingCheck::LocatorDigestDrift if !rebind_attempted => {
                 rebind_attempted = true;
+                // A concurrent open may have won the swap; adopt what it
+                // published and re-verify it exactly.
                 current = match store
                     .rebind_daemon_project_source_binding(
                         &current.revision_id,
@@ -585,12 +562,7 @@ async fn open_runtime_configuration_from_store(
                     .await
                 {
                     Ok(state) => state,
-                    // A concurrent open won the swap; adopt what it
-                    // published and re-verify it exactly.
-                    Err(ConfigurationError::RevisionConflict) => {
-                        store.current().await.map_err(map_configuration_error)?
-                    }
-                    Err(error) => return Err(map_configuration_error(error)),
+                    Err(error) => current_after_conflict(store, error).await?,
                 };
             }
             SourceBindingCheck::LocatorDigestDrift | SourceBindingCheck::Mismatch => {
@@ -676,6 +648,37 @@ fn validate_registered_configuration_database(
         _ => Err(config_error(
             "configuration authority unavailable: registered database is not the exact project session shard",
         )),
+    }
+}
+
+fn daemon_project_source_binding(
+    target: &RuntimeConfigurationTarget,
+) -> Result<ScopeSourceBinding> {
+    tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
+        &target.project_id,
+        &target.project_root,
+    )
+    .map_err(|error| {
+        config_error(format!(
+            "daemon project source binding could not be derived: {error}"
+        ))
+    })
+}
+
+fn source_bindings_setting_key() -> Result<SettingKey> {
+    SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
+        .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))
+}
+
+async fn current_after_conflict(
+    store: &GlobalDbConfigurationControlStore<'_>,
+    error: ConfigurationError,
+) -> Result<ConfigurationCurrentStateV1> {
+    match error {
+        ConfigurationError::RevisionConflict => {
+            store.current().await.map_err(map_configuration_error)
+        }
+        error => Err(map_configuration_error(error)),
     }
 }
 

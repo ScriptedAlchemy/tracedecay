@@ -431,9 +431,7 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
-        self.discard_document_context(&uri);
+        self.invalidate_document(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
             .control
@@ -461,9 +459,7 @@ where
             .overlays
             .close(&uri)
             .map_err(overlay_failure)?;
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
-        self.discard_document_context(&uri);
+        self.invalidate_document(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
             .control
@@ -486,9 +482,7 @@ where
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
-        self.discard_document_context(&uri);
+        self.invalidate_document(&uri);
         if matches!(
             self.lifecycle.gateway.document_saved(uri.clone()),
             FeedbackCycleResponse::Accepted
@@ -503,6 +497,12 @@ where
             }
         }
         Ok(())
+    }
+
+    fn invalidate_document(&mut self, uri: &str) {
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
+        self.discard_document_context(uri);
     }
 }
 

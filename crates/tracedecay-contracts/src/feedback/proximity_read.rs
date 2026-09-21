@@ -473,9 +473,7 @@ mod tests {
 
     use super::*;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn scope() -> FeedbackScopeV1 {
         FeedbackScopeV1 {

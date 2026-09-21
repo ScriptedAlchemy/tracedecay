@@ -29,17 +29,6 @@ impl VectorWatermark {
             (false, false) => None,
         }
     }
-
-    pub fn merge_max(&self, other: &Self) -> Self {
-        let mut components = self.components.clone();
-        for (shard, sequence) in &other.components {
-            components
-                .entry(shard.clone())
-                .and_modify(|current| *current = (*current).max(*sequence))
-                .or_insert(*sequence);
-        }
-        Self { components }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

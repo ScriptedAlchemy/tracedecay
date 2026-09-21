@@ -76,7 +76,7 @@ fn handle_hook_command_inner(
         if let Some(source) = crate::hook_capture_cmd::capture_source_for_command(&command) {
             return Ok(crate::hook_capture_cmd::run_native_capture(source));
         }
-        if crate::hook_capture_cmd::is_native_hook_command(&command) {
+        if matches!(command, Commands::HookPreToolUse) {
             return Ok(0);
         }
         unreachable!("non-hook command passed to hook dispatcher")

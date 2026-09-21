@@ -2120,12 +2120,13 @@ fn review_body_preview(body: &str) -> ProjectDeliveryReviewBodyPreviewV1 {
             truncated: false,
         };
     }
-    let mut cut = MAX_PROJECT_DELIVERY_REVIEW_BODY_PREVIEW_BYTES_V1;
-    while !body.is_char_boundary(cut) {
-        cut -= 1;
-    }
+    let text = tracedecay_domain::utf8_prefix_at_or_before(
+        body,
+        MAX_PROJECT_DELIVERY_REVIEW_BODY_PREVIEW_BYTES_V1,
+    )
+    .to_owned();
     ProjectDeliveryReviewBodyPreviewV1 {
-        text: body[..cut].to_owned(),
+        text,
         truncated: true,
     }
 }

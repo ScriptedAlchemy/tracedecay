@@ -224,17 +224,9 @@ impl GitIndexPolicyRecheckPort for TestPolicy {
     }
 }
 
-pub fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture identity")
-}
+pub use tracedecay_domain::test_fixtures::id;
 
-pub fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
+pub use tracedecay_domain::test_fixtures::digest;
 
 pub fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")

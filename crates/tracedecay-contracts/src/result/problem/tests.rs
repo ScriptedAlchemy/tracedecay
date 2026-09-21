@@ -7,6 +7,97 @@ use super::{
 };
 
 #[test]
+fn invalid_request_offers_correction_and_never_retries() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.invalid-request".to_owned(),
+        message: "The request is invalid.".to_owned(),
+    };
+    let problem =
+        ApplicationProblem::invalid_request(diagnostic.code.clone(), diagnostic.message.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::CorrectRequest],
+        }
+    );
+    assert_eq!(problem.safe_message(), "The request is invalid.");
+    assert_eq!(problem.reason_code(), "application.invalid-request");
+}
+
+#[test]
+fn invalid_request_without_action_offers_no_recovery() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.invalid-request.closed".to_owned(),
+        message: "The request is invalid.".to_owned(),
+    };
+    let problem = ApplicationProblem::invalid_request_without_action(
+        diagnostic.code.clone(),
+        diagnostic.message.clone(),
+    );
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::InvalidRequest {
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }
+    );
+    assert_eq!(problem.safe_message(), "The request is invalid.");
+    assert!(problem.legal_actions().is_empty());
+}
+
+#[test]
+fn saturated_retries_after_delay() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.saturated".to_owned(),
+        message: "The authority has no remaining capacity.".to_owned(),
+    };
+    let problem =
+        ApplicationProblem::saturated(diagnostic.code.clone(), diagnostic.message.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::Saturated {
+            diagnostic,
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+        }
+    );
+    assert_eq!(
+        problem.safe_message(),
+        "The authority has no remaining capacity."
+    );
+    assert_eq!(problem.reason_code(), "application.saturated");
+}
+
+#[test]
+fn conflict_retries_only_after_revalidate_and_refresh() {
+    let diagnostic = SafeDiagnostic {
+        code: "application.conflict".to_owned(),
+        message: "The request conflicts with current state.".to_owned(),
+    };
+    let problem = ApplicationProblem::conflict(diagnostic.code.clone(), diagnostic.message.clone());
+
+    assert_eq!(
+        problem,
+        ApplicationProblem::Conflict {
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        }
+    );
+    assert_eq!(
+        problem.safe_message(),
+        "The request conflicts with current state."
+    );
+    assert_eq!(problem.reason_code(), "application.conflict");
+}
+
+#[test]
 fn reset_required_is_a_distinct_non_retryable_terminal() {
     let problem = ApplicationProblem::reset_required(
         SafeDiagnostic::new("store.reset_required", "The store must be reset.")

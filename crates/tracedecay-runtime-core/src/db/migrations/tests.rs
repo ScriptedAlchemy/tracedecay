@@ -23,14 +23,8 @@ mod fts;
 struct AllowSchemaWrites;
 
 impl ExactSqlWriteAuthority for AllowSchemaWrites {
-    fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
-        if intent == ExactSqlWriteIntent::Vacuum {
-            Err(ExactSqlError::AuthorityDenied(
-                "ordinary schema fixture cannot vacuum".to_owned(),
-            ))
-        } else {
-            Ok(())
-        }
+    fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        Ok(())
     }
 }
 

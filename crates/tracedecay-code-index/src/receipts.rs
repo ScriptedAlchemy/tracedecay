@@ -30,6 +30,8 @@ use tracedecay_domain::{
     ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, canonical_sha256,
 };
 
+use super::generations::placeholder_digest;
+
 /// Domain separator for the canonical projection-batch-request digest.
 pub const PROJECTION_REQUEST_SEPARATOR: &str = "tracedecay.projection-batch-request.v1";
 
@@ -556,13 +558,6 @@ fn check_decision(
         return Err(inconsistent());
     }
     Ok(())
-}
-
-/// A well-formed placeholder digest, replaced by the computed publication
-/// digest before the batch is returned.
-fn placeholder_digest() -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
-        .expect("a zeroed sha256 digest is canonical")
 }
 
 #[cfg(test)]

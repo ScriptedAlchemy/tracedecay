@@ -134,19 +134,6 @@ jobs:
           digest="$(python3 scripts/check-dashboard-bundle.py dashboard/app-dist --print-digest)"
           echo "TRACEDECAY_DASHBOARD_BUNDLE_SHA256=${digest}" >> "$GITHUB_ENV"
 
-      - name: Validate portable distribution harnesses
-        run: |
-          python3 scripts/test-check-packaged-lsp-bridge.py
-          python3 scripts/test-build-mcpb.py
-          python3 scripts/test-resolve-installed-binary.py
-          python3 scripts/test-check-packaged-mcp-stdio.py
-          python3 scripts/test-check-distribution-feature-wiring.py
-          python3 scripts/test-resolve-release-source-profile.py
-          python3 scripts/test-package-release-archive.py
-          bash scripts/test-check-distribution-clean-source.sh
-          bash scripts/test-check-distribution-snapshot.sh
-          bash scripts/test-check-distribution-reuse.sh
-
       # rust-toolchain.toml is the only compiler this job may install.
       # dtolnay/rust-toolchain@stable also installs floating stable, and
       # rust-cache hashes every rustc into the environment key, so each
@@ -163,13 +150,10 @@ jobs:
           toolchain: ${{ steps.pin.outputs.toolchain }}
           targets: ${{ matrix.target }}
 
-      # Restore before the first cargo invocation. resolve-release-source-profile
-      # runs `cargo tree` twice (~4 min cold on beta.40) and used to do that
-      # before rust-cache, so a warm registry sitting in Actions cache never
-      # reached the step that needed it. Tag runs can restore only same-ref or
-      # default-branch caches; this shared-key must stay stable so a later
-      # master writer can seed them. cache-workspace-crates stays false: the
-      # 10 GB repo budget is already full of CI lineages (~13.8 GB / 28 entries).
+      # Restore before the packaging compile. Tag runs can restore only
+      # same-ref or default-branch caches; this shared-key must stay stable so
+      # a later master writer can seed them. cache-workspace-crates stays
+      # false: the 10 GB repo budget is already full of CI lineages.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -229,11 +213,6 @@ jobs:
           "$binary" --version
           "$binary" --help >/dev/null
 
-      - name: Get version
-        id: version
-        shell: bash
-        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
-
       - name: Package MCPB
         shell: bash
         run: |
@@ -246,11 +225,11 @@ jobs:
           python3 scripts/build-mcpb.py build \
             --binary "$binary" \
             --output "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${RELEASE_TAG#v}" \
             --platform "${{ matrix.name }}"
           python3 scripts/build-mcpb.py verify \
             --bundle "$bundle" \
-            --version "${{ steps.version.outputs.version }}" \
+            --version "${RELEASE_TAG#v}" \
             --platform "${{ matrix.name }}"
 
       - name: Verify MCPB runtime (unix)

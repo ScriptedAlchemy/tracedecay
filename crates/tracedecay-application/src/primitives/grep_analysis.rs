@@ -329,7 +329,9 @@ fn effective_scoped_path(
     match (requested, authorized) {
         (None, None) => Ok(None),
         (Some(path), None) | (None, Some(path)) => Ok(Some(path.to_owned())),
-        (Some(path), Some(scope)) if path == scope || path.starts_with(&format!("{scope}/")) => {
+        (Some(path), Some(scope))
+            if tracedecay_domain::repository_path_matches_scope(path, Some(scope)) =>
+        {
             Ok(Some(path.to_owned()))
         }
         (Some(_), Some(_)) => Err(GrepAnalysisProblemV1::Denied),

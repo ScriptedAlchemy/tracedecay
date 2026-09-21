@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use tracedecay_application::observability::BoundedObservabilityProducerV1;
 use tracedecay_contracts::{
-    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline, LegalAction,
-    RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryDirective,
-    RetryWorkAttemptCommandV1, SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1,
-    WorkSynthesisAttemptV1, WorkflowArtifactStorePort,
+    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline,
+    RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryWorkAttemptCommandV1,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkSynthesisAttemptV1,
+    WorkflowArtifactStorePort,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1, WorkAttemptV1};
 use tracedecay_tool_catalog::UseCaseId;
@@ -26,14 +26,7 @@ use super::{
 };
 
 fn consume_synthesis_bytes(remaining: &mut u64, bytes: u64) -> Result<(), ApplicationProblem> {
-    *remaining = remaining.checked_sub(bytes).ok_or_else(|| ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "application.work-synthesis.source-context-oversized".to_owned(),
-            message: "The synthesis instructions and source payloads exceed the admitted protocol byte bound.".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    })?;
+    *remaining = remaining.checked_sub(bytes).ok_or_else(|| ApplicationProblem::invalid_request("application.work-synthesis.source-context-oversized", "The synthesis instructions and source payloads exceed the admitted protocol byte bound."))?;
     Ok(())
 }
 
@@ -461,15 +454,10 @@ pub(super) fn resume_attempts(
     // still owns would strand the durable attempt on a new epoch while the old
     // task can no longer settle it.
     let report = if attempt_processes.holds_worktree(&context.scope().worktree_id) {
-        Err(ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic {
-                code: "application.work-attempt.live-holder".to_owned(),
-                message: "Work attempt recovery requires the current worktree to have no live provider holder."
-                    .to_owned(),
-            },
-            retry: tracedecay_contracts::RetryDirective::AfterRevalidate,
-            legal_actions: vec![tracedecay_contracts::LegalAction::Refresh],
-        })
+        Err(ApplicationProblem::conflict(
+            "application.work-attempt.live-holder",
+            "Work attempt recovery requires the current worktree to have no live provider holder.",
+        ))
     } else {
         services.attempts().resume(context, &command)
     };

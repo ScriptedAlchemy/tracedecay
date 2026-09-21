@@ -19,7 +19,7 @@ import time
 
 from orchestrator import _phase_environment, run_bounded_command
 from runner import McpClient
-from outcomes import objects, response_problem_code
+from outcomes import decode_json_stdout, objects, response_problem_code
 
 RUNTIME = Path.cwd()
 PROJECT = RUNTIME / "project"
@@ -37,10 +37,7 @@ def write_json(name: str, value: object) -> None:
 def command(args: list[str], *, timeout: int = 120, cwd: Path | None = None) -> dict[str, object]:
     started = time.monotonic()
     run = subprocess.run(args, cwd=cwd or PROJECT, text=True, capture_output=True, timeout=timeout)
-    try:
-        stdout: object = json.loads(run.stdout)
-    except json.JSONDecodeError:
-        stdout = run.stdout
+    stdout: object = decode_json_stdout(run.stdout)
     return {"command": args, "exit_code": run.returncode, "elapsed_ms": round((time.monotonic() - started) * 1000), "stdout": stdout, "stderr": run.stderr}
 
 

@@ -73,17 +73,9 @@ const CODEX_EXEC_JSON_ARGV: [&str; 3] = ["exec", "--json", "-"];
 // In-memory attempt authority
 // ---------------------------------------------------------------------------
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()

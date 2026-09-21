@@ -17,8 +17,8 @@ use tracedecay_contracts::{
     native_integration_surface_operation,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    UtcMicros, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    ActorId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros, WorktreeId,
+    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_mcp::McpTransport;
 use tracedecay_runtime_core::git::try_git_program;
@@ -53,9 +53,7 @@ impl McpTransport for CaptureTransport {
     }
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn git(root: &Path, arguments: &[&str]) {
     let status = Command::new(try_git_program().expect("git program"))

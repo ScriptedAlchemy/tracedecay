@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use std::sync::Arc;
 
 use tracedecay_code_index::chunks::{CodeFileChunksV1, content_digest};
@@ -20,13 +19,7 @@ use tracedecay_domain::{
     SymbolIdentityDigest, SymbolOccurrenceId,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn generation(sequence: u64) -> CodeGenerationId {
     id(&format!("generation.v1.aaaaaaaa.{sequence:08}"))

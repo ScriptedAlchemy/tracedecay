@@ -22,7 +22,7 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
-use super::query::{now_micros, storage, storage_message};
+use super::query::{decode_generation_i64, now_micros, storage, storage_message};
 use super::relations::{SessionRelationError, SummarySourceRef};
 use super::retrieval::partial_summary_invalidation_exists;
 use super::store::execution_control_graph_cancellation;
@@ -835,14 +835,6 @@ fn decode_summary_publication(encoded: &str) -> SessionStoreResult<SummaryPublic
         value
     };
     decode_json_value(value)
-}
-
-fn decode_generation_i64(
-    value: i64,
-    operation: &'static str,
-) -> SessionStoreResult<SessionProjectionGenerationV1> {
-    let generation = u64::try_from(value).map_err(|error| storage(operation, error))?;
-    SessionProjectionGenerationV1::new(generation).map_err(SessionStoreError::from)
 }
 
 fn decode_frozen_watermarks(

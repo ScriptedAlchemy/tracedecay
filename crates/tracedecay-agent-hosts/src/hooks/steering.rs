@@ -214,10 +214,7 @@ fn enforce_context_budget(mut text: String, budget: usize) -> String {
     if text.len() <= budget {
         return text;
     }
-    let mut end = budget.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = tracedecay_domain::utf8_prefix_at_or_before(&text, budget.min(text.len())).len();
     text.truncate(end);
     text
 }

@@ -1198,38 +1198,37 @@ async fn reconstruct_session_metadata(
     Ok((parent, memberships))
 }
 
+fn projection_budget(count: usize, add: usize) -> SessionStoreResult<usize> {
+    count
+        .checked_add(add)
+        .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))
+}
+
 fn enforce_projection_bounds(
     projection: &SessionRelationProjection,
     max_entities: usize,
     max_relations: usize,
 ) -> SessionStoreResult<()> {
-    let summary_relations = projection
-        .summaries
-        .iter()
-        .try_fold(0usize, |count, summary| {
-            count.checked_add(summary.sources.len()).and_then(|count| {
-                count.checked_add(usize::from(summary.predecessor_summary_id.is_some()))
-            })
-        })
-        .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))?;
-    let relation_count = [
+    let mut summary_relations = 0usize;
+    for summary in &projection.summaries {
+        summary_relations = projection_budget(summary_relations, summary.sources.len())?;
+        summary_relations = projection_budget(
+            summary_relations,
+            usize::from(summary.predecessor_summary_id.is_some()),
+        )?;
+    }
+    let mut relation_count = summary_relations;
+    for count in [
         projection.logical_copies.len(),
         projection.thread_hierarchy.len(),
         projection.agent_hierarchy.len(),
         usize::from(projection.parent_session_id.is_some()),
         projection.workflow_agents.len(),
-    ]
-    .into_iter()
-    .try_fold(summary_relations, usize::checked_add)
-    .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))?;
-    let entity_count =
-        projection
-            .summaries
-            .len()
-            .checked_add(relation_count.checked_mul(2).ok_or_else(|| {
-                storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted)
-            })?)
-            .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))?;
+    ] {
+        relation_count = projection_budget(relation_count, count)?;
+    }
+    let entity_count = projection_budget(relation_count, relation_count)
+        .and_then(|doubled| projection_budget(projection.summaries.len(), doubled))?;
     if relation_count > max_relations || entity_count > max_entities {
         return Err(storage(
             RECONSTRUCT_OPERATION,

@@ -11,8 +11,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
 use tracedecay_contracts::doctor::{
@@ -1188,12 +1186,7 @@ pub fn doctor_report_request_context(
 }
 
 fn now_secs() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs()),
-    )
-    .unwrap_or(i64::MAX)
+    tracedecay_runtime_core::tracedecay::saturating_unix_secs()
 }
 
 #[cfg(test)]

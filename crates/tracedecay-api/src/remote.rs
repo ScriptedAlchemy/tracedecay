@@ -38,8 +38,7 @@ use tracedecay_contracts::remote::recovery::{
 use tracedecay_contracts::remote::replay::RemoteReplayRequestV1;
 use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
-    ApplicationContractError, ApplicationProblemKind, CancellationSignal, RequestId,
-    ResultContractRef,
+    ApplicationContractError, CancellationSignal, RequestId, ResultContractRef,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::SchemaId;
@@ -452,21 +451,7 @@ fn remote_protocol_response<T: Serialize>(response: RemoteHttpResponseV1<T>) -> 
         Err(problem) => {
             let kind = problem.problem.kind();
             crate::observe::record_error_class(kind);
-            match kind {
-                ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-                ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-                ApplicationProblemKind::Conflict
-                | ApplicationProblemKind::PartialEffect
-                | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-                ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-                ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-                ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
-                ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-                ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
-                ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
-            }
+            crate::application_problem_status(kind)
         }
     };
     crate::observe::json_response(status, &response)

@@ -53,8 +53,8 @@ pub(crate) fn record_hydration_emitted_bytes(count: usize) {
 
 /// Same composition as the observation-projection derive path: canonical
 /// envelopes go through store authority; legacy Claude records use the public
-/// sessions mapper. Kept here so this crate does not depend on global-db.
-pub(crate) fn derive_projection(
+/// sessions mapper. Global-db calls this so the two projections cannot drift.
+pub fn derive_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
     match observation.source().provider().as_str() {

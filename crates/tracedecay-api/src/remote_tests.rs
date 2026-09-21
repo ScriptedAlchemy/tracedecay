@@ -184,13 +184,7 @@ const fn fixed_remote_clock() -> UtcMicros {
 
 const ACTIVE_CREDENTIAL: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn repository_scope(snapshot_id: &str) -> RemoteRepositoryScopeV1 {
     RemoteRepositoryScopeV1 {

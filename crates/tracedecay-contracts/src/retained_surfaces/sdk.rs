@@ -178,12 +178,132 @@ pub enum MessageRelationshipScopeV1 {
     SubagentsOnly,
 }
 
+impl MessageRelationshipScopeV1 {
+    /// Advertised order for MCP schemas and the CLI parser. Labels are the
+    /// serde `snake_case` names.
+    pub const WIRE: [&'static str; 3] = [
+        Self::All.as_str(),
+        Self::ParentsOnly.as_str(),
+        Self::SubagentsOnly.as_str(),
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::ParentsOnly => "parents_only",
+            Self::SubagentsOnly => "subagents_only",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "parents_only" => Some(Self::ParentsOnly),
+            "subagents_only" => Some(Self::SubagentsOnly),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod relationship_scope_wire_tests {
+    use serde_json::json;
+
+    use super::MessageRelationshipScopeV1;
+
+    #[test]
+    fn scope_labels_match_serde() {
+        let scopes = [
+            MessageRelationshipScopeV1::All,
+            MessageRelationshipScopeV1::ParentsOnly,
+            MessageRelationshipScopeV1::SubagentsOnly,
+        ];
+        let labels: Vec<&str> = scopes
+            .iter()
+            .copied()
+            .map(MessageRelationshipScopeV1::as_str)
+            .collect();
+        assert_eq!(labels.as_slice(), MessageRelationshipScopeV1::WIRE);
+        for scope in scopes {
+            assert_eq!(
+                serde_json::to_value(scope).expect("scope serializes"),
+                json!(scope.as_str())
+            );
+            assert_eq!(
+                MessageRelationshipScopeV1::parse(scope.as_str()),
+                Some(scope)
+            );
+        }
+        assert_eq!(MessageRelationshipScopeV1::parse(" all"), None);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageTypeFilterV1 {
     All,
     DirectUser,
     ToolResult,
+}
+
+impl MessageTypeFilterV1 {
+    /// Advertised order for MCP schemas and the CLI parser. Labels are the
+    /// serde `snake_case` names.
+    pub const WIRE: [&'static str; 3] = [
+        Self::All.as_str(),
+        Self::DirectUser.as_str(),
+        Self::ToolResult.as_str(),
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::DirectUser => "direct_user",
+            Self::ToolResult => "tool_result",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "direct_user" => Some(Self::DirectUser),
+            "tool_result" => Some(Self::ToolResult),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod message_type_wire_tests {
+    use serde_json::json;
+
+    use super::MessageTypeFilterV1;
+
+    #[test]
+    fn message_type_labels_match_serde() {
+        let types = [
+            MessageTypeFilterV1::All,
+            MessageTypeFilterV1::DirectUser,
+            MessageTypeFilterV1::ToolResult,
+        ];
+        let labels: Vec<&str> = types
+            .iter()
+            .copied()
+            .map(MessageTypeFilterV1::as_str)
+            .collect();
+        assert_eq!(labels.as_slice(), MessageTypeFilterV1::WIRE);
+        for message_type in types {
+            assert_eq!(
+                serde_json::to_value(message_type).expect("message type serializes"),
+                json!(message_type.as_str())
+            );
+            assert_eq!(
+                MessageTypeFilterV1::parse(message_type.as_str()),
+                Some(message_type)
+            );
+        }
+        assert_eq!(MessageTypeFilterV1::parse("tool"), None);
+    }
 }
 
 /// Exact public input accepted by `tracedecay_message_search`.
@@ -349,6 +469,68 @@ pub enum LcmRoleV1 {
     Assistant,
     Tool,
     Unknown,
+}
+
+impl LcmRoleV1 {
+    /// Advertised order for MCP schemas. Labels are [`Self::as_str`], which is
+    /// the serde `snake_case` name, so the catalog cannot drift from the wire.
+    pub const WIRE: [&'static str; 5] = [
+        Self::System.as_str(),
+        Self::User.as_str(),
+        Self::Assistant.as_str(),
+        Self::Tool.as_str(),
+        Self::Unknown.as_str(),
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            "tool" => Some(Self::Tool),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod lcm_role_wire_tests {
+    use serde_json::json;
+
+    use super::LcmRoleV1;
+
+    #[test]
+    fn role_labels_match_serde_and_reject_host_aliases() {
+        let roles = [
+            LcmRoleV1::System,
+            LcmRoleV1::User,
+            LcmRoleV1::Assistant,
+            LcmRoleV1::Tool,
+            LcmRoleV1::Unknown,
+        ];
+        let labels: Vec<&str> = roles.iter().copied().map(LcmRoleV1::as_str).collect();
+        assert_eq!(labels.as_slice(), LcmRoleV1::WIRE);
+        for role in roles {
+            assert_eq!(
+                serde_json::to_value(role).expect("role serializes"),
+                json!(role.as_str())
+            );
+            assert_eq!(LcmRoleV1::parse(role.as_str()), Some(role));
+        }
+        assert_eq!(LcmRoleV1::parse("developer"), None);
+        assert_eq!(LcmRoleV1::parse(" model"), None);
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -11,30 +11,26 @@ use std::time::{Duration, Instant};
 use roaring::RoaringBitmap;
 use tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1;
 use tracedecay_domain::{
-    CodeGenerationId, CodeSearchChunkV1, CompactCandidate, ComponentRevision, EvidenceRole,
-    ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1, ExtractionAdmittedChunkV1,
-    FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId,
-    SymbolOccurrenceId,
+    CodeGenerationId, CodeSearchChunkV1, ExactFieldV1, ExactTechnicalTermV1,
+    ExtractionAdmittedChunkV1, FreshnessCompatibilityV1, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, SymbolOccurrenceId,
 };
 
 use super::super::{
-    LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, LexicalSpellingVariantV1,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, admit_candidate_sources, candidate_admission_outcome,
+    LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest, MAX_FUZZY_TERM_EXPANSIONS_V1,
+    admit_candidate_sources, candidate_admission_outcome,
 };
 use super::{
-    CodeLexicalProjectionMetadataV1, ECHO_SCORE_MILLIS, ExactMatchRowViewV1, FUZZY_SCORE_MILLIS,
-    FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalRowScoreV1, LiteralProofCacheV1,
-    PHRASE_SCORE_MILLIS, PreparedLexicalQueryV1, ProjectedChunkV1, add_score, bm25_score_micros,
-    canonical_projected_exact_term, collect_term_kinds, exact_field_for_kind, exact_matches,
-    field_weight_millis, fuzzy_distance_bound, matches_phrase, normalize_lexical,
-    normalized_field_text, normalized_search_text, proximity_count, retrieval_anchor,
-    substring_count,
+    CodeLexicalProjectionMetadataV1, ExactMatchRowViewV1, FuzzyExpansionsV1, FuzzyQueryGroupV1,
+    LexicalRowScoreV1, LiteralProofCacheV1, PreparedLexicalQueryV1, ProjectedChunkV1,
+    bm25_score_micros, canonical_projected_exact_term, exact_field_for_kind, exact_matches,
+    field_weight_millis, fuzzy_distance_bound, lexical_lane_binding, lexical_lane_candidate,
+    matches_phrase, normalize_lexical, normalized_search_text, score_lexical_row,
 };
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, LexicalPostingReadPort,
-    RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError, contract_error, retrieval_checkpoint,
+    ExactTermPostingReadPort, LexicalPostingReadPort, RETRIEVAL_CANDIDATE_BATCH_SIZE,
+    RetrievalPortError, contract_error, retrieval_checkpoint,
 };
 
 mod postings;
@@ -865,15 +861,17 @@ impl CodeLexicalProjectionAdapterV1 {
                 excluded += 1;
                 continue;
             }
-            let candidate = self.candidate(
+            let candidate = lexical_lane_candidate(
                 row,
+                &self.metadata.freshness,
+                self.metadata.repository_id.clone(),
                 RetrieverKind::Lexical,
                 self.metadata.lexical_retriever_revision.clone(),
                 request.score_domain.clone(),
                 None,
             )?;
             let evidence = LexicalLaneEvidence {
-                binding: self.binding(row, &candidate, score.matched_kinds),
+                binding: lexical_lane_binding(row, &candidate, score.matched_kinds),
                 field_scores_micros: score.field_scores,
                 matched_whole_terms: score.matched_whole_terms,
                 matched_subtokens: score.matched_subtokens,
@@ -1000,236 +998,26 @@ impl CodeLexicalProjectionAdapterV1 {
         phrase_document_frequencies: &BTreeMap<String, usize>,
     ) -> LexicalRowScoreV1 {
         crate::hotpath_metrics::measure_frequent("query.lane.lexical.score_row", || {
-            self.score_row_inner(document, row, prepared, fuzzy, phrase_document_frequencies)
-        })
-    }
-
-    fn score_row_inner(
-        &self,
-        document: u32,
-        row: &ProjectedChunkV1,
-        prepared: &PreparedLexicalQueryV1<'_>,
-        fuzzy: &FuzzyExpansionsV1,
-        phrase_document_frequencies: &BTreeMap<String, usize>,
-    ) -> LexicalRowScoreV1 {
-        let mut field_scores: BTreeMap<LexicalFieldV1, u64> = BTreeMap::new();
-        let mut matched_whole_terms = BTreeSet::new();
-        let mut matched_subtokens = BTreeSet::new();
-        let mut matched_phrases = BTreeSet::new();
-        let mut matched_proximities = BTreeSet::new();
-        let mut spelling_variants = BTreeSet::new();
-        let mut matched_kinds = BTreeSet::new();
-        let mut typo_recovery_applied = false;
-        for field in row.field_lengths.keys() {
-            if *field != LexicalFieldV1::Subtoken {
-                for (query_term, normalized_query) in &prepared.whole_terms {
-                    let exact_tf = self
-                        .postings
-                        .term_frequency(*field, normalized_query, document);
-                    if exact_tf > 0 {
-                        add_score(
-                            &mut field_scores,
-                            *field,
-                            self.term_score(*field, normalized_query, exact_tf, row),
-                        );
-                        matched_whole_terms.insert((*query_term).to_owned());
-                        collect_term_kinds(&row.exact_terms, normalized_query, &mut matched_kinds);
-                    }
-                    if let Some(expansions) = fuzzy.by_query.get(*query_term) {
-                        for expansion in expansions {
-                            let fuzzy_tf =
-                                self.postings.term_frequency(*field, expansion, document);
-                            if fuzzy_tf == 0 {
-                                continue;
-                            }
-                            let score = self
-                                .term_score(*field, expansion, fuzzy_tf, row)
-                                .saturating_mul(FUZZY_SCORE_MILLIS)
-                                / 1_000;
-                            add_score(&mut field_scores, *field, score);
-                            matched_whole_terms.insert((*query_term).to_owned());
-                            spelling_variants.insert(LexicalSpellingVariantV1 {
-                                query: (*query_term).to_owned(),
-                                alternative: expansion.clone(),
-                            });
-                            typo_recovery_applied = true;
-                            collect_term_kinds(&row.exact_terms, expansion, &mut matched_kinds);
-                        }
-                    }
-                }
-            }
-            if *field == LexicalFieldV1::Subtoken {
-                for (subtoken, normalized) in &prepared.subtokens {
-                    let tf = self.postings.term_frequency(*field, normalized, document);
-                    if tf > 0 {
-                        add_score(
-                            &mut field_scores,
-                            *field,
-                            self.term_score(*field, normalized, tf, row),
-                        );
-                        matched_subtokens.insert((*subtoken).to_owned());
-                    }
-                }
-            }
-        }
-        for (phrase, normalized) in &prepared.phrases {
-            for field in row.field_lengths.keys() {
-                let Some(text) = normalized_field_text(row, *field) else {
-                    continue;
-                };
-                let tf = substring_count(&text, normalized);
-                if tf == 0 {
-                    continue;
-                }
-                let score = self
-                    .phrase_score(
-                        *field,
-                        tf,
-                        row,
-                        phrase_document_frequencies
-                            .get(normalized)
-                            .copied()
-                            .unwrap_or_default(),
+            score_lexical_row(
+                row,
+                &row.exact_terms,
+                prepared,
+                fuzzy,
+                phrase_document_frequencies,
+                |field, term| self.postings.term_frequency(field, term, document),
+                |field, term| self.postings.document_frequency(field, term),
+                |field, term_frequency, document_frequency| {
+                    bm25_score_micros(
+                        self.rows.len(),
+                        document_frequency,
+                        term_frequency,
+                        row.field_lengths.get(&field).copied().unwrap_or(0).max(1),
+                        self.postings.average_field_length(field),
+                        field_weight_millis(field),
                     )
-                    .saturating_mul(PHRASE_SCORE_MILLIS)
-                    / 1_000;
-                add_score(&mut field_scores, *field, score);
-                matched_phrases.insert((*phrase).to_owned());
-            }
-        }
-        for proximity in &prepared.proximities {
-            for field in row.field_lengths.keys() {
-                let Some(text) = normalized_field_text(row, *field) else {
-                    continue;
-                };
-                let tf = proximity_count(&text, &proximity.terms, proximity.original.maximum_gap);
-                if tf == 0 {
-                    continue;
-                }
-                let score = self
-                    .phrase_score(*field, tf, row, 1)
-                    .saturating_mul(PHRASE_SCORE_MILLIS)
-                    / 1_000;
-                add_score(&mut field_scores, *field, score);
-                matched_proximities.insert(proximity.original.clone());
-            }
-        }
-        let echo_penalty_applied =
-            !prepared.echo_query.is_empty() && prepared.echo_query == row.normalized_text.trim();
-        if echo_penalty_applied {
-            for score in field_scores.values_mut() {
-                *score = score.saturating_mul(ECHO_SCORE_MILLIS) / 1_000;
-            }
-        }
-        LexicalRowScoreV1 {
-            field_scores: field_scores.into_iter().collect(),
-            matched_whole_terms: matched_whole_terms.into_iter().collect(),
-            matched_subtokens: matched_subtokens.into_iter().collect(),
-            matched_phrases: matched_phrases.into_iter().collect(),
-            matched_proximities: matched_proximities.into_iter().collect(),
-            spelling_variants: spelling_variants.into_iter().collect(),
-            matched_kinds: matched_kinds.into_iter().collect(),
-            typo_recovery_applied,
-            echo_penalty_applied,
-        }
-    }
-
-    fn term_score(
-        &self,
-        field: LexicalFieldV1,
-        term: &str,
-        term_frequency: usize,
-        row: &ProjectedChunkV1,
-    ) -> u64 {
-        let document_frequency = self.postings.document_frequency(field, term);
-        let document_length = row.field_lengths.get(&field).copied().unwrap_or(0).max(1);
-        let average_length = self.postings.average_field_length(field);
-        bm25_score_micros(
-            self.rows.len(),
-            document_frequency,
-            term_frequency,
-            document_length,
-            average_length,
-            field_weight_millis(field),
-        )
-    }
-
-    fn phrase_score(
-        &self,
-        field: LexicalFieldV1,
-        term_frequency: usize,
-        row: &ProjectedChunkV1,
-        document_frequency: usize,
-    ) -> u64 {
-        let document_length = row.field_lengths.get(&field).copied().unwrap_or(0).max(1);
-        bm25_score_micros(
-            self.rows.len(),
-            document_frequency,
-            term_frequency,
-            document_length,
-            self.postings.average_field_length(field),
-            field_weight_millis(field),
-        )
-    }
-
-    fn candidate(
-        &self,
-        row: &ProjectedChunkV1,
-        retriever: RetrieverKind,
-        retriever_revision: ComponentRevision,
-        score_domain: ScoreDomainId,
-        exact_admission_proof: Option<tracedecay_domain::ExactAdmissionProof>,
-    ) -> Result<CompactCandidate, RetrievalPortError> {
-        let lane = retriever.as_str();
-        let chunk_id = row.id.as_str();
-        let generation = row.anchor.generation_id.as_str();
-        let evidence_id = row.anchor.symbol_occurrence_id.as_ref().map_or_else(
-            || format!("code-chunk:{chunk_id}"),
-            |symbol| format!("code-symbol:{}", symbol.as_str()),
-        );
-        Ok(CompactCandidate {
-            anchor_id: retrieval_anchor(evidence_id.clone())?,
-            logical_evidence_id: LogicalEvidenceId::new(evidence_id).map_err(contract_error)?,
-            source_occurrence_id: SourceOccurrenceId::new(format!(
-                "code-chunk:{generation}:{chunk_id}"
-            ))
-            .map_err(contract_error)?,
-            file_occurrence_id: Some(row.anchor.file_occurrence_id.clone()),
-            source_namespace: self.metadata.freshness.source_namespace.clone(),
-            repository_id: self.metadata.repository_id.clone(),
-            session_or_thread_id: None,
-            logical_copy_cluster_id: None,
-            logical_copy_evidence_anchor: None,
-            evidence_role: EvidenceRole::Primary,
-            retriever,
-            retriever_revision,
-            score_domain,
-            raw_score: FixedPointScore::ZERO,
-            ordinal_rank: 0,
-            exact_admission_proof,
-            retriever_evidence_anchor: retrieval_anchor(format!("code-lexical:{lane}:{chunk_id}"))?,
-            freshness: self.metadata.freshness.clone(),
+                },
+            )
         })
-    }
-
-    fn binding(
-        &self,
-        row: &ProjectedChunkV1,
-        candidate: &CompactCandidate,
-        matched_term_kinds: Vec<ExactTechnicalTermKindV1>,
-    ) -> CodeCandidateBindingV1 {
-        CodeCandidateBindingV1 {
-            candidate_anchor: candidate.anchor_id.clone(),
-            occurrence: CodeOccurrenceRefV1 {
-                generation: row.anchor.generation_id.clone(),
-                file: row.anchor.file_occurrence_id.clone(),
-                symbol: row.anchor.symbol_occurrence_id.clone(),
-                chunk: Some(row.id.clone()),
-            },
-            language_descriptor_revision: row.language_descriptor_revision.clone(),
-            matched_term_kinds,
-            source_occurrence: candidate.source_occurrence_id.clone(),
-        }
     }
 }
 
@@ -1294,15 +1082,17 @@ where
                 .iter()
                 .map(|ordinal| request.literals[*ordinal].clone())
                 .collect::<Vec<_>>();
-            let candidate = self.projection.candidate(
+            let candidate = lexical_lane_candidate(
                 row,
+                &self.projection.metadata.freshness,
+                self.projection.metadata.repository_id.clone(),
                 RetrieverKind::ExactLiteral,
                 self.projection.metadata.exact_retriever_revision.clone(),
                 self.projection.metadata.exact_score_domain.clone(),
                 Some(proof.clone()),
             )?;
             let evidence = ExactLaneEvidence {
-                binding: self.projection.binding(row, &candidate, matched_kinds),
+                binding: lexical_lane_binding(row, &candidate, matched_kinds),
                 matched_literals,
                 admission_proof: proof,
             };

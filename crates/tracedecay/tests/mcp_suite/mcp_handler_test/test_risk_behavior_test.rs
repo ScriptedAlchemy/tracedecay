@@ -9,7 +9,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use crate::common::fixture::git_run as git;
 
 use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
@@ -266,15 +267,6 @@ async fn open_ranked_project() -> RankedProject {
         project_root,
         _isolation: isolation,
     }
-}
-
-fn git(project: &Path, args: &[&str]) {
-    let status = Command::new(crate::common::git_program())
-        .args(args)
-        .current_dir(project)
-        .status()
-        .unwrap_or_else(|error| panic!("git {args:?}: {error}"));
-    assert!(status.success(), "git {args:?} exited {status}");
 }
 
 fn commit(project: &Path, message: &str) {

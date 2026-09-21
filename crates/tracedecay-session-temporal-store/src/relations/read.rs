@@ -296,7 +296,7 @@ fn require_budget(max_relations: usize) -> Result<(), SessionRelationError> {
     }
 }
 
-fn string_property<'a>(
+pub(super) fn string_property<'a>(
     relation: &'a GraphRelation,
     property: &GraphPropertyName,
 ) -> Option<&'a str> {

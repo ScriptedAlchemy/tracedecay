@@ -11,6 +11,7 @@ use tracedecay_contracts::{
     CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
 };
 use tracedecay_domain::Confidence;
+use tracedecay_domain::collapse_whitespace;
 use tracedecay_session_memory::memory::memory_application_error;
 use tracedecay_store::{
     FactReadControl, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
@@ -135,7 +136,7 @@ pub(super) fn context_memory_section(
                 context_fact_category(hit.fact.category),
                 f64::from(hit.fact.trust_score_millionths) / 1_000_000.0,
                 f64::from(hit.scores.score_millionths) / 1_000_000.0,
-                compact_memory_content(&hit.fact.content)
+                collapse_whitespace(&hit.fact.content)
             );
         }
         section.push('\n');
@@ -151,10 +152,6 @@ pub(super) fn context_memory_section(
         return Some(section);
     }
     None
-}
-
-fn compact_memory_content(content: &str) -> String {
-    content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 const fn context_fact_category(category: FactCategoryV1) -> &'static str {

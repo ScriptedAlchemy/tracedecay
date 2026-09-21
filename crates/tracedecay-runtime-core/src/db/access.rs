@@ -582,14 +582,6 @@ impl ExactSqlWriteAuthority for DatabaseAuthority {
             ExactSqlWriteIntent::ExecuteBatch => {
                 "execute registered global database statement batch"
             }
-            ExactSqlWriteIntent::Vacuum => {
-                if self.role() != DatabaseAuthorityRole::Maintenance {
-                    return Err(ExactSqlError::AuthorityDenied(
-                        "whole-database vacuum requires exclusive maintenance authority".to_owned(),
-                    ));
-                }
-                "vacuum registered global database under exclusive maintenance"
-            }
             ExactSqlWriteIntent::BeginTransaction => "begin registered global database transaction",
             ExactSqlWriteIntent::Commit => "commit registered global database transaction",
         };

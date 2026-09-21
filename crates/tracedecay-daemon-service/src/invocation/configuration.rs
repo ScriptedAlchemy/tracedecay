@@ -762,14 +762,10 @@ fn is_safe_configuration_validation_reason(reason: &str) -> bool {
 }
 
 fn invalid_configuration_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "configuration.invalid_request".to_owned(),
-            message: "The configuration request is invalid".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: Vec::new(),
-    }
+    ApplicationProblem::invalid_request_without_action(
+        "configuration.invalid_request",
+        "The configuration request is invalid",
+    )
 }
 
 pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationProblem {
@@ -781,14 +777,10 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
         ConfigurationError::RevisionConflict | ConfigurationError::IdempotencyConflict => {
-            ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic {
-                    code: "configuration.conflict".to_owned(),
-                    message: "The configuration request conflicts with current state".to_owned(),
-                },
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![tracedecay_contracts::LegalAction::Refresh],
-            }
+            ApplicationProblem::conflict(
+                "configuration.conflict",
+                "The configuration request conflicts with current state",
+            )
         }
         ConfigurationError::PlanExpired | ConfigurationError::PlanStale => {
             ApplicationProblem::stale(SafeDiagnostic {
@@ -796,22 +788,18 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
                 message: "The configuration preview is stale".to_owned(),
             })
         }
-        ConfigurationError::PolicyWideningForbidden => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "configuration.policy_widening_forbidden".to_owned(),
-                message: "Configuration policy widening is forbidden".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
-        ConfigurationError::Validation(reason) => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "configuration.invalid_request".to_owned(),
-                message: safe_configuration_validation_message(&reason),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ConfigurationError::PolicyWideningForbidden => {
+            ApplicationProblem::invalid_request_without_action(
+                "configuration.policy_widening_forbidden",
+                "Configuration policy widening is forbidden",
+            )
+        }
+        ConfigurationError::Validation(reason) => {
+            ApplicationProblem::invalid_request_without_action(
+                "configuration.invalid_request",
+                safe_configuration_validation_message(&reason),
+            )
+        }
         ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "configuration.unavailable".to_owned(),
             message: "The configuration authority is unavailable".to_owned(),

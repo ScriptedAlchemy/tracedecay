@@ -5,16 +5,8 @@ use tracedecay_domain::{
     RepositoryId, WorktreeId,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::id;
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn scope() -> ResolvedScope {
     ResolvedScope::new(

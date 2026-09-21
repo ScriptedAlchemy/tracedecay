@@ -131,15 +131,6 @@ fn matches_adapter_extension(adapter: &LspAdapterDefinition, file: &str) -> bool
         })
 }
 
-pub fn adapter_workspace_root(
-    project_root: &Path,
-    adapter: &LspAdapterDefinition,
-    file: &str,
-) -> Option<PathBuf> {
-    let project_root = canonicalize_project_root(project_root).ok()?;
-    adapter_workspace_root_from_canonical_root(&project_root, adapter, file)
-}
-
 pub(crate) fn adapter_workspace_root_from_canonical_root(
     project_root: &Path,
     adapter: &LspAdapterDefinition,

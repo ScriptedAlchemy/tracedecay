@@ -7,6 +7,7 @@ use tracedecay_store::AdmissionConfigV1;
 
 use super::runtime_test_support::{
     CountExecutor, Probe, TestDatabase, maintenance_binding, read_request, reader_locator,
+    seed_acceptance_rows,
 };
 
 #[test]
@@ -14,14 +15,7 @@ fn checkpoint_health_exposes_wal_pressure_while_a_snapshot_blocks_progress() {
     let binding = maintenance_binding();
     let database = TestDatabase::new("runtime-checkpoint.sqlite3");
     let mut writer = database.connect();
-    writer
-        .execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA wal_autocheckpoint=0;
-             CREATE TABLE acceptance_rows(value INTEGER NOT NULL);
-             INSERT INTO acceptance_rows(value) VALUES (1);",
-        )
-        .expect("seed checkpoint authority");
+    seed_acceptance_rows(&writer, true);
     let pool = ReaderPool::start(
         reader_locator(&binding, &database.path),
         AdmissionConfigV1::default().readers,

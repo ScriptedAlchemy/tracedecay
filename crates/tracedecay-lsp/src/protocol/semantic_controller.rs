@@ -1,3 +1,5 @@
+use crate::session::RequestAdmission;
+
 use super::{
     AnalyzerCancellationPort, Arc, BTreeMap, CompletionDisposition, DaemonLspProtocolSession,
     DiagnosticSnapshotPort, FeedbackCyclePort, GatewayResponse, LspRequestFailure, LspRequestId,
@@ -46,55 +48,17 @@ where
             return;
         };
         let deadline = now_ms.saturating_add(self.lifecycle.request_deadline_ms);
-        match self.lifecycle.control.admit_request_with_deadline(
+        let admission = self.lifecycle.control.admit_request_with_deadline(
             request_id.clone(),
             document,
             Some(deadline),
-        ) {
-            crate::session::RequestAdmission::Accepted => {
-                let result = route(self);
-                let completion = self.lifecycle.control.complete_request(&request_id);
-                if let Some(failure) = completion.failure() {
-                    let _ = self
-                        .enqueue_value(error_response(id, RpcFailure::request_failure(failure)));
-                } else if completion == CompletionDisposition::Publish {
-                    match result {
-                        Ok(value) => {
-                            let _ = self.enqueue_value(success_response(id, value));
-                        }
-                        Err(error) => {
-                            let _ = self.enqueue_value(error_response(id, error));
-                        }
-                    }
-                }
-            }
-            crate::session::RequestAdmission::DuplicateId => {
-                let _ = self.enqueue_value(error_response(
-                    id,
-                    RpcFailure {
-                        code: -32600,
-                        message: "Invalid Request",
-                        data: json!({ "detail": "duplicate request id" }),
-                    },
-                ));
-            }
-            crate::session::RequestAdmission::SessionUnavailable => {
-                let _ = self.enqueue_value(error_response(
-                    id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
-                        retrigger_request: true,
-                    }),
-                ));
-            }
-            crate::session::RequestAdmission::Saturated { retrigger_request } => {
-                let _ = self.enqueue_value(error_response(
-                    id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
-                        retrigger_request,
-                    }),
-                ));
-            }
+        );
+        if let Some(failure) = admission_refusal(admission) {
+            let _ = self.enqueue_value(error_response(id, failure));
+            return;
         }
+        let result = route(self);
+        self.finish_admitted_request(request_id, id, result.map(Some));
     }
 
     #[hotpath::measure(
@@ -116,51 +80,26 @@ where
             return;
         };
         let deadline = now_ms.saturating_add(self.lifecycle.request_deadline_ms);
-        match self.lifecycle.control.admit_request_with_deadline(
+        let admission = self.lifecycle.control.admit_request_with_deadline(
             request_id.clone(),
             document,
             Some(deadline),
-        ) {
-            crate::session::RequestAdmission::Accepted => {
-                match self.semantic_request_value(&request_id, &request) {
-                    Ok(None) => {
-                        self.semantic.pending.insert(
-                            request_id,
-                            PendingSemanticRequest {
-                                response_id,
-                                request,
-                            },
-                        );
-                    }
-                    result => self.complete_semantic_request(request_id, response_id, result),
-                }
-            }
-            crate::session::RequestAdmission::DuplicateId => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure {
-                        code: -32600,
-                        message: "Invalid Request",
-                        data: json!({ "detail": "duplicate request id" }),
+        );
+        if let Some(failure) = admission_refusal(admission) {
+            let _ = self.enqueue_value(error_response(response_id, failure));
+            return;
+        }
+        match self.semantic_request_value(&request_id, &request) {
+            Ok(None) => {
+                self.semantic.pending.insert(
+                    request_id,
+                    PendingSemanticRequest {
+                        response_id,
+                        request,
                     },
-                ));
+                );
             }
-            crate::session::RequestAdmission::SessionUnavailable => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
-                        retrigger_request: true,
-                    }),
-                ));
-            }
-            crate::session::RequestAdmission::Saturated { retrigger_request } => {
-                let _ = self.enqueue_value(error_response(
-                    response_id,
-                    RpcFailure::request_failure(LspRequestFailure::ServerCancelled {
-                        retrigger_request,
-                    }),
-                ));
-            }
+            result => self.finish_admitted_request(request_id, response_id, result),
         }
     }
 
@@ -187,7 +126,22 @@ where
         }
     }
 
-    pub(super) fn complete_semantic_request(
+    pub(super) fn poll_semantic_requests(&mut self) {
+        let request_ids = self.semantic.pending.keys().cloned().collect::<Vec<_>>();
+        for request_id in request_ids {
+            let Some(pending) = self.semantic.pending.get(&request_id).cloned() else {
+                continue;
+            };
+            let result = self.semantic_request_value(&request_id, &pending.request);
+            if matches!(result, Ok(None)) {
+                continue;
+            }
+            self.semantic.pending.remove(&request_id);
+            self.finish_admitted_request(request_id, pending.response_id, result);
+        }
+    }
+
+    pub(super) fn finish_admitted_request(
         &mut self,
         request_id: LspRequestId,
         response_id: Value,
@@ -211,19 +165,23 @@ where
             }
         }
     }
+}
 
-    pub(super) fn poll_semantic_requests(&mut self) {
-        let request_ids = self.semantic.pending.keys().cloned().collect::<Vec<_>>();
-        for request_id in request_ids {
-            let Some(pending) = self.semantic.pending.get(&request_id).cloned() else {
-                continue;
-            };
-            let result = self.semantic_request_value(&request_id, &pending.request);
-            if matches!(result, Ok(None)) {
-                continue;
-            }
-            self.semantic.pending.remove(&request_id);
-            self.complete_semantic_request(request_id, pending.response_id, result);
-        }
+pub(super) fn admission_refusal(admission: RequestAdmission) -> Option<RpcFailure> {
+    match admission {
+        RequestAdmission::Accepted => None,
+        RequestAdmission::DuplicateId => Some(RpcFailure {
+            code: -32600,
+            message: "Invalid Request",
+            data: json!({ "detail": "duplicate request id" }),
+        }),
+        RequestAdmission::SessionUnavailable => Some(RpcFailure::request_failure(
+            LspRequestFailure::ServerCancelled {
+                retrigger_request: true,
+            },
+        )),
+        RequestAdmission::Saturated { retrigger_request } => Some(RpcFailure::request_failure(
+            LspRequestFailure::ServerCancelled { retrigger_request },
+        )),
     }
 }

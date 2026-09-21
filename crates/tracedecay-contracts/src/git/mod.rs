@@ -1,6 +1,7 @@
 //! Git index transaction application boundary.
 
 mod catalog;
+mod effect_surface;
 mod native_integration;
 mod native_integration_surface;
 mod public_wire;

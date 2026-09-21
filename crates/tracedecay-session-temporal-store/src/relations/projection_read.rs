@@ -459,10 +459,7 @@ fn string_property<'a>(
     relation: &'a tracedecay_graph_db::GraphRelation,
     property: &GraphPropertyName,
 ) -> Result<&'a str, SessionRelationError> {
-    match relation.properties.get(property) {
-        Some(GraphProperty::String(value)) => Ok(value),
-        _ => Err(SessionRelationError::Corrupt),
-    }
+    super::read::string_property(relation, property).ok_or(SessionRelationError::Corrupt)
 }
 
 #[cfg(test)]
@@ -478,13 +475,7 @@ mod tests {
         GraphWatermark, NeverCancelled, ProjectionReplacement, SourceGeneration,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid test identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn relation_projection() -> SessionRelationProjection {
         SessionRelationProjection {

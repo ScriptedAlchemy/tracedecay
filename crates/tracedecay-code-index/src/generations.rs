@@ -663,10 +663,10 @@ fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(Strin
     Some((discriminator.to_owned(), sequence.parse().ok()?))
 }
 
-/// A well-formed placeholder digest, replaced by the computed seal before the
-/// manifest is returned. The seal payload excludes the seal itself, so the
-/// placeholder never influences the computed digest.
-fn placeholder_digest() -> ManifestDigest {
+/// Canonical zero digest substituted until the caller computes the real digest.
+/// Callers exclude this placeholder from that computation, so it never
+/// influences the result.
+pub(crate) fn placeholder_digest() -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
         .expect("a zeroed sha256 digest is canonical")
 }
@@ -758,13 +758,7 @@ mod tests {
             .expect("valid digest")
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn repository() -> RepositoryId {
         id("repository.fixture")

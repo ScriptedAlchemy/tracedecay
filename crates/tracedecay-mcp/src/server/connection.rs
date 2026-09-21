@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::lifecycle::{McpConnectionLifecyclePort, McpRequestActivity};
 use crate::transport::{McpTransport, write_wire_oversized_rejection};
 use crate::{ErrorCode, JsonRpcRequest, JsonRpcResponse, serialize_response_line};
+use tracedecay_contracts::request_identity::mcp_connection_request_key as application_surface_request_id;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_framing::is_wire_oversized_io_error;
 
@@ -304,11 +305,6 @@ where
         return None;
     }
     request.id.clone()
-}
-
-fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    tracedecay_contracts::request_identity::mcp_connection_request_id(id, connection_scope)
-        .map(|request_id| request_id.as_str().to_owned())
 }
 
 fn queued_cancellable_request_key(

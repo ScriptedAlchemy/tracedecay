@@ -554,11 +554,7 @@ fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock:
 }
 
 fn now_unix_str() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
+    crate::tracedecay::unix_secs().to_string()
 }
 
 /// Formats a UNIX timestamp string as a human-readable relative time.
@@ -566,10 +562,7 @@ pub fn format_timestamp(ts: &str) -> String {
     let Ok(secs) = ts.parse::<u64>() else {
         return ts.to_string();
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::tracedecay::unix_secs();
     let age = now.saturating_sub(secs);
     if age < 60 {
         "just now".to_string()

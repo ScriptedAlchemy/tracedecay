@@ -52,9 +52,7 @@ fn normalize_plan_detail(detail: &str) -> String {
         .to_ascii_uppercase()
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn snapshot(generation: u64) -> TemporalExecutionSnapshot {
     TemporalExecutionSnapshot::new_authorized(

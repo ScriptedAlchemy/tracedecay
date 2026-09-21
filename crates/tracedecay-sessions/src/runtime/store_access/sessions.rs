@@ -5,7 +5,7 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_runtime_core::db::engine::Value;
+use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, Value};
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
@@ -991,98 +991,69 @@ fn workflow_column_error(column: &str, error: &dyn std::fmt::Display) -> String 
     format!("failed to decode workflow fact column '{column}': {error}")
 }
 
-fn row_to_session(
-    row: &tracedecay_runtime_core::db::engine::Row,
-) -> std::result::Result<SessionRecord, String> {
-    Ok(SessionRecord {
-        provider: row
-            .get(0)
-            .map_err(|error| session_column_error("provider", &error))?,
-        session_id: row
-            .get(1)
-            .map_err(|error| session_column_error("session_id", &error))?,
-        project_key: row
-            .get(2)
-            .map_err(|error| session_column_error("project_key", &error))?,
-        project_path: row
-            .get(3)
-            .map_err(|error| session_column_error("project_path", &error))?,
-        title: row
-            .get(4)
-            .map_err(|error| session_column_error("title", &error))?,
-        started_at: row
-            .get(5)
-            .map_err(|error| session_column_error("started_at", &error))?,
-        ended_at: row
-            .get(6)
-            .map_err(|error| session_column_error("ended_at", &error))?,
-        transcript_path: row
-            .get(7)
-            .map_err(|error| session_column_error("transcript_path", &error))?,
-        metadata_json: row
-            .get(8)
-            .map_err(|error| session_column_error("metadata_json", &error))?,
-        parent_session_id: row
-            .get(9)
-            .map_err(|error| session_column_error("parent_session_id", &error))?,
-        is_subagent: row
-            .get::<i64>(10)
-            .map_err(|error| session_column_error("is_subagent", &error))?
-            != 0,
-        agent_id: row
-            .get(11)
-            .map_err(|error| session_column_error("agent_id", &error))?,
-        parent_tool_use_id: row
-            .get(12)
-            .map_err(|error| session_column_error("parent_tool_use_id", &error))?,
+/// Column decode failure. Callers keep their own error text; the column name
+/// is the sessions spelling and the source is the engine error.
+pub struct SqlColumnError {
+    pub column: &'static str,
+    pub source: EngineError,
+}
+
+fn column<T: FromValue>(row: &Row, index: i32, name: &'static str) -> Result<T, SqlColumnError> {
+    row.get(index).map_err(|source| SqlColumnError {
+        column: name,
+        source,
     })
 }
 
-fn row_to_message(
-    row: &tracedecay_runtime_core::db::engine::Row,
-    offset: i32,
-) -> std::result::Result<SessionMessageRecord, String> {
-    Ok(SessionMessageRecord {
-        provider: row
-            .get(offset)
-            .map_err(|error| message_column_error("provider", &error))?,
-        message_id: row
-            .get(offset + 1)
-            .map_err(|error| message_column_error("message_id", &error))?,
-        session_id: row
-            .get(offset + 2)
-            .map_err(|error| message_column_error("session_id", &error))?,
-        role: row
-            .get(offset + 3)
-            .map_err(|error| message_column_error("role", &error))?,
-        timestamp: row
-            .get(offset + 4)
-            .map_err(|error| message_column_error("timestamp", &error))?,
-        ordinal: row
-            .get(offset + 5)
-            .map_err(|error| message_column_error("ordinal", &error))?,
-        text: row
-            .get(offset + 6)
-            .map_err(|error| message_column_error("text", &error))?,
-        kind: row
-            .get(offset + 7)
-            .map_err(|error| message_column_error("kind", &error))?,
-        model: row
-            .get(offset + 8)
-            .map_err(|error| message_column_error("model", &error))?,
-        tool_names: row
-            .get(offset + 9)
-            .map_err(|error| message_column_error("tool_names", &error))?,
-        source_path: row
-            .get(offset + 10)
-            .map_err(|error| message_column_error("source_path", &error))?,
-        source_offset: row
-            .get(offset + 11)
-            .map_err(|error| message_column_error("source_offset", &error))?,
-        metadata_json: row
-            .get(offset + 12)
-            .map_err(|error| message_column_error("metadata_json", &error))?,
+/// `sessions` row in the column order both the session store and the
+/// observation projection read.
+pub fn session_record_from_row(row: &Row) -> Result<SessionRecord, SqlColumnError> {
+    Ok(SessionRecord {
+        provider: column(row, 0, "provider")?,
+        session_id: column(row, 1, "session_id")?,
+        project_key: column(row, 2, "project_key")?,
+        project_path: column(row, 3, "project_path")?,
+        title: column(row, 4, "title")?,
+        started_at: column(row, 5, "started_at")?,
+        ended_at: column(row, 6, "ended_at")?,
+        transcript_path: column(row, 7, "transcript_path")?,
+        metadata_json: column(row, 8, "metadata_json")?,
+        parent_session_id: column(row, 9, "parent_session_id")?,
+        is_subagent: column::<i64>(row, 10, "is_subagent")? != 0,
+        agent_id: column(row, 11, "agent_id")?,
+        parent_tool_use_id: column(row, 12, "parent_tool_use_id")?,
     })
+}
+
+/// `session_messages` row, starting at `offset`, in the shared column order.
+pub fn message_record_from_row(
+    row: &Row,
+    offset: i32,
+) -> Result<SessionMessageRecord, SqlColumnError> {
+    Ok(SessionMessageRecord {
+        provider: column(row, offset, "provider")?,
+        message_id: column(row, offset + 1, "message_id")?,
+        session_id: column(row, offset + 2, "session_id")?,
+        role: column(row, offset + 3, "role")?,
+        timestamp: column(row, offset + 4, "timestamp")?,
+        ordinal: column(row, offset + 5, "ordinal")?,
+        text: column(row, offset + 6, "text")?,
+        kind: column(row, offset + 7, "kind")?,
+        model: column(row, offset + 8, "model")?,
+        tool_names: column(row, offset + 9, "tool_names")?,
+        source_path: column(row, offset + 10, "source_path")?,
+        source_offset: column(row, offset + 11, "source_offset")?,
+        metadata_json: column(row, offset + 12, "metadata_json")?,
+    })
+}
+
+fn row_to_session(row: &Row) -> std::result::Result<SessionRecord, String> {
+    session_record_from_row(row).map_err(|error| session_column_error(error.column, &error.source))
+}
+
+fn row_to_message(row: &Row, offset: i32) -> std::result::Result<SessionMessageRecord, String> {
+    message_record_from_row(row, offset)
+        .map_err(|error| message_column_error(error.column, &error.source))
 }
 
 fn row_to_workflow_message(

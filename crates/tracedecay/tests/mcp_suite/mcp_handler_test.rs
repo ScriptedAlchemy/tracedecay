@@ -97,8 +97,6 @@ mod lcm_load_session_behavior;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
 mod memory_contradiction_contract_test;
-#[cfg(feature = "test-transport")]
-mod memory_fact_assertions;
 mod memory_fact_probe_test;
 #[cfg(feature = "test-transport")]
 mod memory_fact_store_reason_test;

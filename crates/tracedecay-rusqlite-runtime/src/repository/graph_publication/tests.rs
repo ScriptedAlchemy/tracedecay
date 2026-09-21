@@ -232,9 +232,7 @@ fn control_and_probe(
     )
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn projection(name: &str) -> GraphProjectionIdentityV1 {
     projection_for_project("project.fixture", name)

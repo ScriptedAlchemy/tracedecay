@@ -247,11 +247,8 @@ async fn drain_admitted_host_spool(
 
 fn hook_replay_now() -> UtcMicros {
     UtcMicros(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |duration| {
-                duration.as_micros().min(i64::MAX as u128) as i64
-            })
+        tracedecay_runtime_core::tracedecay::saturating_utc_now()
+            .0
             .max(1),
     )
 }

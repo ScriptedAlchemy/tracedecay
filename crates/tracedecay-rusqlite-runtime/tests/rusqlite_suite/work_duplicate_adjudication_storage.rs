@@ -20,17 +20,9 @@ use tracedecay_domain::{
 
 use work_registered_store::RegisteredWorkStore;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn topology_ref(byte: char) -> WorkTopologyGenerationRefV1 {
     WorkTopologyGenerationRefV1::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()

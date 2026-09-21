@@ -228,11 +228,7 @@ fn project_http_binding(
             disposition: unavailable_disposition(availability),
         });
     };
-    let RouteExposureV1::Public {
-        binding_id,
-        route_path,
-    } = executable.exposure()
-    else {
+    let Some((binding_id, route_path)) = executable.public_route() else {
         return Ok(SdkExecutableBindingAvailabilityV1::Unavailable {
             operation_id: executable.operation_id().clone(),
             disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
@@ -244,7 +240,7 @@ fn project_http_binding(
         binding_id.clone(),
         sdk_method,
         SdkTransportBindingV1::Http {
-            route_path: route_path.clone(),
+            route_path: route_path.to_owned(),
         },
     )?;
     Ok(SdkExecutableBindingAvailabilityV1::available(binding))

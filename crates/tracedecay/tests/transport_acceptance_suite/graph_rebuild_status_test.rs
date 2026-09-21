@@ -23,6 +23,8 @@ use serde_json::{Value, json};
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_mcp::JsonRpcResponse;
 
+use crate::common::mcp_response::tool_json;
+
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Pause between status polls while the daemon reconciles.
@@ -144,7 +146,7 @@ async fn tool(
 }
 
 async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
-    tool(
+    tool_json(
         harness,
         project,
         "tracedecay_status",
@@ -336,7 +338,7 @@ async fn background_refresh_and_reopen_report_only_servable_generations_inner() 
     install_background_batch(isolation.path(), &project);
     commit_all(&project, "install background refresh batch");
     let refreshed_revision = head(&project);
-    let receipt = tool(
+    let receipt = tool_json(
         &harness,
         &project,
         "tracedecay_admin_sync",

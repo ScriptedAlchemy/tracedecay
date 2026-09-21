@@ -554,7 +554,11 @@ fn telemetry_entry(
         )
     });
     let budget = budget_dimension(&sampled.store, sample, retention);
-    let growth = growth_dimension(total_bytes, free_bytes);
+    // Current bytes stay on the store-size read. A status sample has no
+    // execution-owned watermarks, so it cannot become a growth series.
+    let growth = StoreGrowthDimensionV1::Unknown {
+        reason: GROWTH_UNKNOWN_REASON.to_string(),
+    };
     let table_growth = table_growth_dimension(TableGrowthTelemetryReadV1::Unsupported {
         store: StoreKeyV1::new(sanitize_store_key(&sampled.store))
             .unwrap_or_else(|_| fallback_store_key()),
@@ -609,15 +613,6 @@ fn budget_dimension(
         Err(error) => StoreBudgetDimensionV1::Unknown {
             reason: format!("the configured budget could not be evaluated: {error}"),
         },
-    }
-}
-
-/// Project the absence of execution-owned watermarks. Current bytes remain
-/// available in the store-size read, but a status read cannot honestly turn
-/// them into a growth series.
-fn growth_dimension(_total_bytes: Option<u64>, _free_bytes: Option<u64>) -> StoreGrowthDimensionV1 {
-    StoreGrowthDimensionV1::Unknown {
-        reason: GROWTH_UNKNOWN_REASON.to_string(),
     }
 }
 

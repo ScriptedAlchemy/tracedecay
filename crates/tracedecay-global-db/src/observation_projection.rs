@@ -15,8 +15,6 @@ pub use rebuild::{
     converge_projection_predecessor, project_observation, project_queued_observations,
     rebuild_projection,
 };
-#[cfg(test)]
-pub use rebuild::{project_observation_with_engine, rebuild_projection_with_engine};
 pub(crate) use schema::{
     OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL, OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL,
     OBSERVATION_PROJECTION_SCHEMA_SQL,

@@ -43,7 +43,7 @@ async fn open_project(files: &[(&str, &str)]) -> InsertProject {
         fs::create_dir_all(path.parent().unwrap_or(&project_root)).unwrap();
         fs::write(path, contents).unwrap();
     }
-    let (fixture, _) = init_production_source_edit_project(&project_root).await;
+    let fixture = init_production_source_edit_project(&project_root).await;
     let server = fixture
         .harness
         .server(&fixture.project_root)

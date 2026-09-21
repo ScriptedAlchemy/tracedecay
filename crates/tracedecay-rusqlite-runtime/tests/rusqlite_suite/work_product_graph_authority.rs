@@ -26,7 +26,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,
-    ManifestDigest, MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, TaskId, UtcMicros,
+    MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, TaskId, UtcMicros,
     WorkAcceptanceCriterionV1, WorkCommandId, WorkGraphVersionV1, WorkHierarchyV1,
     WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
     WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductGraphV1,
@@ -43,17 +43,9 @@ const REPOSITORY: &str = "repository.work-product.fixture";
 /// `occurred_at`, so a projection is never asked to describe its own future.
 const PROJECTED_AT: UtcMicros = UtcMicros(400);
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn binding() -> WorkProductBindingV1 {
     WorkProductBindingV1::new(

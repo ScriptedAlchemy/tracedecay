@@ -682,8 +682,7 @@ mod tests {
     };
     use tracedecay_contracts::{
         ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
-        ApplicationProblem, ApplicationResponse, InvocationError, LegalAction, RetryDirective,
-        SafeDiagnostic,
+        ApplicationProblem, ApplicationResponse, InvocationError, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_daemon_protocol::{
         DaemonInvocationError, DaemonInvocationExecutorFuture, DaemonInvocationPayload,
@@ -1025,15 +1024,10 @@ mod tests {
     #[tokio::test]
     async fn kernel_conflict_reaches_mcp_with_reason_code_and_retryability() {
         let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
-            problem: ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic::new(
-                    "source_edit.idempotency_conflict",
-                    "source edit idempotency key conflicts with a prior input",
-                )
-                .unwrap(),
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            },
+            problem: ApplicationProblem::conflict(
+                "source_edit.idempotency_conflict",
+                "source edit idempotency key conflicts with a prior input",
+            ),
         })
         .await;
         let (reason_code, retryable, _) = error

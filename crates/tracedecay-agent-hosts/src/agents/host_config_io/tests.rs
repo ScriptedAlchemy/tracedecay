@@ -262,7 +262,7 @@ mod path_normalize_tests {
     #[test]
     fn normalizes_windows_backslashes() {
         assert_eq!(
-            normalize_path_separators(r"C:\Users\dev\scoop\shims\tracedecay.exe"),
+            tracedecay_domain::forward_slash_text(r"C:\Users\dev\scoop\shims\tracedecay.exe"),
             "C:/Users/dev/scoop/shims/tracedecay.exe"
         );
     }
@@ -284,7 +284,7 @@ mod path_normalize_tests {
 
         assert_eq!(
             found,
-            normalize_path_separators(&path_bin.to_string_lossy())
+            tracedecay_domain::forward_slash_text(&path_bin.to_string_lossy())
         );
     }
 
@@ -307,7 +307,7 @@ mod path_normalize_tests {
 
         assert_eq!(
             found,
-            normalize_path_separators(&path_bin.to_string_lossy())
+            tracedecay_domain::forward_slash_text(&path_bin.to_string_lossy())
         );
     }
 
@@ -332,7 +332,7 @@ mod path_normalize_tests {
 
         assert_eq!(
             found,
-            normalize_path_separators(&stable_bin.to_string_lossy())
+            tracedecay_domain::forward_slash_text(&stable_bin.to_string_lossy())
         );
     }
 
@@ -350,7 +350,7 @@ mod path_normalize_tests {
 
         assert_eq!(
             found,
-            normalize_path_separators(&current_exe.to_string_lossy())
+            tracedecay_domain::forward_slash_text(&current_exe.to_string_lossy())
         );
     }
 }

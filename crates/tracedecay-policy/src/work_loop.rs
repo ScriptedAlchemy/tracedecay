@@ -1026,21 +1026,21 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
                 plan,
             );
         }
+        if input.execution_admitted && terminal_attempt_count > 0 {
+            reasons.push(WorkProposalReasonV1::TerminalEvidenceObserved);
+            return self.planned_decision(
+                self.decision(
+                    input,
+                    WorkProposalDispositionV1::Allow,
+                    Some(WorkProposalActionV1::Replan),
+                    false,
+                    reasons,
+                    comparison,
+                ),
+                plan,
+            );
+        }
         if input.execution_admitted {
-            if terminal_attempt_count > 0 {
-                reasons.push(WorkProposalReasonV1::TerminalEvidenceObserved);
-                return self.planned_decision(
-                    self.decision(
-                        input,
-                        WorkProposalDispositionV1::Allow,
-                        Some(WorkProposalActionV1::Replan),
-                        false,
-                        reasons,
-                        comparison,
-                    ),
-                    plan,
-                );
-            }
             reasons.push(WorkProposalReasonV1::ExecutionInFlight);
             return self.planned_decision(
                 self.decision(

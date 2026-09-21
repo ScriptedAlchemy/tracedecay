@@ -5,14 +5,14 @@ use super::super::primitives::{
 };
 use super::super::projection::load_project_memory_projection_tx;
 use super::super::scoring::{
-    project_memory_fact_vector, project_memory_jaccard, project_memory_millionths,
-    project_memory_tokens,
+    project_memory_fact_vector, project_memory_holographic_error, project_memory_jaccard,
+    project_memory_millionths, project_memory_tokens,
 };
 use crate::memory::diff::{
     ADD_COMPARISON_REPORT_FLOOR_MILLIONTHS, NEAR_DUPLICATE_SCORE_MILLIONTHS,
     POSSIBLE_CONFLICT_SCORE_MILLIONTHS, contains_negation_cue, normalized_equivalent,
 };
-use crate::memory::encoding::{HolographicEncoder, HolographicEncodingError};
+use crate::memory::encoding::HolographicEncoder;
 use tracedecay_domain::{FactId, FactOwnerV1};
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 use tracedecay_runtime_core::db::engine::params;
@@ -34,14 +34,6 @@ pub(super) enum ProjectMemoryAddClassification {
     },
 }
 
-fn holographic_store_error(error: HolographicEncodingError) -> FactStoreError {
-    match error {
-        HolographicEncodingError::DimensionMismatch { expected, actual } => {
-            FactStoreError::HolographicDimensionMismatch { expected, actual }
-        }
-    }
-}
-
 fn classification_similarity(
     encoder: &HolographicEncoder,
     proposed_tokens: &[String],
@@ -51,10 +43,10 @@ fn classification_similarity(
     let candidate_tokens = project_memory_tokens(candidate.content());
     let mut similarity = project_memory_jaccard(proposed_tokens, &candidate_tokens);
     let candidate_vector =
-        project_memory_fact_vector(encoder, candidate).map_err(holographic_store_error)?;
+        project_memory_fact_vector(encoder, candidate).map_err(project_memory_holographic_error)?;
     let holographic = encoder
         .similarity(proposed_vector, &candidate_vector)
-        .map_err(holographic_store_error)?;
+        .map_err(project_memory_holographic_error)?;
     if holographic >= 0.85 && holographic > similarity {
         similarity = holographic;
     }
@@ -156,7 +148,7 @@ pub(super) async fn classify_project_memory_add_tx(
     let proposed_tokens = project_memory_tokens(content);
     let proposed_vector = encoder
         .encode_fact(content, entities)
-        .map_err(holographic_store_error)?;
+        .map_err(project_memory_holographic_error)?;
     let mut closest: Option<(&ProjectMemoryFactV1, u32)> = None;
     for candidate in &candidates {
         let similarity =

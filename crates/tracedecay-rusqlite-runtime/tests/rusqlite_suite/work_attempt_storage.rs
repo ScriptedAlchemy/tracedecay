@@ -27,7 +27,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
     ObservationSourceIdentityV1, ProjectId, ProposalId, ProviderId, RefId, RepositoryId, RunId,
     SessionId, TaskId, UtcMicros, WorkApprovalPolicy, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
@@ -45,17 +45,9 @@ use common::fixture_abs_root;
 use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 use work_registered_store::RegisteredWorkStore;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn authority(actor: &str) -> WorkAuthority {
     authority_in_worktree(actor, "worktree.attempt.storage")

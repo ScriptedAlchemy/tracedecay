@@ -14,8 +14,8 @@ use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
 use super::super::CodeLexicalProjectionMetadataV1;
 use super::builder::{
-    BuilderMutationGuardV1, compute_clone_section_digests, install_clone_freeze,
-    register_builder_mutation_gate, sqlite_file_size, verify_clone_rows,
+    BuilderMutationGuardV1, compute_clone_section_digests, derive_clone_fingerprint_counts,
+    install_clone_freeze, register_builder_mutation_gate, sqlite_file_size, verify_clone_rows,
 };
 use super::format::{
     RECEIPT_RESERVATION_BYTES, VerifiedCodeLexicalArtifactV1, artifact_digest,
@@ -809,17 +809,4 @@ fn verify_source_receipt(
         ));
     }
     Ok(())
-}
-
-fn derive_clone_fingerprint_counts(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    transaction
-        .execute_batch(
-            "INSERT INTO clone_fingerprint_counts(language, class, normalization_revision, fingerprint, posting_count)
-             SELECT language, class, normalization_revision, fingerprint, COUNT(*)
-             FROM clone_fingerprint_postings
-             GROUP BY language, class, normalization_revision, fingerprint;",
-        )
-        .map_err(sqlite_error)
 }

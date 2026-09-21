@@ -34,7 +34,6 @@ pub(super) struct InsertTracker {
 pub(super) enum AuthorizedDatabaseOperation {
     Attach,
     Detach(String),
-    Vacuum,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -202,7 +201,7 @@ fn authorize_exact_sql_writer(
         AuthAction::Attach { .. }
             if matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
+                Some(AuthorizedDatabaseOperation::Attach)
             ) =>
         {
             return Authorization::Allow;
@@ -216,7 +215,7 @@ fn authorize_exact_sql_writer(
         } if code == rusqlite::ffi::SQLITE_ATTACH
             && matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
+                Some(AuthorizedDatabaseOperation::Attach)
             ) =>
         {
             return Authorization::Allow;
@@ -226,9 +225,6 @@ fn authorize_exact_sql_writer(
                 database_operation,
                 Some(AuthorizedDatabaseOperation::Detach(expected))
                     if database_name.eq_ignore_ascii_case(expected)
-            ) || matches!(
-                database_operation,
-                Some(AuthorizedDatabaseOperation::Vacuum)
             ) =>
         {
             return Authorization::Allow;

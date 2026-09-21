@@ -623,7 +623,7 @@ impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::ports::Retriev
     }
 
     fn elapsed_micros(&self) -> u64 {
-        u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
+        tracedecay_runtime_core::tracedecay::saturating_duration_micros(self.started.elapsed())
     }
 }
 

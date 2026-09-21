@@ -16,13 +16,13 @@ use super::skill_usage::{
     SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
-use crate::ports::session_evidence::LcmGrepHit;
 use tracedecay_automation::analytics::ToolFamilySignal;
 use tracedecay_automation::managed_skills::validate_managed_skill_update;
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::Result;
+use tracedecay_lcm::LcmGrepHit;
 
-use super::config_error;
+use super::{config_error, normalized_non_empty};
 
 mod consolidation;
 
@@ -934,15 +934,6 @@ fn rejected_skill(proposal: &Value, reason: &str) -> Value {
         "proposal": proposal,
         "reason": reason,
     })
-}
-
-fn normalized_non_empty(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
 }
 
 #[cfg(test)]

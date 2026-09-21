@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -12,15 +11,6 @@ import tempfile
 
 
 RESOLVER = Path(__file__).with_name("resolve-release-source-profile.py")
-
-
-def load_resolver():
-    spec = importlib.util.spec_from_file_location("release_profile_resolver", RESOLVER)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"could not load {RESOLVER}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 @dataclass(frozen=True)
@@ -37,8 +27,22 @@ def run_fixture(manifest: str) -> FixtureResult:
         # The resolver reads the product package manifest, not the workspace
         # root: `crates/tracedecay/Cargo.toml` is where the feature table lives.
         product = source.joinpath("crates", "tracedecay")
-        product.mkdir(parents=True)
+        product.joinpath("src").mkdir(parents=True)
         product.joinpath("Cargo.toml").write_text(manifest, encoding="utf-8")
+        product.joinpath("src", "lib.rs").write_text("", encoding="utf-8")
+        # The resolver walks the resolved dependency graph with `cargo tree
+        # --locked`, so the fixture is a real workspace with a lockfile. It
+        # has no dependencies, so the lockfile resolves offline.
+        source.joinpath("Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/tracedecay"]\nresolver = "2"\n',
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["cargo", "generate-lockfile", "--offline"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+        )
         output = source / "github-output.txt"
         completed = subprocess.run(
             [
@@ -62,55 +66,48 @@ def run_fixture(manifest: str) -> FixtureResult:
 
 
 def main() -> int:
-    resolver = load_resolver()
-    modern_features = {
-        "production": [],
-        "hotpath": [],
-        "hotpath-alloc": [],
-        "hotpath-cpu": [],
-        "hotpath-mcp": [],
-    }
-    linux_features = resolver.production_release_features(
-        modern_features, "x86_64-unknown-linux-gnu"
-    )
-    if linux_features != ("production",):
-        raise SystemExit(f"unexpected Linux release features: {linux_features!r}")
+    production = run_fixture(
+        """[package]
+name = "tracedecay"
+version = "0.1.0"
+edition = "2024"
 
-    macos_features = resolver.production_release_features(
-        modern_features, "aarch64-apple-darwin"
+[features]
+default = ["production"]
+production = ["token-counting", "lite", "full"]
+token-counting = []
+lite = []
+full = []
+"""
     )
-    if macos_features != ("production",):
-        raise SystemExit(f"unexpected macOS release features: {macos_features!r}")
-
-    windows_features = resolver.production_release_features(
-        modern_features, "x86_64-pc-windows-msvc"
-    )
-    if windows_features != ("production",):
-        raise SystemExit(f"unexpected Windows release features: {windows_features!r}")
-
-    historical_production = resolver.production_release_features(
-        {"production": []}, None
-    )
-    if historical_production != ("production",):
+    if production.returncode != 0:
+        raise SystemExit(production.stderr)
+    if production.github_output != (
+        "profile=production\n"
+        "cargo_args=--no-default-features --features production\n"
+        "cargo_features=production\n"
+    ):
         raise SystemExit(
-            f"unexpected historical production features: {historical_production!r}"
+            f"unexpected production profile output: {production.github_output!r}"
         )
 
-    historical_macos = resolver.production_release_features(
-        {"production": []}, "aarch64-apple-darwin"
-    )
-    if historical_macos != ("production",):
-        raise SystemExit(
-            f"unexpected historical macOS features: {historical_macos!r}"
-        )
+    contaminated_production = run_fixture(
+        """[package]
+name = "tracedecay"
+version = "0.1.0"
+edition = "2024"
 
-    partial_hotpath = resolver.production_release_features(
-        {"production": [], "hotpath": []}, "x86_64-unknown-linux-gnu"
+[features]
+default = ["production"]
+production = ["token-counting", "lite", "full", "test-transport"]
+token-counting = []
+lite = []
+full = []
+test-transport = []
+"""
     )
-    if partial_hotpath != ("production",):
-        raise SystemExit(
-            f"unexpected partial-Hotpath production features: {partial_hotpath!r}"
-        )
+    if contaminated_production.returncode == 0:
+        raise SystemExit("production test-transport contamination was accepted")
 
     legacy = run_fixture(
         """[package]

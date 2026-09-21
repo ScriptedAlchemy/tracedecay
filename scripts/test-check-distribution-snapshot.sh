@@ -75,6 +75,11 @@ printf 'wrapper\n' >"$repo/dashboard/hermes-wrapper/fixture"
 printf 'bundle\n' >"$repo/dashboard/app-dist/fixture"
 printf '#!/usr/bin/env bash\n' >"$repo/scripts/run-session-temporal-benchmark.sh"
 
+# The product crate carries its own `tests/fixtures`, which occupies the path
+# the root asset of the same name is staged onto.
+mkdir -p -- "$repo/crates/tracedecay/tests/fixtures/crate_local"
+printf 'crate local\n' >"$repo/crates/tracedecay/tests/fixtures/crate_local/fixture"
+
 git -C "$repo" init -q
 git -C "$repo" config user.name "TraceDecay test"
 git -C "$repo" config user.email "test@tracedecay.local"
@@ -156,5 +161,15 @@ grep -Fxq "original readme" "$staged/crates/tracedecay/README.md" || {
   exit 1
 }
 grep -Fxq "mutated live readme" "$repo/README.md"
+
+product_fixtures="$staged/crates/tracedecay/tests/fixtures"
+[[ ! -e "$product_fixtures/crate_local" ]] || {
+  echo "crate-local content survived beside the staged root asset" >&2
+  exit 1
+}
+[[ -f "$product_fixtures/packaged_host_events/claude.json" ]] || {
+  echo "staged root asset is missing from the product package" >&2
+  exit 1
+}
 
 printf 'distribution staged-snapshot regression passed\n'

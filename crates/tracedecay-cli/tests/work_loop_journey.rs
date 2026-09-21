@@ -40,7 +40,6 @@
 //! actually owns: the forwarded argv, the instructions on stdin, the sealed
 //! terminal state, and the requested-versus-actual route.
 
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -98,32 +97,9 @@ fn lock_env() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Restores a process environment variable when the guard drops.
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        // The fixture holds the binary-wide environment lock for its whole
-        // life, so no other thread reads the environment while it is pinned.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
+#[path = "../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
+use isolated_profile::{EnvVarGuard, apply_isolated_profile_env, run_ok};
 
 /// A live daemon over a registered project under a throwaway profile, plus the
 /// credentials it published for its own HTTP application endpoint.
@@ -468,28 +444,8 @@ fn daemon_authority_path(profile_root: &Path) -> PathBuf {
 
 fn isolated(home: &Path, profile: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tracedecay"));
+    apply_isolated_profile_env(&mut command, home, profile);
     command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env(USER_DATA_DIR_ENV, profile)
-        .env(GLOBAL_DB_ENV, profile.join("global.db"))
-        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
-    command
-}
-
-fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
-    assert!(
-        output.status.success(),
-        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
 }
 
 fn wait_for_authority(daemon: &mut Child, path: &Path) -> Value {

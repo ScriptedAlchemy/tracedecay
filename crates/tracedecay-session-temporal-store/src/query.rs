@@ -57,6 +57,14 @@ pub(super) fn frontier_i64(frontier: u64, operation: &'static str) -> SessionSto
     i64::try_from(frontier).map_err(|error| storage(operation, error))
 }
 
+pub(super) fn decode_generation_i64(
+    value: i64,
+    operation: &'static str,
+) -> SessionStoreResult<SessionProjectionGenerationV1> {
+    let value = u64::try_from(value).map_err(|error| storage(operation, error))?;
+    SessionProjectionGenerationV1::new(value).map_err(SessionStoreError::from)
+}
+
 pub(super) fn encode_watermarks(
     watermarks: &SessionFrozenWatermarksV1,
     operation: &'static str,
@@ -128,10 +136,7 @@ pub(super) async fn read_active_generation(
         return Ok(None);
     };
     let value: i64 = row.get(0).map_err(|error| storage(operation, error))?;
-    let value = u64::try_from(value).map_err(|error| storage(operation, error))?;
-    SessionProjectionGenerationV1::new(value)
-        .map(Some)
-        .map_err(SessionStoreError::from)
+    decode_generation_i64(value, operation).map(Some)
 }
 
 pub(super) async fn require_active_generation(

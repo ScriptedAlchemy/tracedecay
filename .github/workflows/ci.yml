@@ -191,6 +191,23 @@ jobs:
           python3 scripts/test-rust-cache-lineage.py
           python3 scripts/check-rust-cache-lineage.py
 
+      # Packager unit tests. They do not need a release binary, so they run
+      # once here instead of once per release matrix target.
+      - name: Test release packagers
+        run: |
+          python3 scripts/test-check-packaged-lsp-bridge.py
+          python3 scripts/test-build-mcpb.py
+          python3 scripts/test-resolve-installed-binary.py
+          python3 scripts/test-check-packaged-mcp-stdio.py
+          python3 scripts/test-check-distribution-feature-wiring.py
+          python3 scripts/test-resolve-release-source-profile.py
+          python3 scripts/test-package-release-archive.py
+          python3 scripts/test-plan-release-recovery.py
+          python3 scripts/test-check-release-artifacts.py
+          bash scripts/test-check-distribution-clean-source.sh
+          bash scripts/test-check-distribution-snapshot.sh
+          bash scripts/test-check-distribution-reuse.sh
+
       # Release guards: drift, safety, installer, PR integrity, bundle check.
       # Pull requests only; the release PR itself is exempt because it is
       # the one change allowed to move the version authorities.
@@ -745,17 +762,11 @@ jobs:
       # `--tests` keeps the binaries in the dev-dependency graph the archive
       # is built from; a `--bins`-only build resolves 60 dependencies with
       # different features and compiles them a second time (see the Linux
-      # lane).
-      - name: Build workspace binaries and tests for the Windows test lane
+      # lane). The host-CLI example is the same `--workspace` resolution;
+      # a second cargo invocation would re-resolve it.
+      - name: Build workspace binaries, tests, and the host-CLI fixture
         shell: pwsh
-        run: cargo build --workspace --bins --tests --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
-
-      # `--workspace`, not `-p tracedecay-cli`: the package selection decides
-      # feature unification, and the narrower one recompiles the code-index
-      # and extraction crates in a second configuration (see the Linux lane).
-      - name: Build Windows host-CLI test fixture
-        shell: pwsh
-        run: cargo build --workspace --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
+        run: cargo build --workspace --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
       # The controlled-workload Hotpath parity helpers are provisioned and
       # verified by the `hotpath-parity` job. Building them here would put a
@@ -1046,6 +1057,11 @@ jobs:
           # The two lines above keep them in sync, which hides a type that
           # forks on the local feature while hotpath::io! expands on the backend.
           cargo check --workspace --all-targets --features hotpath/hotpath --locked
+
+      # One graph walk per push. The release resolver repeats it on the tag it
+      # builds, since a release is dispatched without waiting on this run.
+      - name: Check the production feature graph
+        run: python3 scripts/check-production-feature-profile.py
 
   # The configuration users actually receive. `scripts/resolve-release-source-profile.py`
   # resolves the release build to `--no-default-features --features production`

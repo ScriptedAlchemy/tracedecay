@@ -363,39 +363,6 @@ fn environment_override_value() -> Result<Option<String>, CodeIndexWorkerPlanErr
     }
 }
 
-/// Preview the worker status without constructing a pool or installing any
-/// process authority. `available_memory_bytes` must come from the caller's
-/// canonical resident-memory authority (`limit - used`), never a second
-/// estimator. Environment precedence and every typed refusal are identical to
-/// [`install_worker_plan`].
-pub fn preview_worker_plan(
-    configured: CodeIndexWorkerSelectionV1,
-    available_memory_bytes: u64,
-) -> Result<CodeIndexWorkerStatusV1, CodeIndexWorkerPlanErrorV1> {
-    let environment_override = environment_override_value()?;
-    preview_worker_plan_from(
-        configured,
-        detected_cores(),
-        available_memory_bytes,
-        environment_override.as_deref(),
-    )
-}
-
-fn preview_worker_plan_from(
-    configured: CodeIndexWorkerSelectionV1,
-    available_logical_cpus: usize,
-    available_memory_bytes: u64,
-    environment_override: Option<&str>,
-) -> Result<CodeIndexWorkerStatusV1, CodeIndexWorkerPlanErrorV1> {
-    worker_plan_from(
-        configured,
-        available_logical_cpus,
-        available_memory_bytes,
-        environment_override,
-    )
-    .map(CodeIndexWorkerPlanV1::status)
-}
-
 fn compare_installed_plan(
     existing: &CodeIndexWorkerPlanV1,
     requested: &CodeIndexWorkerPlanV1,

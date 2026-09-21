@@ -31,6 +31,7 @@ struct CachedDiagnostics {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DiagnosticsCacheRevision {
+    #[cfg(test)]
     WorkspaceChange(u64),
     Recovery(DiagnosticsFingerprint),
 }
@@ -100,25 +101,6 @@ impl DiagnosticsCache {
             .await
     }
 
-    /// Run diagnostics under the code index's worktree-change authority.
-    ///
-    /// A generation is exactly as fresh as the index used by search: hook
-    /// hints and Git metadata changes are observed immediately, while other
-    /// out-of-band edits are observed by the 30-second stat-signature ladder.
-    /// Until that ladder runs, diagnostics intentionally reuse the preceding
-    /// generation rather than deriving a second workspace-change authority.
-    pub async fn run_for_generation(
-        &self,
-        project_root: &Path,
-        scope: &Scope,
-        generation: u64,
-    ) -> Result<Vec<Diagnostic>> {
-        self.run_with_generation(project_root, scope, generation, || {
-            run_all(project_root, scope)
-        })
-        .await
-    }
-
     #[hotpath::measure(label = "compile_diagnostics.cache.run", future = true)]
     pub(crate) async fn run_with<F, Fut>(
         &self,
@@ -157,6 +139,7 @@ impl DiagnosticsCache {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn run_with_generation<F, Fut>(
         &self,
         project_root: &Path,

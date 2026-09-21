@@ -7,6 +7,9 @@ use tracedecay_session_memory::user_config::UserConfig;
 mod automation;
 #[cfg(test)]
 mod host_cli_fixture;
+#[cfg(test)]
+#[path = "../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
 pub(crate) use automation::CodexAutomationInstall;
 #[cfg(test)]
 use automation::broker_codex_daemon_automation_project;
@@ -1809,7 +1812,6 @@ pub(crate) async fn handle_uninstall_command(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
     use std::sync::{
         Arc,
@@ -2427,27 +2429,7 @@ mod tests {
         }
     }
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(previous) => unsafe { std::env::set_var(self.key, previous) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use super::isolated_profile::EnvVarGuard;
 
     /// Keep Kiro lifecycle tests on the native `kiro-cli` route. The compiled
     /// fixture is a real executable so Windows runners do not rename a shell

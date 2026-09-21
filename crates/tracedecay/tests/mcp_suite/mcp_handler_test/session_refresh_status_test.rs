@@ -4,14 +4,14 @@
 //! assertions name the envelope a host reads, not scheduler or store calls.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
+
+use crate::common::fixture::git_run as git;
 
 use serde_json::{Value, json};
 
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
-use crate::common;
 use crate::fixture;
 use crate::support::{GLOBAL_DB_ENV_LOCK, HomeEnvGuard, test_temp_dir};
 
@@ -40,15 +40,6 @@ fn refresh_arguments(session_id: &str, handle: Option<&str>) -> Value {
         arguments["handle"] = json!(handle);
     }
     arguments
-}
-
-fn git(project: &Path, args: &[&str]) {
-    let status = Command::new(common::git_program())
-        .args(args)
-        .current_dir(project)
-        .status()
-        .unwrap_or_else(|error| panic!("git {args:?} failed to start: {error}"));
-    assert!(status.success(), "git {args:?} failed");
 }
 
 async fn call_tool(

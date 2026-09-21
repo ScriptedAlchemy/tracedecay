@@ -498,35 +498,6 @@ impl RegisteredGlobalDb {
     }
 
     #[hotpath::skip]
-    pub async fn lcm_payload_health_detail(
-        &self,
-        storage_root: &Path,
-        provider: &str,
-        session_id: Option<&str>,
-        deep: bool,
-        sample_limit: usize,
-        cfg: &LcmGcConfig,
-    ) -> Result<tracedecay_lcm::query::PayloadHealthDetail, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_payload_health_detail(storage_root, provider, session_id, deep, sample_limit, cfg)
-            .await
-    }
-
-    #[hotpath::skip]
-    pub async fn lcm_preview_payload_gc(
-        &self,
-        storage_root: &Path,
-        provider: &str,
-        session_id: Option<&str>,
-        cfg: &LcmGcConfig,
-        now: i64,
-    ) -> Result<LcmGcReport, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_preview_payload_gc(storage_root, provider, session_id, cfg, now)
-            .await
-    }
-
-    #[hotpath::skip]
     pub async fn lcm_run_payload_gc_apply(
         &self,
         storage_root: &Path,

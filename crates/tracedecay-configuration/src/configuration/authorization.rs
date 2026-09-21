@@ -135,7 +135,7 @@ mod tests {
     use tracedecay_domain::configuration::{
         ConfigurationGrantReceiptId, ConfigurationMutationGrantReceiptV1,
     };
-    use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest};
+    use tracedecay_domain::{AccessPolicyDigest, ActorId};
     use tracedecay_policy::configuration::{
         ConfigurationMutationGrantStateV1, ConfigurationMutationPermissionV1,
     };
@@ -155,17 +155,9 @@ mod tests {
         }
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn policy_digest(byte: char) -> AccessPolicyDigest {
         AccessPolicyDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()

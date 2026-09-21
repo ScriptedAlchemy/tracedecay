@@ -23,8 +23,7 @@ use crate::retrieval::{
 };
 use crate::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, CancellationSignal,
-    CancellationStage, EffectReceipt, LegalAction, RequestAdmission, RequestContext,
-    RetryDirective, SafeDiagnostic,
+    CancellationStage, EffectReceipt, LegalAction, RequestContext, RetryDirective, SafeDiagnostic,
 };
 
 pub type RetainedSurfaceExecutionFutureV1<'a> = Pin<
@@ -219,7 +218,7 @@ impl<'a> RetainedSurfaceServiceV1<'a> {
         observed_at: UtcMicros,
         request: &RetainedSurfaceRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, ApplicationProblem> {
-        admit(context, observed_at)?;
+        ApplicationProblem::ensure_admitted(context, observed_at)?;
         if cancellation.context().token_id != context.cancellation().token_id {
             return Err(ApplicationProblem::not_found_or_not_authorized(
                 RetryDirective::Never,
@@ -515,14 +514,6 @@ pub const fn retained_surface_operation_is_effect(operation: RetainedSurfaceOper
     )
 }
 
-fn admit(context: &RequestContext, observed_at: UtcMicros) -> Result<(), ApplicationProblem> {
-    match context.admission_at(observed_at) {
-        RequestAdmission::Admitted => Ok(()),
-        RequestAdmission::Cancelled => Err(ApplicationProblem::cancelled_before_admission()),
-        RequestAdmission::TimedOut => Err(ApplicationProblem::timed_out_before_admission()),
-    }
-}
-
 /// Canonical semantic problem projection for a retained runtime failure.
 pub fn retained_surface_execution_problem(
     error: RetainedSurfaceExecutionErrorV1,
@@ -532,25 +523,17 @@ pub fn retained_surface_execution_problem(
         RetainedSurfaceExecutionErrorV1::StructuralRefusal(refusal) => {
             structural_refusal_problem(refusal)
         }
-        RetainedSurfaceExecutionErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
-            diagnostic: diagnostic(
-                "application.retained.invalid-request",
-                "The retained operation request is invalid.",
-            ),
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        RetainedSurfaceExecutionErrorV1::InvalidRequest => ApplicationProblem::invalid_request(
+            "application.retained.invalid-request",
+            "The retained operation request is invalid.",
+        ),
         RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        RetainedSurfaceExecutionErrorV1::Conflict => ApplicationProblem::Conflict {
-            diagnostic: diagnostic(
-                "application.retained.conflict",
-                "The retained operation conflicts with current state.",
-            ),
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        RetainedSurfaceExecutionErrorV1::Conflict => ApplicationProblem::conflict(
+            "application.retained.conflict",
+            "The retained operation conflicts with current state.",
+        ),
         RetainedSurfaceExecutionErrorV1::PartialEffect {
             reason_code,
             committed_receipt,
@@ -576,14 +559,10 @@ pub fn retained_surface_execution_problem(
             retry: RetryDirective::Never,
             legal_actions: vec![LegalAction::CorrectRequest],
         },
-        RetainedSurfaceExecutionErrorV1::Saturated => ApplicationProblem::Saturated {
-            diagnostic: diagnostic(
-                "application.retained.saturated",
-                "The retained authority cannot admit more work right now.",
-            ),
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        RetainedSurfaceExecutionErrorV1::Saturated => ApplicationProblem::saturated(
+            "application.retained.saturated",
+            "The retained authority cannot admit more work right now.",
+        ),
         // Structural budget refusal uses InvalidRequest so the wire kind stays
         // unchanged and non-retryable. Callers must narrow scope or limit.
         RetainedSurfaceExecutionErrorV1::Unavailable { detail } => {
@@ -753,11 +732,7 @@ fn structural_refusal_problem(refusal: RetainedStructuralRefusalV1) -> Applicati
             "The authorized session scope exceeds the cursor manifest byte limit. Narrow the session scope.",
         ),
     };
-    ApplicationProblem::InvalidRequest {
-        diagnostic,
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
+    ApplicationProblem::invalid_request(diagnostic.code, diagnostic.message)
 }
 
 fn diagnostic(code: &'static str, message: &'static str) -> SafeDiagnostic {
@@ -779,7 +754,7 @@ mod tests {
         CapabilityGrantSnapshot, Deadline, EffectTermination, IdempotencyKey, ProblemTerminality,
         RequestId, ResolvedScope,
     };
-    use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_domain::{ActorId, ProjectId, RepositoryId, WorktreeId};
     use tracedecay_tool_catalog::EffectClass;
 
     struct ErrorMemoryPort(RetainedSurfaceExecutionErrorV1);
@@ -799,18 +774,9 @@ mod tests {
         }
     }
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture identity is valid")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
-            .expect("fixture digest is valid")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn scope() -> ResolvedScope {
         ResolvedScope::new(

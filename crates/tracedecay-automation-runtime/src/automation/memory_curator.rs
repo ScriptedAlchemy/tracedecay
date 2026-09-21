@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
     ActorId, Confidence, FactEventId, FactId, FactOwnerV1, ManifestDigest, canonical_sha256,
@@ -20,7 +19,7 @@ use super::lifecycle::{
     failed_backend_fallback_report,
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::ports::project_runtime::{AutomationProjectContext, ProfileRuntime};
+use crate::ports::project_runtime::AutomationProjectContext;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_policy::{
@@ -87,7 +86,7 @@ pub async fn run_memory_curator_with_backend(
 ) -> AutomationRunResult<MemoryCuratorAutomationRun> {
     let sessions_db = super::runner::project_automation_sessions(cg);
     run_memory_curator_for_store_with_publication(
-        MemoryCuratorStore::Project { cg, sessions_db },
+        MemoryCuratorStore { cg, sessions_db },
         config,
         configuration_revision_id,
         backend,
@@ -114,7 +113,7 @@ pub async fn run_memory_curator_with_backend_for_retained_settlement(
     let settlement_guard = AutomationRunSettlementGuard::new();
     let sessions_db = super::runner::project_automation_sessions(cg);
     let result = run_memory_curator_for_store_with_publication(
-        MemoryCuratorStore::Project { cg, sessions_db },
+        MemoryCuratorStore { cg, sessions_db },
         config,
         configuration_revision_id,
         backend,
@@ -129,71 +128,24 @@ pub async fn run_memory_curator_with_backend_for_retained_settlement(
     RetainedAutomationRun::new(result, settlement_guard)
 }
 
-/// Runs autonomous curation against profile-level user memory.
-pub(crate) async fn run_user_memory_curator_with_backend(
-    profile_root: &std::path::Path,
-    session_registry: Arc<dyn ProfileRuntime>,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: MemoryCuratorAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> AutomationRunResult<MemoryCuratorAutomationRun> {
-    let sessions_db = session_registry.profile_sessions().await?;
-    run_memory_curator_for_store_with_publication(
-        MemoryCuratorStore::User {
-            profile_root,
-            runtime: session_registry.as_ref(),
-            sessions_db,
-        },
-        config,
-        configuration_revision_id,
-        backend,
-        options,
-        run_control,
-        AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
-        },
-    )
-    .await
-}
-
-enum MemoryCuratorStore<'a> {
-    Project {
-        cg: &'a AutomationProjectContext,
-        sessions_db: RegisteredGlobalDbLeaseV1,
-    },
-    User {
-        profile_root: &'a std::path::Path,
-        runtime: &'a dyn ProfileRuntime,
-        sessions_db: RegisteredGlobalDbLeaseV1,
-    },
+struct MemoryCuratorStore<'a> {
+    cg: &'a AutomationProjectContext,
+    sessions_db: RegisteredGlobalDbLeaseV1,
 }
 
 impl MemoryCuratorStore<'_> {
     fn dashboard_root(&self) -> std::path::PathBuf {
-        match self {
-            Self::Project { cg, .. } => cg.dashboard_root.clone(),
-            Self::User { profile_root, .. } => super::runner::user_automation_root(profile_root),
-        }
+        self.cg.dashboard_root.clone()
     }
 
     fn sessions_db(&self) -> RegisteredGlobalDbLeaseV1 {
-        match self {
-            Self::Project { sessions_db, .. } | Self::User { sessions_db, .. } => {
-                sessions_db.clone()
-            }
-        }
+        self.sessions_db.clone()
     }
 
     fn owner(&self) -> Result<FactOwnerV1> {
-        match self {
-            Self::Project { cg, .. } => Ok(FactOwnerV1::Project {
-                project_id: cg.project_id.clone(),
-            }),
-            Self::User { .. } => Ok(FactOwnerV1::Profile),
-        }
+        Ok(FactOwnerV1::Project {
+            project_id: self.cg.project_id.clone(),
+        })
     }
 
     fn curation_authority(
@@ -201,27 +153,20 @@ impl MemoryCuratorStore<'_> {
         configuration_revision_id: &ConfigurationRevisionId,
     ) -> Result<CurationApplyAuthorityV1> {
         let actor_id = ActorId::new("automation:memory-curator").map_err(memory_contract_error)?;
-        let (project_id, profile_id) = match self {
-            Self::Project { cg, .. } => (Some(cg.project_id.clone()), cg.profile_id.clone()),
-            Self::User { runtime, .. } => (None, runtime.profile_id().clone()),
-        };
         Ok(CurationApplyAuthorityV1 {
             actor_id,
-            project_id,
-            profile_id,
+            project_id: Some(self.cg.project_id.clone()),
+            profile_id: self.cg.profile_id.clone(),
             configuration_revision_id: configuration_revision_id.clone(),
         })
     }
 
-    async fn open_memory_database(&self) -> Result<tracedecay_runtime_core::db::Database> {
-        match self {
-            Self::Project { cg, .. } => Ok(cg.project_memory_database.clone()),
-            Self::User { runtime, .. } => runtime.open_user_memory_db().await,
-        }
+    fn open_memory_database(&self) -> tracedecay_runtime_core::db::Database {
+        self.cg.project_memory_database.clone()
     }
 }
 
-// The single funnel every curator entry point (project, user, retained
+// The single funnel every curator entry point (project and retained
 // settlement) flows through: one static run-lifetime span in the futures lane
 // so suspension and cancellation of long runs stay visible.
 #[hotpath::measure(future = true, label = "automation.run.memory_curator")]
@@ -277,7 +222,7 @@ async fn run_memory_curator_for_store_with_publication(
     }
 
     let owner = store.owner()?;
-    let database = store.open_memory_database().await?;
+    let database = store.open_memory_database();
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).map_err(
         |error| TraceDecayError::Config {
             message: format!("initialize memory curator authority: {error}"),

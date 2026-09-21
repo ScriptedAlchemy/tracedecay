@@ -741,7 +741,8 @@ pub(crate) fn host_home_override(home: &Path, env_key: &str, default_relative: &
 /// On Windows the returned path uses forward slashes so it can be safely
 /// embedded in JSON hook commands without backslash-escaping issues.
 pub fn which_tracedecay() -> Option<String> {
-    which_tracedecay_path().and_then(|path| path.to_str().map(normalize_path_separators))
+    which_tracedecay_path()
+        .and_then(|path| path.to_str().map(tracedecay_domain::forward_slash_text))
 }
 
 /// Finds the tracedecay binary without converting its platform-native path.
@@ -764,7 +765,7 @@ fn which_tracedecay_from(
     cargo_target_dir: Option<&Path>,
 ) -> Option<String> {
     which_tracedecay_path_from(current_exe, path_var, cargo_target_dir)
-        .and_then(|path| path.to_str().map(normalize_path_separators))
+        .and_then(|path| path.to_str().map(tracedecay_domain::forward_slash_text))
 }
 
 fn which_tracedecay_path_from(
@@ -860,12 +861,6 @@ fn path_component_eq(actual: &std::ffi::OsStr, expected: impl AsRef<std::ffi::Os
         (Some(actual), Some(expected)) => actual.eq_ignore_ascii_case(expected),
         _ => actual == expected,
     }
-}
-
-/// Replace backslashes with forward slashes so paths work in JSON/shell
-/// contexts on Windows. No-op on Unix where paths already use `/`.
-fn normalize_path_separators(path: &str) -> String {
-    path.replace('\\', "/")
 }
 
 /// Remove explicitly retired sibling plugin trees.
@@ -967,7 +962,7 @@ pub(crate) fn hook_command(tracedecay_bin: &str, subcommand: &str) -> String {
 
 fn hook_command_for_platform(tracedecay_bin: &str, subcommand: &str, windows: bool) -> String {
     let quoted = if windows {
-        quote_windows_command_arg(&normalize_path_separators(tracedecay_bin))
+        quote_windows_command_arg(&tracedecay_domain::forward_slash_text(tracedecay_bin))
     } else {
         quote_posix_command_arg(tracedecay_bin)
     };
