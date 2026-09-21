@@ -207,32 +207,19 @@ fn extract_clone_body(
         .body
         .end_byte()
         .saturating_sub(syntax.body.start_byte()) as u64;
-    let conservative = if body_bytes > MAX_AUTOMATIC_CLONE_BODY_BYTES_V1 {
-        ConservativeFields {
-            tokens: Arc::from([]),
-            issues: vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound],
-            token_count: 0,
-            status: CloneBodyTokenizationStatusV1::Partial,
-            eligibility: oversized_clone_body(),
-        }
+    let (conservative, rename) = if body_bytes > MAX_AUTOMATIC_CLONE_BODY_BYTES_V1 {
+        (
+            ConservativeFields {
+                tokens: Arc::from([]),
+                issues: vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound],
+                token_count: 0,
+                status: CloneBodyTokenizationStatusV1::Partial,
+                eligibility: oversized_clone_body(),
+            },
+            oversized_rename_fields(),
+        )
     } else {
-        conservative_fields(syntax, source, language)
-    };
-    // An oversized body keeps its count and its typed exclusion but no
-    // stream: the streams are what would not fit a page, and rename
-    // normalization has nothing to normalize for.
-    let rename = if matches!(
-        conservative.eligibility,
-        CloneBodyEligibilityV1::ExcludedTooLarge { .. }
-    ) {
-        RenameFields {
-            revision: None,
-            status: CloneBodyRenameStatusV1::Partial,
-            issues: Vec::new(),
-            tokens: None,
-        }
-    } else {
-        rename_fields(syntax, source, language)
+        tokenize_clone_body(syntax, source, language)
     };
     ExtractedCloneBodyV1 {
         logical_path: logical_path.to_owned(),
@@ -264,16 +251,30 @@ struct ConservativeFields {
     eligibility: CloneBodyEligibilityV1,
 }
 
-fn conservative_fields(
+/// Emit both normalization streams from one traversal.
+///
+/// The two streams are the same walk of the same body: whether a token is
+/// emitted at all is decided by the source text, never by a replacement, so
+/// they agree position for position and differ only in the `text` of a
+/// renamed identifier. Over this repository that is 778k of 17.25M tokens, so
+/// walking the tree a second time to rebuild the other 96% was the larger
+/// half of the rename cost. A body whose normalization renames nothing shares
+/// the conservative stream outright.
+fn tokenize_clone_body(
     syntax: CallableSyntax<'_>,
     source: &str,
     language: &str,
-) -> ConservativeFields {
+) -> (ConservativeFields, RenameFields) {
+    let normalization = rename::normalize(syntax, source, language);
     let mut emitter = TokenEmitter {
         source: source.as_bytes(),
         language,
-        replacements: None,
+        replacements: normalization
+            .replacements
+            .as_ref()
+            .filter(|replacements| !replacements.is_empty()),
         tokens: Vec::new(),
+        renamed: Vec::new(),
         issues: Vec::new(),
         token_count: 0,
     };
@@ -306,18 +307,42 @@ fn conservative_fields(
     } else {
         CloneBodyEligibilityV1::Eligible
     };
-    let tokens = if matches!(eligibility, CloneBodyEligibilityV1::ExcludedTooLarge { .. }) {
+    // An oversized body keeps its count and its typed exclusion but no
+    // stream: the streams are what would not fit a page, and rename
+    // normalization has nothing to normalize for.
+    let oversized = matches!(eligibility, CloneBodyEligibilityV1::ExcludedTooLarge { .. });
+    let tokens: Arc<[ConservativeCloneTokenV1]> = if oversized {
         Arc::from([])
     } else {
         emitter.tokens.into()
     };
-    ConservativeFields {
-        tokens,
-        issues: emitter.issues,
-        token_count: emitter.token_count,
-        status: tokenization_status,
-        eligibility,
-    }
+    let rename = if oversized {
+        oversized_rename_fields()
+    } else {
+        RenameFields {
+            revision: (normalization.status != CloneBodyRenameStatusV1::UnsupportedLanguage)
+                .then_some(RENAME_CLONE_NORMALIZATION_REVISION_V1),
+            status: normalization.status,
+            issues: normalization.issues,
+            tokens: normalization.replacements.is_some().then(|| {
+                if emitter.replacements.is_some() {
+                    emitter.renamed.into()
+                } else {
+                    Arc::clone(&tokens)
+                }
+            }),
+        }
+    };
+    (
+        ConservativeFields {
+            tokens,
+            issues: emitter.issues,
+            token_count: emitter.token_count,
+            status: tokenization_status,
+            eligibility,
+        },
+        rename,
+    )
 }
 
 const fn oversized_clone_body() -> CloneBodyEligibilityV1 {
@@ -334,44 +359,24 @@ struct RenameFields {
     tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
 }
 
-fn rename_fields(syntax: CallableSyntax<'_>, source: &str, language: &str) -> RenameFields {
-    let normalization = rename::normalize(syntax, source, language);
-    let tokens = normalization
-        .replacements
-        .as_ref()
-        .map(|replacements| rename_token_stream(syntax.body, source, language, replacements));
+fn oversized_rename_fields() -> RenameFields {
     RenameFields {
-        revision: (normalization.status != CloneBodyRenameStatusV1::UnsupportedLanguage)
-            .then_some(RENAME_CLONE_NORMALIZATION_REVISION_V1),
-        status: normalization.status,
-        issues: normalization.issues,
-        tokens,
-    }
-}
-
-fn rename_token_stream(
-    body: TreeSitterNode<'_>,
-    source: &str,
-    language: &str,
-    replacements: &HashMap<(usize, usize), String>,
-) -> Arc<[ConservativeCloneTokenV1]> {
-    let mut emitter = TokenEmitter {
-        source: source.as_bytes(),
-        language,
-        replacements: Some(replacements),
-        tokens: Vec::new(),
+        revision: None,
+        status: CloneBodyRenameStatusV1::Partial,
         issues: Vec::new(),
-        token_count: 0,
-    };
-    emitter.emit(body);
-    emitter.tokens.into()
+        tokens: None,
+    }
 }
 
 struct TokenEmitter<'a> {
     source: &'a [u8],
     language: &'a str,
+    /// Present only when normalization renames at least one identifier. When
+    /// it is absent `renamed` stays empty and the caller shares the
+    /// conservative stream.
     replacements: Option<&'a HashMap<(usize, usize), String>>,
     tokens: Vec<ConservativeCloneTokenV1>,
+    renamed: Vec<ConservativeCloneTokenV1>,
     issues: Vec<CloneBodyTokenizationIssueV1>,
     token_count: u32,
 }
@@ -387,7 +392,7 @@ impl<'a> TokenEmitter<'a> {
         }
 
         if node.is_named() {
-            self.tokens.push(ConservativeCloneTokenV1::StructureStart {
+            self.push(ConservativeCloneTokenV1::StructureStart {
                 syntax_kind: Cow::Borrowed(node.kind()),
             });
         }
@@ -401,10 +406,17 @@ impl<'a> TokenEmitter<'a> {
             }
         }
         if node.is_named() {
-            self.tokens.push(ConservativeCloneTokenV1::StructureEnd {
+            self.push(ConservativeCloneTokenV1::StructureEnd {
                 syntax_kind: Cow::Borrowed(node.kind()),
             });
         }
+    }
+
+    fn push(&mut self, token: ConservativeCloneTokenV1) {
+        if self.replacements.is_some() {
+            self.renamed.push(token.clone());
+        }
+        self.tokens.push(token);
     }
 
     fn emit_leaf(&mut self, node: TreeSitterNode<'_>) {
@@ -419,12 +431,17 @@ impl<'a> TokenEmitter<'a> {
         {
             return;
         }
+        let syntax_kind = Cow::Borrowed(node.kind());
+        if let Some(replacements) = self.replacements {
+            let replacement = replacements.get(&(node.start_byte(), node.end_byte()));
+            self.renamed.push(ConservativeCloneTokenV1::Syntax {
+                syntax_kind: syntax_kind.clone(),
+                text: replacement.map_or_else(|| text.to_owned(), Clone::clone),
+            });
+        }
         self.tokens.push(ConservativeCloneTokenV1::Syntax {
-            syntax_kind: Cow::Borrowed(node.kind()),
-            text: self
-                .replacements
-                .and_then(|replacements| replacements.get(&(node.start_byte(), node.end_byte())))
-                .map_or_else(|| text.to_owned(), Clone::clone),
+            syntax_kind,
+            text: text.to_owned(),
         });
         self.token_count = self.token_count.saturating_add(1);
     }
