@@ -3998,14 +3998,20 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     fs::create_dir_all(project_root.join("src")).unwrap();
-    fs::write(
-        project_root.join("src/lib.rs"),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../tracedecay-session-memory/src/monitor_ring.rs"
-        )),
-    )
-    .unwrap();
+    let source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tracedecay-session-memory/src/monitor_ring.rs"
+    ));
+    let line_of = |needle: &str| {
+        source
+            .lines()
+            .position(|line| line.contains(needle))
+            .map(|index| index as u64 + 1)
+            .unwrap_or_else(|| panic!("fixture lost the line containing {needle:?}"))
+    };
+    let literal_line = line_of("\"monitor.mmap\"");
+    let write_line = line_of("self.mmap = unsafe");
+    fs::write(project_root.join("src/lib.rs"), source).unwrap();
     let host = init_test_project(&project_root).await;
 
     let result = handle_tool_call(
@@ -4025,10 +4031,13 @@ async fn field_sites_ignores_field_text_in_real_rust_literals() {
     assert!(
         output["read_sites"]
             .as_array()
-            .is_some_and(|sites| sites.iter().all(|site| site["line"] != 38)),
+            .is_some_and(|sites| sites.iter().all(|site| site["line"] != literal_line)),
         "string literal was reported as a field site: {output}"
     );
-    assert_eq!(output["write_sites"][0]["line"], 256, "payload: {output}");
+    assert_eq!(
+        output["write_sites"][0]["line"], write_line,
+        "payload: {output}"
+    );
 }
 
 fn field_site(line: u64, enclosing: &str, snippet: &str) -> Value {
