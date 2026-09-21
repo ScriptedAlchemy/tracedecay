@@ -987,8 +987,47 @@ async fn cancellation_at_completion_precommit_rolls_back_activation_and_terminal
     );
 }
 
+/// Active-generation rows in `table` that the candidate generation is missing.
+async fn rows_missing_from_candidate(
+    transaction: &impl QueryExecutor,
+    table: &str,
+    key: &str,
+    session_id: &str,
+    active: i64,
+    candidate: i64,
+) -> i64 {
+    let sql = format!(
+        "SELECT COUNT(*) FROM {table} source
+         WHERE source.session_id = ?1 AND source.generation = ?2
+           AND NOT EXISTS (
+               SELECT 1 FROM {table} copied
+               WHERE copied.session_id = ?1 AND copied.generation = ?3
+                 AND copied.{key} = source.{key}
+           )"
+    );
+    let mut rows = transaction
+        .query(&sql, params![session_id, active, candidate])
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+async fn generation_row_count(
+    transaction: &impl QueryExecutor,
+    table: &str,
+    session_id: &str,
+    generation: i64,
+) -> i64 {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1 AND generation = ?2");
+    let mut rows = transaction
+        .query(&sql, params![session_id, generation])
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
 #[tokio::test]
-async fn cancellation_during_active_generation_seed_rolls_back_copied_rows() {
+async fn cancelled_active_generation_seed_resumes_without_losing_rows() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1058,6 +1097,7 @@ async fn cancellation_during_active_generation_seed_rolls_back_copied_rows() {
         .unwrap()
         .unwrap();
     let candidate_generation = i64::try_from(batch.generation().value()).unwrap();
+    let active_generation = i64::try_from(batch.watermarks().active_generation().value()).unwrap();
     let error = store
         .persist_session_refresh_projection_batch_controlled(
             progress,
@@ -1074,19 +1114,30 @@ async fn cancellation_during_active_generation_seed_rolls_back_copied_rows() {
         .registered_database(HostAdmissionScope::Profile)
         .unwrap();
     let transaction = database.begin_write_transaction().await.unwrap();
-    let mut rows = transaction
-        .query(
-            "SELECT COUNT(*) FROM session_turns
-             WHERE session_id = ?1 AND generation = ?2",
-            params![session_id.as_str(), candidate_generation],
+    assert!(
+        generation_row_count(
+            &transaction,
+            "session_turns",
+            session_id.as_str(),
+            candidate_generation,
         )
         .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        0
+            > 0,
+        "the cancelled seed must leave its committed pages durable"
     );
-    drop(rows);
+    assert!(
+        rows_missing_from_candidate(
+            &transaction,
+            "session_occurrences",
+            "occurrence_id",
+            session_id.as_str(),
+            active_generation,
+            candidate_generation,
+        )
+        .await
+            > 0,
+        "the cancelled seed must stop before it copied every table"
+    );
     drop(transaction);
     assert_eq!(
         store
@@ -1097,6 +1148,52 @@ async fn cancellation_during_active_generation_seed_rolls_back_copied_rows() {
             .restart_state(),
         SessionRefreshRestartStateV1::BeginProjection
     );
+
+    let recovery = store
+        .session_refresh_recovery(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (progress, batch) = store
+        .materialize_session_temporal_refresh_batch_for_test(&recovery)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        i64::try_from(batch.generation().value()).unwrap(),
+        candidate_generation,
+        "a resumed pass must continue the same candidate generation"
+    );
+    store
+        .persist_session_refresh_projection_batch(progress, batch)
+        .await
+        .unwrap();
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    for (table, key) in [
+        ("session_turns", "turn_id"),
+        ("session_occurrences", "occurrence_id"),
+    ] {
+        assert!(
+            generation_row_count(&transaction, table, session_id.as_str(), active_generation).await
+                > 0,
+            "{table}: the fixture must seed the active generation"
+        );
+        assert_eq!(
+            rows_missing_from_candidate(
+                &transaction,
+                table,
+                key,
+                session_id.as_str(),
+                active_generation,
+                candidate_generation,
+            )
+            .await,
+            0,
+            "{table}: a resumed seed must copy every active row"
+        );
+    }
+    drop(transaction);
 }
 
 #[tokio::test]
