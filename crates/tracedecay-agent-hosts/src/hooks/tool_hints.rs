@@ -576,7 +576,7 @@ impl ToolHintDedupe {
 
     /// Loads the dedupe state from `path`, tolerating a missing file (empty
     /// state) and resetting when the persisted history exceeds
-    /// [`MAX_PERSISTED_HINT_ENTRIES`].
+    /// `MAX_PERSISTED_HINT_ENTRIES`.
     pub fn load_or_default(path: &Path) -> Self {
         match Self::load(path) {
             Ok(loaded) if loaded.persisted_len() <= MAX_PERSISTED_HINT_ENTRIES => loaded,

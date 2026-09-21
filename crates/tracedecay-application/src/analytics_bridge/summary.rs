@@ -583,7 +583,7 @@ impl HookAnalyticsRows {
 /// filtering. Shared with the `tracedecay analytics` CLI.
 ///
 /// Reads only the trailing [`HOOK_ANALYTICS_WINDOW_ROWS`] rows of each file;
-/// see [`HookAnalyticsRows::window_payload`] for the caption callers must
+/// see `HookAnalyticsRows::window_payload` for the caption callers must
 /// surface alongside any derived figure.
 pub fn read_hook_analytics_rows_at(
     store_root: Option<&std::path::Path>,

@@ -141,7 +141,7 @@ async fn call_skill_view(server: &Arc<McpServer>, id: i64, arguments: Value) -> 
     response_with_id(&responses, json!(id))
 }
 
-fn successful_text<'a>(response: &'a Value) -> &'a str {
+fn successful_text(response: &Value) -> &str {
     assert!(
         response.get("error").is_none(),
         "tracedecay_skill_view failed: {response}"

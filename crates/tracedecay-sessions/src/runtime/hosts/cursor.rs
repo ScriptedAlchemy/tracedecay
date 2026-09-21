@@ -873,6 +873,17 @@ pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session
     .await
 }
 
+fn retryable_cursor_conflict(error: &TranscriptIngestError) -> bool {
+    matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            reason: "cursor_conflict",
+            retryable: true,
+            ..
+        }
+    )
+}
+
 #[hotpath::measure(label = "sessions.hosts.cursor.sweep_admit", future = true)]
 async fn admit_cursor_sweep_observations_with_session_ids(
     source: &CursorSweepSource,
@@ -911,16 +922,28 @@ async fn admit_cursor_sweep_observations_with_session_ids(
             &path,
             matches!(&scope, ObservationScopeV1::Profile),
         );
-        let progress = admit_cursor_jsonl_observations(
-            &parent_session_id,
-            &path,
-            &context,
-            admission,
-            &scope,
-            budget.remaining(),
-            cancellation,
-        )
-        .await?;
+        let admit_file = || {
+            admit_cursor_jsonl_observations(
+                &parent_session_id,
+                &path,
+                &context,
+                admission,
+                &scope,
+                budget.remaining(),
+                cancellation,
+            )
+        };
+        // A lost compare-and-swap fails this file before any later file is
+        // scanned. One rescan starts from the peer's durable cursor. If that
+        // also loses, the file's cursor is unchanged and the next pass retries
+        // it. Do not fail the rest of the sweep.
+        let progress = match admit_file().await {
+            Err(error) if retryable_cursor_conflict(&error) => match admit_file().await {
+                Err(error) if retryable_cursor_conflict(&error) => continue,
+                other => other?,
+            },
+            other => other?,
+        };
         admitted.record(&progress);
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
@@ -1007,7 +1030,7 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 /// before a project was indexed could never ingest. This source sweeps
 /// `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` for the slug that
 /// encodes `project_root`, feeding every file through the same
-/// [`parse_cursor_jsonl`] parser and (path-keyed) `parse_offsets` cursors as
+/// `parse_cursor_jsonl` parser and (path-keyed) `parse_offsets` cursors as
 /// the hook path, files either path has already ingested are byte-offset
 /// no-ops for the other, so sweep and hooks never double-ingest.
 pub struct CursorSweepSource {

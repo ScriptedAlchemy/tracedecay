@@ -23,7 +23,7 @@
 //!   missing or unreadable executable is a typed `spec` + `unreadable`
 //!   component, not a hasher error. Pointing the backend at a different or
 //!   upgraded executable is a backend change even when no setting moved.
-//! * the **protocol revision**, [`AGENT_BACKEND_PROTOCOL_REVISION`], our own
+//! * the **protocol revision**, `AGENT_BACKEND_PROTOCOL_REVISION`, our own
 //!   side of the transport contract. The app-server handshake, framing, and
 //!   process lifetime are ours, so shipping a transport fix is a backend
 //!   change. Without this component a suppression recorded by a broken build

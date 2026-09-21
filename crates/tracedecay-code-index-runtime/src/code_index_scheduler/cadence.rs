@@ -254,7 +254,7 @@ pub struct CodeIndexCadenceReadModelV1 {
 
 /// Bounded ring of recent event-to-ready receipts.
 ///
-/// Capacity is at least [`P99_MINIMUM_SAMPLES`] so a retained population can
+/// Capacity is at least `P99_MINIMUM_SAMPLES` so a retained population can
 /// actually reach p99 eligibility; a shorter ring would make p99 permanently
 /// unavailable by construction.
 #[derive(Debug, Default)]

@@ -4,7 +4,8 @@
 //! Callers must not dump structured fields into free-form `format!` strings and
 //! treat those strings as a schema. Stable [`NonCanonicalReasonCodeV1`] values
 //! plus optional structured [`NonCanonicalDetailKeyV1`] details are the wire
-//! and test contract; [`Display`] is derived from those fields for humans.
+//! and test contract; [`Display`](std::fmt::Display) is derived from those
+//! fields for humans.
 
 use std::collections::BTreeMap;
 use std::fmt;

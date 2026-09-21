@@ -52,10 +52,11 @@ pub async fn record_relation_receipt(
         .await
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if changed != 1 {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "immutable relation receipt rejected different graph identity",
-        ));
+        // The stored receipt already names a different graph. Replaying this
+        // write cannot succeed, so this is not a storage retry.
+        return Err(SessionStoreError::ReceiptIdentityMismatch {
+            context: "immutable relation receipt graph identity",
+        });
     }
     record_pending_effect_journal(conn, projection, now).await?;
     Ok(watermark)
@@ -94,10 +95,12 @@ async fn record_pending_effect_journal(
         .await
         .map_err(|error| storage(RECEIPT_OPERATION, error))?;
     if changed != 1 {
-        return Err(storage_message(
-            RECEIPT_OPERATION,
-            "immutable relation effect journal rejected different projection",
-        ));
+        // The journal row for this generation already holds a different
+        // projection. The next pass would submit the same row and be refused
+        // again, so retire the refresh instead of retrying it.
+        return Err(SessionStoreError::ReceiptIdentityMismatch {
+            context: "immutable relation effect journal",
+        });
     }
     Ok(())
 }

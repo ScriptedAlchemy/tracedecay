@@ -258,24 +258,13 @@ pub fn search_tree(
     path_glob: Option<&str>,
     max_results: usize,
 ) -> Result<AstGrepSearchResult, AstGrepSearchError> {
-    search_tree_scoped(project_root, pattern, lang, path_glob, max_results, None)
-}
-
-pub(crate) fn search_tree_scoped(
-    project_root: &Path,
-    pattern: &str,
-    lang: Option<&str>,
-    path_glob: Option<&str>,
-    max_results: usize,
-    scope_prefix: Option<&str>,
-) -> Result<AstGrepSearchResult, AstGrepSearchError> {
     search_tree_scoped_with_cancel(
         project_root,
         pattern,
         lang,
         path_glob,
         max_results,
-        scope_prefix,
+        None,
         || false,
     )
 }

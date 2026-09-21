@@ -6,7 +6,7 @@ use tracedecay_sessions::runtime::claude_observation::ClaudeObservationIngestErr
 /// actually reported.
 ///
 /// Every hook-runtime failure raised from this module goes through here, so
-/// [`tracedecay_mcp::structured_hook_error_data`] can serialize the reported
+/// `tracedecay_mcp::structured_hook_error_data` can serialize the reported
 /// status instead of inferring one from the reason code.
 pub fn hook_admission_error(
     status: HostAdmissionStatus,

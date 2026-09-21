@@ -41,8 +41,7 @@ fn cursor_transcript_token_count_lands_as_correlated_provider_usage() {
         "message": {"content": "Refactored the module."},
         "tokenCount": {"inputTokens": 1200, "outputTokens": 340}
     });
-    let record_id =
-        cursor::observation_native_record_id("cursor", "cursor-usage-session", &native).unwrap();
+    let record_id = cursor::observation_native_record_id("cursor-usage-session", &native).unwrap();
     let envelope = cursor::normalize_cursor_observation(
         &native,
         "cursor-usage-session",
@@ -106,8 +105,7 @@ fn cursor_transcript_usage_without_model_stays_typed_unknown() {
             "usage": {"input_tokens": 7, "output_tokens": 3}
         }
     });
-    let record_id =
-        cursor::observation_native_record_id("cursor", "cursor-modelless", &native).unwrap();
+    let record_id = cursor::observation_native_record_id("cursor-modelless", &native).unwrap();
     let envelope = cursor::normalize_cursor_observation(
         &native,
         "cursor-modelless",

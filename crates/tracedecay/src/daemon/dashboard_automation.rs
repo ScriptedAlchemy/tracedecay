@@ -339,9 +339,12 @@ where
 }
 
 #[hotpath::measure(label = "daemon.dashboard.automation.execute", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "The observation producer and pinned configuration are admitted before any UserJob or retained effect is reserved."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "The observation producer and pinned configuration are admitted before any UserJob or retained effect is reserved."
+    )
 )]
 async fn execute_dashboard_automation_run(
     cg: &TraceDecay,

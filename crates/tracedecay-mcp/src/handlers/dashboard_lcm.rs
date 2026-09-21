@@ -78,9 +78,12 @@ impl DashboardLcmReadAdapter {
     }
 
     #[hotpath::measure(future = true, label = "mcp.lcm.total")]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Dashboard LCM execute is one action match onto the session-memory authority."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Dashboard LCM execute is one action match onto the session-memory authority."
+        )
     )]
     async fn execute(
         &self,

@@ -5,7 +5,7 @@
 //! time a soft hint surfaces. Whether the model *acted* on that hint is not
 //! known at emit time, it depends on which tools fire next. This module closes
 //! that loop after the fact: for each emitted hint that has not yet been
-//! resolved, it inspects the session's ingested [`session_messages`] activity
+//! resolved, it inspects the session's ingested `session_messages` activity
 //! *after* the hint timestamp and appends a new `hint_outcome` analytics event:
 //!
 //! * `acted`  , a tracedecay tool matching the hint's category fired inside the
@@ -18,12 +18,12 @@
 //! ## Horizon
 //!
 //! A hint is judged over the earlier of two bounds after its timestamp:
-//! [`HORIZON_TOOL_STEPS`] tool-activity steps or [`HORIZON_SECS`] of wall time.
+//! `HORIZON_TOOL_STEPS` tool-activity steps or `HORIZON_SECS` of wall time.
 //! The window is treated as *closed* (making a no-match verdict `ignored`
 //! rather than unresolved) when any of these hold:
 //!   * a tool-activity step is observed beyond `hint_ts + HORIZON_SECS`
 //!     (activity ingested past the time horizon), or
-//!   * [`HORIZON_TOOL_STEPS`] steps were observed inside the window, or
+//!   * `HORIZON_TOOL_STEPS` steps were observed inside the window, or
 //!   * wall-clock `now` is already past `hint_ts + HORIZON_SECS` (the horizon
 //!     has elapsed in real time even if the session then went quiet).
 //!
