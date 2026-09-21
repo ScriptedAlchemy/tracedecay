@@ -481,9 +481,12 @@ impl MaintenanceCoordinator {
         clippy::too_many_arguments,
         reason = "A tick borrows independently owned stores and policy while retaining the continuation cursor."
     )]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "A maintenance tick is one ordered pass over session, graph, and retention owners."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "A maintenance tick is one ordered pass over session, graph, and retention owners."
+        )
     )]
     async fn run_tick(
         &self,

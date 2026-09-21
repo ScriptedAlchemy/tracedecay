@@ -214,7 +214,7 @@ pub struct BackfillOptions {
     pub since: i64,
     /// Maximum number of sessions to scan.
     pub limit_sessions: usize,
-    /// Span merge gap forwarded to [`record_span_observation`].
+    /// Span merge gap forwarded to `record_span_observation`.
     pub merge_gap_secs: i64,
     /// Hard cap on commits parsed from a single `git log` invocation.
     pub max_commits_per_repo: usize,

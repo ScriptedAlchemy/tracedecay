@@ -165,9 +165,12 @@ impl RemoteRecoveryProjectLifecycleV1 {
     }
 
     #[hotpath::measure(label = "daemon.branch_admin.remote_recovery_quiesce", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Recovery quiesce drains one project's live owners before the recovered store is remounted."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Recovery quiesce drains one project's live owners before the recovered store is remounted."
+        )
     )]
     pub(in crate::daemon) async fn quiesce(
         &self,

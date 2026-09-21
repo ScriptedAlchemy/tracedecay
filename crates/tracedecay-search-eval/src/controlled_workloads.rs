@@ -248,8 +248,7 @@ fn compose_cursor_batch(records: &[Vec<u8>]) -> std::io::Result<(u64, Option<Str
         records,
         ObservationOrderingDomainV1::FileBytes,
         |_index, range, native| {
-            let record_id =
-                cursor::observation_native_record_id("cursor", "cursor-eval-session", &native)?;
+            let record_id = cursor::observation_native_record_id("cursor-eval-session", &native)?;
             cursor::normalize_cursor_observation(
                 &native,
                 "cursor-eval-session",

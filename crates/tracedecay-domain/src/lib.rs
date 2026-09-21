@@ -338,7 +338,7 @@ pub use research::{
     canonical_json_bytes_and_sha256, canonical_json_value, canonical_sha256,
     decode_with_canonical_digest, derive_exact_observation_anchor_id,
     derive_exact_source_occurrence_anchor_id, derive_git_topology_anchor_id,
-    validate_anchor_lineage_v3, zero_digest,
+    validate_anchor_lineage_v3,
 };
 pub use resource_policy::host_cpu_target;
 pub use retrieval::{

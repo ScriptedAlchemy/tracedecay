@@ -6,7 +6,7 @@ use serde_json::Value;
 use serde_json::json;
 
 #[cfg(feature = "test-transport")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
 use std::process::Command;
 #[cfg(feature = "test-transport")]
@@ -18,6 +18,18 @@ use tracedecay_domain::SessionId;
 use tracedecay_session_temporal_store::SessionTemporalStore;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
+
+/// Where a composed journey seeds host transcripts.
+///
+/// The composition reads them from its own isolated layout rather than from
+/// the ambient `$HOME`, so a rollout written under the process home is
+/// invisible to it.
+#[cfg(feature = "test-transport")]
+fn composed_transcript_home(isolation: &Path) -> PathBuf {
+    std::fs::create_dir_all(isolation).expect("production composition root");
+    ProductionProjectCompositionHarnessV1::transcript_source_home(isolation)
+        .expect("composed transcript source home")
+}
 
 #[cfg(feature = "test-transport")]
 fn write_production_codex_rollout(home: &Path, project: &Path) {
@@ -509,6 +521,9 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     std::fs::create_dir_all(&project).expect("production composition project");
     fixture::write_indexed_fixture_sources(&project);
     commit_worktree(&project, "production Codex transcript fixture");
+    // The hook route reads the process home, which is what this journey
+    // exercises. The composition's own sweep reads its isolated layout and
+    // finds nothing there, so the search below proves the hook's own commit.
     write_production_codex_rollout(&home, &project);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
@@ -709,6 +724,9 @@ async fn completed_session_import_immediately_searches_canonical_message() {
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
     let _home_guard = HomeEnvGuard::set(&home);
+    // `sessions_import` is the composition's own pass, so it reads the
+    // isolated transcript layout rather than the process home.
+    let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
     fixture::write_indexed_fixture_sources(&project);
@@ -721,7 +739,7 @@ async fn completed_session_import_immediately_searches_canonical_message() {
     // More than one bounded transcript pass admits. The searchable message is
     // in the final source, so Complete proves the production continuation
     // worker consumed every durable Codex frontier before returning.
-    write_production_codex_rollouts(&home, &project, 33);
+    write_production_codex_rollouts(&transcripts, &project, 33);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
         &isolation,

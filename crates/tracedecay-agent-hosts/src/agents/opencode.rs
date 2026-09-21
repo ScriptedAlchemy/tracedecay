@@ -8,7 +8,7 @@
 //! Unlike the Claude and Kiro integrations, no half of this lifecycle is driven
 //! through the host's own CLI: the plugin deployment already *is* `OpenCode`'s
 //! own discovery contract, `opencode mcp add` is interactive, and the LSP and
-//! prompt registrations have no host command at all. [`plugin_cli`] is the
+//! prompt registrations have no host command at all. `plugin_cli` is the
 //! decision record, including why driving `opencode plugin <module>` would
 //! double-load the plugin and could not be undone.
 

@@ -450,9 +450,12 @@ impl McpServer {
     }
 
     #[hotpath::measure(label = "mcp.server.hook_event", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Hook-event notification is one decode-admit-ack of a host envelope."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Hook-event notification is one decode-admit-ack of a host envelope."
+        )
     )]
     pub(crate) async fn handle_hook_event_notification(
         &self,
@@ -1461,9 +1464,14 @@ impl McpServer {
         cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> JsonRpcResponse {
         let started = timings_enabled.then(std::time::Instant::now);
-        let mut response = self
-            .handle_tools_call_inner(id, params, timings_enabled, connection, cancellation)
-            .await;
+        let mut response = Box::pin(self.handle_tools_call_inner(
+            id,
+            params,
+            timings_enabled,
+            connection,
+            cancellation,
+        ))
+        .await;
         Self::attach_missing_response_timing(
             &mut response,
             started.map(|started| started.elapsed().as_micros() as u64),
