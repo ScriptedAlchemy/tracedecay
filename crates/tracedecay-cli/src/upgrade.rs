@@ -1253,15 +1253,52 @@ mod tests {
         use tracedecay_runtime_core::git::GitCommandError;
 
         use super::super::{
-            UpgradeOutcome, VersionProbeError, finish_versioned_upgrade, installed_binary_version,
-            installed_binary_version_within,
+            UpgradeOutcome, VERSION_PROBE_DEADLINE, VersionProbeError, finish_versioned_upgrade,
+            installed_binary_version, installed_binary_version_within,
         };
+
+        /// How long the wedged scripts below keep the probe's stdout pipe open.
+        ///
+        /// The regression those tests catch is a probe that returns only once
+        /// the child lets go, so this doubles as their failure bound: elapsed
+        /// time at or past it means the probe waited for the process instead
+        /// of its own deadline. A bare five seconds could not say that. It sat
+        /// close enough to the probe deadline that a loaded host read as a
+        /// blocked probe.
+        const WEDGED_PIPE_HOLD: Duration = Duration::from_secs(30);
+
+        /// The deadline the wedged probes run under. Every one of them runs to
+        /// this deadline by construction, so it is also their runtime; it is
+        /// kept short for that reason and no assertion is derived from it.
+        const WEDGED_PROBE_DEADLINE: Duration = Duration::from_secs(1);
 
         fn script(dir: &Path, body: &str) -> PathBuf {
             let path = dir.join("tracedecay");
             fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
             path
+        }
+
+        /// Whether any live process still has `script` on its command line.
+        ///
+        /// Each wedge test writes its script into its own temp directory, so
+        /// the path names that test's child and no other process on the host.
+        /// Asking the process table directly is what makes the check
+        /// independent of the probe's deadline: the child used to report its
+        /// own pid into a file, and a host loaded enough to need half a second
+        /// to exec a shell lost the race with a deadline measured in
+        /// milliseconds, so the test read a pid file that was never written.
+        #[cfg(target_os = "linux")]
+        fn script_is_still_running(script: &Path) -> bool {
+            let needle = script.as_os_str().as_encoded_bytes();
+            fs::read_dir("/proc")
+                .expect("procfs is mounted on linux")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+                        cmdline.windows(needle.len()).any(|window| window == needle)
+                    })
+                })
         }
 
         #[test]
@@ -1330,21 +1367,21 @@ mod tests {
                 ),
                 "{error}"
             );
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(
+                started.elapsed() < VERSION_PROBE_DEADLINE,
+                "the byte bound must refuse the flood, not the deadline it would \
+                 reach by blocking on a full pipe"
+            );
         }
 
         #[test]
         fn a_wedged_binary_is_killed_and_reaped_at_the_deadline() {
             let dir = tempfile::tempdir().unwrap();
-            let pid_file = dir.path().join("pid");
-            let wedged = script(
-                dir.path(),
-                &format!("echo $$ > '{}'; exec sleep 30", pid_file.display()),
-            );
+            let wedged = script(dir.path(), &format!("sleep {}", WEDGED_PIPE_HOLD.as_secs()));
             let started = Instant::now();
 
             let error =
-                installed_binary_version_within(&wedged, Duration::from_millis(300)).unwrap_err();
+                installed_binary_version_within(&wedged, WEDGED_PROBE_DEADLINE).unwrap_err();
 
             assert!(
                 matches!(
@@ -1353,15 +1390,15 @@ mod tests {
                 ),
                 "{error}"
             );
-            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(
+                started.elapsed() < WEDGED_PIPE_HOLD,
+                "the probe returned only once the wedged child let go"
+            );
             #[cfg(target_os = "linux")]
-            {
-                let pid = fs::read_to_string(&pid_file).unwrap().trim().to_owned();
-                assert!(
-                    !Path::new("/proc").join(&pid).exists(),
-                    "the probe must not leave its child running"
-                );
-            }
+            assert!(
+                !script_is_still_running(&wedged),
+                "the probe must not leave its child running"
+            );
         }
 
         #[test]
@@ -1369,12 +1406,14 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let leaky = script(
                 dir.path(),
-                "printf 'tracedecay 1.2.3\\n'; sleep 20 & exit 0",
+                &format!(
+                    "printf 'tracedecay 1.2.3\\n'; sleep {} & exit 0",
+                    WEDGED_PIPE_HOLD.as_secs()
+                ),
             );
             let started = Instant::now();
 
-            let error =
-                installed_binary_version_within(&leaky, Duration::from_millis(300)).unwrap_err();
+            let error = installed_binary_version_within(&leaky, WEDGED_PROBE_DEADLINE).unwrap_err();
 
             assert!(
                 matches!(
@@ -1384,7 +1423,7 @@ mod tests {
                 "{error}"
             );
             assert!(
-                started.elapsed() < Duration::from_secs(5),
+                started.elapsed() < WEDGED_PIPE_HOLD,
                 "a successful parent exit does not close an inherited pipe; the deadline must"
             );
         }
