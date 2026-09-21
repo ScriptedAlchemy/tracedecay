@@ -270,7 +270,7 @@ fn populated_inventory(home: &Path, include_bodies: bool, include_payloads: bool
                     Some("revise the workflow steps"),
                     Some("operator"),
                     Some("2026-04-01T00:00:00Z"),
-                    include_payloads.then(|| workflow_payload),
+                    include_payloads.then_some(workflow_payload),
                 ),
                 pending_write(
                     "approval-other",
@@ -280,7 +280,7 @@ fn populated_inventory(home: &Path, include_bodies: bool, include_payloads: bool
                     None,
                     None,
                     None,
-                    include_payloads.then(|| other_payload),
+                    include_payloads.then_some(other_payload),
                 ),
             ],
             "usage_records": {
@@ -423,7 +423,7 @@ async fn hermes_skill_bridge_mcp_reports_missing_install_as_empty_inventory() {
     let alternate = isolated.home.join("custom-hermes");
     write_skill(&alternate.join("skills").join("secret"), SECRET_BODY);
     let _hermes_home = HermesHomeGuard::set(&alternate);
-    let before = snapshot_roots(&[alternate.clone()]);
+    let before = snapshot_roots(std::slice::from_ref(&alternate));
     let server = open_server(cg).await;
 
     let response = call_bridge(&server, 7, json!({"format": "json"})).await;

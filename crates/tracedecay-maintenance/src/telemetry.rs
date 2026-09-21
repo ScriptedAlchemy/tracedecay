@@ -440,7 +440,7 @@ impl StoreTelemetrySamplingRegistry {
     ///
     /// Consecutive unhealthy attempts open a bounded skip window; each denied
     /// tick burns one unit of it, so a wedged runtime is re-probed after at
-    /// most [`GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS`] short-cadence ticks
+    /// most `GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS` short-cadence ticks
     /// rather than being polled (and timing out) on every one.
     pub fn graph_replay_release_attempt_admitted(&self, project_root: &Path) -> bool {
         let mut progress = self
@@ -459,7 +459,7 @@ impl StoreTelemetrySamplingRegistry {
 
     /// Record a release attempt the graph runtime could not serve (deadline,
     /// unavailability, or a held replay pool) and widen the skip window:
-    /// 1, 2, 4, then capped at [`GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS`].
+    /// 1, 2, 4, then capped at `GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS`.
     pub fn record_graph_replay_release_unhealthy(&self, project_root: &Path) {
         let mut progress = self
             .graph_replay_release

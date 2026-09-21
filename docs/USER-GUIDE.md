@@ -58,12 +58,23 @@ Download from the [latest release](https://github.com/ScriptedAlchemy/tracedecay
 
 ## Your First Index
 
-Navigate to any project directory and run:
+Start the daemon first, then enroll the project:
 
 ```bash
+tracedecay daemon install-service
 cd /path/to/your/project
 tracedecay init
 ```
+
+`tracedecay init` is brokered through the daemon-owned code-index scheduler.
+With no daemon accepting connections for this profile it refuses before it
+writes anything:
+
+```
+Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
+```
+
+Confirm the daemon with `tracedecay daemon status` and re-run `init`.
 
 TraceDecay enrolls the repository with the daemon, captures an exact checkout
 snapshot, and publishes a validated code generation. Project facts, sessions,
@@ -528,9 +539,12 @@ or a typed warming/refresh-required state. They do not run an implicit refresh
 or open storage. Hooks and the daemon scheduler own background convergence;
 multiple clients are serialized by the daemon authority.
 
-### Optional daemon service
+### Daemon service
 
-If you want the daemon available across terminal sessions and after login, install the per-user service:
+The daemon is required, not optional: `tracedecay init` brokers through the
+daemon-owned code-index scheduler, and the read commands connect to the daemon
+rather than starting one. Install the per-user service so it survives terminal
+sessions and logout:
 
 ```bash
 tracedecay daemon install-service
@@ -1034,6 +1048,21 @@ sanitization metadata.
 TraceDecay could not find an initialized project store for your current directory. Run:
 
 ```bash
+tracedecay init
+```
+
+### "code_index_scheduler_unavailable" from `init`
+
+```
+Error: project route error (code_index_scheduler_unavailable): project initialization requires the daemon-owned code-index scheduler; start the daemon and retry
+```
+
+No daemon is accepting connections for this profile, so `init` refused before
+writing anything. Start one and retry:
+
+```bash
+tracedecay daemon install-service   # or: tracedecay daemon start
+tracedecay daemon status
 tracedecay init
 ```
 

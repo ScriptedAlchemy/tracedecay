@@ -277,7 +277,7 @@ impl StartupCatchUpMachineV1 {
     }
 
     /// One-shot dispatch claim. The first caller wins and the machine enters
-    /// [`StartupCatchUpStateV1::Syncing`] in the same critical section, so
+    /// `StartupCatchUpStateV1::Syncing` in the same critical section, so
     /// there is no interval in which a dispatched catch-up reads as settled.
     pub fn try_claim_dispatch(&self) -> bool {
         if self

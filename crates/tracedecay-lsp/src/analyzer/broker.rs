@@ -51,7 +51,7 @@ pub struct CodeDiagnostic {
 
 /// Minimal indexed-symbol span used to attribute a diagnostic to the smallest
 /// enclosing code-graph node. Line numbers are 0-based, matching
-/// [`crate::types::Node`]; they are compared against a diagnostic's 1-based line
+/// `crate::types::Node`; they are compared against a diagnostic's 1-based line
 /// inside [`enclosing_node_for_line`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSpan {

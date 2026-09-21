@@ -13,7 +13,7 @@
 //!
 //! The contract is "re-link or explicitly retire, never orphan silently": a
 //! store whose registry roots are gone but whose manifest points at a
-//! *different, currently-live* root is classified [`StoreDisposition::Relinkable`]
+//! *different, currently-live* root is classified `StoreDisposition::Relinkable`
 //! and is never collected here, an applied sweep atomically transfers its
 //! registry identity to that exact live project. Only stores with no live root
 //! at all are eligible for collection, and only once older than the retention
@@ -360,7 +360,7 @@ pub enum CollectionFailureKind {
     /// The store's graph database carries rows in a durable per-project memory
     /// table (or the check could not prove otherwise). Never collected, even
     /// when every other eligibility check passed, see
-    /// [`DurableMemoryCheck`]/[`check_durable_memory_rows`].
+    /// `DurableMemoryCheck`/`check_durable_memory_rows`.
     DurableDataProtected,
 }
 

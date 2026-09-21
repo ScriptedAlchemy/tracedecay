@@ -449,7 +449,7 @@ fn matches_no_history_marker(value: &str) -> bool {
 /// Resolves the tracedecay project root for a Codex event from its `cwd`.
 ///
 /// Kept as the published Codex-named entry point; the resolution itself is the
-/// host-neutral [`super::event_project_root`] every `cwd`-carrying host shares.
+/// host-neutral `super::event_project_root` every `cwd`-carrying host shares.
 pub fn codex_project_root_from_event(event_json: &str) -> Option<PathBuf> {
     event_project_root_from_json(event_json)
 }

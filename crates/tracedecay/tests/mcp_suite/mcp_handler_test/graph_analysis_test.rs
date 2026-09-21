@@ -5372,7 +5372,7 @@ fn public_recursion_report(payload: &Value) -> Value {
         })
         .collect::<Vec<_>>();
     let mut cycles = cycles;
-    cycles.sort_by(|left, right| cycle_order_key(left).cmp(&cycle_order_key(right)));
+    cycles.sort_by_key(cycle_order_key);
     json!({
         "cycle_count": payload["cycle_count"],
         "cycles": cycles,

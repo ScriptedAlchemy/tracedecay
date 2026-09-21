@@ -284,20 +284,20 @@ pub struct ObservationAuthorityResetV1 {
     /// external-content FTS index is synchronized by its delete trigger).
     pub cleared_session_message_rows: u64,
     /// Session-temporal projection rows cleared because they derive from the
-    /// reset observation stream (see [`OBSERVATION_DERIVED_TEMPORAL_DELETES`]).
+    /// reset observation stream (see `OBSERVATION_DERIVED_TEMPORAL_DELETES`).
     pub cleared_derived_temporal_rows: u64,
     /// Retrieval anchors (and the native-record aliases resolving to them)
     /// cleared because the reset observation stream bound them (see
-    /// [`OBSERVATION_ANCHOR_BINDING_COLUMNS`]).
+    /// `OBSERVATION_ANCHOR_BINDING_COLUMNS`).
     pub cleared_retrieval_anchor_rows: u64,
     /// Native-source scheduling cursors cleared so the next open re-reads
     /// every provider transcript (see
-    /// [`NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE`]).
+    /// `NATIVE_SOURCE_SCHEDULING_CURSOR_DELETE`).
     pub cleared_native_source_cursor_rows: u64,
     /// Host-observation external-source receipts, current-state rows, and
     /// matching writer-ledger identities cleared so re-admission is a rebuild
     /// rather than a conflicting reuse of the destroyed stream (see
-    /// [`OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES`]).
+    /// `OBSERVATION_DERIVED_EXTERNAL_SOURCE_DELETES`).
     pub cleared_external_source_rows: u64,
 }
 

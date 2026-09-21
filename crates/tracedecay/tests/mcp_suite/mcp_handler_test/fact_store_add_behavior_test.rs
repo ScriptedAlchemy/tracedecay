@@ -47,7 +47,7 @@ async fn call_add(server: &McpServer, arguments: Value) -> Value {
     handle_real_server_tool_call_raw(server, TOOL, arguments).await
 }
 
-fn tool_text<'a>(response: &'a Value) -> &'a str {
+fn tool_text(response: &Value) -> &str {
     assert!(
         response.get("error").is_none() || response["error"].is_null(),
         "JSON-RPC error: {response}"

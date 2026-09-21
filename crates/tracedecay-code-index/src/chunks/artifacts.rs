@@ -318,7 +318,7 @@ impl CodeFileIndexArtifactsV1 {
     /// Verify canonical structure without claiming parser-backed semantic
     /// identity. Generation restoration performs that stronger check against
     /// the persisted extraction batch through
-    /// [`Self::validate_generation_import_authority`].
+    /// `Self::validate_generation_import_authority`.
     pub fn validate(&self) -> Result<(), ChunkingFailureV1> {
         self.validate_with_clone_payloads(true)
     }
