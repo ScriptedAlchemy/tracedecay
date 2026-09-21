@@ -50,9 +50,12 @@ fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) ->
 }
 
 #[hotpath::measure(label = "daemon.project.compose.release_idle", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idle-server release is one cache-evict-and-shutdown before the next project open."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Idle-server release is one cache-evict-and-shutdown before the next project open."
+    )
 )]
 async fn release_one_idle_project_server_before_open(
     store_administration: &StoreAdministration,
@@ -714,9 +717,12 @@ impl ProjectOpenInputs<'_> {
     /// Build every route-owned port and construct the core (graph, search,
     /// diagnostics) server candidate. Nothing is published yet.
     #[hotpath::measure(label = "daemon.project.compose.core", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Core server composition wires one project's ports into a single McpServer."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Core server composition wires one project's ports into a single McpServer."
+        )
     )]
     async fn compose_core_server(
         &self,
@@ -1098,9 +1104,12 @@ impl ProjectOpenInputs<'_> {
     /// is deliberately absent; the bounded code-index activation owns
     /// background indexing.
     #[hotpath::measure(label = "daemon.project.compose.construct_full", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Full server construction is one owner-and-port assembly for a published project route."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Full server construction is one owner-and-port assembly for a published project route."
+        )
     )]
     async fn construct_full_server(
         &self,
