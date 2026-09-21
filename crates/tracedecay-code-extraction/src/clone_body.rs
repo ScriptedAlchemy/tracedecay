@@ -386,20 +386,23 @@ struct TokenEmitter<'a> {
 
 impl<'a> TokenEmitter<'a> {
     fn emit(&mut self, node: TreeSitterNode<'_>, in_token_tree: bool) {
-        if is_comment(node.kind()) {
+        // Asking a node for its kind is a `strlen` over the grammar table plus
+        // a UTF-8 check, so the walk reads it once and passes it around.
+        let kind = node.kind();
+        if is_comment(kind) {
             return;
         }
         if node.child_count() == 0 {
-            self.emit_leaf(node, in_token_tree);
+            self.emit_leaf(node, kind, in_token_tree);
             return;
         }
 
         if node.is_named() {
             self.push(ConservativeCloneTokenV1::StructureStart {
-                syntax_kind: Cow::Borrowed(node.kind()),
+                syntax_kind: Cow::Borrowed(kind),
             });
         }
-        let inside_token_tree = in_token_tree || node.kind() == "token_tree";
+        let inside_token_tree = in_token_tree || kind == "token_tree";
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
@@ -411,7 +414,7 @@ impl<'a> TokenEmitter<'a> {
         }
         if node.is_named() {
             self.push(ConservativeCloneTokenV1::StructureEnd {
-                syntax_kind: Cow::Borrowed(node.kind()),
+                syntax_kind: Cow::Borrowed(kind),
             });
         }
     }
@@ -423,19 +426,19 @@ impl<'a> TokenEmitter<'a> {
         self.tokens.push(token);
     }
 
-    fn emit_leaf(&mut self, node: TreeSitterNode<'_>, in_token_tree: bool) {
+    fn emit_leaf(&mut self, node: TreeSitterNode<'_>, kind: &'static str, in_token_tree: bool) {
         let Ok(text) = node.utf8_text(self.source) else {
             self.issues
                 .push(CloneBodyTokenizationIssueV1::InvalidSourceRange);
             return;
         };
         if text.trim().is_empty()
-            || is_ignorable_trailing_comma(node, self.source, in_token_tree)
-            || (node.kind() == ";" && matches!(self.language, "javascript" | "typescript" | "tsx"))
+            || is_ignorable_trailing_comma(node, kind, self.source, in_token_tree)
+            || (kind == ";" && matches!(self.language, "javascript" | "typescript" | "tsx"))
         {
             return;
         }
-        let syntax_kind = Cow::Borrowed(node.kind());
+        let syntax_kind = Cow::Borrowed(kind);
         if let Some(replacements) = self.replacements {
             let replacement = replacements.get(&(node.start_byte(), node.end_byte()));
             self.renamed.push(ConservativeCloneTokenV1::Syntax {
@@ -459,10 +462,11 @@ fn is_comment(kind: &str) -> bool {
 
 fn is_ignorable_trailing_comma(
     node: TreeSitterNode<'_>,
+    kind: &str,
     source: &[u8],
     in_token_tree: bool,
 ) -> bool {
-    if in_token_tree || node.kind() != "," {
+    if in_token_tree || kind != "," {
         return false;
     }
     let mut next = node.next_sibling();
