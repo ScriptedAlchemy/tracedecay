@@ -7976,29 +7976,29 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         )
         .await
         .expect("reopen retained generation");
-    let mut serving_changes = registry
-        .subscribe_serving_generation_changes(fixture.path())
-        .await
-        .expect("subscribe to retained serving changes");
     assert!(
         registry.request_complete_generation(fixture.path()).await,
         "mounted worktree admits complete-generation demand"
     );
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let current = loop {
-        if let Some((current, true)) = registry
-            .latest_text_serving_freshness_for_scope(&scope)
-            .await
-            && current.query_owners_are_ready()
-        {
-            break current;
-        }
-        tokio::time::timeout_at(deadline, serving_changes.changed())
-            .await
-            .expect("the current retained text owner wakes deferred consumers")
-            .expect("the serving-change channel stays open while mounted");
-    };
+    // A 5s `changed()` cut-off reports a late seat as a lost wake. The
+    // registry signal has no such wall-clock bound; the ceiling only
+    // distinguishes a seat that never arrives.
+    let current = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        || async {
+            let Some((current, true)) = registry
+                .latest_text_serving_freshness_for_scope(&scope)
+                .await
+            else {
+                return None;
+            };
+            current.query_owners_are_ready().then_some(current)
+        },
+    )
+    .await;
     assert!(
         current.uses_partitioned_manifest(),
         "the retained text owner is the partitioned generation authority"
@@ -8230,19 +8230,22 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
         .await
         .expect("mount retained generation");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let latest = loop {
-        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await
-            && latest.query_owners_are_ready()
-        {
-            break latest;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "resident graph refusal withheld the text-serving generation"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    // The historical 5s/10ms poll misses a seat that lands after the
+    // deadline (`serving_seat_signal_observes_a_seat_that_misses_the_poll_deadline`).
+    // Graph refusal must still seat exact and lexical serving whenever
+    // that signal arrives.
+    let latest = wait_until_serving_seat(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        || async {
+            registry
+                .latest_complete_serving_for_scope(&scope)
+                .await
+                .filter(|latest| latest.query_owners_are_ready())
+        },
+    )
+    .await;
     assert!(
         latest.production_query_owners().is_ok(),
         "exact and lexical owners remain serving under graph refusal"
