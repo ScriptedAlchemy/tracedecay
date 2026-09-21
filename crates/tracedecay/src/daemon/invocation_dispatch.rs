@@ -428,7 +428,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             // Core publication may have been visible before the dependent LSP
             // owner finished. Re-enter the canonical route lookup after the
             // wait instead of carrying the pre-upgrade root/owner snapshot.
-            let project_server = await_lsp_route_rejoin(
+            let project_server = Box::pin(await_lsp_route_rejoin(
                 deadline,
                 request_cancellation,
                 portable_project_server_for_request(
@@ -442,7 +442,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                     #[cfg(test)]
                     lsp_project_open_attempts,
                 ),
-            )
+            ))
             .await;
             let project_server = match project_server {
                 Ok(project_server) => project_server,

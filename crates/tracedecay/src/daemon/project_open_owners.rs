@@ -159,9 +159,12 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
 
 /// Registers code-index-independent owners for one newly inserted project.
 #[hotpath::measure(label = "daemon.project.owners.register", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Production owner registration is one ordered phase list for a project open."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Production owner registration is one ordered phase list for a project open."
+    )
 )]
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,

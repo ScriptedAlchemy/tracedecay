@@ -76,10 +76,6 @@ fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
     !short && stdout_is_terminal
 }
 
-fn should_fetch_online_status_embellishments(stdout_is_terminal: bool) -> bool {
-    stdout_is_terminal
-}
-
 /// Cache lifetimes of the two decorative worldwide-counter reads. The status
 /// render always shows the cache; these only decide whether one bounded
 /// refresh for the next invocation is worth starting.
@@ -453,8 +449,7 @@ async fn handle_status_command_within(
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
-    let show_online =
-        should_fetch_online_status_embellishments(stdout_is_terminal) && upload_enabled;
+    let show_online = stdout_is_terminal && upload_enabled;
     // The worldwide counter and country flags are decoration served from the
     // local cache: the render below never waits on the network. When a cache
     // has expired, one refresh for the next invocation starts here so its

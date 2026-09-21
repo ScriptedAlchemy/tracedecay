@@ -112,7 +112,7 @@ pub enum HostCapabilityV1 {
 
 impl HostCapabilityV1 {
     /// Position of this capability in every stock host capability row.
-    /// [`canonical_stock_host_capabilities`] emits rows in exactly this order,
+    /// `canonical_stock_host_capabilities` emits rows in exactly this order,
     /// so indexing a row by it is total and needs no fallback state.
     pub const fn row_index(self) -> usize {
         match self {

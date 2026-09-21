@@ -68,8 +68,8 @@ const TEST_DIRECTORY_COMPONENTS: [&str; 5] = ["test", "tests", "__tests__", "spe
 const TEST_FILE_NAME_MARKERS: [&str; 4] = [".test.", ".spec.", "_test.", "_spec."];
 
 /// Naming heuristic over a `/`-separated logical path: `true` when a
-/// directory component is exactly one of [`TEST_DIRECTORY_COMPONENTS`] or the
-/// final filename contains one of [`TEST_FILE_NAME_MARKERS`].
+/// directory component is exactly one of `TEST_DIRECTORY_COMPONENTS` or the
+/// final filename contains one of `TEST_FILE_NAME_MARKERS`.
 ///
 /// Components that merely contain a marker word (`contest/`, `latest.rs`) do
 /// not match, and a marker inside a directory name (`fixtures.test.d/`) is

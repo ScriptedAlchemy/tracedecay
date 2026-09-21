@@ -699,7 +699,7 @@ async fn reconcile_projected_codex_goal_response(
 pub(super) async fn supersede_projected_message(
     conn: &impl Executor,
     message: &SessionMessageRecord,
-) -> ProjectionStoreResult<()> {
+) -> ProjectionStoreResult<u64> {
     conn.execute(
         "UPDATE session_messages
          SET session_id = ?3, role = ?4, timestamp = ?5, ordinal = ?6,
@@ -723,7 +723,6 @@ pub(super) async fn supersede_projected_message(
         ],
     )
     .await
-    .map(|_| ())
     .map_err(|error| storage("supersede projected message", error))
 }
 
@@ -791,7 +790,33 @@ pub(in super::super) async fn converge_released_output_rendering(
     // compatible session metadata when the row already exists.
     apply_session(conn, projection.session()).await?;
     let message = projection.message();
-    supersede_projected_message(conn, message).await?;
+    if supersede_projected_message(conn, message).await? == 0 {
+        // The creator's provenance survived an interrupted write that never
+        // landed the message row. Update cannot restore a missing row.
+        conn.execute(
+            "INSERT INTO session_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
+                 tool_names, source_path, source_offset, metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                message.session_id.as_str(),
+                message.role.as_str(),
+                message.timestamp,
+                message.ordinal,
+                message.text.as_str(),
+                message.kind.as_deref(),
+                message.model.as_deref(),
+                message.tool_names.as_deref(),
+                message.source_path.as_deref(),
+                message.source_offset,
+                message.metadata_json.as_deref(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("insert missing projected message", error))?;
+    }
     if message.provider != "hermes" {
         adopt_owned_projection_raw_session(conn, message).await?;
         match upsert_projected_raw_message(conn, message).await {

@@ -4,7 +4,8 @@
 //! execution-topology event family; Plans 24, 32, 36, and 37 own emission and
 //! push their source facts through the one observability application
 //! boundary. This module is therefore a pure projection: it reads recorded
-//! `ObservabilityEnvelopeV1` events through [`ObservabilityQueryPort`] and
+//! `ObservabilityEnvelopeV1` events through
+//! [`ObservabilityQueryPort`](crate::observability::ObservabilityQueryPort) and
 //! derives every descriptor named in Plan 26 from those events alone.
 //!
 //! Two invariants shape every type here. First, nothing is estimated: a

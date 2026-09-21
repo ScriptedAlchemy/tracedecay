@@ -183,7 +183,7 @@ pub async fn project_observation(
 /// Projects up to `max` ready queue-head observations inside one write
 /// transaction, in strict sequence order, committing once for the window.
 ///
-/// Each item runs the exact per-item projection ([`project_observation_in_transaction`]
+/// Each item runs the exact per-item projection (`project_observation_in_transaction`
 /// with its gap, queue, and duplicate checks). A retry-deferred queue head
 /// stops the window before consuming it, mirroring the scalar head-of-queue
 /// gate. Any per-item error rolls the whole window back and surfaces the

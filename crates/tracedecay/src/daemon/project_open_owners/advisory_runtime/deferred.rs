@@ -145,9 +145,12 @@ enum Attempt {
 }
 
 #[hotpath::measure(label = "daemon.project.owners.advisory_retry", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Deferred advisory mount is one generation-ready attach of the feedback and LSP owners."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Deferred advisory mount is one generation-ready attach of the feedback and LSP owners."
+    )
 )]
 async fn try_mount(
     invocation: &DaemonInvocationState,

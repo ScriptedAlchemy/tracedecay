@@ -17,7 +17,7 @@
 //! `pr-link` records, `system` compaction boundaries, and model-fallback
 //! records become dedicated marker rows; assistant attribution fields and
 //! `toolUseResult` edited-file facts ride on the owning message row. See the
-//! gate in [`message_from_line`] for the record types we deliberately drop.
+//! gate in `message_from_line` for the record types we deliberately drop.
 
 use std::path::{Path, PathBuf};
 
