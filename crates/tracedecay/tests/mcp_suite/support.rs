@@ -297,11 +297,16 @@ pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &s
         last_search =
             serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
         let incomplete = common::incomplete_code_index_query_lanes(&last_search);
+        // `status = current` and complete lanes prove the generation, but the
+        // seat can still owe its source proof to a continuation pass, and a
+        // read taken before that pass binds it reports `verifying`. A settled
+        // seat answers `fresh`; take the first search that reports it.
         if freshness["status"] == "current"
             && last_search["reason"].as_str() != Some("authority_unavailable")
             && last_search["code_generation"].as_str() == status_generation
             && status_generation.is_some()
             && incomplete.is_empty()
+            && last_search["freshness"] == json!({ "state": "fresh" })
         {
             return;
         }
@@ -309,7 +314,7 @@ pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &s
     }
     let incomplete = common::incomplete_code_index_query_lanes(&last_search);
     panic!(
-        "code-index search did not complete lane coverage within the polling budget: incomplete lanes={incomplete:?}; status={last_status}; search={last_search}"
+        "code-index search did not settle within the polling budget: incomplete lanes={incomplete:?}; status={last_status}; search={last_search}"
     );
 }
 
