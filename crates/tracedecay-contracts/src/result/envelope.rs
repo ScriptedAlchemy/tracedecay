@@ -614,7 +614,7 @@ impl ApplicationProblemRecord {
     ///
     /// This is not a transport instruction to loop. A retained authority that
     /// is unavailable still carries `after_delay` so the caller can choose to
-    /// retry; only [`owner_mount_resend_delay`] tells the one-shot client to
+    /// retry; only [`Self::owner_mount_resend_delay`] tells the one-shot client to
     /// re-send on its own.
     pub fn pre_admission_retry_delay(&self) -> Option<Duration> {
         (self.retryable && self.retry == RetryDirective::AfterDelay && self.is_pre_admission())

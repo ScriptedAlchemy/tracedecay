@@ -247,7 +247,7 @@ impl McpServer {
     /// non-blocking, while tests can await durability deterministically
     /// instead of polling the DB against a wall-clock deadline.
     ///
-    /// Bounded by [`LEDGER_SETTLE_TIMEOUT`] so a spawned write that wedges
+    /// Bounded by `LEDGER_SETTLE_TIMEOUT` so a spawned write that wedges
     /// (a stuck DB handle, a task that never resolves) can never hang the
     /// caller forever, the earlier unbounded loop made a wedged write
     /// manifest as an un-observable, indefinitely-hung integration test.

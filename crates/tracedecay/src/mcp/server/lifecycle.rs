@@ -318,12 +318,12 @@ impl McpServer {
     /// call into an O(store) reindex the client waited on. The claim is still
     /// made here, so the cooldown and single-flight semantics are unchanged,
     /// but the bounded request is retained through the same mechanism read tools
-    /// already use ([`Self::spawn_read_refresh_task`]), and the caller serves
+    /// already use (`Self::spawn_read_refresh_task`), and the caller serves
     /// immediately on the current snapshot. Freshness is reported separately by
     /// the code-index authority after reconciliation completes.
     ///
     /// Concurrent callers are serialized via
-    /// [`Self::last_staleness_check_at`]: the first caller stamps `now`
+    /// `Self::last_staleness_check_at`: the first caller stamps `now`
     /// into the field with `compare_exchange`; later callers within the
     /// same window see the stamp and bail. If admission fails, the stamp still
     /// advances so every subsequent tool call does not retry immediately.

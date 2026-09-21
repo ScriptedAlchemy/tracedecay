@@ -58,7 +58,7 @@ const CARDINALITY_LABEL_HASH_CHARS: usize = 16;
 const LOOKUP_IDENTIFIER_MAX_BYTES: usize = 256;
 
 /// Collapse whitespace and cap a failure reason to
-/// [`FAILURE_REASON_MAX_CHARS`] characters (never argument bodies, callers
+/// `FAILURE_REASON_MAX_CHARS` characters (never argument bodies, callers
 /// must derive `reason` from response/error text only).
 pub fn bounded_failure_reason(reason: &str) -> String {
     let collapsed = collapse_whitespace(reason);

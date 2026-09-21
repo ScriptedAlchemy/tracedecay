@@ -1007,7 +1007,7 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 /// before a project was indexed could never ingest. This source sweeps
 /// `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` for the slug that
 /// encodes `project_root`, feeding every file through the same
-/// [`parse_cursor_jsonl`] parser and (path-keyed) `parse_offsets` cursors as
+/// `parse_cursor_jsonl` parser and (path-keyed) `parse_offsets` cursors as
 /// the hook path, files either path has already ingested are byte-offset
 /// no-ops for the other, so sweep and hooks never double-ingest.
 pub struct CursorSweepSource {

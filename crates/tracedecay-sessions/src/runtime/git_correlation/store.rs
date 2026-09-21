@@ -110,7 +110,7 @@ pub fn git_evidence_generation_id(
 /// Besides the session, span, and commit rows the manifest carries the query
 /// index bounded reads depend on: a branch and a worktree hub per distinct
 /// value whose relations to spans are keyed newest-activity-first
-/// ([`SpanIndexKey`]), a commit-prefix hub per six-digit SHA prefix, and
+/// (`SpanIndexKey`), a commit-prefix hub per six-digit SHA prefix, and
 /// projection metadata (projector revision, span and commit counts) so
 /// health and presence never enumerate rows.
 pub fn build_git_evidence_manifest_checked(
