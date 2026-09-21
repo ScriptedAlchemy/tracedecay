@@ -211,7 +211,8 @@ pub enum AuthorizedScopeSetError {
 
 /// Immutable canonical set of exact roots admitted by their existing request
 /// contexts. A registered locator participates only as frozen reopening
-/// evidence; its paired [`ResolvedScope`] remains the root identity authority.
+/// evidence; its paired [`ResolvedScope`](crate::context::ResolvedScope) remains
+/// the root identity authority.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizedScopeSet {

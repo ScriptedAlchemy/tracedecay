@@ -16,10 +16,10 @@
 //! The audit is per ecosystem, because "reachable" means something different in
 //! each one and pretending otherwise would be the same lie in a new place:
 //!
-//!   - [`rust`] answers "which `.rs` files under a cargo package's own source
+//!   - `rust` answers "which `.rs` files under a cargo package's own source
 //!     directories are NOT reachable from its targets by following `mod`?".
 //!     Unreachable there means the compiler genuinely never parses the file.
-//!   - [`typescript`] answers "which source files are NOT reachable from any
+//!   - `typescript` answers "which source files are NOT reachable from any
 //!     declared entry point by following static `import` / `require` /
 //!     `export … from`?". Unreachable there is a *weaker* claim, `tsc` still
 //!     type-checks anything matched by a tsconfig `include`, and the report

@@ -434,9 +434,12 @@ impl DaemonInvocationState {
 
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.invocation_state.multi_root_execute", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Multi-root execute is one scoped dispatch across the admitted root set."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Multi-root execute is one scoped dispatch across the admitted root set."
+        )
     )]
     pub(super) async fn execute_multi_root_for_project(
         &self,

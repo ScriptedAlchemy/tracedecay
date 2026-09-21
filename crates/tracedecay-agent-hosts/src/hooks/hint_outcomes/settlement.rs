@@ -4,7 +4,7 @@
 //! (`tracedecay_hook_runtime` action `ingest_transcript`): freshly ingested
 //! session activity is exactly what resolves previously emitted hints, so
 //! every project-scope ingest ends with a best-effort
-//! [`settle_project_hint_outcomes`] pass. Settlement imports the hook
+//! `settle_project_hint_outcomes` pass. Settlement imports the hook
 //! JSONL tail (where hooks record `hint_emitted`) into the durable
 //! `analytics_events` authority and then correlates outcomes into the same
 //! table, the one the `tracedecay_analytics` hints section and the

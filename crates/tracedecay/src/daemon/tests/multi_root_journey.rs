@@ -612,7 +612,7 @@ async fn run_authenticated_multi_root_journey() {
             problem: DaemonInvocationProblem::InvalidRequest
         }
     ));
-    let portable_invalid = execute_portable_daemon_invocation(
+    let portable_invalid = Box::pin(execute_portable_daemon_invocation(
         engine.lifecycle.clone(),
         engine.store_administration.clone(),
         Arc::clone(&engine.project_open_gates),
@@ -621,7 +621,7 @@ async fn run_authenticated_multi_root_journey() {
         engine.http_application_registry.clone(),
         wire_round_trip(&invalid_read),
         Some(Arc::clone(&engine.project_open_attempts)),
-    )
+    ))
     .await;
     assert!(matches!(
         portable_invalid.outcome,
@@ -1159,7 +1159,7 @@ async fn run_authenticated_multi_root_journey() {
     // resolves or mounts any selected root, then reach the same executor.
     let observed_at = now();
     let (deadline, cancellation) = controls("portable-execute", observed_at);
-    let portable_execute = execute_portable_daemon_invocation(
+    let portable_execute = Box::pin(execute_portable_daemon_invocation(
         engine.lifecycle.clone(),
         engine.store_administration.clone(),
         Arc::clone(&engine.project_open_gates),
@@ -1182,7 +1182,7 @@ async fn run_authenticated_multi_root_journey() {
             cancellation,
         ),
         Some(Arc::clone(&engine.project_open_attempts)),
-    )
+    ))
     .await;
     assert!(
         matches!(

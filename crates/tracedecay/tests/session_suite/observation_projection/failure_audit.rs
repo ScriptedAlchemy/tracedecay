@@ -808,12 +808,15 @@ async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     );
 }
 
-/// A vanished projected output is the same hard failure: the convergence
-/// ledger rewrites a shipped rendering it can see, and never inserts a missing
-/// message row, so a store whose projected output disappeared still has to be
-/// named rather than silently admitted.
+/// A vanished projected output is not the tamper case. Provenance still names
+/// this observation as the row's creator, and the immutable projection still
+/// holds the rendering, so the audit reads the deletion as an interrupted
+/// write and restores the row rather than refusing the whole profile. History
+/// for the surviving sources keeps serving across that repair. The sibling
+/// above stays a hard failure because a body the ledger can see disagreeing
+/// with the deterministic output is tamper, not an unfinished write.
 #[tokio::test]
-async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
+async fn projected_message_delete_is_restored_from_the_immutable_projection() {
     let tmp = audited_projection_fixture("session-audit-delete", "message-audit-delete").await;
     let runtime = profile_runtime(&tmp).await;
     let database_path = runtime
@@ -821,6 +824,12 @@ async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
         .unwrap()
         .to_path_buf();
     drop(runtime);
+    let shipped = projected_message_texts(&tmp).await;
+    assert!(
+        shipped.len() == 1 && shipped[0].contains("audited projection body"),
+        "fixture did not ship the rendering this test deletes: {shipped:?}"
+    );
+
     let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
@@ -830,10 +839,16 @@ async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
         )
         .unwrap();
     drop(raw_conn);
+    assert!(projected_message_texts(&tmp).await.is_empty());
 
-    assert!(
-        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-            .await
-            .is_err()
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("a created row with surviving provenance must be restored, not refused");
+    drop(reopened);
+
+    assert_eq!(
+        projected_message_texts(&tmp).await,
+        shipped,
+        "profile reopen admitted the store without putting the deleted rendering back"
     );
 }

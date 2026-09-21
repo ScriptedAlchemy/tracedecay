@@ -112,7 +112,7 @@ impl AdvisoryHookNoticeQueueV1 {
     }
 
     fn enqueue(&self, notice: &AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
-        if notice.validate().is_err() || !feedback_scope_matches(&self.scope, &notice.scope) {
+        if notice.validate().is_err() || self.scope != notice.scope {
             return HookFeedbackDeliveryOutcomeV1::Unavailable;
         }
         let key = notice.result_id.as_str().to_owned();
@@ -246,7 +246,7 @@ impl HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> for AdvisoryHookDeli
         &self,
         notice: &AdvisoryHookLookupNoticeV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
-        if !feedback_scope_matches(&self.scope, &notice.scope) {
+        if self.scope != notice.scope {
             return HookFeedbackDeliveryOutcomeV1::Unavailable;
         }
         (self.hook_v2)(notice)
@@ -412,7 +412,7 @@ impl AdvisoryHostDeliveryRegistrationV1 {
         if cycle.dedupe_key.as_ref() != Some(&publication.dedupe_key)
             || cycle.cycle.result_id != publication.result.result_id
             || cycle.cycle.cycle_id != publication.result.cycle_id
-            || !feedback_scope_matches(&cycle.cycle.scope, &publication.result.scope)
+            || cycle.cycle.scope != publication.result.scope
         {
             return Err(AdvisoryHostDeliveryErrorV1::PublicationMismatch);
         }
@@ -692,14 +692,6 @@ fn resolved_scope_matches_feedback_scope(
             .as_ref()
             .map(tracedecay_domain::RefId::as_str)
             == Some(feedback_scope.branch_ref.as_str())
-}
-
-fn feedback_scope_matches(left: &FeedbackScopeV1, right: &FeedbackScopeV1) -> bool {
-    left.project_id == right.project_id
-        && left.repository_id == right.repository_id
-        && left.worktree_id == right.worktree_id
-        && left.branch_ref == right.branch_ref
-        && left.head_commit_id == right.head_commit_id
 }
 
 #[cfg(test)]

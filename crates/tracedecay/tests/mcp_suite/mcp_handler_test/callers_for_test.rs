@@ -168,14 +168,14 @@ async fn callers_for_maps_each_node_to_its_direct_callers() {
     assert_callers(
         server,
         &helper_callers,
-        &[main_id.clone()],
+        std::slice::from_ref(&main_id),
         "helper is called by main",
     )
     .await;
     assert_callers(
         server,
         &format_callers,
-        &[helper_id.clone()],
+        std::slice::from_ref(&helper_id),
         "format_greeting is called by helper",
     )
     .await;

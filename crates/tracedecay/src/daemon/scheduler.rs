@@ -672,9 +672,12 @@ impl DaemonEngine {
     }
 
     #[hotpath::measure(label = "daemon.scheduler.start_automation", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
+        )
     )]
     pub(super) async fn start_automation_scheduler(
         &self,
@@ -1986,9 +1989,12 @@ async fn automation_scheduler_has_work(
     clippy::too_many_arguments,
     reason = "Job dispatch binds retained project memory and pinned configuration to the admitted backend and shared error result."
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
+    )
 )]
 async fn run_user_jobs_scheduler_pass(
     engine: &DaemonEngine,

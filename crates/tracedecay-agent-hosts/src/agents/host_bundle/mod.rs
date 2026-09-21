@@ -5,10 +5,10 @@
 //! contains no signing key, trust root, external bundle loader, credential,
 //! daemon lifecycle, product semantics, or host-specific business authority.
 //!
-//! The lifecycle is split along its seams: [`planner`] observes and plans,
-//! [`writer`] and [`component_set`] mutate under a recoverable journal,
-//! [`doctor`] discovers installed state, [`control`] owns the control
-//! directory layout and validators, and [`runtime`] composes injected
+//! The lifecycle is split along its seams: `planner` observes and plans,
+//! `writer` and `component_set` mutate under a recoverable journal,
+//! `doctor` discovers installed state, `control` owns the control
+//! directory layout and validators, and `runtime` composes injected
 //! verifier and storage authorities. Every public item is re-exported here so
 //! callers address one module.
 
@@ -73,7 +73,7 @@ pub use planner::{
     dry_run_host_bundle_lifecycle_with_lifecycle_root_at,
     dry_run_host_component_set_lifecycle_with_lifecycle_root_at, inspect_install_target,
     plan_complete_lifecycle_mutation, plan_lifecycle_mutation,
-    plan_verified_complete_lifecycle_mutation, plan_verified_lifecycle_mutation,
+    plan_verified_complete_lifecycle_mutation,
 };
 pub use runtime::{
     FeedbackPathRestoreReceiptV1, FeedbackPathRollbackReceiptV1, FeedbackPathRollbackSwitchV1,

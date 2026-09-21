@@ -48,7 +48,7 @@ const DAEMON_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// What an initialize probe actually observed.
 ///
 /// Socket acceptance and service-manager "active" are not this type. Only a
-/// completed initialize exchange produces [`Ready`] or [`VersionMismatch`].
+/// completed initialize exchange produces `Ready` or `VersionMismatch`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonProcessProofV1 {
     /// initialize returned `serverInfo.name = tracedecay` at `expected_version`.

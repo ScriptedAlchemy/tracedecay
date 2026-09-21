@@ -10,19 +10,21 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [lib]
 doctest = false
 
-[features]
-# Same activation as the shipped binary: the runtime crate stays crates.io
-# hotpath. `hotpath-mcp` is only so the live-query proof can start the server.
-hotpath = ["hotpath/hotpath"]
-hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
-
 [dependencies]
 hotpath.workspace = true
 
 [dev-dependencies]
 serde_json = "1"
 
+# No `hotpath` feature of its own. Only a composition root can select the
+# backend, because `tracedecay-sdk` mirrors it onto its host build-script
+# context (see its manifest). A leaf selector lit the one shared
+# `hotpath-macros` while the host `hotpath` lib stayed off, so every
+# instrumented crate failed with E0433, and it left `tracedecay-cli/hotpath`
+# off, compiling out the guard that starts and flushes the profiler. The live
+# proof names the dependency features instead, the selector the workspace-wide
+# hotpath graph check already uses.
 [[test]]
 name = "functions_limit_live"
 path = "tests/functions_limit_live.rs"
-required-features = ["hotpath", "hotpath-mcp"]
+required-features = ["hotpath/hotpath", "hotpath/hotpath-mcp"]

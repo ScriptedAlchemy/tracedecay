@@ -2354,7 +2354,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         })
     });
     let had_expected_cursor = expected_cursor.is_some();
-    let (raw, shared_page_hit) = shared_jsonl_page_with_frame_limit_and_cancellation(
+    let (raw, shared_page_hit) = match shared_jsonl_page_with_frame_limit_and_cancellation(
         path,
         previous,
         max_new_bytes,
@@ -2367,7 +2367,18 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         },
         false,
     )
-    .await?;
+    .await
+    {
+        // A dangling symlink or a source removed between discovery and open
+        // cannot be read on the next pass either. Failing the provider keeps
+        // historical catch-up retrying one missing file forever.
+        Err(TranscriptIngestError::ScanIo { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(JsonlObservationAdmissionProgress::default());
+        }
+        other => other?,
+    };
     let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
