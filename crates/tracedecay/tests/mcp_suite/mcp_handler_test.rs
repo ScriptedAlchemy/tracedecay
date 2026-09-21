@@ -181,4 +181,4 @@ mod workflow_register_definition_test;
 
 // Shared lock used by sibling transport suites.
 #[cfg(feature = "test-transport")]
-pub(crate) use crate::support::GLOBAL_DB_ENV_LOCK;
+pub(crate) use crate::support::lock_process_env;

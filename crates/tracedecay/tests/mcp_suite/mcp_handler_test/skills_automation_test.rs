@@ -143,13 +143,13 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn managed_skill_mcp_tools_list_and_view_profile_store() {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
     let home = dir.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
     let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
