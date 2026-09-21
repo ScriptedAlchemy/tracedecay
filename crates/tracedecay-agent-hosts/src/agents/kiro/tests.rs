@@ -413,6 +413,51 @@ fn global_activate_sweeps_retired_artifacts_and_clears_their_advisories() {
     );
 }
 
+#[test]
+fn a_current_mcp_entry_reads_repairable_while_a_retired_artifact_remains() {
+    use crate::agents::host_bundle::HostBundleRegistrationStateV1 as State;
+
+    let home = tempfile::tempdir().unwrap();
+    let mcp_path = mcp_config_path(home.path());
+    std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &mcp_path,
+        br#"{"mcpServers":{"tracedecay":{"command":"/bin/tracedecay","args":["serve"],"disabled":false}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        kiro_context_mcp_registration_state(home.path()),
+        State::Current
+    );
+
+    let agent = managed_agent_path(home.path());
+    std::fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent,
+        serde_json::to_vec(&serde_json::json!({
+            "name": KIRO_AGENT_NAME,
+            "description": OWNED_AGENT_DESCRIPTION,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        kiro_context_mcp_registration_state(home.path()),
+        State::Repairable,
+        "a current MCP entry must not mask a retired artifact: install short-circuits \
+         on Current and never reaches the sweep, which is the state every profile \
+         holding these leftovers is already in"
+    );
+
+    remove_retired_global_agent_artifacts(home.path()).unwrap();
+    assert_eq!(
+        kiro_context_mcp_registration_state(home.path()),
+        State::Current,
+        "the sweep must settle the state rather than leave install repairing forever"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn global_activate_does_not_create_missing_legacy_steering() {

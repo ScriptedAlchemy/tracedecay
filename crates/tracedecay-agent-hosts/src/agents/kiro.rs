@@ -476,7 +476,7 @@ impl AgentIntegration for KiroIntegration {
             // is required: converging them is local file work, and welding it
             // to uninstall left the only remedy one that also tears out the
             // MCP registration this very pass is installing.
-            remove_retired_global_artifacts(&ctx.home)?;
+            remove_retired_global_agent_artifacts(&ctx.home)?;
             let kiro_cli = require_kiro_cli()?;
             kiro_mcp_add_with(&kiro_cli, &ctx.home, &ctx.tracedecay_bin)?;
         }
@@ -809,16 +809,42 @@ fn uninstall_managed_agent(path: &Path) {
 /// is left alone: clearing it needs a strict cli.json rewrite that this
 /// MCP-only lifecycle does not own; doctor tells the operator to clear it.
 fn remove_retired_global_artifacts(home: &Path) -> Result<()> {
-    let steering = steering_path(home);
-    if steering.exists() {
-        remove_steering_rules(&steering)?;
-    }
-    uninstall_managed_agent(&managed_agent_path(home));
+    remove_retired_global_agent_artifacts(home)?;
     let skill_index = managed_skill_index_path(home);
     if skill_index.exists() {
         remove_kiro_managed_skill_index(home, &skill_index)?;
     }
     Ok(())
+}
+
+/// The retired artifacts doctor advises removing: the steering block and the
+/// managed agent.
+///
+/// The managed skill index is deliberately not one of them. It is live state
+/// the managed-skill export owns and rewrites, so sweeping it on install would
+/// only fight that export on the next deploy.
+fn remove_retired_global_agent_artifacts(home: &Path) -> Result<()> {
+    let steering = steering_path(home);
+    if steering.exists() {
+        remove_steering_rules(&steering)?;
+    }
+    uninstall_managed_agent(&managed_agent_path(home));
+    Ok(())
+}
+
+/// True while a retired global artifact is still present.
+///
+/// Global install is MCP-only, so an install carrying one is not in its
+/// canonical shape. Saying so is what makes `tracedecay install --agent kiro`
+/// run the sweep at all: an install whose MCP entry already reads `Current`
+/// short-circuits before activation, which is precisely the state every
+/// profile holding these leftovers is in. Self-limiting, the sweep clears it.
+fn retired_global_agent_artifacts_present(home: &Path) -> bool {
+    if is_owned_agent_file(&managed_agent_path(home)) {
+        return true;
+    }
+    std::fs::read_to_string(steering_path(home))
+        .is_ok_and(|contents| !owned_steering_ranges(&contents).is_empty())
 }
 
 fn is_owned_agent_file(path: &Path) -> bool {
@@ -863,7 +889,7 @@ fn kiro_context_mcp_registration_state(
             .and_then(serde_json::Value::as_array)
             .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
         && server.get("disabled").and_then(serde_json::Value::as_bool) != Some(true);
-    if !mcp_current {
+    if !mcp_current || retired_global_agent_artifacts_present(home) {
         return State::Repairable;
     }
     State::Current
