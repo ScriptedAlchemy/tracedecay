@@ -39,6 +39,18 @@ use tracedecay_code_index_runtime::project_reads::{
 
 const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
 
+/// Bound for every wait in this file that reads "the worker never got there".
+///
+/// None of them is a latency contract. Each one polls or gates until a
+/// background owner decodes, seats, recovers, or serves a generation, and the
+/// regression each one catches is an owner that never does, which no finite
+/// bound reaches. The value therefore only has to exceed the honest latency of
+/// the work being waited on. At five, ten, and twenty seconds it did not: a
+/// host running the rest of the lib suite against the same cores needs longer
+/// than that to decode a retained generation, and the bound reported a loaded
+/// host as a stalled worker.
+const MUST_NOT_BLOCK: Duration = Duration::from_mins(2);
+
 struct GitFixture {
     root: TempDir,
 }
@@ -240,7 +252,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
         .expect("mounted scheduler");
     drop(admission);
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     loop {
         if scheduler
             .try_lock()
@@ -255,7 +267,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     let text = loop {
         if let Some(text) = registry.latest_text_serving_for_scope(&scope).await
             && text.query_owners_are_ready()
@@ -278,7 +290,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     // A retryable activation failure no longer withholds the seat: the sealed
     // generation is installed while native graph keeps retrying, so the
     // contract lives on the seated generation's typed graph state.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     let seated = loop {
         if let Some(seated) = registry.latest_complete_serving_for_scope(&scope).await {
             break seated;
@@ -411,7 +423,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
 
     // The committed image converges shortly after activation returns rather
     // than atomically with it.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     loop {
         if native_graph_footprint(&native_graph_path) != native_graph_before {
             break;
@@ -532,7 +544,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         )
         .await
         .expect("mount persistent generation A");
-    let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let ready_deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     loop {
         if registry
             .retained_text_owner_freshness_for_scope(&scope)
@@ -606,6 +618,10 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\npub fn caller_c() { hub(); }\n",
     );
     git(fixture.path(), &["commit", "-qam", "publish generation B"]);
+    // Generation B gets its own ceiling. Sharing generation A's absolute
+    // deadline made the bound depend on how long A took, so the later wait
+    // could start with almost none of it left.
+    let ready_deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     let (generation_b, hub_b) = loop {
         if let Some((latest, true)) = registry
             .retained_text_owner_freshness_for_scope(&scope)
@@ -630,7 +646,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
             );
         }
         assert!(
-            std::time::Instant::now() <= ready_deadline + Duration::from_secs(20),
+            std::time::Instant::now() <= ready_deadline,
             "generation B graph did not become ready"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -948,7 +964,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     if !corrupt_graph {
         let (recovered, release_successor) =
             retained_recovery_gate.expect("clean retained graph restart must arm recovery gate");
-        tokio::time::timeout(Duration::from_secs(5), recovered)
+        tokio::time::timeout(MUST_NOT_BLOCK, recovered)
             .await
             .expect("retained graph recovery did not finish")
             .expect("retained graph recovery gate dropped before observation");
@@ -967,7 +983,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
 
         if dirty_before_restart {
             let stale_context = graph_request_context(scope.clone(), "restart-dirty-retained");
-            let stale_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let stale_deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
             loop {
                 let stale_read = port
                     .open(CodeGraphReadRequest::from_context(
@@ -1000,7 +1016,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             .expect("release reconcile after retained graph observation");
     }
 
-    let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled_deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     let settled = loop {
         let observed = registry
             .latest_text_serving_freshness_for_scope(&scope)
@@ -1057,7 +1073,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         // that abstention reads back as a statistics-free projection. Sampling
         // once therefore observes a non-terminal state on any host where the
         // rebuilt successor decodes after its text head starts serving.
-        let census_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let census_deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
         loop {
             let settled_census = census().await;
             // Freshness alone would anchor the later lock-held comparison to
@@ -1380,12 +1396,12 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
         .await
         .expect("mount restarted retained generation");
 
-    tokio::time::timeout(Duration::from_secs(20), projecting)
+    tokio::time::timeout(MUST_NOT_BLOCK, projecting)
         .await
         .expect("the restart never started projecting its retained text owner")
         .expect("retained text projection gate dropped before observation");
     // The seat must not wait for the projection this gate is holding.
-    tokio::time::timeout(Duration::from_secs(20), recovered)
+    tokio::time::timeout(MUST_NOT_BLOCK, recovered)
         .await
         .expect("the retained graph head did not recover while its text owner was projecting")
         .expect("retained graph recovery gate dropped before observation");
@@ -1447,7 +1463,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
             .await,
         "branch publication demand reaches the mounted retained owner"
     );
-    let complete_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let complete_deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     loop {
         if let Some(complete) = registry.latest_complete_serving_for_scope(&scope).await {
             assert_eq!(
@@ -1474,7 +1490,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
     release_projection
         .send(())
         .expect("release the held text projection");
-    let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let ready_deadline = std::time::Instant::now() + MUST_NOT_BLOCK;
     loop {
         if let Some(ready) = registry
             .latest_text_serving_for_root(&canonical_fixture)
