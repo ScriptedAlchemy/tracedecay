@@ -225,12 +225,16 @@ async fn release_one_idle_project_server_before_open(
     Ok(capacity_admission)
 }
 
-#[cfg(test)]
+// Gated exactly like the `production_harness` module that owns the isolated
+// layout: an integration test links this crate without `cfg(test)`, so a
+// `cfg(test)`-only pin left `mcp_suite` compositions sweeping the developer's
+// real `$HOME` transcripts.
+#[cfg(any(test, feature = "test-transport"))]
 pub(super) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
     profile_root.parent().map(Path::to_path_buf)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-transport")))]
 pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
     tracedecay_sessions::runtime::home_dir()
 }
