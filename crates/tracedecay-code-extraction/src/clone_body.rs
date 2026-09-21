@@ -278,7 +278,10 @@ fn tokenize_clone_body(
         issues: Vec::new(),
         token_count: 0,
     };
-    emitter.emit(syntax.body);
+    // Resolved once for the body. Every comma below it used to re-walk its
+    // own ancestor chain to ask the same question, and each step of that
+    // chain is a `Node::parent` that re-descends from the root.
+    emitter.emit(syntax.body, has_ancestor_kind(syntax.body, "token_tree"));
     if !syntax.body_boundary_complete {
         emitter
             .issues
@@ -382,12 +385,12 @@ struct TokenEmitter<'a> {
 }
 
 impl<'a> TokenEmitter<'a> {
-    fn emit(&mut self, node: TreeSitterNode<'_>) {
+    fn emit(&mut self, node: TreeSitterNode<'_>, in_token_tree: bool) {
         if is_comment(node.kind()) {
             return;
         }
         if node.child_count() == 0 {
-            self.emit_leaf(node);
+            self.emit_leaf(node, in_token_tree);
             return;
         }
 
@@ -396,10 +399,11 @@ impl<'a> TokenEmitter<'a> {
                 syntax_kind: Cow::Borrowed(node.kind()),
             });
         }
+        let inside_token_tree = in_token_tree || node.kind() == "token_tree";
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
-                self.emit(cursor.node());
+                self.emit(cursor.node(), inside_token_tree);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -419,14 +423,14 @@ impl<'a> TokenEmitter<'a> {
         self.tokens.push(token);
     }
 
-    fn emit_leaf(&mut self, node: TreeSitterNode<'_>) {
+    fn emit_leaf(&mut self, node: TreeSitterNode<'_>, in_token_tree: bool) {
         let Ok(text) = node.utf8_text(self.source) else {
             self.issues
                 .push(CloneBodyTokenizationIssueV1::InvalidSourceRange);
             return;
         };
         if text.trim().is_empty()
-            || is_ignorable_trailing_comma(node, self.source)
+            || is_ignorable_trailing_comma(node, self.source, in_token_tree)
             || (node.kind() == ";" && matches!(self.language, "javascript" | "typescript" | "tsx"))
         {
             return;
@@ -453,8 +457,12 @@ fn is_comment(kind: &str) -> bool {
         || kind.starts_with("comment_")
 }
 
-fn is_ignorable_trailing_comma(node: TreeSitterNode<'_>, source: &[u8]) -> bool {
-    if node.kind() != "," || has_ancestor_kind(node, "token_tree") {
+fn is_ignorable_trailing_comma(
+    node: TreeSitterNode<'_>,
+    source: &[u8],
+    in_token_tree: bool,
+) -> bool {
+    if in_token_tree || node.kind() != "," {
         return false;
     }
     let mut next = node.next_sibling();
