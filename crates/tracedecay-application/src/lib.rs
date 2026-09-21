@@ -25,7 +25,7 @@
 //!   Configuration
 //!   value/persistence contracts live in `tracedecay-configuration` (re-exported
 //!   from `tracedecay_global_db::configuration::contracts`), not duplicated here.
-//!   [`config::retrieval`] stays in this crate because it is production-load-bearing
+//!   `config::retrieval` stays in this crate because it is production-load-bearing
 //!   on search-eval.
 //! - Transport-independent response handles live in
 //!   `tracedecay_session_memory::response_handles`; MCP adapters should call

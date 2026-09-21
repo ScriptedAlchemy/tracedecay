@@ -42,7 +42,7 @@ impl<E> From<LcmError> for PayloadStreamError<E> {
 
 /// A payload file whose content proof was taken through the handle it holds.
 ///
-/// Constructed only by [`VerifiedPayloadStream::open`], which runs the proof,
+/// Constructed only by `VerifiedPayloadStream::open`, which runs the proof,
 /// so holding a value is evidence that the handle's bytes matched the expected
 /// hash, byte count, and character count at open time. [`Self::emit`] consumes
 /// the stream: one proof authorizes one emission.

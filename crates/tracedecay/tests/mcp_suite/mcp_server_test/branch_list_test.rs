@@ -143,7 +143,7 @@ async fn call_branch_list(server: &Arc<McpServer>, id: i64, arguments: Value) ->
     response_with_id(&responses, json!(id))
 }
 
-fn payload_text<'a>(response: &'a Value) -> &'a str {
+fn payload_text(response: &Value) -> &str {
     assert!(
         response["error"].is_null(),
         "branch list must not return a JSON-RPC error: {response}"

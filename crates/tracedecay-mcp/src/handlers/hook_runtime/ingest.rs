@@ -603,9 +603,12 @@ pub(super) async fn ingest_transcript(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.ingest")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Transcript ingest is one cancelled-aware write through the capture authority."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Transcript ingest is one cancelled-aware write through the capture authority."
+    )
 )]
 pub async fn ingest_transcript_with_cancellation(
     cg: Option<&TraceDecay>,

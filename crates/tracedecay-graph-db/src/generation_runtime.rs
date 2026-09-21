@@ -1915,7 +1915,7 @@ impl GraphDb {
     }
 
     /// Test surface for
-    /// [`Self::release_sealed_generation_staging_rows_for_relational_head`].
+    /// `Self::release_sealed_generation_staging_rows_for_relational_head`.
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn release_staging_rows_for_relational_head(
         &self,

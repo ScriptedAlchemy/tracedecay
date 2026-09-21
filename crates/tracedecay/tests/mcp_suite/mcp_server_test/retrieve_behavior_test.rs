@@ -27,7 +27,7 @@ const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracede
 (`tracedecay tool retrieve --help` for parameters). If MCP calls keep failing or timing out, \
 fall back to that CLI instead of querying .tracedecay databases directly.";
 
-fn tool_text<'a>(response: &'a Value) -> &'a str {
+fn tool_text(response: &Value) -> &str {
     response["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("retrieve text missing: {response}"))

@@ -1,4 +1,4 @@
-//! Session-store operations hosted on [`SessionStoreAccess`].
+//! Session-store operations hosted on `SessionStoreAccess`.
 //!
 //! These are the former `RegisteredGlobalDb` SQL/LCM adapter bodies. Global-db
 //! keeps thin inherent wrappers so existing lease call sites keep working.

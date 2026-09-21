@@ -41,7 +41,7 @@ pub const CONFIG_FILENAME: &str = "config.json";
 /// Returns `true` if any component of `path` is a generated/vendored
 /// directory segment, or `path` itself carries a minified-asset suffix
 /// (`app.min.js`, `app.min.css`, ...). This mirrors the `**/*.min.*` default
-/// exclude pattern built by [`default_exclude_patterns`].
+/// exclude pattern built by `default_exclude_patterns`.
 ///
 /// Path-level, including individual file paths, so callers can filter a flat
 /// list of file paths in one pass.

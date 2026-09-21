@@ -155,7 +155,7 @@ async fn call_inheritance_depth(project: &OpenedProject, arguments: Value) -> Js
     call_tool(project, "tracedecay_inheritance_depth", arguments).await
 }
 
-fn tool_text<'a>(response: &'a JsonRpcResponse) -> &'a str {
+fn tool_text(response: &JsonRpcResponse) -> &str {
     assert!(response.error.is_none(), "MCP error: {:?}", response.error);
     let result = response
         .result

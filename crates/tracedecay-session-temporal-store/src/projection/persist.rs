@@ -23,7 +23,6 @@ use super::super::query::{
     read_generation, read_observation, storage, storage_message,
 };
 use super::super::rebuild::checkpoint_relation_rebuild_control;
-use super::super::sql::GENERATION_COPY_STATEMENTS;
 use super::MATERIALIZE_REFRESH;
 use super::materialize::*;
 use super::receipts::*;
@@ -168,29 +167,6 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
 pub(crate) enum ProjectionProgressBaseline {
     Empty,
     SeededFromActive,
-}
-
-#[hotpath::measure(future = true, label = "session_temporal.persist.seed_projection")]
-pub async fn seed_active_projection_in_transaction(
-    conn: &impl crate::handle::SessionTemporalExec,
-    batch: &SessionTemporalProjectionBatchV1,
-    control: &ExecutionControl,
-) -> SessionStoreResult<()> {
-    checkpoint_relation_rebuild_control(control)?;
-    if batch.batch_ordinal() != 0 || batch.watermarks().active_generation() == batch.generation() {
-        return Ok(());
-    }
-    let session_id = batch.session_id().as_str();
-    let candidate = generation_i64(batch.generation(), PERSIST_OPERATION)?;
-    let active = generation_i64(batch.watermarks().active_generation(), PERSIST_OPERATION)?;
-    for sql in GENERATION_COPY_STATEMENTS {
-        checkpoint_relation_rebuild_control(control)?;
-        conn.execute(sql, params![session_id, candidate, active])
-            .await
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        checkpoint_relation_rebuild_control(control)?;
-    }
-    Ok(())
 }
 
 struct CanonicalOccurrenceProjection {

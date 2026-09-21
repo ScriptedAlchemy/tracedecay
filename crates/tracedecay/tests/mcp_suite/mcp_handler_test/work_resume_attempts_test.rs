@@ -496,7 +496,7 @@ fn attempt_status_args(attempt_id: &str) -> Value {
 }
 
 async fn wait_until(server: &McpServer, attempt_id: &str, expected: &str) -> Value {
-    let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             let status = call(
                 server,
@@ -514,8 +514,7 @@ async fn wait_until(server: &McpServer, attempt_id: &str, expected: &str) -> Val
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("{attempt_id} did not reach {expected}"));
-    status
+    .unwrap_or_else(|_| panic!("{attempt_id} did not reach {expected}"))
 }
 
 async fn admit_placed_run(server: &McpServer, project_root: &Path) -> Value {

@@ -1,7 +1,7 @@
 //! Free-page compaction for tracked branch databases (plan 38 §6).
 //!
-//! [`super::live_compaction::compact_project_store`] and
-//! [`super::live_compaction::compact_registered_store`] already compact the
+//! `compact_project_store` and
+//! `compact_registered_store` already compact the
 //! live graph store and `global.db` off the hot path, through their retained
 //! writer runtimes.
 //! Every *other* tracked branch gets its own `SQLite` family under
@@ -30,7 +30,7 @@
 //! pass. That case is precisely the one the owner's audit measured, so this
 //! pass refuses to report it as work done: the mode is checked up front and a
 //! database that cannot be incrementally vacuumed is skipped with
-//! [`BranchCompactionSkipReason::IncrementalVacuumUnavailable`], which the
+//! `BranchCompactionSkipReason::IncrementalVacuumUnavailable`, which the
 //! daemon logs. Silently "compacting" zero pages would have reported success
 //! over exactly the bloat this exists to remove.
 //!
