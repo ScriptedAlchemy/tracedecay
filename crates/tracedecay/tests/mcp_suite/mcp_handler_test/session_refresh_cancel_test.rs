@@ -11,7 +11,7 @@
 use crate::common::fixture::git_run as git;
 #[cfg(feature = "test-transport")]
 use crate::fixture;
-use crate::support::{GLOBAL_DB_ENV_LOCK, GlobalDbEnvGuard, HomeEnvGuard, extract_text};
+use crate::support::{GlobalDbEnvGuard, HomeEnvGuard, extract_text, lock_process_env};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -219,11 +219,11 @@ async fn production_call(
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let root = crate::support::test_temp_dir();
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let project = isolation.join("project");
     std::fs::create_dir_all(project.join("src")).expect("project source directory");
     fixture::write_indexed_fixture_sources(&project);
@@ -451,10 +451,10 @@ async fn production_mcp_cancel_refuses_bad_handles_and_keeps_a_finished_receipt(
 /// the cancelled receipt and a repeat returns that same receipt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_of_an_unfinished_refresh_stores_a_cancelled_receipt() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let root = crate::support::test_temp_dir();
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let _global_db = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let project = root.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("project source directory");

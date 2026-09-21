@@ -476,9 +476,9 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let project_root = dir.path().join("project");
     fs::create_dir_all(&project_root).unwrap();
     let project = project_root.as_path();
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let home = project.join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
     let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();

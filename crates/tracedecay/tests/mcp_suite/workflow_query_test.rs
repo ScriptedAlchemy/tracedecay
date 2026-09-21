@@ -250,7 +250,6 @@ async fn call(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (_env, project_root) = common::IsolatedEnv::acquire().await;
     let cg = TraceDecay::init(&project_root)
         .await
@@ -287,7 +286,6 @@ async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_query_surface_end_to_end() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let home = env.home().to_path_buf();
 
@@ -604,7 +602,6 @@ async fn refuse(cg: &TraceDecay, args: Value) -> String {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_tool_returns_literal_query_documents() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let home = env.home().to_path_buf();
     let cg = TraceDecay::init(&project_root)
