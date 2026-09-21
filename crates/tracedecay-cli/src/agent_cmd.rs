@@ -2900,22 +2900,27 @@ mod tests {
         )
         .unwrap();
 
+        // Global install is MCP-only, so both leftovers are retired by
+        // definition and the install sweeps them. Refreshing the steering block
+        // instead left doctor advising a remedy no install could satisfy.
         assert!(
-            !std::fs::read_to_string(&legacy_steering)
-                .unwrap()
-                .contains("old rules"),
-            "global install must converge leftover legacy steering"
+            !legacy_steering.exists()
+                || !std::fs::read_to_string(&legacy_steering)
+                    .unwrap()
+                    .contains("old rules"),
+            "global install must not leave a retired steering block behind"
         );
         assert!(
-            std::fs::read_to_string(&legacy_steering)
-                .unwrap()
-                .contains("<!-- tracedecay:kiro:start -->"),
-            "converged steering must carry the current ownership sentinel"
+            !legacy_agent.exists(),
+            "global install must sweep the retired managed agent"
         );
+        let registered: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.path().join(".kiro/settings/mcp.json")).unwrap(),
+        )
+        .unwrap();
         assert!(
-            std::fs::read_to_string(&legacy_agent)
-                .unwrap()
-                .contains("timeout_ms")
+            registered["mcpServers"]["tracedecay"].is_object(),
+            "sweeping retired artifacts must not disturb the MCP registration: {registered}"
         );
 
         let mut counters = DoctorCounters::new();
@@ -2927,10 +2932,10 @@ mod tests {
             },
         );
         assert_eq!(counters.issues, 0);
-        // Canonical MCP install leaves retired global leftovers untouched, and
-        // doctor must advise migration for the owned steering block plus the
-        // managed agent fixture rather than reporting a silent green check.
-        assert_eq!(counters.warnings, 2);
+        assert_eq!(
+            counters.warnings, 0,
+            "the install the advisories name must clear every one of them"
+        );
     }
 
     /// A transaction interrupted after it staged registration leaves a journal
