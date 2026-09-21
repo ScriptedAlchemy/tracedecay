@@ -287,9 +287,7 @@ fn record_tool_family(families: &mut BTreeMap<String, FamilyCounts>, tool: &str,
     }
     if matches!(tool, "grep" | "rg" | "glob" | "search")
         || (matches!(tool, "bash" | "shell" | "exec_command")
-            && (looks_like_search_command(&text)
-                || text.contains("grep")
-                || text.contains("find ")))
+            && (looks_like_search_command(text) || text.contains("grep") || text.contains("find ")))
     {
         increment_family_relevance(families, "code_search");
     }
