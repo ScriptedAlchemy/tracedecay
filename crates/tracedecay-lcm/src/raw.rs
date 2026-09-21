@@ -722,7 +722,7 @@ fn externalized_payload_metadata(
 /// Observation capture already privacy-sanitized and size-bounded the payload
 /// before it became durable, so the projected row stays inline; this binds a
 /// fresh content receipt to the stored text so the canonical raw-read
-/// authority ([`load_raw_message`]) can hydrate observation-projected
+/// authority (`load_raw_message`) can hydrate observation-projected
 /// messages instead of refusing them as receipt-less rows.
 pub async fn upsert_projection_raw_message(
     conn: &(impl Executor + ?Sized),
@@ -1181,7 +1181,7 @@ const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 /// Returns whether the current detector would change this provider metadata.
 ///
 /// This is the at-rest rescan's change probe for the exact transformation
-/// ingest applies through [`protected_metadata_json`]: metadata persisted
+/// ingest applies through `protected_metadata_json`: metadata persisted
 /// under older detector rules is dirty when re-sanitizing it under the
 /// current rules yields a different document. A document the sanitizer
 /// refuses to evaluate is a typed refusal, never implicitly clean.

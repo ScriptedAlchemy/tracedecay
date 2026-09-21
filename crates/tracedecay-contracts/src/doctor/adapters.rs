@@ -250,7 +250,8 @@ fn storage_read_parts(
 /// The resolved kernel reads a Doctor report composes from.
 ///
 /// The composition root builds this bundle from the real signals it can reach
-/// and wires each read into [`DoctorReportComposerV1`]. A signal the surface
+/// and wires each read into [`DoctorReportComposerV1`](crate::doctor::DoctorReportComposerV1).
+/// A signal the surface
 /// cannot obtain carries its honest typed absence rather than a fabricated
 /// healthy read.
 #[derive(Clone, Debug)]

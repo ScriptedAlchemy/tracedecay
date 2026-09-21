@@ -4,6 +4,7 @@
 
 pub(crate) const TOP_LEVEL_AFTER_HELP: &str = "\
 Quick start:
+  tracedecay daemon install-service     Install + start the daemon (required first)
   tracedecay init                       Index the current repo (once per project)
   tracedecay sync                       Refresh the index after changes
   tracedecay tool                       List every MCP tool callable from the CLI
@@ -27,13 +28,18 @@ flags to target another project.
 For more help on a command: tracedecay <command> --help";
 
 pub(crate) const INIT_LONG_ABOUT: &str = "\
-Walks the project tree, parses sources across the supported languages, and \
-writes the code graph plus memory/session stores under .tracedecay/. Run once \
+Enrolls the repository and publishes its first code generation. Requires a \
+running daemon: init is brokered through the daemon-owned code-index \
+scheduler, and without one it refuses with \
+`code_index_scheduler_unavailable` before writing anything. Start the daemon \
+with `tracedecay daemon install-service` (or `tracedecay daemon start`) and \
+confirm with `tracedecay daemon status`. Storage is daemon-owned. Run once \
 per repository; afterwards `tracedecay sync` keeps the index fresh \
 incrementally. Respects .gitignore by default (see `tracedecay gitignore`).";
 
 pub(crate) const INIT_AFTER_HELP: &str = "\
 Examples:
+  tracedecay daemon install-service              Start the daemon init brokers through
   tracedecay init                                Index the current directory
   tracedecay init /path/to/repo                  Index another repository
   tracedecay init --skip-folder vendor --skip-folder dist
@@ -42,8 +48,9 @@ Examples:
   tracedecay init /new/path --yes                Adopt the unique moved non-git store
   tracedecay init /new/path --fresh              Mint a new identity, never adopt
 
-Related: tracedecay sync (incremental refresh), tracedecay status,
-tracedecay gitignore, tracedecay wipe (delete local stores).";
+Related: tracedecay daemon (the daemon init requires), tracedecay sync
+(incremental refresh), tracedecay status, tracedecay gitignore,
+tracedecay wipe (delete local stores).";
 
 pub(crate) const SYNC_LONG_ABOUT: &str = "\
 Re-parses only files that changed since the last index and updates the code \

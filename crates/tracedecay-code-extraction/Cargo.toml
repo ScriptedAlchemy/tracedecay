@@ -99,3 +99,9 @@ sha2 = "0.11"
 
 [build-dependencies]
 cc = "1"
+
+# Names every shipped extractor to prove signature identity across the whole
+# language set, so it only builds once the full tier registers them.
+[[test]]
+name = "extract_alloc"
+required-features = ["full"]

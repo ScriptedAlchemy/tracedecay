@@ -11,7 +11,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, CustomNotification, ErrorCode,
     ErrorData, Implementation, InitializeRequestParams, InitializeResult, ListResourcesResult,
     ListToolsResult, MetaObject, ReadResourceRequestParams, ReadResourceResponse,
-    ReadResourceResult, ServerCapabilities, ServerInfo,
+    ReadResourceResult, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler};
@@ -645,8 +645,8 @@ impl<C> ServerHandler for RmcpConnectionAdapter<C>
 where
     C: McpConnectionContext,
 {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_resources()
                 .enable_tools()

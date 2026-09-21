@@ -577,7 +577,7 @@ pub async fn run_measurement() -> BenchResult<Value> {
     validate_bench_profile_enforced()?;
 
     let root = repository_root();
-    let measurement = capture_measurement().await?;
+    let measurement = Box::pin(capture_measurement()).await?;
     Ok(measurement_result(
         source_identity(&current_commit(&root)?),
         measurement,
@@ -600,7 +600,7 @@ pub async fn refresh_contract() -> BenchResult<Value> {
     let workload = read_json(&root.join(WORKLOAD_PATH))?;
     validate_refresh_inputs(&root, &workload)?;
     let source_commit = clean_source_commit(&root)?;
-    let measurement = capture_measurement().await?;
+    let measurement = Box::pin(capture_measurement()).await?;
     let commit_after = clean_source_commit(&root)?;
     if commit_after != source_commit {
         return Err("source commit changed during benchmark contract refresh".to_owned());
@@ -625,7 +625,7 @@ async fn capture_measurement() -> BenchResult<Value> {
     let mut records_per_repetition = None;
 
     for repetition in 0..(WARMUP_REPETITIONS + MEASURED_REPETITIONS) {
-        let repetition_measurement = run_one_repetition(repetition).await?;
+        let repetition_measurement = Box::pin(run_one_repetition(repetition)).await?;
         match records_per_repetition {
             Some(expected) if expected != repetition_measurement.record_count => {
                 return Err(format!(
@@ -1298,7 +1298,7 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_benchmark_db_provisions_key_for_rank_and_hydration() {
-        let samples = run_one_repetition(0)
+        let samples = Box::pin(run_one_repetition(0))
             .await
             .expect("fresh benchmark database must provision an authenticated cursor key");
         let phases = samples

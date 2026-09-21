@@ -2,7 +2,7 @@
 //! maintenance owner.
 //!
 //! Every operation that opens or garbage-collects a store lives here so its
-//! [`StoreAdministration`] lifetime is kept separate from the watcher state
+//! `StoreAdministration` lifetime is kept separate from the watcher state
 //! machine. The git watcher itself never opens or mutates a store: it routes
 //! exact-frontier freshness requests to the code-index scheduler and wakes the
 //! maintenance owner.

@@ -12,13 +12,13 @@
 //! `~/.codex/config.toml`; TraceDecay never writes those. Hook trust is
 //! different: `codex plugin add` does not record `[hooks.state]` hashes and
 //! `/hooks` is interactive-only, so activation records trust for TraceDecay's
-//! own managed hooks ([`sync_codex_hook_trust`]) and deactivation prunes those
-//! records again ([`prune_codex_hook_trust_records`]), both inside the
+//! own managed hooks (`sync_codex_hook_trust`) and deactivation prunes those
+//! records again (`prune_codex_hook_trust_records`), both inside the
 //! component transaction's rollback boundary. Trust is recorded only for hooks
 //! whose installed command is byte-for-byte a generated tracedecay command
-//! ([`codex_hook_command_invokes_tracedecay`]); anything else keeps the manual
-//! `/hooks` review. See [`plugin_registry`] for the plugin adoption and
-//! [`mcp_registry`] for the MCP-only (non-plugin) registry.
+//! (`codex_hook_command_invokes_tracedecay`); anything else keeps the manual
+//! `/hooks` review. See `plugin_registry` for the plugin adoption and
+//! `mcp_registry` for the MCP-only (non-plugin) registry.
 //!
 //! Codex's **MCP registry** remains the path for an MCP-only component set
 //! (`codex mcp add`/`remove`). A `Core`-bearing set must not also register a
@@ -455,13 +455,13 @@ impl AgentIntegration for CodexIntegration {
 
     /// Split by component: the MCP-only set is driven through Codex's own
     /// non-interactive MCP registry; a `Core`-bearing set drives
-    /// `codex plugin add` / `remove` through [`plugin_registry`].
+    /// `codex plugin add` / `remove` through `plugin_registry`.
     ///
     /// That split is deliberate: a plugin install already carries the MCP route
     /// inside its bundled `.mcp.json`, and adding a standalone server beside it
     /// would give the operator two identical tracedecay servers, one of them
-    /// outside `codex plugin` management. See [`mcp_registry`] and
-    /// [`plugin_registry`] for the full rulings.
+    /// outside `codex plugin` management. See `mcp_registry` and
+    /// `plugin_registry` for the full rulings.
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle::HostComponentV1],
@@ -2222,7 +2222,7 @@ fn doctor_check_native_activation(dc: &mut DoctorCounters, home: &Path) {
 }
 
 /// Install and update-plugin auto-trust the managed hooks
-/// ([`sync_codex_hook_trust`]), but the safety valve skips tampered commands
+/// (`sync_codex_hook_trust`), but the safety valve skips tampered commands
 /// and an unwritable config leaves trust unrecorded. Returns follow-up
 /// guidance while any managed hook is untrusted or stale, and `None` once
 /// explicit, current trust exists for every managed hook.

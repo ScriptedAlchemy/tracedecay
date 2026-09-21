@@ -30,7 +30,7 @@ pub(super) const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical
 /// instead. The marker is recorded for any authority that holds no rows yet,
 /// and for one whose retained rows and cursors name no Cline/Roo/Kilo source at
 /// all, the scheme change touched only those hosts, so such a store cannot
-/// double-count anything (see [`cline_like_sources_present`]). Only stores
+/// double-count anything (see `cline_like_sources_present`). Only stores
 /// carrying old-scheme rows from those hosts refuse.
 pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
     "observations-native-source-scheme-v2-cline-ui-messages";
