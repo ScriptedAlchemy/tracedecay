@@ -92,7 +92,8 @@ unauthorized external action after completing independent, authorized work.
 - Commits: `<type>(<scope>): <subject>` (scope optional; full header ≤ 72 chars)
   with one of
   `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`,
-  `style`, `test`. Every non-merge commit message must pass commitlint
+  `simplify`, `style`, `test`. `simplify` is a behavior-preserving deletion
+  or dedup; like `refactor` it is hidden from generated release notes. Every non-merge commit message must pass commitlint
   (`npm run lint:commit`, configured in `commitlint.config.cjs`; the
   `.githooks/commit-msg` hook runs it locally via
   `scripts/install-git-hooks.sh`).
