@@ -52,7 +52,7 @@ use tracedecay_runtime_core::resident_memory::{
 use super::{
     ALPHA_LIB_V1, CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
     application_context, build_progress_snapshot, caller_star_sources, callers_page_meta,
-    core_search_request, decode_hex, git, install_verified_graph_store,
+    core_search_request, decode_hex, drain_clone_backfill, git, install_verified_graph_store,
     install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
     mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit,
     moved_reference_scope, progress_snapshot_for_generation, published, query_authority,
@@ -1130,7 +1130,7 @@ async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
 }
 
 #[tokio::test]
-async fn query_admission_serves_v14_while_clone_successor_is_pending() {
+async fn a_proven_seat_serves_v14_without_asking_for_the_pending_clone_successor() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
@@ -1154,6 +1154,10 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     let registry_store = TempDir::new().expect("registry store root");
     let (registry, scope) =
         mounted_core_query_worktree_with_one_permit(&fixture, &registry_store).await;
+    // The registry's own owner owes a clone successor too, and the worker
+    // keeps a continuation queued for it. Settle that first so the slot this
+    // test reads belongs to the query alone.
+    drain_clone_backfill(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
     {
@@ -1193,6 +1197,26 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
         );
     }
 
+    // Bind the seat's source proof, the state a settled mount reaches. The
+    // read below then has nothing left to verify.
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source fence");
+    let witness = source_freshness
+        .source_currency_witness_for(
+            &latest.metadata().manifest().generation_id,
+            &latest.metadata().snapshot().content_identity,
+        )
+        .expect("the seated owner's snapshot is the one the fence proved");
+    *registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted serving witness")
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(witness);
+    registry.clear_pending_wake_for_scope(&scope).await;
+
     let executed = registry
         .execute_query_search(&scope, core_search_request("alpha"))
         .await
@@ -1201,12 +1225,12 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
         ranks_symbol(&ranked_symbol_names(&executed, &latest), "alpha"),
         "the query must return the V14 alpha symbol"
     );
-    assert!(
-        registry
-            .pending_wake_micros_for_scope(&scope)
-            .await
-            .is_some_and(|pending| pending != 0),
-        "pending clone work must request a background reconcile"
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "a search whose owners are ready under a current proof must ask the \
+         worker for nothing: the pending-wake slot is what the freshness \
+         ladder reports as `verifying`"
     );
 
     drop(admission);
