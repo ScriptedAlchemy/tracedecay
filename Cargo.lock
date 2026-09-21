@@ -6408,6 +6408,7 @@ dependencies = [
  "tracedecay-graph-db",
  "tracedecay-private-fs",
  "tracedecay-query",
+ "tracedecay-runtime-core",
  "tracedecay-temporal-query",
  "tracing",
  "zeroize",

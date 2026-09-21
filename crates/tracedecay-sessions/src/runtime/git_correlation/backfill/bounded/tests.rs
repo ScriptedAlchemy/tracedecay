@@ -219,7 +219,7 @@ fn append_linear_history(path: &Path, commit_count: usize) {
 }
 
 fn head_commit_time(path: &Path) -> i64 {
-    gix::discover(path)
+    tracedecay_runtime_core::git_open::discover(path)
         .unwrap()
         .head_commit()
         .unwrap()

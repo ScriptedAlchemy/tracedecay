@@ -2509,7 +2509,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.validate_generation_identity(&active)?;
             self.adopt_ignored_source_roster(&active);
         }
-        // Capture may advance `.git/index` mtime (gix::open). The post-reconcile
+        // Capture may advance `.git/index` mtime (git_open::open). The post-reconcile
         // witness is sampled at `mark_reconciled`, after that side effect, so
         // the next ready probe does not see this pass as stale.
         let mut overflow_reconciled = false;
@@ -2939,7 +2939,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !self.source_witness_matches_worktree(&freshness) {
             return None;
         }
-        // Sample after the walk. `gix::open` inside the digest comparison can
+        // Sample after the walk. `git_open::open` inside the digest comparison can
         // move index metadata; storing the post-walk sample is what keeps the
         // next probe from calling that side effect a new generation.
         let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
@@ -3038,7 +3038,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// did: it proves the authority exists without walking, hashing, or
     /// classifying anything.
     pub fn git_authority_available(&self) -> bool {
-        gix::open(&self.project_root).is_ok()
+        tracedecay_runtime_core::git_open::open(&self.project_root).is_ok()
     }
 
     /// Run the cheap Git/stat ladder, unverified restore, tier-1 git
@@ -3520,7 +3520,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Err(cancelled_code_index_reconcile());
         }
         ignored_dependencies::checkpoint_if_present(control)?;
-        let repository = gix::open(&self.project_root)
+        let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         // Classify committed/staged/unstaged/untracked/deleted/renamed paths
         // truthfully from gix. Deletions drop out of the present candidate set;

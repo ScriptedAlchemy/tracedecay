@@ -323,7 +323,7 @@ fn bare_repository_is_typed_unsupported() {
 fn removed_opened_worktree_is_captured_as_partially_readable() {
     let fixture = GitFixture::new();
     fixture.commit("base");
-    let repo = gix::discover(fixture.path()).unwrap();
+    let repo = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let workdir = repo.workdir().unwrap().to_path_buf();
     fs::remove_dir_all(&workdir).unwrap();
 

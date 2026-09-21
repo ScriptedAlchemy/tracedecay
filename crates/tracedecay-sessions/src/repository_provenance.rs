@@ -377,7 +377,7 @@ impl NativeRepositoryProvenanceProbe {
         // Admission has already resolved the exact checkout root. Opening that
         // root directly prevents a removed nested checkout from silently
         // walking up to, and capturing evidence from, an ambient repository.
-        let Ok(repo) = gix::open(request.project_root) else {
+        let Ok(repo) = tracedecay_runtime_core::git_open::open(request.project_root) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
         Self::capture_open_repository(&repo, request)
@@ -600,7 +600,7 @@ fn canonical_path(path: &Path) -> (PathBuf, bool) {
 }
 
 fn repository_provenance_watermark(project_root: &Path) -> Option<RepositoryProvenanceWatermark> {
-    let repo = gix::open(project_root).ok()?;
+    let repo = tracedecay_runtime_core::git_open::open(project_root).ok()?;
     let workdir = repo.workdir()?;
     let (canonical_root, root_partial) = canonical_path(workdir);
     let (canonical_common_dir, common_partial) = canonical_path(repo.common_dir());
@@ -652,7 +652,7 @@ fn persisted_index_watermark(path: &Path) -> PersistedFileWatermark {
 }
 
 fn discover_canonical_common_dir(project_root: &Path) -> Option<PathBuf> {
-    let repository = gix::discover(project_root).ok()?;
+    let repository = tracedecay_runtime_core::git_open::discover(project_root).ok()?;
     let (common_dir, partial) = canonical_path(repository.common_dir());
     (!partial && common_dir.is_absolute()).then_some(common_dir)
 }

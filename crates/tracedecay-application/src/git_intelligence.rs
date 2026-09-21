@@ -405,7 +405,7 @@ impl NativeGitIntelligence {
     /// index conflict state do not require subprocesses.
     #[hotpath::measure(label = "usecases.git_intelligence.snapshot")]
     fn repository_snapshot(&self) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
-        let Ok(repo) = gix::open(&self.repo_root) else {
+        let Ok(repo) = tracedecay_runtime_core::git_open::open(&self.repo_root) else {
             return self.cli_repository_snapshot();
         };
         if repo.object_hash() != gix::hash::Kind::Sha1 {

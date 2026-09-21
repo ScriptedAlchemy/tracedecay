@@ -539,7 +539,7 @@ fn validate_source_bindings(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
 ) -> Result<(), CandidateOutputError> {
-    let repo = gix::open(repo_root).map_err(|error| {
+    let repo = tracedecay_runtime_core::git_open::open(repo_root).map_err(|error| {
         CandidateOutputError::Contract(format!(
             "open source repository {}: {error}",
             repo_root.display()

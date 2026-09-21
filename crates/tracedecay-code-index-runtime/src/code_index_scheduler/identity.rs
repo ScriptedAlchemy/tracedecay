@@ -63,8 +63,8 @@ impl IndexingIdentityV1 {
 
         // HEAD/commit/tree are best-effort: an unborn or detached HEAD is a
         // truthful `None`, never a fabricated placeholder.
-        let repository =
-            gix::open(project_root).map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
+        let repository = tracedecay_runtime_core::git_open::open(project_root)
+            .map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
         let head_ref = repository
             .head()
             .ok()
@@ -286,7 +286,7 @@ fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
     {
         return (topology.git_dir.clone(), topology.common_dir.clone());
     }
-    if let Ok(repository) = gix::open(project_root) {
+    if let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) {
         let git_dir = repository.git_dir().to_path_buf();
         let common_dir = {
             let common = repository.common_dir().to_path_buf();

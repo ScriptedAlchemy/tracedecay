@@ -700,7 +700,7 @@ pub fn transcript_git_evidence(
             };
             let repo = match &mut repo {
                 Some(repo) => repo,
-                slot => match gix::discover(project_root) {
+                slot => match tracedecay_runtime_core::git_open::discover(project_root) {
                     Ok(discovered) => slot.insert(discovered),
                     Err(_) => {
                         // Keep spans already collected; later messages can
@@ -829,11 +829,12 @@ pub fn canonical_observation_git_evidence(
         })
         .unwrap_or_default();
 
-    let repo = gix::discover(admitted_project_root).map_err(|error| {
-        GitCorrelationError::Unavailable(format!(
-            "admitted repository could not be opened for canonical commit evidence: {error}"
-        ))
-    })?;
+    let repo =
+        tracedecay_runtime_core::git_open::discover(admitted_project_root).map_err(|error| {
+            GitCorrelationError::Unavailable(format!(
+                "admitted repository could not be opened for canonical commit evidence: {error}"
+            ))
+        })?;
     let mut commits = Vec::new();
     for reference in commit_references {
         let Ok(prefix) = gix::hash::Prefix::from_hex(reference.as_str()) else {
