@@ -840,7 +840,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// remains fully decoded and current. When a background reconcile owns the
     /// scheduler mutex, the recorded exact-source witness answers for the
     /// seated generation instead of refusing for the whole pass (see
-    /// [`MountedCodeIndexWorktreeV1::serving_source_witness`]).
+    /// `MountedCodeIndexWorktreeV1::serving_source_witness`).
     pub async fn latest_complete_ready_decoded_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,

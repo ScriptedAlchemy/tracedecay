@@ -5508,7 +5508,6 @@ name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
  "cap-std",
- "criterion",
  "getrandom 0.2.17",
  "gix",
  "glob",
@@ -5588,7 +5587,6 @@ dependencies = [
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-global-db",
- "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-lcm",
  "tracedecay-policy",

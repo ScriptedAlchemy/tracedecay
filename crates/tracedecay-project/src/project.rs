@@ -2,8 +2,8 @@
 //!
 //! This module root holds the [`TraceDecay`] struct and its shared result
 //! types; the behavior is implemented in focused submodules:
-//! [`lifecycle`] (init/open/branch provenance), [`queries`]
-//! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
+//! `lifecycle` (init/open/branch provenance), [`queries`]
+//! (read-side graph queries), `diagnostics` (branch state), [`facts`]
 //! (session memory), and source-edit orchestration.
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};

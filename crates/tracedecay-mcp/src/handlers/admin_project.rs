@@ -139,9 +139,12 @@ fn automatic_fact_receipt_json(receipt: &ProjectMemoryAutomaticFactReceiptV1) ->
 }
 
 #[hotpath::measure(future = true, label = "mcp.admin.project.total")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Admin project handling is one action match onto registry and store owners."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Admin project handling is one action match onto registry and store owners."
+    )
 )]
 pub async fn handle_admin_project(
     cg: &TraceDecay,

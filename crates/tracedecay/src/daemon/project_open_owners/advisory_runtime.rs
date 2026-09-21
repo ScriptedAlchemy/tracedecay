@@ -1295,9 +1295,12 @@ async fn refresh_project_open_feedback_configuration(
 
 /// Registers owners whose exact authority depends on a mounted code index.
 #[hotpath::measure(label = "daemon.project.owners.dependent", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Dependent-owner registration is one follow-on bind after production owners exist."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Dependent-owner registration is one follow-on bind after production owners exist."
+    )
 )]
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,

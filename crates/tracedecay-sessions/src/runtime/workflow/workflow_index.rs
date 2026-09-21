@@ -10,7 +10,7 @@
 //! the run's meta+result is the sibling `workflows/<run_id>.json`. A run is
 //! therefore *owned* by the session that spawned it (`parent_session_id`).
 //! Git-scoped callers resolve matching parent sessions through the canonical
-//! graph authority before querying this index (see [`runs_for_git_scope`]).
+//! graph authority before querying this index (see `runs_for_git_scope`).
 //!
 //! This module owns the **storage + query** foundation only. The ingest sweep
 //! that discovers run directories and parses transcripts, and the
@@ -27,7 +27,7 @@ use tracedecay_runtime_core::db::engine::{
 };
 
 /// Schema version recorded in `session_schema_migrations` under
-/// [`MIGRATION_NAME`]. Bump when the workflow tables change shape.
+/// `MIGRATION_NAME`. Bump when the workflow tables change shape.
 pub const WORKFLOW_INDEX_SCHEMA_VERSION: i64 = 1;
 
 const MIGRATION_NAME: &str = "workflow_indexing";

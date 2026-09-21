@@ -69,7 +69,7 @@ pub struct HostAdmissionOutcome {
     /// from strings at another layer.
     #[serde(skip)]
     pub recovery: Option<HostAdmissionRecovery>,
-    /// Operator-only storage cause for [`ObservationStoreError::Storage`].
+    /// Operator-only storage cause for `ObservationStoreError::Storage`.
     ///
     /// Host wire output stays reason-code-only. Admission callers that already
     /// carry a detail/message slot (MCP hook JSON-RPC `detail`) may copy this

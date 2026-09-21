@@ -573,7 +573,7 @@ pub async fn handle_diff_context(
 }
 
 /// Changelog is git-first: the tree diff is the answer, and symbol enrichment
-/// comes from [`exact_semantic_symbol_diff`], which reports its own typed
+/// comes from `exact_semantic_symbol_diff`, which reports its own typed
 /// coverage when the code index is unavailable. The handler therefore takes no
 /// verified graph query at all, a repository that git itself refuses must
 /// report its typed git error rather than whatever state the graph projection

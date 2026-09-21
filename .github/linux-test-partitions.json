@@ -206,6 +206,7 @@
         "tracedecay-tool-catalog"
       ],
       "features": [
+        "tracedecay-code-extraction/full",
         "tracedecay-code-extraction/test-helpers",
         "tracedecay-daemon-protocol/test-helpers",
         "tracedecay-framing/test-helpers",

@@ -9,7 +9,7 @@
 //! ## Incremental cursors
 //!
 //! Sources differ in how they store transcripts, so three cursor kinds are
-//! supported, all persisted through the authoritative [`TranscriptStore`]
+//! supported, all persisted through the authoritative `TranscriptStore`
 //! implementation and its existing `parse_offsets` table keyed by file path.
 //! The stored [`StoredCursor`] is `(position, mtime)` where `position`
 //! means:
