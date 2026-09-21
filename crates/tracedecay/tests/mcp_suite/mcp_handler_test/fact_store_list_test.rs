@@ -43,7 +43,7 @@ fn added_fact_id(result: &Value) -> String {
         .to_owned()
 }
 
-fn by_content<'a>(payload: &'a Value) -> BTreeMap<&'a str, &'a Value> {
+fn by_content(payload: &Value) -> BTreeMap<&str, &Value> {
     payload["facts"]
         .as_array()
         .expect("list facts")

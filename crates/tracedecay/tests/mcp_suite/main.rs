@@ -8,6 +8,9 @@
 //! Windows test-group assignments per module.
 
 #![allow(clippy::too_many_lines)]
+// Handler fixtures thread one request's full argument set through a single
+// builder call; splitting them would hide which inputs a case actually binds.
+#![allow(clippy::too_many_arguments)]
 // Deeply nested async fixture bodies exceed rustc's default layout query
 // depth under the perf profile; match the workspace-standard limit used by
 // the tracedecay lib and CLI crate roots.
