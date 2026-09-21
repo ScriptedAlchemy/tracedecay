@@ -265,6 +265,14 @@ async fn open_scope_set_cas_projects<'a>(
         .await;
         match project_server {
             Ok(Ok(_)) => {}
+            // A cold registered root cannot publish inside the 500 ms
+            // per-request bound, so its first open answers warming while the
+            // open task keeps running. That is exactly what the route's
+            // open-gate wait below absorbs, and skipping it here made a
+            // compare-and-swap over a cold root fail whenever the machine was
+            // slow enough for the bound to elapse. Only a settled refusal ends
+            // the request.
+            Ok(Err(error)) if crate::daemon::error_is_project_open_retryable(&error) => {}
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
                 return Err(project_open_refusal_response(
@@ -987,6 +995,102 @@ mod workflow_reset_tests {
         assert_eq!(
             project_open_problem(&failed, false, false),
             DaemonInvocationProblem::Unavailable
+        );
+    }
+}
+
+#[cfg(test)]
+mod scope_set_cas_open_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A registered root the compare-and-swap has to mount cold answers its
+    /// first open with `project_warming` whenever publication outruns the
+    /// 500 ms per-request bound. The request owns a 30 s deadline and a
+    /// route-local open gate, so the settled refusal is what the caller must
+    /// read, never the transient mounting hint.
+    #[tokio::test]
+    async fn a_warming_first_open_still_reports_the_settled_route_outcome() {
+        let profile = tempfile::TempDir::new().expect("profile root");
+        let root = tempfile::TempDir::new().expect("registered root");
+        let handshake = DaemonHandshake {
+            project_path: Some(root.path().to_path_buf()),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: tracedecay_daemon_protocol::DaemonClientIdentity::new(
+                profile.path().to_path_buf(),
+                profile.path().join("global.db"),
+            ),
+            client_version: String::new(),
+            client_instance_id: String::new(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+            moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+        };
+        let scope_set_request = tracedecay_contracts::MultiRootScopeSetCasRequestV1::new(
+            tracedecay_domain::ScopeSetId::new("scope-set.warming-open").expect("scope set id"),
+            None,
+            vec![
+                tracedecay_contracts::RegisteredRootSelectorV1::new(
+                    tracedecay_domain::ProjectId::new("proj_warming_open").expect("project id"),
+                    root.path().canonicalize().expect("canonical root"),
+                )
+                .expect("root selector"),
+            ],
+        )
+        .expect("compare-and-swap request");
+        let observed_at = tracedecay_contracts::clock::now_micros();
+        let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+            observed_at.0.saturating_add(30_000_000),
+        ))
+        .expect("deadline");
+        let cancellation = tracedecay_contracts::CancellationContext::active(
+            "cancel.multi-root.warming-open".to_owned(),
+        )
+        .expect("cancellation");
+        let request_cancellation = CancellationToken::new();
+        let gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let warming_root = root.path().to_path_buf();
+        let open_opens = Arc::clone(&opens);
+        let opened = open_scope_set_cas_projects(
+            &handshake,
+            &scope_set_request,
+            observed_at,
+            &deadline,
+            &cancellation,
+            "request.multi-root.warming-open",
+            &request_cancellation,
+            &gates,
+            move |_handshake| {
+                let opens = Arc::clone(&open_opens);
+                let warming_root = warming_root.clone();
+                Box::pin(async move {
+                    if opens.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(project_warming_error(&warming_root))
+                    } else {
+                        Err(tracedecay_domain::errors::TraceDecayError::Config {
+                            message: "project store rejected".to_owned(),
+                        })
+                    }
+                })
+            },
+        )
+        .await;
+        let Err(refusal) = opened else {
+            panic!("a refused root must not produce project servers");
+        };
+
+        assert_eq!(
+            refusal.outcome,
+            tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::Unavailable
+            },
+            "the settled store refusal is the answer, not a mounting hint: {refusal:?}"
         );
     }
 }
