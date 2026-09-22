@@ -2156,6 +2156,25 @@ fn reference_evidence_span(
     let line_start = offsets.get(reference.line as usize).copied()?;
     let site_start = usize::try_from(line_start.checked_add(u64::from(reference.column))?).ok()?;
     let source_at_site = source.get(site_start..)?;
+    // Typed receiver references name `Type::method`, while the source spells
+    // `receiver.method`. Both forms must identify the parser-observed method
+    // token so a sealed edge can discharge the same site's limitation.
+    let rust_call =
+        reference.reference_kind == EdgeKind::Calls && reference.file_path.ends_with(".rs");
+    let reference_name = if rust_call
+        && (reference.reference_name.contains('.')
+            || !source_at_site.starts_with(&reference.reference_name))
+    {
+        reference.reference_name.rsplit(['.', ':']).next()?
+    } else {
+        &reference.reference_name
+    };
+    if rust_call && source_at_site.starts_with(reference_name) {
+        return Some(SourceSpan {
+            start_byte: u64::try_from(site_start).ok()?,
+            end_byte: u64::try_from(site_start.checked_add(reference_name.len())?).ok()?,
+        });
+    }
     references_by_site
         .get(&(
             reference.from_node_id.as_str(),
@@ -2347,14 +2366,28 @@ fn resolve_file_references(
             _ => {}
         }
     }
+    // The parser may describe one invocation both as a receiver expression
+    // and as a type-qualified call. A proved edge covers that exact call site;
+    // keeping the receiver form would falsely report a missing caller there.
+    let resolved_sites = resolved
+        .iter()
+        .map(|edge| (edge.from_occurrence.clone(), edge.kind, edge.evidence_span))
+        .collect::<BTreeSet<_>>();
+    retained.retain(|reference| {
+        !resolved_sites.contains(&(
+            reference.from_occurrence.clone(),
+            reference.kind,
+            reference.evidence_span,
+        ))
+    });
     (resolved, retained)
 }
 
 /// The retained cross-file form of one reference the file could not bind, or
-/// `None` when the reference can never bind cross-file: receiver-dotted
-/// paths (unknown receiver type), blocklisted ubiquitous names, relation
-/// kinds outside the canonical graph contract, and references whose
-/// enclosing symbol is not uniquely identified.
+/// `None` when the reference can never bind cross-file: blocklisted names,
+/// relation kinds outside the canonical graph contract, and references whose
+/// enclosing symbol is not uniquely identified. Rust receiver calls remain as
+/// limitation evidence; a dotted name never grants edge authority.
 fn cross_file_reference_candidate(
     source: &str,
     offsets: &[u64],
@@ -2362,8 +2395,12 @@ fn cross_file_reference_candidate(
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
-    if reference.reference_name.contains('.')
-        || cross_file_reference_name_is_blocklisted(&reference.reference_name)
+    let receiver_call = reference.reference_kind == EdgeKind::Calls
+        && reference.file_path.ends_with(".rs")
+        && reference.reference_name.contains('.');
+    if !receiver_call
+        && (reference.reference_name.contains('.')
+            || cross_file_reference_name_is_blocklisted(&reference.reference_name))
     {
         return None;
     }
@@ -4490,6 +4527,58 @@ pub fn real_symbol() {}
             "a bare receiver must not add a same-file caller; self and typed \
              bindings still bind: {calls:?}"
         );
+    }
+
+    #[test]
+    fn dotted_chain_references_keep_distinct_method_token_spans() {
+        let source = "fn nested(builder: &WalkBuilder) { builder.repeat().repeat(); }\n";
+        let file = validated_file("src/lib.rs", source.as_bytes());
+        let batch = batch_for(&file, ParseOutcomeV1::Complete);
+        let artifacts = chunker()
+            .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+            .expect("real Rust extraction");
+        let receiver_sites = artifacts
+            .unresolved_references
+            .iter()
+            .filter(|reference| reference.reference_name.contains('.'))
+            .map(|reference| reference.evidence_span)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            receiver_sites.len(),
+            2,
+            "inner and outer calls are distinct sites"
+        );
+        for span in receiver_sites {
+            assert_eq!(
+                &source[span.start_byte as usize..span.end_byte as usize],
+                "repeat"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_receiver_member_identity_survives_trivia() {
+        for source in [
+            "fn caller(args: &Args) { args.walk_builder()?.\n build(); }\n",
+            "fn caller(args: &Args) { args.walk_builder()?. /* comment */ build(); }\n",
+            "fn caller(args: &Args) { args.walk_builder()?. /* decoy.unused */ build::<u8>(); }\n",
+        ] {
+            let file = validated_file("src/lib.rs", source.as_bytes());
+            let batch = batch_for(&file, ParseOutcomeV1::Complete);
+            let artifacts = chunker()
+                .index_file(&file, &batch, &rust_descriptor(), &NeverCancelled)
+                .expect("real Rust extraction");
+            let member = artifacts
+                .unresolved_references
+                .iter()
+                .find(|reference| reference.reference_name.ends_with(".build"))
+                .expect("parser-observed member identity");
+            assert_eq!(
+                &source[member.evidence_span.start_byte as usize
+                    ..member.evidence_span.end_byte as usize],
+                "build"
+            );
+        }
     }
 
     #[test]

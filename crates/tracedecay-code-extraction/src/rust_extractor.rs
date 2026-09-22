@@ -1634,13 +1634,41 @@ impl RustExtractor {
                 match child.kind() {
                     "call_expression" => {
                         if let Some(callee) = child.child_by_field_name("function") {
-                            let callee_name = state.node_text(callee);
+                            let member_callee = if callee.kind() == "generic_function" {
+                                callee.child_by_field_name("function").unwrap_or(callee)
+                            } else {
+                                callee
+                            };
+                            let receiver = (member_callee.kind() == "field_expression")
+                                .then(|| {
+                                    member_callee
+                                        .child_by_field_name("value")
+                                        .zip(member_callee.child_by_field_name("field"))
+                                })
+                                .flatten()
+                                .filter(|(_, field)| field.kind() == "field_identifier");
+                            // Receiver spelling is not target authority. The field
+                            // node owns the member identity and exact token site,
+                            // independently of comments or whitespace after `.`.
+                            let (callee_name, position) = receiver.map_or_else(
+                                || (state.node_text(callee).to_owned(), child.start_position()),
+                                |(value, field)| {
+                                    (
+                                        format!(
+                                            "{}.{}",
+                                            state.node_text(value),
+                                            state.node_text(field)
+                                        ),
+                                        field.start_position(),
+                                    )
+                                },
+                            );
                             state.unresolved_refs.push(UnresolvedRef {
                                 from_node_id: fn_node_id.to_string(),
-                                reference_name: callee_name.to_string(),
+                                reference_name: callee_name,
                                 reference_kind: EdgeKind::Calls,
-                                line: child.start_position().row as u32,
-                                column: child.start_position().column as u32,
+                                line: position.row as u32,
+                                column: position.column as u32,
                                 file_path: state.file_path.clone(),
                             });
                             // The simple name of a dotted call is not itself a call.
@@ -1649,14 +1677,14 @@ impl RustExtractor {
                             // (`Rows::len`), which is also the form that binds
                             // across files.
                             if let Some(typed_method) =
-                                Self::typed_receiver_method(state, callee, receivers)
+                                Self::typed_receiver_method(state, member_callee, receivers)
                             {
                                 state.unresolved_refs.push(UnresolvedRef {
                                     from_node_id: fn_node_id.to_string(),
                                     reference_name: typed_method,
                                     reference_kind: EdgeKind::Calls,
-                                    line: child.start_position().row as u32,
-                                    column: child.start_position().column as u32,
+                                    line: position.row as u32,
+                                    column: position.column as u32,
                                     file_path: state.file_path.clone(),
                                 });
                             }

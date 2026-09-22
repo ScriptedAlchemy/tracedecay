@@ -200,6 +200,7 @@ impl CatalogScan {
             CatalogSymbol {
                 binding: record.binding,
                 metadata: record.metadata,
+                unresolved_calls: record.unresolved_calls,
             },
         );
         Ok(())

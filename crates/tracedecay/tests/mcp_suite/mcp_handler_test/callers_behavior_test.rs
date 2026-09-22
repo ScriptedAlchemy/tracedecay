@@ -26,7 +26,7 @@
 //! `settle` is called by `also` and `prepare_order`. `prepare_order` is called
 //! by `main`. The callee is not named `run`: that bare name is withheld from
 //! cross-file binding, so a depth-2 walk would never reach `main`. `main` and
-//! an unknown occurrence have no callers. Call edges are ordered by caller
+//! has no callers, while an unknown occurrence is rejected. Call edges are ordered by caller
 //! occurrence identity, which is what the verified graph returns.
 
 #![cfg(feature = "test-transport")]
@@ -154,10 +154,18 @@ fn transitive_settle_callers(also_id: &str, prepare_order_id: &str, main_id: &st
     Value::Array(callers)
 }
 
+fn complete_callers(callers: Value) -> Value {
+    json!({
+        "callers": callers,
+        "coverage": { "completeness": "complete" },
+        "omissions": [],
+    })
+}
+
 fn direct_settle_markdown(callers: &Value) -> String {
     let rows = callers.as_array().expect("direct callers are an array");
     let mut body = String::from(
-        "**kind:** function\n**file:** src/worker.rs\n**depth:** 1\n**edge_kind:** calls\n\n",
+        "\n## callers\n**kind:** function\n**file:** src/worker.rs\n**depth:** 1\n**edge_kind:** calls\n\n",
     );
     for row in rows {
         body.push_str(&format!(
@@ -167,12 +175,13 @@ fn direct_settle_markdown(callers: &Value) -> String {
             row["node_id"].as_str().expect("caller node id"),
         ));
     }
+    body.push_str("\n## coverage\n**completeness:** complete\nomissions: none\n");
     body
 }
 
 fn single_caller_markdown(row: &Value) -> String {
     format!(
-        "- **{}**\n  **kind:** function\n  **file:** {}\n  **line:** {}\n  **depth:** {}\n  **edge_kind:** calls\n  **node_id:** `{}`\n",
+        "\n## callers\n- **{}**\n  **kind:** function\n  **file:** {}\n  **line:** {}\n  **depth:** {}\n  **edge_kind:** calls\n  **node_id:** `{}`\n\n## coverage\n**completeness:** complete\nomissions: none\n",
         row["name"].as_str().expect("caller name"),
         row["file"].as_str().expect("caller file"),
         row["line"],
@@ -250,7 +259,8 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     let depth_one_payload: Value =
         serde_json::from_str(tool_text(&depth_one)).expect("depth-1 callers JSON");
     assert_eq!(
-        depth_one_payload, direct,
+        depth_one_payload,
+        complete_callers(direct.clone()),
         "max_depth 1 must list only the two functions that call settle"
     );
 
@@ -262,7 +272,8 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     let depth_two_payload: Value =
         serde_json::from_str(tool_text(&depth_two)).expect("depth-2 callers JSON");
     assert_eq!(
-        depth_two_payload, transitive,
+        depth_two_payload,
+        complete_callers(transitive.clone()),
         "max_depth 2 must keep the direct callers and add main through prepare_order"
     );
 
@@ -271,7 +282,8 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     let default_payload: Value =
         serde_json::from_str(tool_text(&default_depth)).expect("default-depth callers JSON");
     assert_eq!(
-        default_payload, transitive,
+        default_payload,
+        complete_callers(transitive),
         "omitted max_depth defaults to a walk that reaches main"
     );
 
@@ -283,7 +295,8 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     let alias_payload: Value =
         serde_json::from_str(tool_text(&by_alias)).expect("id-alias callers JSON");
     assert_eq!(
-        alias_payload, direct,
+        alias_payload,
+        complete_callers(direct.clone()),
         "the id alias must address the same symbol as node_id"
     );
 
@@ -295,7 +308,8 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     let prepare_order_payload: Value = serde_json::from_str(tool_text(&prepare_order_callers))
         .expect("prepare_order callers JSON");
     assert_eq!(
-        prepare_order_payload, prepare_order_caller,
+        prepare_order_payload,
+        complete_callers(prepare_order_caller.clone()),
         "prepare_order's only caller is main at src/main.rs:4"
     );
 
@@ -306,7 +320,7 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     .await;
     assert_eq!(
         serde_json::from_str::<Value>(tool_text(&no_callers)).expect("main callers JSON"),
-        json!([]),
+        complete_callers(json!([])),
         "main has no callers; settle in the same graph does"
     );
 
@@ -316,9 +330,18 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     )
     .await;
     assert_eq!(
-        serde_json::from_str::<Value>(tool_text(&unknown)).expect("unknown callers JSON"),
-        json!([]),
-        "an unknown occurrence is an empty caller list, not a populated one"
+        unknown["error"],
+        json!({
+            "code": -32603,
+            "message": "tool project route failed: reason_code=code-graph-unavailable retryable=true: the exact project code graph is unavailable: caller target has no admitted symbol metadata",
+            "data": {
+                "tool": "tracedecay_callers",
+                "reason_code": "code-graph-unavailable",
+                "retryable": true,
+                "detail": "the exact project code graph is unavailable: caller target has no admitted symbol metadata"
+            }
+        }),
+        "an unknown occurrence cannot be mistaken for a known function with no callers"
     );
 
     let markdown = call_callers(&server, json!({"node_id": settle_id, "max_depth": 1})).await;
@@ -342,7 +365,7 @@ async fn tracedecay_callers_reports_literal_call_sites_and_typed_rejections() {
     let empty_markdown = call_callers(&server, json!({"node_id": main_id, "max_depth": 1})).await;
     assert_eq!(
         tool_text(&empty_markdown),
-        "_None._\n",
+        "callers: none\n\n## coverage\n**completeness:** complete\nomissions: none\n",
         "a symbol with no callers renders an explicit empty markdown note"
     );
 

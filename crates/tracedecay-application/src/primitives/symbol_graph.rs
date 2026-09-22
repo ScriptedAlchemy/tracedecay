@@ -575,7 +575,7 @@ where
                 let Ok(graph) = open_graph(&self.code_graph, context).await else {
                     return failed(context, "caller traversal failed");
                 };
-                let records = match relation_traversal(
+                let (records, unsupported) = match relation_traversal(
                     &graph.reader,
                     Arc::clone(&graph.cancellation),
                     &request.node_id,
@@ -586,6 +586,16 @@ where
                     Ok(records) => records,
                     Err(()) => return failed(context, "caller traversal failed"),
                 };
+                let gaps = if unsupported {
+                    vec![PrimitiveSupportGap {
+                        provider: Some("code_index".to_owned()),
+                        language: Some("rust".to_owned()),
+                        reason: "Exact target evidence is unavailable for matching method calls"
+                            .to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                };
                 complete_or_failed(
                     &self.cursors,
                     context,
@@ -594,7 +604,7 @@ where
                     &claim,
                     graph.freshness,
                     records,
-                    Vec::new(),
+                    gaps,
                     None,
                 )
                 .await
@@ -620,7 +630,7 @@ where
                 let Ok(graph) = open_graph(&self.code_graph, context).await else {
                     return failed(context, "callee traversal failed");
                 };
-                let mut records = match relation_traversal(
+                let (mut records, _) = match relation_traversal(
                     &graph.reader,
                     Arc::clone(&graph.cancellation),
                     &request.node_id,
@@ -940,14 +950,24 @@ fn relation_traversal(
     maximum_depth: u32,
     incoming: bool,
     scope: &SymbolGraphScope,
-) -> Result<Vec<SymbolRelationRecord>, ()> {
+) -> Result<(Vec<SymbolRelationRecord>, bool), ()> {
     let seed = SymbolOccurrenceId::new(seed.to_owned()).map_err(|_| ())?;
     let mut seen = HashSet::from([seed.clone()]);
     let mut frontier = vec![seed];
     let mut records = Vec::new();
+    let mut unsupported_callers = false;
     for depth in 1..=maximum_depth {
         if frontier.is_empty() || records.len() >= MAX_COMPATIBILITY_RESULTS {
             break;
+        }
+        if incoming {
+            unsupported_callers |= graph
+                .has_unresolved_callers(
+                    &frontier,
+                    scope.path_prefix.as_deref(),
+                    Arc::clone(&cancellation),
+                )
+                .map_err(|_| ())?;
         }
         let batches = if incoming {
             graph.callers(
@@ -987,7 +1007,7 @@ fn relation_traversal(
         }
         frontier = next;
     }
-    Ok(records)
+    Ok((records, unsupported_callers))
 }
 
 fn trait_dispatch_targets(

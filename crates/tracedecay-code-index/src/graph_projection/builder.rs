@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-use crate::chunks::{CodeIndexImportEvidenceV1, published_symbol_spans};
+use crate::chunks::{
+    CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, published_symbol_spans,
+};
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, FileOccurrenceId,
-    SanitizedCodeFileV1, SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, EdgeAuthorityV1,
+    FileOccurrenceId, RelationEdgeKindV1, SanitizedCodeFileV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationManifest,
@@ -55,6 +57,62 @@ pub fn build_published_code_graph_manifest_checked(
     if let Some(manifest) = generation.memoized_graph_manifest(&projection, projector_revision) {
         return Ok(manifest);
     }
+    let mut site_candidates = BTreeMap::new();
+    for (_, reference) in generation.unresolved_references() {
+        check()?;
+        reference
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
+        if reference.kind == RelationEdgeKindV1::Calls && !reference.reference_name.contains('.') {
+            site_candidates
+                .entry((&reference.from_occurrence, reference.evidence_span))
+                .and_modify(|candidate| *candidate = None)
+                .or_insert(Some(reference.reference_name.as_str()));
+        }
+    }
+    let mut resolved_sites = BTreeMap::new();
+    for edge in generation.edges() {
+        check()?;
+        if edge.kind == RelationEdgeKindV1::Calls && edge.authority == EdgeAuthorityV1::NameResolved
+        {
+            let site = (&edge.from_occurrence, edge.evidence_span);
+            // NameResolved is emitted only by the canonical retained-reference
+            // resolver. A unique qualified candidate ties that edge to this
+            // exact receiver site; bare or competing candidates cannot do so.
+            if let Some(Some(candidate)) = site_candidates.get(&site)
+                && let Some((owner, member)) = candidate.rsplit_once("::")
+                && !owner.is_empty()
+                && !member.is_empty()
+            {
+                resolved_sites.insert(site, member);
+            }
+        }
+    }
+    let mut unresolved_calls = Vec::new();
+    for (_, reference) in generation.unresolved_references() {
+        check()?;
+        // An enclosing-symbol fallback is not exact call-site proof, even
+        // when another relation carries the same broad source span.
+        let resolved_method_token =
+            reference
+                .reference_name
+                .rsplit('.')
+                .next()
+                .is_some_and(|member| {
+                    reference.evidence_span.len() == member.len() as u64
+                        && resolved_sites
+                            .get(&(&reference.from_occurrence, reference.evidence_span))
+                            == Some(&member)
+                });
+        if reference.kind == RelationEdgeKindV1::Calls
+            && reference.reference_name.contains('.')
+            && !resolved_method_token
+        {
+            unresolved_calls.push(reference.clone());
+        }
+    }
+    unresolved_calls.sort();
+    unresolved_calls.dedup();
     let manifest = Arc::new(build_code_graph_manifest_inputs_checked(
         projection.clone(),
         generation_id,
@@ -64,6 +122,7 @@ pub fn build_published_code_graph_manifest_checked(
             files: &generation.snapshot().files,
             symbols: generation.symbols(),
             imports: generation.imports(),
+            unresolved_calls: &unresolved_calls,
         }),
         projector_revision,
         check,
@@ -87,6 +146,7 @@ pub(super) struct ProductionCodeGraphInputs<'a> {
     pub(super) files: &'a [SanitizedCodeFileV1],
     pub(super) symbols: &'a GenerationSymbolIndexV1,
     pub(super) imports: &'a [CodeIndexImportEvidenceV1],
+    pub(super) unresolved_calls: &'a [CodeIndexUnresolvedReferenceV1],
 }
 
 fn collect_graph_rows_ordered<T, R>(
@@ -144,6 +204,17 @@ pub(super) fn build_projection(
     generation
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    let mut unresolved_by_source = BTreeMap::<_, Vec<_>>::new();
+    for reference in production
+        .into_iter()
+        .flat_map(|inputs| inputs.unresolved_calls)
+    {
+        check()?;
+        unresolved_by_source
+            .entry(&reference.from_occurrence)
+            .or_default()
+            .push(reference.clone());
+    }
     let (files, symbol_metadata, imports, bindings, retained_edges, occurrences) =
         hotpath::measure_block!("code_index.seal.collect.bind", {
             let files = production
@@ -349,6 +420,10 @@ pub(super) fn build_projection(
                         .get(occurrence)
                         .map(|record| LineageSymbolRecordV1::clone(record)),
                     occurrence: occurrence.clone(),
+                    unresolved_calls: unresolved_by_source
+                        .get(occurrence)
+                        .cloned()
+                        .unwrap_or_default(),
                 };
                 symbol_entity(identity, record)
             })?);

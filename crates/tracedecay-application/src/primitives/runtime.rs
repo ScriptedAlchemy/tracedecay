@@ -31,10 +31,10 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, OmissionReason, OpaqueCursor,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor, PageRequest,
-    PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
-    RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, Omission, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
+    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId,
+    ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
@@ -1233,8 +1233,9 @@ fn symbol_page<T: Serialize>(
     let total = page.total;
     let continuation = page.next_cursor.clone();
     let temporal = symbol_temporal_state(&page, finished_at);
+    let unsupported = !page.support_gaps.is_empty();
     let payload = value_or_problem!(serde_json::to_value(page), context, operation);
-    evidence_result(
+    let mut result = evidence_result(
         access,
         context,
         operation,
@@ -1256,7 +1257,19 @@ fn symbol_page<T: Serialize>(
         budget,
         temporal,
         partial,
-    )
+    )?;
+    if unsupported
+        && let Ok(envelope) = &mut result
+        && let ApplicationOutcome::Evidence(packet) = &mut envelope.outcome
+    {
+        // Unsupported coverage is one capability omission, not an estimate of missing symbols.
+        packet.omissions.push(Omission {
+            domain,
+            count: 1,
+            reason: OmissionReason::Unsupported,
+        });
+    }
+    Ok(result)
 }
 
 fn symbol_temporal_state<T>(page: &SymbolGraphPage<T>, finished_at: UtcMicros) -> TemporalState {

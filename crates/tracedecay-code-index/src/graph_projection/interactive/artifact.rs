@@ -24,13 +24,13 @@ use super::super::schema::{
 use super::super::{CodeGraphProjectionError, CodeGraphSymbolBindingV1, validate_symbol_record};
 use super::catalog::{canonical_import_order, check_cancelled};
 use super::models::{CatalogSymbol, InteractiveCatalog};
-use crate::chunks::CodeIndexImportEvidenceV1;
+use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
 
 /// Bundle artifact name of the interactive catalog.
 pub const INTERACTIVE_CATALOG_ARTIFACT_NAME: &str = "interactive-catalog";
 
-const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str = "tracedecay.code-graph-interactive-catalog.v1";
+const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str = "tracedecay.code-graph-interactive-catalog.v2";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +38,7 @@ struct CatalogSymbolRowV1 {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -83,6 +84,7 @@ impl Serialize for CatalogSymbolRowsV1<'_> {
                 occurrence: record.occurrence,
                 binding: record.binding,
                 metadata: record.metadata,
+                unresolved_calls: record.unresolved_calls,
             })?;
         }
         sequence.end()
@@ -360,6 +362,7 @@ pub(super) fn decode_interactive_catalog_artifact(
             occurrence: row.occurrence,
             binding: row.binding,
             metadata: row.metadata,
+            unresolved_calls: row.unresolved_calls,
         };
         validate_symbol_record(&record)?;
         if catalog.symbols.contains_key(&record.occurrence) {
@@ -372,6 +375,7 @@ pub(super) fn decode_interactive_catalog_artifact(
             CatalogSymbol {
                 binding: record.binding,
                 metadata: record.metadata,
+                unresolved_calls: record.unresolved_calls,
             },
         );
     }

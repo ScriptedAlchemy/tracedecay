@@ -111,7 +111,8 @@ pub use sealed_codec::{
 /// must never be emitted as current activation evidence.
 ///
 /// `v4` attributes whitespace-only FileWindow ranges to a neighboring
-/// retrievable grain instead of minting unreachable rows.
+/// retrievable grain instead of minting unreachable rows. Rust receiver-call
+/// extraction changes are tracked by the Rust extractor revision.
 pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v4";
 
 /// Immutable configuration retained by one production index owner.
