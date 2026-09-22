@@ -3,16 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_contracts::retained_surfaces::{
-    ClosedUtcIntervalV1, GitScopeV1, HydrationStateResultV1, MessageRelationshipScopeV1,
-    MessageSearchHitV1, MessageSearchRequestV1, MessageSearchResultV1, MessageTypeFilterV1,
-    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
-    SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
-    SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
-    SessionRefreshRequestV1, SessionRefreshScopeV1,
-    SessionSourceCoverageV1 as WireSourceCoverageV1, SessionsForRequestV1,
-    TemporalCoverageOmissionV1, TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1,
-    TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1, TemporalWatermarksV1,
-    ValidCoverageIntervalV1, WorkflowsRequestV1,
+    GitScopeV1, HydrationStateResultV1, MessageSearchHitV1, MessageSearchRequestV1,
+    MessageSearchResultV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1, SessionMessageV1, SessionRecordV1, SessionRefreshRequestV1,
+    SessionRefreshScopeV1, SessionsForRequestV1, TemporalCoverageOmissionV1, TemporalExplanationV1,
+    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1,
+    WorkflowsRequestV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -20,10 +16,8 @@ use tracedecay_contracts::{
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
 use tracedecay_domain::{
-    HydrationStateV1, ManifestDigest, ProjectId, RetrievalGrainV1, SessionId,
-    SessionSourceCoverageIntervalV1, SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1,
-    SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1, UserProfileId,
-    ValidCoverageIntervalV1 as DomainValidCoverageIntervalV1, canonical_sha256,
+    ManifestDigest, ProjectId, RetrievalGrainV1, SessionId, TemporalModeV1, UserProfileId,
+    canonical_sha256,
 };
 use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
 use tracedecay_session_memory::session::{
@@ -37,8 +31,7 @@ use tracedecay_sessions::runtime::{
 };
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::{
-    TemporalCandidateFilterV1, TemporalCandidatePopulationCount, TemporalMessageTypeFilterV1,
-    TemporalSessionScopeFilterV1,
+    TemporalCandidateFilterV1, TemporalCandidatePopulationCount,
 };
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
@@ -49,7 +42,8 @@ use super::session_refresh::{
 use crate::session_retrieval::{
     DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
     SessionRetrievalCoverageOmissionView, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
-    SessionRetrievalStoreScope, SessionTemporalMetadataView,
+    SessionRetrievalStoreScope, SessionTemporalMetadataView, temporal_message_type,
+    temporal_session_scope,
 };
 use tracedecay_contracts::retained_receipts::{evidence_outcome, session_refresh_effect_outcome};
 use tracedecay_domain::errors::TraceDecayError;
@@ -445,6 +439,30 @@ impl RetainedSessionExecutionPortV1 for DirectRetainedSessionPortV1<'_> {
     }
 }
 
+/// The provider parser names the offending value and the accepted set; keep
+/// that corrective diagnostic in the refusal instead of collapsing it to the
+/// generic invalid-request problem. A value the sanitized diagnostic cannot
+/// carry (oversized or control characters) still refuses with the generic
+/// problem.
+fn invalid_provider(error: String) -> RetainedSurfaceExecutionErrorV1 {
+    tracedecay_contracts::SafeDiagnostic::new(
+        "application.retained.message-search-provider-invalid",
+        error,
+    )
+    .map_or(
+        RetainedSurfaceExecutionErrorV1::InvalidRequest,
+        |diagnostic| {
+            RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                tracedecay_contracts::ApplicationProblem::InvalidRequest {
+                    diagnostic,
+                    retry: tracedecay_contracts::RetryDirective::Never,
+                    legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
+                },
+            )
+        },
+    )
+}
+
 struct MessageSearchInput {
     query: String,
     goals: bool,
@@ -473,49 +491,17 @@ impl MessageSearchInput {
             None if goals => String::new(),
             None => return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
         };
-        // The provider parser names the offending value and the accepted set;
-        // keep that corrective diagnostic in the refusal instead of collapsing
-        // it to the generic invalid-request problem. A value the sanitized
-        // diagnostic cannot carry (oversized or control characters) still
-        // refuses with the generic problem.
         let provider =
-            ProviderScope::parse_optional(request.provider.as_deref()).map_err(|error| {
-                tracedecay_contracts::SafeDiagnostic::new(
-                    "application.retained.message-search-provider-invalid",
-                    error.clone(),
-                )
-                .map_or(
-                    RetainedSurfaceExecutionErrorV1::InvalidRequest,
-                    |diagnostic| {
-                        RetainedSurfaceExecutionErrorV1::ApplicationProblem(
-                            tracedecay_contracts::ApplicationProblem::InvalidRequest {
-                                diagnostic,
-                                retry: tracedecay_contracts::RetryDirective::Never,
-                                legal_actions: vec![
-                                    tracedecay_contracts::LegalAction::CorrectRequest,
-                                ],
-                            },
-                        )
-                    },
-                )
-            })?;
+            ProviderScope::parse_optional(request.provider.as_deref()).map_err(invalid_provider)?;
         let include_subagents = request.include_subagents.unwrap_or(true);
-        let mut scope = match request.scope.unwrap_or(MessageRelationshipScopeV1::All) {
-            MessageRelationshipScopeV1::All => SessionSearchScope::All,
-            MessageRelationshipScopeV1::ParentsOnly => SessionSearchScope::ParentsOnly,
-            MessageRelationshipScopeV1::SubagentsOnly => SessionSearchScope::SubagentsOnly,
-        };
+        let mut scope = super::lcm::relationship_scope(request.scope);
         if !include_subagents && scope == SessionSearchScope::SubagentsOnly {
             return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
         }
         if !include_subagents && scope == SessionSearchScope::All {
             scope = SessionSearchScope::ParentsOnly;
         }
-        let message_type = match request.message_type.unwrap_or(MessageTypeFilterV1::All) {
-            MessageTypeFilterV1::All => SessionMessageType::All,
-            MessageTypeFilterV1::DirectUser => SessionMessageType::DirectUser,
-            MessageTypeFilterV1::ToolResult => SessionMessageType::ToolResult,
-        };
+        let message_type = super::lcm::message_type(request.message_type);
         let workflow_run = optional_string(request.workflow_run.as_deref())?;
         let workflow_agent = optional_string(request.workflow_agent.as_deref())?;
         if workflow_agent.is_some() && workflow_run.is_none() {
@@ -564,16 +550,8 @@ impl MessageSearchInput {
             parent_session_id: self.parent_session_id.clone(),
             source: None,
             include_summaries: false,
-            session_scope: match self.scope {
-                SessionSearchScope::All => TemporalSessionScopeFilterV1::All,
-                SessionSearchScope::ParentsOnly => TemporalSessionScopeFilterV1::ParentsOnly,
-                SessionSearchScope::SubagentsOnly => TemporalSessionScopeFilterV1::SubagentsOnly,
-            },
-            message_type: match self.message_type {
-                SessionMessageType::All => TemporalMessageTypeFilterV1::All,
-                SessionMessageType::DirectUser => TemporalMessageTypeFilterV1::DirectUser,
-                SessionMessageType::ToolResult => TemporalMessageTypeFilterV1::ToolResult,
-            },
+            session_scope: temporal_session_scope(self.scope),
+            message_type: temporal_message_type(self.message_type),
             roles: Vec::new(),
             start_time: self.since,
             end_time: self.until,
@@ -621,7 +599,7 @@ impl MessageSearchInput {
                 .with_semantic_filter(semantic_filter)
                 // Without this the query carries the multi-MiB
                 // `ExecutionLimits::default()`, which the admitted binding
-                // refuses terminally — every message search would answer
+                // refuses terminally, every message search would answer
                 // a structural budget refusal instead of searching.
                 .with_execution_limits(crate::session_retrieval::admitted_execution_limits(
                     self.limit,
@@ -1036,13 +1014,7 @@ fn temporal(
             .into_iter()
             .map(|anchor| anchor.as_str().to_owned())
             .collect(),
-        watermarks: TemporalWatermarksV1 {
-            generation: value.watermarks.generation,
-            source: value.watermarks.source,
-            projection: value.watermarks.projection,
-            index: value.watermarks.index,
-            summary: value.watermarks.summary,
-        },
+        watermarks: temporal_watermarks(value.watermarks),
         coverage: coverage(value.coverage),
         source_coverage: value
             .source_coverage
@@ -1063,7 +1035,7 @@ fn temporal(
             .map(|omission| TemporalOmissionV1 {
                 rank: omission.rank,
                 anchor: omission.anchor.as_str().to_owned(),
-                reason: hydration(omission.reason),
+                reason: HydrationStateResultV1::from(omission.reason),
             })
             .collect(),
         coverage_omissions: value
@@ -1104,119 +1076,7 @@ fn coverage_omission(omission: SessionRetrievalCoverageOmissionView) -> Temporal
     }
 }
 
-const fn coverage(value: TemporalCoverageCountsV1) -> TemporalCoverageV1 {
-    TemporalCoverageV1 {
-        visible: value.visible,
-        hidden: value.hidden,
-        unknown: value.unknown,
-        redacted: value.redacted,
-    }
-}
-
-pub(super) fn source_coverage(value: SessionSourceCoverageV1) -> WireSourceCoverageV1 {
-    WireSourceCoverageV1 {
-        source_id: value.source_id().as_str().to_owned(),
-        observed_frontier: value.observed_frontier().value(),
-        committed_frontier: value.committed_frontier().value(),
-        target_watermark: value.target_watermark().value(),
-        request: SessionCoverageRequestV1 {
-            mode: coverage_mode(value.request().mode()),
-        },
-        covered_intervals: value
-            .covered_intervals()
-            .iter()
-            .cloned()
-            .map(coverage_interval)
-            .collect(),
-        missing_intervals: value
-            .missing_intervals()
-            .iter()
-            .cloned()
-            .map(coverage_interval)
-            .collect(),
-        state: coverage_state(value.state()),
-        reason: coverage_reason(value.reason()),
-    }
-}
-
-fn coverage_interval(value: SessionSourceCoverageIntervalV1) -> SessionCoverageIntervalV1 {
-    SessionCoverageIntervalV1 {
-        knowledge: ClosedUtcIntervalV1 {
-            from_inclusive: value.knowledge.from_inclusive().map(|value| value.0),
-            through_inclusive: value.knowledge.through_inclusive().map(|value| value.0),
-        },
-        valid: match value.valid {
-            DomainValidCoverageIntervalV1::Known(interval) => {
-                ValidCoverageIntervalV1::Known(ClosedUtcIntervalV1 {
-                    from_inclusive: interval.from_inclusive().map(|value| value.0),
-                    through_inclusive: interval.through_inclusive().map(|value| value.0),
-                })
-            }
-            DomainValidCoverageIntervalV1::Unknown => ValidCoverageIntervalV1::Unknown,
-        },
-    }
-}
-
-const fn coverage_mode(value: TemporalModeV1) -> SessionCoverageModeV1 {
-    match value {
-        TemporalModeV1::Current => SessionCoverageModeV1::Current,
-        TemporalModeV1::AsOf { cutoff } => SessionCoverageModeV1::AsOf { cutoff: cutoff.0 },
-        TemporalModeV1::Evolution => SessionCoverageModeV1::Evolution,
-        TemporalModeV1::Forensic => SessionCoverageModeV1::Forensic,
-    }
-}
-
-const fn coverage_state(value: SessionSourceCoverageStateV1) -> SessionCoverageStateV1 {
-    match value {
-        SessionSourceCoverageStateV1::Fresh => SessionCoverageStateV1::Fresh,
-        SessionSourceCoverageStateV1::Stale => SessionCoverageStateV1::Stale,
-        SessionSourceCoverageStateV1::Partial => SessionCoverageStateV1::Partial,
-        SessionSourceCoverageStateV1::Locked => SessionCoverageStateV1::Locked,
-        SessionSourceCoverageStateV1::Redacted => SessionCoverageStateV1::Redacted,
-        SessionSourceCoverageStateV1::RetentionWithheld => {
-            SessionCoverageStateV1::RetentionWithheld
-        }
-        SessionSourceCoverageStateV1::Unavailable => SessionCoverageStateV1::Unavailable,
-    }
-}
-
-fn coverage_reason(value: &SessionSourceCoverageReasonV1) -> SessionCoverageReasonV1 {
-    match value {
-        SessionSourceCoverageReasonV1::CaughtUp => SessionCoverageReasonV1::CaughtUp,
-        SessionSourceCoverageReasonV1::ProjectionBehindSource { lag } => {
-            SessionCoverageReasonV1::ProjectionBehindSource { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::SourceBehindTarget { lag } => {
-            SessionCoverageReasonV1::SourceBehindTarget { lag: *lag }
-        }
-        SessionSourceCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag,
-            source_lag,
-        } => SessionCoverageReasonV1::ProjectionAndSourceBehind {
-            projection_lag: *projection_lag,
-            source_lag: *source_lag,
-        },
-        SessionSourceCoverageReasonV1::Locked => SessionCoverageReasonV1::Locked,
-        SessionSourceCoverageReasonV1::Redacted => SessionCoverageReasonV1::Redacted,
-        SessionSourceCoverageReasonV1::RetentionWithheld => {
-            SessionCoverageReasonV1::RetentionWithheld
-        }
-        SessionSourceCoverageReasonV1::Unavailable => SessionCoverageReasonV1::Unavailable,
-    }
-}
-
-const fn hydration(value: HydrationStateV1) -> HydrationStateResultV1 {
-    match value {
-        HydrationStateV1::Available => HydrationStateResultV1::Available,
-        HydrationStateV1::RetainedButUnavailable => HydrationStateResultV1::RetainedButUnavailable,
-        HydrationStateV1::Redacted => HydrationStateResultV1::Redacted,
-        HydrationStateV1::Deleted => HydrationStateResultV1::Deleted,
-        HydrationStateV1::RetentionExpired => HydrationStateResultV1::RetentionExpired,
-        HydrationStateV1::Unauthorized => HydrationStateResultV1::Unauthorized,
-        HydrationStateV1::Locked => HydrationStateResultV1::Locked,
-        HydrationStateV1::UnverifiableLegacy => HydrationStateResultV1::UnverifiableLegacy,
-    }
-}
+pub(super) use super::wire::{coverage, source_coverage, temporal_watermarks};
 
 #[cfg(test)]
 mod refusal_tests {

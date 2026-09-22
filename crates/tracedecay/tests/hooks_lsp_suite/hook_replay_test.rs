@@ -1,6 +1,6 @@
 //! End-to-end hook replay: drives response and capture hook subcommands through
 //! the real binary with representative event payloads, then asserts the full
-//! telemetry wiring — every native callback, response-capable or capture-only,
+//! telemetry wiring, every native callback, response-capable or capture-only,
 //! records one attributed `hook_analytics.jsonl` row, and `tracedecay analytics
 //! sync` bridges those rows into durable analytics events. Capture-only
 //! callbacks additionally persist delivery receipts; that durable spool journey
@@ -26,7 +26,7 @@ use crate::common::{git_program, spawn_tracedecay_daemon_with, tracedecay_comman
 /// processes never touch the operator's real accounting store. This test's
 /// subject is the bridge from hook JSONL into the durable `analytics_events`
 /// table, which lives in the registered profile accounting database, so it must
-/// opt back in — against its own hermetic temp profile, never a live one.
+/// opt back in, against its own hermetic temp profile, never a live one.
 fn enable_profile_accounting(command: &mut Command) -> &mut Command {
     command.env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
 }

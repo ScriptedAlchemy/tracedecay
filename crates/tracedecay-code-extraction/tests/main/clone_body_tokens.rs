@@ -4,8 +4,8 @@ use tracedecay_code_extraction::ClojureExtractor;
 use tracedecay_code_extraction::PerlExtractor;
 use tracedecay_code_extraction::{
     CloneBodyEligibilityV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    ConservativeCloneTokenV1, LanguageExtractor, PythonExtractor, RustExtractor,
-    TypeScriptExtractor,
+    ConservativeCloneTokenV1, LanguageExtractor, MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
+    MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1, PythonExtractor, RustExtractor, TypeScriptExtractor,
 };
 use tracedecay_domain::NodeKind;
 
@@ -26,7 +26,7 @@ fn tokens(
         "{:?}",
         artifact.result.nodes
     );
-    artifact.clone_bodies[0].conservative_tokens.clone()
+    artifact.clone_bodies[0].conservative_tokens.to_vec()
 }
 
 #[test]
@@ -223,6 +223,73 @@ fn automatic_discovery_minimum_is_thirty_non_trivia_tokens() {
     }
 }
 
+/// A body above the token maximum is a typed exclusion carrying no token
+/// stream, not a record the text-artifact page later refuses. One such body
+/// parked a whole project's text projection before graph seating; the bound
+/// exists so extraction never emits a record a 4 MiB page cannot hold.
+#[test]
+fn bodies_above_the_token_maximum_are_excluded_without_streams() {
+    let artifact = |statements: usize| {
+        RustExtractor.extract_artifact(
+            "src/lib.rs",
+            &format!("fn body() {{ {} }}", "foo(); ".repeat(statements)),
+        )
+    };
+    // `foo();` is four non-trivia tokens.
+    let over = artifact(usize::try_from(MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1).unwrap() / 4 + 1);
+    let body = &over.clone_bodies[0];
+    assert!(body.non_trivia_token_count > MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1);
+    assert_eq!(
+        body.eligibility,
+        CloneBodyEligibilityV1::ExcludedTooLarge {
+            maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+            maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
+        }
+    );
+    assert!(body.conservative_tokens.is_empty());
+    assert_eq!(
+        body.tokenization_status,
+        CloneBodyTokenizationStatusV1::Complete
+    );
+    assert!(body.rename_tokens.is_none());
+    assert!(body.complete_rename_tokens().is_none());
+
+    let under = artifact(usize::try_from(MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1).unwrap() / 4 - 8);
+    let body = &under.clone_bodies[0];
+    assert!(body.non_trivia_token_count <= MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1);
+    assert_eq!(body.eligibility, CloneBodyEligibilityV1::Eligible);
+    assert!(!body.conservative_tokens.is_empty());
+}
+
+#[test]
+fn body_bytes_are_bounded_before_a_large_literal_is_tokenized() {
+    let literal = "x".repeat(usize::try_from(MAX_AUTOMATIC_CLONE_BODY_BYTES_V1).unwrap());
+    let artifact = RustExtractor.extract_artifact(
+        "src/lib.rs",
+        &format!("fn body() {{ let value = \"{literal}\"; }}"),
+    );
+    let body = &artifact.clone_bodies[0];
+
+    assert_eq!(
+        body.eligibility,
+        CloneBodyEligibilityV1::ExcludedTooLarge {
+            maximum_tokens: MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+            maximum_bytes: MAX_AUTOMATIC_CLONE_BODY_BYTES_V1,
+        }
+    );
+    assert_eq!(body.non_trivia_token_count, 0);
+    assert!(body.conservative_tokens.is_empty());
+    assert_eq!(
+        body.tokenization_issues,
+        vec![CloneBodyTokenizationIssueV1::BodyExceedsSizeBound]
+    );
+    assert_eq!(
+        body.tokenization_status,
+        CloneBodyTokenizationStatusV1::Partial
+    );
+    assert!(body.rename_tokens.is_none());
+}
+
 #[test]
 fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
     for (artifact, expected_kind, expected_language) in [
@@ -252,4 +319,39 @@ fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
         assert_eq!(body.language, expected_language);
         assert!(!body.body_span.is_empty());
     }
+}
+
+#[test]
+fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shape() {
+    let source = "pub fn publish(input: &str) -> bool {\n    let trimmed = input.trim();\n    let ready = !trimmed.is_empty();\n    let flagged = trimmed.starts_with('!');\n    let long = trimmed.len() > 4;\n    ready && long && !flagged\n}\n";
+    let emitted = tokens(&RustExtractor, "borrowed.rs", source);
+    assert!(!emitted.is_empty());
+    for token in &emitted {
+        let kind = match token {
+            ConservativeCloneTokenV1::StructureStart { syntax_kind }
+            | ConservativeCloneTokenV1::StructureEnd { syntax_kind }
+            | ConservativeCloneTokenV1::Syntax { syntax_kind, .. } => syntax_kind,
+        };
+        assert!(
+            matches!(kind, std::borrow::Cow::Borrowed(_)),
+            "extraction owned the grammar kind {kind:?}: one heap allocation per emitted token"
+        );
+    }
+
+    let encoded = serde_json::to_string(&emitted[0]).expect("token encodes");
+    assert!(
+        encoded.contains("\"syntax_kind\":\""),
+        "the persisted clone-token shape changed: {encoded}"
+    );
+    let decoded: ConservativeCloneTokenV1 = serde_json::from_str(&encoded).expect("token decodes");
+    assert_eq!(decoded, emitted[0]);
+    let decoded_kind = match &decoded {
+        ConservativeCloneTokenV1::StructureStart { syntax_kind }
+        | ConservativeCloneTokenV1::StructureEnd { syntax_kind }
+        | ConservativeCloneTokenV1::Syntax { syntax_kind, .. } => syntax_kind,
+    };
+    assert!(
+        matches!(decoded_kind, std::borrow::Cow::Owned(_)),
+        "a page read back from disk must own its kind, not borrow a grammar table it never saw"
+    );
 }

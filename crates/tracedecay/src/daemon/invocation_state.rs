@@ -131,8 +131,8 @@ impl DaemonInvocationState {
 
     /// Charge one already-resolved worker selection against this daemon's own
     /// resident-memory authority, then mount the process resources session
-    /// preparation meters against — that same resident-memory authority and
-    /// the background CPU authority the plan installed — into the store
+    /// preparation meters against, that same resident-memory authority and
+    /// the background CPU authority the plan installed, into the store
     /// administration's session runtimes. Keeping both steps here means the
     /// persisted-profile path, the production harness, and every in-process
     /// test engine install the exact same plan for the same selection and can
@@ -356,9 +356,9 @@ impl DaemonInvocationState {
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git
-        // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the
+        // repository (`IndexingIdentityV1::resolve` uses `git_open::open` on the
         // root, no upward discovery). A non-git project has no code-index
-        // identity by design: skip mounting instead of failing project open —
+        // identity by design: skip mounting instead of failing project open,
         // every non-code-index surface stays available.
         let git_control = project_root.join(".git");
         if !git_control.is_dir() && !git_control.is_file() {
@@ -434,9 +434,12 @@ impl DaemonInvocationState {
 
     #[allow(clippy::too_many_arguments)]
     #[hotpath::measure(label = "daemon.invocation_state.multi_root_execute", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Multi-root execute is one scoped dispatch across the admitted root set."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Multi-root execute is one scoped dispatch across the admitted root set."
+        )
     )]
     pub(super) async fn execute_multi_root_for_project(
         &self,
@@ -1042,7 +1045,7 @@ impl DaemonInvocationState {
 
     /// Close every invocation admission gate that can be closed without
     /// awaiting, so no new provider, code-index, or project-runtime work is
-    /// admitted once shutdown has been *requested* — not merely once this
+    /// admitted once shutdown has been *requested*, not merely once this
     /// owner's drain phase is reached.
     ///
     /// The invocation owner sits behind the producer phase in the daemon

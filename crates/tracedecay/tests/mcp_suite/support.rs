@@ -13,15 +13,12 @@ use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
-use std::process::Command;
-#[cfg(feature = "test-transport")]
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "test-transport")]
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 #[cfg(feature = "test-transport")]
@@ -65,7 +62,46 @@ use tracedecay_store::{
 #[cfg(feature = "test-transport")]
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+pub(crate) use crate::common::{ProcessEnvGuard, lock_process_env};
+
+/// `HOME` is one slot shared by every test in this binary, and the two
+/// fixtures that pin it ([`HomeEnvGuard`] and `common::IsolatedEnv`) both
+/// prove they hold `common::PROCESS_ENV_LOCK` to do so. A raw `set_var`
+/// bypasses that proof: the suite once pinned `HOME` under a second, private
+/// mutex and the Hermes bridge read a sibling fixture's home out of `$HOME`.
+#[test]
+fn home_is_pinned_only_through_the_process_env_guard() {
+    let suite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("mcp_suite");
+    let mut pending = vec![suite.clone()];
+    let mut offenders = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read mcp_suite directory") {
+            let path = entry.expect("mcp_suite directory entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_some_and(|extension| extension == "rs")
+                && path != suite.join("support.rs")
+            {
+                let source = std::fs::read_to_string(&path).expect("read mcp_suite source");
+                if ["set_var(\"HOME\"", "set_var(\"USERPROFILE\""]
+                    .iter()
+                    .any(|needle| source.contains(needle))
+                {
+                    offenders.push(path);
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "pin HOME through HomeEnvGuard or common::IsolatedEnv, which hold \
+         common::PROCESS_ENV_LOCK; these set it directly: {offenders:?}"
+    );
+}
 
 #[cfg(feature = "test-transport")]
 pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = tracedecay_mcp::MAX_RESPONSE_CHARS;
@@ -87,7 +123,7 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
 #[cfg(feature = "test-transport")]
 #[derive(Default)]
 pub(crate) struct CaptureTransport {
-    incoming: Option<String>,
+    pub(crate) incoming: Option<String>,
     pub(crate) output: String,
 }
 
@@ -199,7 +235,7 @@ pub(crate) fn retained_envelope_payload(text: &str) -> Option<Value> {
 ///
 /// Handlers that return `Err` are mapped to a JSON-RPC error rather than an
 /// `isError` tool result (see `crate::mcp::server::tool_errors`), so tests
-/// asserting on infrastructure failures need the envelope, not just `result`.
+/// asserting on infrastructure failures need the full JSON-RPC envelope.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn handle_real_server_tool_call_raw(
     server: &McpServer,
@@ -211,6 +247,20 @@ pub(crate) async fn handle_real_server_tool_call_raw(
             .entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
+    dispatch_mcp_tool_call(server, tool_name, arguments).await
+}
+
+/// JSON-RPC `tools/call` with the caller's arguments left intact.
+///
+/// [`handle_real_server_tool_call_raw`] inserts `format: "json"` when the
+/// caller omitted it. Production default is markdown, so a journey that
+/// proves that default must dispatch the arguments as the client sent them.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn dispatch_mcp_tool_call(
+    server: &McpServer,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -255,7 +305,7 @@ pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
 
 /// Poll `tracedecay_status` and `tracedecay_search` until the current
 /// worktree generation is sealed and the exact, lexical, and graph lanes
-/// report complete coverage — the same terminal signal daemon journeys
+/// report complete coverage, the same terminal signal daemon journeys
 /// wait on. Ranked matches are not stable while a required lane is still
 /// warming or the search generation has not caught the sealed worktree.
 #[cfg(feature = "test-transport")]
@@ -285,11 +335,16 @@ pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &s
         last_search =
             serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
         let incomplete = common::incomplete_code_index_query_lanes(&last_search);
+        // `status = current` and complete lanes prove the generation, but the
+        // seat can still owe its source proof to a continuation pass, and a
+        // read taken before that pass binds it reports `verifying`. A settled
+        // seat answers `fresh`; take the first search that reports it.
         if freshness["status"] == "current"
             && last_search["reason"].as_str() != Some("authority_unavailable")
             && last_search["code_generation"].as_str() == status_generation
             && status_generation.is_some()
             && incomplete.is_empty()
+            && last_search["freshness"] == json!({ "state": "fresh" })
         {
             return;
         }
@@ -297,7 +352,7 @@ pub(crate) async fn wait_for_code_index_generation(server: &McpServer, query: &s
     }
     let incomplete = common::incomplete_code_index_query_lanes(&last_search);
     panic!(
-        "code-index search did not complete lane coverage within the polling budget: incomplete lanes={incomplete:?}; status={last_status}; search={last_search}"
+        "code-index search did not settle within the polling budget: incomplete lanes={incomplete:?}; status={last_status}; search={last_search}"
     );
 }
 
@@ -357,6 +412,14 @@ pub(crate) struct ProductionCompositionFixture {
     _isolation: TestTempDir,
 }
 
+/// `git init`, stage everything, and commit. Identity, hooks, and gc come
+/// from the shared fixture git config so each suite does not fork its own.
+pub(crate) fn commit_worktree(project: &Path, message: &str) {
+    crate::common::fixture::git_run(project, &["init", "-q"]);
+    crate::common::fixture::git_run(project, &["add", "."]);
+    crate::common::fixture::git_run(project, &["commit", "-qm", message]);
+}
+
 #[cfg(feature = "test-transport")]
 pub(crate) async fn production_composition_fixture() -> ProductionCompositionFixture {
     production_composition_fixture_with_sources(fixture::write_indexed_fixture_sources).await
@@ -373,32 +436,7 @@ pub(crate) async fn production_composition_fixture_with_sources(
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).expect("production composition project");
     write_sources(&project_root);
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(&project_root)
-        .status()
-        .expect("git init");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(&project_root)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production composition fixture",
-        ])
-        .current_dir(&project_root)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit must succeed");
+    commit_worktree(&project_root, "production composition fixture");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         vec![project_root.clone()],
@@ -423,49 +461,21 @@ pub(crate) struct ProductionSourceEditFixture {
 #[cfg(feature = "test-transport")]
 pub(crate) async fn init_production_source_edit_project(
     project_root: &Path,
-) -> (ProductionSourceEditFixture, ()) {
+) -> ProductionSourceEditFixture {
     let isolation_root = project_root
         .parent()
         .expect("source-edit project has an isolation parent");
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(project_root)
-        .status()
-        .expect("git init source-edit fixture");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(project_root)
-        .status()
-        .expect("git add source-edit fixture");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "source edit fixture",
-        ])
-        .current_dir(project_root)
-        .status()
-        .expect("git commit source-edit fixture");
-    assert!(commit.success(), "git commit must succeed");
+    commit_worktree(project_root, "source edit fixture");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation_root,
         [project_root.to_path_buf()],
     ))
     .await
     .expect("production source-edit composition");
-    (
-        ProductionSourceEditFixture {
-            harness,
-            project_root: project_root.to_path_buf(),
-        },
-        (),
-    )
+    ProductionSourceEditFixture {
+        harness,
+        project_root: project_root.to_path_buf(),
+    }
 }
 
 #[cfg(feature = "test-transport")]
@@ -581,8 +591,8 @@ pub(crate) async fn handle_tool_call(
     //
     // Every retained-surface tool (LCM, message search, fact store, session
     // and workflow reads) executes through the daemon retained owner in
-    // production, so dispatch it through the registered test server — which
-    // mounts that owner in process — rather than the bare registry path whose
+    // production, so dispatch it through the registered test server, which
+    // mounts that owner in process, rather than the bare registry path whose
     // missing executor truthfully reports the transport as unavailable.
     #[cfg(feature = "test-transport")]
     if tracedecay_contracts::RetainedSurfaceOperation::from_tool_name(tool_name).is_some() {
@@ -960,7 +970,10 @@ pub(crate) struct HomeEnvGuard {
 }
 
 impl HomeEnvGuard {
-    pub(crate) fn set(home: &Path) -> Self {
+    /// Takes the process-env lock by reference: `HOME` is one process-wide
+    /// slot, so a caller that pins it without holding the lock every other
+    /// fixture holds reads a sibling's home instead of its own.
+    pub(crate) fn set(_process_env: &ProcessEnvGuard, home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
         let previous_userprofile = std::env::var_os("USERPROFILE");
         let previous_data_dir = std::env::var_os(tracedecay::config::USER_DATA_DIR_ENV);
@@ -1021,9 +1034,6 @@ pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Shared setup
-// ---------------------------------------------------------------------------
 pub(crate) struct TestTempDir {
     pub(crate) dir: Option<TempDir>,
 }
@@ -1062,7 +1072,7 @@ pub(crate) struct TestEnv {
     pub(crate) _global_db_guard: GlobalDbEnvGuard,
     // Drop order = declaration order: the env lock must outlive the guards
     // above so their env restores happen while the lock is still held.
-    pub(crate) _env_lock: MutexGuard<'static, ()>,
+    pub(crate) _env_lock: ProcessEnvGuard,
 }
 
 pub(crate) struct TestTraceDecay {
@@ -1152,9 +1162,9 @@ pub(crate) async fn close_test_graph(cg: TestTraceDecay) {
 }
 
 pub(crate) async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEnv) {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
+    let home_guard = HomeEnvGuard::set(&env_lock, &home);
     let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let cg = fixture::init_project_from_template(project).await.unwrap();
     (
@@ -1825,11 +1835,6 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
 }
 
 #[cfg(feature = "test-transport")]
-pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> Arc<HostAdmissionTestRuntimeV1> {
-    open_active_project_session_db(cg).await
-}
-
-#[cfg(feature = "test-transport")]
 pub(crate) async fn lcm_raw_store_id(cg: &TraceDecay, message_id: &str) -> i64 {
     lcm_raw_store_id_for_provider(cg, "cursor", message_id).await
 }
@@ -1840,7 +1845,7 @@ pub(crate) async fn lcm_raw_store_id_for_provider(
     provider: &str,
     message_id: &str,
 ) -> i64 {
-    project_lcm_conn(cg)
+    open_active_project_session_db(cg)
         .await
         .lcm_load_raw_message_for_test(provider, message_id)
         .await

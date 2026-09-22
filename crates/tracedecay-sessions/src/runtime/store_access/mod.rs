@@ -1,4 +1,4 @@
-//! Session-store operations hosted on [`SessionStoreAccess`].
+//! Session-store operations hosted on `SessionStoreAccess`.
 //!
 //! These are the former `RegisteredGlobalDb` SQL/LCM adapter bodies. Global-db
 //! keeps thin inherent wrappers so existing lease call sites keep working.
@@ -20,6 +20,7 @@ pub use search::{
 pub(crate) use sessions::EXISTING_SESSION_MESSAGE_IDS_SQL;
 pub(crate) use sessions::SESSION_MESSAGE_ID_LOOKUP_MAX;
 pub use sessions::SESSION_MESSAGES_AFTER_SQL;
+pub use sessions::{SqlColumnError, message_record_from_row, session_record_from_row};
 pub use transcript::{
     TranscriptGitEvidence, get_parse_offset, require_expected_offset, set_parse_offset,
 };

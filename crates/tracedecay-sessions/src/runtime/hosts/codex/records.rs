@@ -4,14 +4,16 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tracedecay_capture::codex::{codex_current_user_message, codex_message_visible_text};
+use tracedecay_capture::codex::codex_current_user_message;
 
 use super::PROVIDER;
 use super::meta::CodexMeta;
 use crate::host_ports::parse_timestamp;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{append_tool_calls_metadata, content_storage_text_and_tools};
-use tracedecay_store::{CodexGoalContext, codex_goal_context_from_text};
+use tracedecay_store::{
+    CodexGoalContext, codex_goal_context_from_text, codex_message_visible_text,
+};
 
 /// Threshold above which a tool call's arguments / a tool output is flagged as
 /// truncated in metadata. Raw tool-call arguments and tool outputs are never
@@ -249,7 +251,7 @@ fn response_item_tool_call_text(
     if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
         parts.push(format!("call_id: {call_id}"));
     }
-    // Never embed raw arguments in the FTS-searchable text — they can carry
+    // Never embed raw arguments in the FTS-searchable text, they can carry
     // secrets (tokens, credentials, private paths). Record only the byte count;
     // the lossless arguments remain in the rollout at `source_offset`.
     if let Some(arguments_bytes) = response_item_arguments_bytes(payload) {
@@ -277,7 +279,7 @@ fn response_item_tool_output_text(payload: &Value, output: Option<&str>) -> Opti
         .unwrap_or("unknown");
     let output = output?;
     let output_bytes = output.len();
-    // Record only the byte count — the raw tool output can carry secrets and
+    // Record only the byte count, the raw tool output can carry secrets and
     // must not land in the FTS-searchable text. The full body stays in the
     // rollout, recoverable via `source_path`/`source_offset`.
     Some(format!(
@@ -331,7 +333,7 @@ pub(super) fn response_item_tool_metadata(
             Value::String("provider_exposed".to_string()),
         );
     }
-    // Byte counts + truncation flags only — never the raw argument/output bytes.
+    // Byte counts + truncation flags only, never the raw argument/output bytes.
     if let Some(arguments_bytes) = response_item_arguments_bytes(payload) {
         metadata.insert(
             "arguments_bytes".to_string(),

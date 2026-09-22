@@ -473,22 +473,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .map_err(MemoryApplicationError::from)
     }
 
-    /// Constructs an owner-bound update command from the canonical store patch.
-    pub fn canonical_fact_update_command(
-        &self,
-        target: ProjectMemoryFactMutationTarget,
-        patch: ProjectMemoryFactUpdatePatchV1,
-        context: &MemoryOperationContext,
-    ) -> Result<ProjectMemoryFactUpdateCommandV1, MemoryApplicationError> {
-        update_command(
-            &self.owner,
-            target,
-            patch,
-            context.operation_id().clone(),
-            context.actor().cloned(),
-        )
-    }
-
     /// Constructs an owner-bound compare-and-set remove command.
     pub fn canonical_fact_remove_command(
         &self,

@@ -575,7 +575,7 @@ async fn environmental_raw_authority_failure_schedules_projection_retry() {
 
     // Fail the same raw-authority write the sanitization refusal flows
     // through, but with an engine fault: this side of the boundary must stay
-    // environmental — retained on the queue with a durable retry, never a
+    // environmental, retained on the queue with a durable retry, never a
     // committed skip disposition.
     let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
     raw_conn
@@ -767,6 +767,13 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
     );
 }
 
+/// A projected message body that matches neither this binary's rendering nor
+/// the rendering a shipped release wrote is tamper. Profile reopen must name
+/// that disagreement and leave the row untouched. An interrupted write whose
+/// row is still the shipped rendering is a different admission and is not this
+/// case. Provenance identity, digests that match neither the current nor the
+/// stored output, foreign ownership, missing rows, and conflicting session
+/// fields remain hard failures as well.
 #[tokio::test]
 async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     let tmp = audited_projection_fixture("session-audit-update", "message-audit-update").await;
@@ -786,15 +793,30 @@ async fn projected_message_update_invalidates_audit_and_fails_reopen() {
         .unwrap();
     drop(raw_conn);
 
+    let Err(error) = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await
+    else {
+        panic!("a tampered projected message must fail profile reopen");
+    };
+    let message = error.to_string();
     assert!(
-        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-            .await
-            .is_err()
+        message.contains("projection output rows disagree with deterministic output"),
+        "{message}"
+    );
+    assert!(
+        projected_message_texts(&tmp).await[0].contains("tampered projection body"),
+        "profile reopen rewrote the tampered body instead of refusing it"
     );
 }
 
+/// A vanished projected output is not the tamper case. Provenance still names
+/// this observation as the row's creator, and the immutable projection still
+/// holds the rendering, so the audit reads the deletion as an interrupted
+/// write and restores the row rather than refusing the whole profile. History
+/// for the surviving sources keeps serving across that repair. The sibling
+/// above stays a hard failure because a body the ledger can see disagreeing
+/// with the deterministic output is tamper, not an unfinished write.
 #[tokio::test]
-async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
+async fn projected_message_delete_is_restored_from_the_immutable_projection() {
     let tmp = audited_projection_fixture("session-audit-delete", "message-audit-delete").await;
     let runtime = profile_runtime(&tmp).await;
     let database_path = runtime
@@ -802,6 +824,12 @@ async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
         .unwrap()
         .to_path_buf();
     drop(runtime);
+    let shipped = projected_message_texts(&tmp).await;
+    assert!(
+        shipped.len() == 1 && shipped[0].contains("audited projection body"),
+        "fixture did not ship the rendering this test deletes: {shipped:?}"
+    );
+
     let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
@@ -811,10 +839,16 @@ async fn projected_message_delete_invalidates_audit_and_fails_reopen() {
         )
         .unwrap();
     drop(raw_conn);
+    assert!(projected_message_texts(&tmp).await.is_empty());
 
-    assert!(
-        HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
-            .await
-            .is_err()
+    let reopened = HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
+        .await
+        .expect("a created row with surviving provenance must be restored, not refused");
+    drop(reopened);
+
+    assert_eq!(
+        projected_message_texts(&tmp).await,
+        shipped,
+        "profile reopen admitted the store without putting the deleted rendering back"
     );
 }

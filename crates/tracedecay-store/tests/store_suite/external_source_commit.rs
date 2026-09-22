@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::{
-    AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest, ManifestDigest,
+    AccessPolicyDigest, CapabilityId, ComponentVersion, LocatorDigest,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
     ResolutionAuthorizationV1, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
     ScopeResolutionId, SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1,
@@ -19,9 +19,7 @@ use tracedecay_store::{
     apply_source_projection, build_source_projection,
 };
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn definition() -> SourceDefinitionV1 {
     definition_with_max(4)
@@ -1100,8 +1098,8 @@ fn validation_memoization_preserves_encoding_and_verdicts() {
     let state = layered_state();
     let encoded = serde_json::to_string(&state).unwrap();
 
-    // The memo is never serialized, so durable bytes — and every digest taken
-    // over these records — are unchanged.
+    // The memo is never serialized, so durable bytes, and every digest taken
+    // over these records, are unchanged.
     assert!(!encoded.contains("verified"));
     assert!(state.validate().is_ok());
     assert_eq!(serde_json::to_string(&state).unwrap(), encoded);

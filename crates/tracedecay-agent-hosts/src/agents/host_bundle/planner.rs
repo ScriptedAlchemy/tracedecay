@@ -27,21 +27,6 @@ use super::{
     validate_relative_install_path,
 };
 
-/// Verify embedded first-party catalog identity and content digests, then
-/// produce the lifecycle plan. This keeps the older closure-based planner
-/// compatible while giving production callers one concrete verification
-/// contract.
-pub fn plan_verified_lifecycle_mutation(
-    manifest: &HostBundleManifestV1,
-    request: &HostBundleLifecycleRequestV1,
-    observed: &[ObservedHostArtifactV1],
-    verifier: &impl HostBundleVerificationAdapterV1,
-) -> Result<HostBundleMutationPlanV1, HostBundleError> {
-    plan_lifecycle_mutation(manifest, request, observed, |manifest| {
-        verifier.verify_manifest(manifest)
-    })
-}
-
 /// Verify first, then produce the full immutable lifecycle plan, including
 /// receipt-derived orphan removals for update, repair, and uninstall.
 #[hotpath::measure(label = "hosts.agent.host_bundle.plan_complete")]
@@ -386,8 +371,8 @@ pub(super) fn plan_artifact_action(
         // Install over a path this component's own receipt already claims is
         // the ordinary reinstall/update journey (e.g. a new bundle version
         // over an unmodified prior deploy), so it converges exactly as
-        // `Update` does. Only a third-party edit — bytes that match neither
-        // the catalog nor the receipt-owned content — is a conflict.
+        // `Update` does. Only a third-party edit, bytes that match neither
+        // the catalog nor the receipt-owned content, is a conflict.
         HostBundleLifecycleOpV1::Install | HostBundleLifecycleOpV1::Update => {
             if state.artifact_digest == Some(artifact.artifact_digest) {
                 Ok(HostArtifactActionV1::Noop)
@@ -433,7 +418,7 @@ pub(super) fn plan_artifact_action(
 ///   ([`HostComponentSetRegistrationV1::receiptless_component_provenance`]),
 ///   e.g. a Cursor plugin directory whose own manifest names tracedecay.
 ///   Live pre-receipt bundles restamp versions and binary paths every
-///   release, so they are never byte-identical — provenance is what lets
+///   release, so they are never byte-identical, provenance is what lets
 ///   `install`/`update-plugin` converge them without wedging;
 /// * explicit operator adoption: `--yes --adopt` claimed the path knowingly.
 ///
@@ -473,7 +458,7 @@ fn adopts_pre_receipt_artifact(
 pub const HOST_BUNDLE_STAGE_ROOT_RELATIVE: &str = ".tracedecay/host-bundle-stage";
 
 /// A deploy path inside TraceDecay's own staging namespace is
-/// TraceDecay-staged by construction — it is never host or user config, so a
+/// TraceDecay-staged by construction, it is never host or user config, so a
 /// receiptless divergent file there is a staging left by another TraceDecay
 /// binary version (its render bakes in the binary path), not a foreign claim.
 /// Refusing it would wedge the documented native-activation hand-over

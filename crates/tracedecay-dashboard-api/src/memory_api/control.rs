@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use axum::Json;
+use axum::http::StatusCode;
+use serde_json::{Value, json};
 use tracedecay_store::FactReadControl;
 
 use crate::DashboardHttpRequestControlV1;
@@ -69,6 +72,18 @@ pub(crate) fn terminal_read_code(state: DashboardDomainStateV1) -> (&'static str
         ),
         _ => ("request_cancelled", "dashboard request was cancelled"),
     }
+}
+
+/// HTTP shape shared by routes that answer a finished deadline or cancellation
+/// before their payload. Timed out is 504; every other terminal state is 408.
+pub(crate) fn terminal_read_response(state: DashboardDomainStateV1) -> (StatusCode, Json<Value>) {
+    let (code, detail) = terminal_read_code(state);
+    let status = if state == DashboardDomainStateV1::TimedOut {
+        StatusCode::GATEWAY_TIMEOUT
+    } else {
+        StatusCode::REQUEST_TIMEOUT
+    };
+    (status, Json(json!({ "detail": detail, "code": code })))
 }
 
 #[cfg(test)]

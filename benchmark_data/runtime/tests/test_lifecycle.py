@@ -160,7 +160,9 @@ class DashboardLifecycleTests(unittest.TestCase):
                             url,
                             request_timeout=0.05,
                         ),
-                        readiness_timeout=0.2,
+                        # The stub takes a moment to bind on a loaded runner;
+                        # 0.2s left the probe stuck in dashboard_connect.
+                        readiness_timeout=2.0,
                         poll_interval=0.01,
                         termination_grace=0.05,
                     )

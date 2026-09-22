@@ -39,7 +39,7 @@ as a stub.
 runtime. That was not an oversight: the gate existed to decide whether a
 *candidate* retrieval profile should be activated in place of the always-on
 `query-fallback` lanes. With the dense lane gone, the packaged profile matrix
-holds exactly one profile — `query-fallback` itself — so there is no candidate,
+holds exactly one profile, `query-fallback` itself, so there is no candidate,
 no paired difference, and nothing for a held-out interval to decide. Keeping a
 statistical gate that can only ever compare a profile with itself would report
 authority it does not have.
@@ -56,7 +56,7 @@ Consequently:
   may present it as doing so.
 - `validate_workload_for_tuning` and
   `validate_need_provenance_against_embedded_corpus` attest that measurement
-  *inputs* are fit and sourced — schema, execution contract, byte-exact corpus,
+  *inputs* are fit and sourced, schema, execution contract, byte-exact corpus,
   partitions, labels, and every natural-language need's verbatim provenance
   quote. Verified provenance bounds what the measurement is worth; it grants no
   activation authority.

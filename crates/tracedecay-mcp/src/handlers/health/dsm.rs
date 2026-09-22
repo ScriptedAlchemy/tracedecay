@@ -1,4 +1,4 @@
-//! `tracedecay_dsm` — design-structure matrix over file dependencies.
+//! `tracedecay_dsm`, design-structure matrix over file dependencies.
 
 use super::*;
 

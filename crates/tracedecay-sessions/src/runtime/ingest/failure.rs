@@ -294,8 +294,8 @@ pub(super) fn scheduling_write_required(
 /// Reason code, retryability, and admission status of one transcript ingest
 /// failure.
 ///
-/// A single match owns all three so every consumer — provider folds, catch-up
-/// telemetry, and the MCP hook boundary alike — reads the same declared
+/// A single match owns all three so every consumer, provider folds, catch-up
+/// telemetry, and the MCP hook boundary alike, reads the same declared
 /// disposition instead of recovering one from the reason-code string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TranscriptIngestDisposition {
@@ -320,7 +320,7 @@ pub fn classify_transcript_ingest_disposition(
     {
         // The record itself is rejected: nothing about the authority is
         // degraded beyond this one non-durable record. Transient admission
-        // failures never take this shape — the ingest wrappers route them
+        // failures never take this shape, the ingest wrappers route them
         // through `HostAdmission`, which carries the authority's own
         // retryability verdict.
         return TranscriptIngestDisposition {
@@ -517,6 +517,9 @@ pub fn classify_claude_observation_failure(
         Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
         Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
         Projection::OutputCollision { .. } => permanent("observation_projection_output_collision"),
+        Projection::SessionOutputCollision { .. } => {
+            permanent("observation_projection_session_collision")
+        }
         Projection::ProvenanceCollision => permanent("observation_projection_provenance_collision"),
         Projection::Contract(_) => permanent("observation_projection_contract_invalid"),
         Projection::Anchor(_) => permanent("observation_projection_anchor_invalid"),

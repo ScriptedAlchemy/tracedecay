@@ -5,6 +5,7 @@ use std::sync::Arc;
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+use crate::projection::check_cancelled;
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
     entity_projection_label, relation_projection_label,
@@ -357,8 +358,8 @@ fn authenticate_relation_cursor(
 ///
 /// Pages are answered from a cached ordered identity index rather than by
 /// rescanning the projection, so paging N identities costs one O(N log N) build
-/// plus O(log N + limit) per page instead of the O(N) scan *per page* — an
-/// O(N^2) catalog warm — this used to run. See
+/// plus O(log N + limit) per page instead of the O(N) scan *per page*, an
+/// O(N^2) catalog warm, this used to run. See
 /// [`crate::projection_identity_index`]. A projection too large to index falls
 /// back to the bounded streaming scan below.
 #[hotpath::measure(label = "graph_db.projection.identity_index.seek")]
@@ -468,14 +469,6 @@ fn validate_optional_page_limit(limit: usize) -> Result<(), GraphDbError> {
             GraphBudgetKind::Read,
             MAX_PROJECTION_PAGE_ITEMS,
         ))
-    } else {
-        Ok(())
-    }
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
     } else {
         Ok(())
     }

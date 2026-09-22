@@ -1,6 +1,6 @@
 //! Provider-neutral transcript ingestion framework.
 //!
-//! Every agent transcript — Cursor, Claude Code, Codex, Vibe, … — converges to
+//! Every agent transcript, Cursor, Claude Code, Codex, Vibe, …, converges to
 //! the same provider-neutral [`SessionMessageRecord`] rows in a per-project
 //! `sessions.db`. This module factors the *incremental, fail-open* machinery
 //! out of the original Cursor-specific implementation so any adapter can plug
@@ -9,20 +9,20 @@
 //! ## Incremental cursors
 //!
 //! Sources differ in how they store transcripts, so three cursor kinds are
-//! supported, all persisted through the authoritative [`TranscriptStore`]
+//! supported, all persisted through the authoritative `TranscriptStore`
 //! implementation and its existing `parse_offsets` table keyed by file path.
 //! The stored [`StoredCursor`] is `(position, mtime)` where `position`
 //! means:
 //!
-//! * [`stream_new_jsonl`] — **`ByteOffset`**: append-only JSONL (Cursor, Claude,
+//! * [`stream_new_jsonl`], **`ByteOffset`**: append-only JSONL (Cursor, Claude,
 //!   Codex, …). `position` is the byte offset of the next unread line; we seek
 //!   there and stream only new lines.
-//! * [`read_changed_file`] — **`ContentHash`**: full-file-rewrite JSON (Cline,
+//! * [`read_changed_file`], **`ContentHash`**: full-file-rewrite JSON (Cline,
 //!   Roo Code, Kilo, …). `position` is a stable 64-bit prefix of the content
 //!   hash; combined with `mtime` it detects rewrites. On change the whole
-//!   document is re-parsed and re-upserted — idempotent `ON CONFLICT` upserts
+//!   document is re-parsed and re-upserted, idempotent `ON CONFLICT` upserts
 //!   make re-adding unchanged messages a no-op.
-//! * [`read_new_rows`](crate::runtime::shared::read_new_rows) — **`RowCursor`**: SQLite-backed stores (Zed, Copilot CLI
+//! * [`read_new_rows`](crate::runtime::shared::read_new_rows), **`RowCursor`**: SQLite-backed stores (Zed, Copilot CLI
 //!   `session-store.db`). `position` is the last-seen `rowid`; we select rows
 //!   with a greater `rowid`.
 //!
@@ -790,7 +790,7 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     // ingest funnels through, so it is where "an agent said something in this
     // project" becomes observable. Published only after the durable batch
     // commits, so the dashboard never lights work that did not land. The project
-    // id is left for the dashboard to resolve from the registry — ingest holds a
+    // id is left for the dashboard to resolve from the registry, ingest holds a
     // project root, not a registered identity, and must not pay a lookup here.
     store
         .record_session_ingest_activity(project_root, messages_upserted, provider)

@@ -165,7 +165,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
             };
             // Concurrent publishers race this post-commit apply. Retry only
             // when the durable publication state provably moved past this
-            // attempt — a newer generation superseded the one just
+            // attempt, a newer generation superseded the one just
             // reconstructed, or a peer settled this generation's receipt
             // first. The retry re-reads the refreshed generation; a genuine
             // mismatch re-surfaces as soon as the state stops moving.
@@ -531,6 +531,139 @@ pub(crate) async fn reconstruct_session_relation_projection(
     super::relations::validate_projection(&projection)
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
     Ok(projection)
+}
+
+/// Counts logical copies for a generation whose native graph was never applied.
+///
+/// The refresh baseline used to refuse that state. The graph comment says the
+/// caller must reconstruct instead. This walks occurrences in precedence order
+/// and keeps only the latest predecessor per message, so a large generation is
+/// not one exact-SQL page of `observation_json`.
+pub(crate) async fn count_canonical_logical_copies(
+    conn: &impl crate::handle::SessionTemporalQuery,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+) -> SessionStoreResult<u64> {
+    const PAGE: i64 = 8;
+    let generation = generation_i64(generation, RECONSTRUCT_OPERATION)?;
+    let mut cursor: Option<(i64, i64, String)> = None;
+    let mut predecessors: BTreeMap<String, (UtcMicros, u32, String)> = BTreeMap::new();
+    let mut copies = 0_u64;
+    loop {
+        let mut rows = match &cursor {
+            None => conn
+                .query(
+                    "SELECT occurrence.occurrence_id, occurrence.message_id,
+                            occurrence.projection_output_ordinal, occurrence.knowledge_at,
+                            observation.observation_json
+                     FROM session_occurrences AS occurrence
+                     JOIN observations AS observation
+                       ON observation.observation_id = occurrence.source_observation_id
+                     WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+                     ORDER BY occurrence.knowledge_at, occurrence.projection_output_ordinal,
+                              occurrence.occurrence_id
+                     LIMIT ?3",
+                    params![session_id.as_str(), generation, PAGE],
+                )
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            Some((knowledge_at, ordinal, occurrence_id)) => conn
+                .query(
+                    "SELECT occurrence.occurrence_id, occurrence.message_id,
+                            occurrence.projection_output_ordinal, occurrence.knowledge_at,
+                            observation.observation_json
+                     FROM session_occurrences AS occurrence
+                     JOIN observations AS observation
+                       ON observation.observation_id = occurrence.source_observation_id
+                     WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+                       AND (
+                            occurrence.knowledge_at > ?3
+                            OR (
+                                occurrence.knowledge_at = ?3
+                                AND occurrence.projection_output_ordinal > ?4
+                            )
+                            OR (
+                                occurrence.knowledge_at = ?3
+                                AND occurrence.projection_output_ordinal = ?4
+                                AND occurrence.occurrence_id > ?5
+                            )
+                       )
+                     ORDER BY occurrence.knowledge_at, occurrence.projection_output_ordinal,
+                              occurrence.occurrence_id
+                     LIMIT ?6",
+                    params![
+                        session_id.as_str(),
+                        generation,
+                        *knowledge_at,
+                        *ordinal,
+                        occurrence_id.as_str(),
+                        PAGE
+                    ],
+                )
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        };
+        let mut page_rows = 0_i64;
+        let mut page_cursor = None;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        {
+            let occurrence_id: String = row
+                .get(0)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let message_id: Option<String> = row
+                .get(1)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let ordinal = u32::try_from(
+                row.get::<i64>(2)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let knowledge_at = UtcMicros(
+                row.get(3)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            );
+            let observation: DurableObservationV1 = serde_json::from_str(
+                &row.get::<String>(4)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let parent_message_id = observation_envelope_from_payload(observation.payload())
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+                .relations()
+                .parent_message_id()
+                .map(|id| id.as_str().to_owned());
+            page_cursor = Some((knowledge_at.0, i64::from(ordinal), occurrence_id.clone()));
+            page_rows += 1;
+            if let (Some(message_id), Some(parent_message_id)) = (&message_id, &parent_message_id)
+                && message_id == parent_message_id
+                && predecessors.get(parent_message_id).is_some_and(|source| {
+                    (source.0, source.1, source.2.as_str())
+                        < (knowledge_at, ordinal, occurrence_id.as_str())
+                })
+            {
+                copies = copies.saturating_add(1);
+            }
+            if let Some(message_id) = message_id {
+                let candidate = (knowledge_at, ordinal, occurrence_id);
+                match predecessors.get(&message_id) {
+                    Some(existing)
+                        if (existing.0, existing.1, existing.2.as_str())
+                            >= (candidate.0, candidate.1, candidate.2.as_str()) => {}
+                    _ => {
+                        predecessors.insert(message_id, candidate);
+                    }
+                }
+            }
+        }
+        if page_rows < PAGE {
+            break;
+        }
+        cursor = page_cursor;
+    }
+    Ok(copies)
 }
 
 pub(crate) async fn reconstruct_logical_copy_relations(
@@ -1065,38 +1198,37 @@ async fn reconstruct_session_metadata(
     Ok((parent, memberships))
 }
 
+fn projection_budget(count: usize, add: usize) -> SessionStoreResult<usize> {
+    count
+        .checked_add(add)
+        .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))
+}
+
 fn enforce_projection_bounds(
     projection: &SessionRelationProjection,
     max_entities: usize,
     max_relations: usize,
 ) -> SessionStoreResult<()> {
-    let summary_relations = projection
-        .summaries
-        .iter()
-        .try_fold(0usize, |count, summary| {
-            count.checked_add(summary.sources.len()).and_then(|count| {
-                count.checked_add(usize::from(summary.predecessor_summary_id.is_some()))
-            })
-        })
-        .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))?;
-    let relation_count = [
+    let mut summary_relations = 0usize;
+    for summary in &projection.summaries {
+        summary_relations = projection_budget(summary_relations, summary.sources.len())?;
+        summary_relations = projection_budget(
+            summary_relations,
+            usize::from(summary.predecessor_summary_id.is_some()),
+        )?;
+    }
+    let mut relation_count = summary_relations;
+    for count in [
         projection.logical_copies.len(),
         projection.thread_hierarchy.len(),
         projection.agent_hierarchy.len(),
         usize::from(projection.parent_session_id.is_some()),
         projection.workflow_agents.len(),
-    ]
-    .into_iter()
-    .try_fold(summary_relations, usize::checked_add)
-    .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))?;
-    let entity_count =
-        projection
-            .summaries
-            .len()
-            .checked_add(relation_count.checked_mul(2).ok_or_else(|| {
-                storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted)
-            })?)
-            .ok_or_else(|| storage(RECONSTRUCT_OPERATION, SessionRelationError::BudgetExhausted))?;
+    ] {
+        relation_count = projection_budget(relation_count, count)?;
+    }
+    let entity_count = projection_budget(relation_count, relation_count)
+        .and_then(|doubled| projection_budget(projection.summaries.len(), doubled))?;
     if relation_count > max_relations || entity_count > max_entities {
         return Err(storage(
             RECONSTRUCT_OPERATION,

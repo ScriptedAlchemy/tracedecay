@@ -157,17 +157,11 @@ fn open_no_follow(path: &Path) -> io::Result<File> {
     options.open(path).map_err(normalize_no_follow_error)
 }
 
-#[cfg(unix)]
 fn normalize_no_follow_error(error: io::Error) -> io::Error {
+    #[cfg(unix)]
     if error.raw_os_error() == Some(libc::ELOOP) {
-        io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link")
-    } else {
-        error
+        return io::Error::new(io::ErrorKind::InvalidInput, "path is a symbolic link");
     }
-}
-
-#[cfg(not(unix))]
-fn normalize_no_follow_error(error: io::Error) -> io::Error {
     error
 }
 
@@ -177,7 +171,7 @@ fn normalize_no_follow_error(error: io::Error) -> io::Error {
 /// The file is opened once, without following a final symlink, and the kind
 /// and length checks run on that opened handle's metadata, so a pathname that
 /// is swapped between check and read cannot substitute a different object
-/// (only a regular file that atomically replaced the path can be observed —
+/// (only a regular file that atomically replaced the path can be observed,
 /// in either its old or new state). Non-regular objects and symlinks fail
 /// with `InvalidInput`; an empty, oversized, or short-read file fails with
 /// `InvalidData`.
@@ -214,12 +208,14 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
     Ok(Some(bytes))
 }
 
+const TEMPORARY_SUFFIX: &str = ".tmp";
+
 fn temporary_path(path: &Path, kind: &str) -> PathBuf {
     static NONCE: AtomicU64 = AtomicU64::new(1);
     let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     parent.join(format!(
-        ".{}.{}.{}.{}.tmp",
+        ".{}.{}.{}.{}{TEMPORARY_SUFFIX}",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("spool"),
@@ -227,6 +223,48 @@ fn temporary_path(path: &Path, kind: &str) -> PathBuf {
         std::process::id(),
         nonce
     ))
+}
+
+/// Is this directory entry one of this module's staging temporaries?
+///
+/// [`with_owned_temp_publish`] stages into `.<destination>.<kind>.<pid>.<nonce>.tmp`
+/// beside the destination and publishes by rename, so a publisher killed
+/// between the two leaves that name behind. A reader enumerating a private
+/// directory must recognize the residue as its own rather than refusing the
+/// whole directory as foreign.
+#[must_use]
+pub fn is_owned_temporary_name(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with(TEMPORARY_SUFFIX)
+}
+
+/// Delete staging temporaries abandoned by a killed publisher.
+///
+/// Only the exclusive owner of `dir` may call this: a live publisher in any
+/// process still owns its staging file. A non-regular entry under a staging
+/// name is foreign and is left in place for the caller's own path validation
+/// to reject.
+pub fn remove_abandoned_temporaries(dir: &Path, policy: DirectorySyncPolicy) -> io::Result<()> {
+    let mut removed = false;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_owned_temporary_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+            continue;
+        }
+        fs::remove_file(&path)?;
+        removed = true;
+    }
+    if removed {
+        sync_directory(dir, policy)?;
+    }
+    Ok(())
 }
 
 fn remove_owned_temp(path: &Path) {
@@ -433,17 +471,7 @@ pub fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     platform_rename_noreplace(source, destination)
 }
 
-#[cfg(target_os = "linux")]
-fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
-    crate::rename_noreplace::rename_noreplace_at(
-        libc::AT_FDCWD,
-        source.as_os_str(),
-        libc::AT_FDCWD,
-        destination.as_os_str(),
-    )
-}
-
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     crate::rename_noreplace::rename_noreplace_at(
         libc::AT_FDCWD,

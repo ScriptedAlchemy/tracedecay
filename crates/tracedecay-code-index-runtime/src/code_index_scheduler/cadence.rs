@@ -49,9 +49,9 @@ impl CodeIndexCadenceTriggerV1 {
 
 /// When the wake that produced one reconcile was accepted.
 ///
-/// A reconcile that runs without an attributable pending wake — a follow-up pass
+/// A reconcile that runs without an attributable pending wake, a follow-up pass
 /// draining work an earlier wake already claimed, or an out-of-range clock
-/// reading — has no arrival instant. That is a typed absence, not an instant
+/// reading, has no arrival instant. That is a typed absence, not an instant
 /// equal to the terminal time, because substituting the terminal time would
 /// publish a zero queue delay and a zero event-to-ready latency for a sample
 /// whose arrival was never observed.
@@ -254,7 +254,7 @@ pub struct CodeIndexCadenceReadModelV1 {
 
 /// Bounded ring of recent event-to-ready receipts.
 ///
-/// Capacity is at least [`P99_MINIMUM_SAMPLES`] so a retained population can
+/// Capacity is at least `P99_MINIMUM_SAMPLES` so a retained population can
 /// actually reach p99 eligibility; a shorter ring would make p99 permanently
 /// unavailable by construction.
 #[derive(Debug, Default)]
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(read_model.arrival_unavailable_count, 4);
         assert_eq!(read_model.latency_sample_count, 1);
         assert_eq!(read_model.event_to_ready_micros.sample_count, 1);
-        // One sample is below every floor, so no percentile may be published —
+        // One sample is below every floor, so no percentile may be published,
         // and none of the four withheld receipts contributed a zero.
         assert_eq!(read_model.event_to_ready_micros.p50.value, None);
         assert_eq!(read_model.queue_delay_micros.p50.value, None);

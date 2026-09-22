@@ -13,8 +13,8 @@ use super::{GitWatcher, WatchState, log_daemon_event, request_freshness_for_repo
 /// Returns the log label for the freshness request this tick must make, or
 /// `None` when nothing has drifted a full interval. Interval drift alone drives
 /// coverage: the heartbeat proves only that the watcher task is alive, and a
-/// live watcher reacts to git metadata alone — never to working-tree edits or
-/// missed hook deliveries — so a healthy heartbeat must never veto the request.
+/// live watcher reacts to git metadata alone, never to working-tree edits or
+/// missed hook deliveries, so a healthy heartbeat must never veto the request.
 /// Gating coverage on a stale heartbeat left healthy-watcher projects with no
 /// freshness floor at all; live profiles were observed hours stale while every
 /// mechanism reported healthy.

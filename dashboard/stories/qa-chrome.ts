@@ -3,9 +3,9 @@
  *
  * `visual:audit` proves each surface *renders* and is axe-clean; `live:sweep`
  * proves each surface survives real daemon payloads. Neither one clicks
- * anything. This drives the app the way a person does — opens the palette,
+ * anything. This drives the app the way a person does: opens the palette,
  * flips the theme, switches scope, clicks a graph node, scrolls a long
- * surface — and fails on any uncaught page error, failed request, or console
+ * surface, and fails on any uncaught page error, failed request, or console
  * error along the way.
  *
  *   AUDIT_PORT=5401 npx tsx stories/qa-chrome.ts
@@ -182,12 +182,12 @@ async function main() {
 
   console.log('\n[qa] ===== interaction QA =====');
   if (problems.length === 0) {
-    console.log('[qa] PASS — 13 surfaces, theme toggle, palette, graph, deep-link scope, 320px reflow');
+    console.log('[qa] PASS: 13 surfaces, theme toggle, palette, graph, deep-link scope, 320px reflow');
   } else {
     for (const problem of problems) {
       console.log(`[qa] ${problem.kind.padEnd(10)} ${problem.surface.padEnd(22)} ${problem.detail}`);
     }
-    console.log(`[qa] FAIL — ${problems.length} problem(s)`);
+    console.log(`[qa] FAIL: ${problems.length} problem(s)`);
     process.exitCode = 1;
   }
 }

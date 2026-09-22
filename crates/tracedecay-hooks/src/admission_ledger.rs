@@ -18,7 +18,7 @@
 //! [`HookAdmissionLedgerLimitsV1::max_records`] live entries per host and
 //! nothing older than [`HookAdmissionLedgerLimitsV1::max_age_micros`]. Beyond
 //! either bound the oldest entries are dropped, so idempotency converges within
-//! that window and no further — a replay older than the window is admitted
+//! that window and no further, a replay older than the window is admitted
 //! again rather than silently believed to be new forever.
 
 use std::collections::{BTreeMap, BTreeSet};

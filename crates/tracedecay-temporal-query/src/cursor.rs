@@ -525,9 +525,7 @@ mod tests {
         }
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot_for(session: &str, access: char, projection: u64) -> TemporalExecutionSnapshot {
         snapshot_for_key(session, access, projection, "key-1", 1)
@@ -895,8 +893,8 @@ mod tests {
 
     /// A prepared cohort is frozen into the snapshot, so a cursor binds its
     /// exact contents: replaying against the same cohort succeeds and any
-    /// change refuses. Ordinary session reads bind position by keyset instead
-    /// — their cohort is a window that is only materialized by the read.
+    /// change refuses. Ordinary session reads bind position by keyset instead,
+    /// their cohort is a window that is only materialized by the read.
     #[test]
     fn cursor_ignores_unrelated_no_match_state_but_rejects_candidate_change() {
         let provider = auth(7);

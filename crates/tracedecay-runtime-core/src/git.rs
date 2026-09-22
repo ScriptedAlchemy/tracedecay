@@ -1,7 +1,7 @@
 //! Process-wide resolution of the `git` binary.
 //!
 //! The daemon and CLI spawn `git` from ~13 sites. A bare `Command::new("git")`
-//! makes the OS re-walk `PATH` on every spawn — cheap on Linux/macOS but
+//! makes the OS re-walk `PATH` on every spawn, cheap on Linux/macOS but
 //! ~100-300ms per spawn on Windows. This module resolves the `git` binary to an
 //! absolute path exactly once (cached in a [`OnceLock`]) and hands every product
 //! spawn site that cached path, so the long-running daemon never re-walks `PATH`.
@@ -484,7 +484,7 @@ pub fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
 /// falls back to a bounded `git config --get` when gix cannot discover
 /// the repository but git still may.
 pub fn git_remote_url(project_root: &Path) -> Option<String> {
-    if let Ok(repo) = gix::discover(project_root) {
+    if let Ok(repo) = crate::git_open::discover(project_root) {
         let url = repo
             .config_snapshot()
             .string("remote.origin.url")?

@@ -9,7 +9,7 @@
 //! That means:
 //!   * no external `ast-grep` CLI requirement (the tool registers
 //!     unconditionally),
-//!   * no additional tree-sitter grammar crates — the same 0.26 grammars the
+//!   * no additional tree-sitter grammar crates, the same 0.26 grammars the
 //!     indexer builds against back the search,
 //!   * pattern parsing/matching happen with zero subprocess spawn per file.
 //!
@@ -123,7 +123,7 @@ fn expando_for_key(key: &str) -> Option<char> {
         // CSS / Nix use `_` (`$` is interpolation / at-rule syntax there).
         "css" | "nix" => Some('_'),
         // Everything else (js/ts/tsx, java, scala, bash, lua, json, yaml,
-        // markdown, dart, solidity, …) parses `$` fine — no expando.
+        // markdown, dart, solidity, …) parses `$` fine, no expando.
         _ => None,
     }
 }
@@ -244,11 +244,11 @@ fn build_lang_pattern(key: &str, pattern: &str) -> Option<Result<(TdLang, Patter
 
 /// Runs a structural search over `project_root`.
 ///
-/// * `lang` — explicit `ts_provider` language key; when `None`, the language is
+/// * `lang`, explicit `ts_provider` language key; when `None`, the language is
 ///   inferred per file from its extension.
-/// * `path_glob` — optional `.gitignore`-style glob restricting the files
+/// * `path_glob`, optional `.gitignore`-style glob restricting the files
 ///   scanned.
-/// * `max_results` — hard cap; one extra match past the cap is collected so
+/// * `max_results`, hard cap; one extra match past the cap is collected so
 ///   truncation can be reported honestly.
 #[hotpath::measure(label = "code_index.search.ast_grep")]
 pub fn search_tree(
@@ -258,24 +258,13 @@ pub fn search_tree(
     path_glob: Option<&str>,
     max_results: usize,
 ) -> Result<AstGrepSearchResult, AstGrepSearchError> {
-    search_tree_scoped(project_root, pattern, lang, path_glob, max_results, None)
-}
-
-pub(crate) fn search_tree_scoped(
-    project_root: &Path,
-    pattern: &str,
-    lang: Option<&str>,
-    path_glob: Option<&str>,
-    max_results: usize,
-    scope_prefix: Option<&str>,
-) -> Result<AstGrepSearchResult, AstGrepSearchError> {
     search_tree_scoped_with_cancel(
         project_root,
         pattern,
         lang,
         path_glob,
         max_results,
-        scope_prefix,
+        None,
         || false,
     )
 }
@@ -500,7 +489,7 @@ fn source_line_at_byte(source: &str, byte_offset: usize) -> String {
 /// squeezing interior whitespace and capping length.
 fn collapse_snippet(text: &str) -> String {
     const MAX: usize = 200;
-    // Single-pass collapse into one String — no intermediate Vec from
+    // Single-pass collapse into one String, no intermediate Vec from
     // split_whitespace().collect().join(" "), and truncate while scanning so
     // long nodes never allocate a second full copy.
     let mut collapsed = String::new();
@@ -538,7 +527,7 @@ fn collapse_snippet(text: &str) -> String {
     collapsed
 }
 
-/// Classifies a byte buffer as binary when a NUL byte appears in the head — the
+/// Classifies a byte buffer as binary when a NUL byte appears in the head, the
 /// same heuristic `git` and `ripgrep` use.
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0)

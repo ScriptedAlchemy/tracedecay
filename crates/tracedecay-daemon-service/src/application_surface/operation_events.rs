@@ -397,7 +397,7 @@ pub(super) async fn http_operation_events(
     };
     // Same owner rule as cancellation: this authority answers for the
     // operations it began, and only an operation it does not own is delegated
-    // to the daemon executor. A resume token is always redeemed locally — the
+    // to the daemon executor. A resume token is always redeemed locally, the
     // token names this authority's own retained frontier.
     let context = match resolve_authenticated_http_request_context(
         &state,
@@ -676,7 +676,7 @@ pub(super) async fn http_operation_cancel(
     // daemon mounts these routes with its *own* process-global authority and an
     // invocation client pointed back at its own socket, so delegating first
     // sent every cancel on a round trip out of the process and back to reach
-    // in-memory state this handler already holds — and reported the typed
+    // in-memory state this handler already holds, and reported the typed
     // `operation_event.unavailable` whenever that socket was momentarily
     // unreachable. Resolve locally first; delegate only for an operation this
     // authority does not own.
@@ -831,52 +831,36 @@ pub(super) fn operation_event_problem(
                 legal_actions: vec![LegalAction::Refresh],
             }
         }
-        OperationEventError::InvalidFrontier => ApplicationProblem::Conflict {
-            diagnostic: SafeDiagnostic {
-                code: "operation_event.invalid_frontier".to_owned(),
-                message: "The requested operation-event frontier is invalid".to_owned(),
-            },
-            retry: RetryDirective::AfterRevalidate,
-            legal_actions: vec![LegalAction::Refresh],
-        },
+        OperationEventError::InvalidFrontier => ApplicationProblem::conflict(
+            "operation_event.invalid_frontier",
+            "The requested operation-event frontier is invalid",
+        ),
         OperationEventError::RequestNotAdmitted => ApplicationProblem::TimedOut {
             stage: CancellationStage::BeforeAdmission,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         },
-        OperationEventError::Saturated => ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic {
-                code: "operation_event.saturated".to_owned(),
-                message: "Operation-event capacity is temporarily saturated".to_owned(),
-            },
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        OperationEventError::Saturated => ApplicationProblem::saturated(
+            "operation_event.saturated",
+            "Operation-event capacity is temporarily saturated",
+        ),
         // Permanently invalid input: the same request can never succeed, so the
         // client must correct it rather than retry.
         OperationEventError::InvalidContext(_)
         | OperationEventError::InvalidProgress
         | OperationEventError::InvalidTerminal(_)
-        | OperationEventError::InvalidTestRunEvent => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "operation_event.invalid_request".to_owned(),
-                message: "The operation-event request is invalid".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        | OperationEventError::InvalidTestRunEvent => ApplicationProblem::invalid_request(
+            "operation_event.invalid_request",
+            "The operation-event request is invalid",
+        ),
         // Idempotency facts: the identity or terminal receipt is already
         // published, so the client re-reads current state instead of retrying
         // the same publish.
         OperationEventError::AlreadyBound | OperationEventError::TerminalAlreadyPublished => {
-            ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic {
-                    code: "operation_event.already_published".to_owned(),
-                    message: "The operation-event identity is already published".to_owned(),
-                },
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            }
+            ApplicationProblem::conflict(
+                "operation_event.already_published",
+                "The operation-event identity is already published",
+            )
         }
         // A misconfigured authority is a deterministic, process-lifetime
         // failure. It is not the caller's request that is wrong and no amount

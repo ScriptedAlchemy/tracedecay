@@ -98,7 +98,7 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
 /// The decode + integrity phase of every LCM read: content hashing and
 /// receipt verification per row, separable in a profile from the enclosing
 /// query spans (span minus this ≈ SQLite evaluation and row transport).
-/// Substantive per call — SHA-256 over the full content — and bounded by the
+/// Substantive per call, SHA-256 over the full content, and bounded by the
 /// caller's page/session row count, so it is not an inner-loop micro-probe.
 #[hotpath::measure(label = "sessions.lcm.raw.verify_row")]
 pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
@@ -365,20 +365,23 @@ fn externalized_payload_placeholder(
     field_path: &str,
     quarantine_reason: Option<&str>,
 ) -> String {
-    if let Some(reason) = quarantine_reason {
-        return format!(
-            "[Externalized LCM ingest payload: assistant output quarantined; kind={}; reason={}; field={}; chars={}; bytes={}; ref={}]",
+    let body = payload_placeholder_body(payload_ref, field_path);
+    match quarantine_reason {
+        Some(reason) => format!(
+            "[Externalized LCM ingest payload: assistant output quarantined; kind={}; reason={}; {body}]",
             safe_placeholder_metadata(&payload_ref.kind),
             safe_placeholder_metadata(reason),
-            safe_placeholder_metadata(field_path),
-            payload_ref.char_count,
-            payload_ref.byte_count,
-            payload_ref.payload_ref
-        );
+        ),
+        None => format!(
+            "[Externalized LCM ingest payload: kind={}; {body}]",
+            safe_placeholder_metadata(&payload_ref.kind)
+        ),
     }
+}
+
+fn payload_placeholder_body(payload_ref: &LcmPayloadRef, field_path: &str) -> String {
     format!(
-        "[Externalized LCM ingest payload: kind={}; field={}; chars={}; bytes={}; ref={}]",
-        safe_placeholder_metadata(&payload_ref.kind),
+        "field={}; chars={}; bytes={}; ref={}",
         safe_placeholder_metadata(field_path),
         payload_ref.char_count,
         payload_ref.byte_count,
@@ -395,6 +398,37 @@ async fn upsert_inline_raw_message(
     let snippet = derived_text_for_snippet(text);
     let index = derived_text_for_index(text);
     let content_hash = projected_content_hash(text);
+    upsert_owned_raw_message(
+        conn,
+        message,
+        OwnedRawMessageWrite {
+            content: Some(text),
+            content_hash: content_hash.as_str(),
+            storage_kind: LcmStorageKind::Inline,
+            payload_ref: None,
+            snippet: snippet.as_str(),
+            index_text: index.as_str(),
+            metadata_json,
+        },
+    )
+    .await
+}
+
+struct OwnedRawMessageWrite<'a> {
+    content: Option<&'a str>,
+    content_hash: &'a str,
+    storage_kind: LcmStorageKind,
+    payload_ref: Option<&'a str>,
+    snippet: &'a str,
+    index_text: &'a str,
+    metadata_json: Option<&'a str>,
+}
+
+async fn upsert_owned_raw_message(
+    conn: &(impl Executor + ?Sized),
+    message: &SessionMessageRecord,
+    write: OwnedRawMessageWrite<'_>,
+) -> Result<(), LcmError> {
     let affected = conn
         .execute(
             "INSERT INTO lcm_raw_messages (
@@ -402,7 +436,7 @@ async fn upsert_inline_raw_message(
             content, content_hash, storage_kind, payload_ref, snippet_text,
             index_text, legacy_source, legacy_truncated, metadata_json
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, 0, 0, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, 0, ?13)
          ON CONFLICT(provider, message_id) DO UPDATE SET
             session_id = excluded.session_id,
             role = excluded.role,
@@ -425,12 +459,13 @@ async fn upsert_inline_raw_message(
                 message.role.as_str(),
                 message.ordinal,
                 message.timestamp,
-                text,
-                content_hash.as_str(),
-                LcmStorageKind::Inline.as_str(),
-                snippet.as_str(),
-                index.as_str(),
-                metadata_json,
+                write.content,
+                write.content_hash,
+                write.storage_kind.as_str(),
+                write.payload_ref,
+                write.snippet,
+                write.index_text,
+                write.metadata_json,
             ],
         )
         .await?;
@@ -468,6 +503,20 @@ async fn persist_raw_predecessor_range(
 /// [`PREDECESSOR_RANGE_UPSERT_BY_STORE_RANGE`]) instead of per call.
 fn predecessor_range_upsert_sql(current_predicate: &str) -> String {
     let role_list = crate::compression_policy::policy_anchor_role_sql_in_list();
+    let bound = |order: &str| {
+        format!(
+            "SELECT candidate.store_id
+                FROM lcm_raw_messages AS candidate
+                WHERE candidate.provider = current.provider
+                  AND candidate.session_id = current.session_id
+                  AND candidate.store_id < current.store_id
+                  AND candidate.role NOT IN ({role_list})
+                ORDER BY candidate.store_id{order}
+                LIMIT 1"
+        )
+    };
+    let first = bound("");
+    let prior = bound(" DESC");
     format!(
         "INSERT INTO lcm_raw_predecessor_ranges (
              provider, message_id, session_id, from_store_id, to_store_id
@@ -477,25 +526,11 @@ fn predecessor_range_upsert_sql(current_predicate: &str) -> String {
          FROM lcm_raw_messages AS current
          JOIN lcm_raw_messages AS first
            ON first.store_id = (
-                SELECT candidate.store_id
-                FROM lcm_raw_messages AS candidate
-                WHERE candidate.provider = current.provider
-                  AND candidate.session_id = current.session_id
-                  AND candidate.store_id < current.store_id
-                  AND candidate.role NOT IN ({role_list})
-                ORDER BY candidate.store_id
-                LIMIT 1
+                {first}
            )
          JOIN lcm_raw_messages AS prior
            ON prior.store_id = (
-                SELECT candidate.store_id
-                FROM lcm_raw_messages AS candidate
-                WHERE candidate.provider = current.provider
-                  AND candidate.session_id = current.session_id
-                  AND candidate.store_id < current.store_id
-                  AND candidate.role NOT IN ({role_list})
-                ORDER BY candidate.store_id DESC
-                LIMIT 1
+                {prior}
            )
          WHERE {current_predicate}
          ON CONFLICT(provider, message_id) DO UPDATE SET
@@ -687,7 +722,7 @@ fn externalized_payload_metadata(
 /// Observation capture already privacy-sanitized and size-bounded the payload
 /// before it became durable, so the projected row stays inline; this binds a
 /// fresh content receipt to the stored text so the canonical raw-read
-/// authority ([`load_raw_message`]) can hydrate observation-projected
+/// authority (`load_raw_message`) can hydrate observation-projected
 /// messages instead of refusing them as receipt-less rows.
 pub async fn upsert_projection_raw_message(
     conn: &(impl Executor + ?Sized),
@@ -791,48 +826,20 @@ pub async fn commit_staged_raw_message(
         });
     };
     payload::upsert_payload_metadata(conn, &whole_message.payload_ref).await?;
-    let affected = conn
-        .execute(
-            "INSERT INTO lcm_raw_messages (
-            provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, legacy_source, legacy_truncated, metadata_json
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, 0, 0, ?12)
-         ON CONFLICT(provider, message_id) DO UPDATE SET
-            session_id = excluded.session_id,
-            role = excluded.role,
-            ordinal = excluded.ordinal,
-            timestamp = excluded.timestamp,
-            content = excluded.content,
-            content_hash = excluded.content_hash,
-            storage_kind = excluded.storage_kind,
-            payload_ref = excluded.payload_ref,
-            snippet_text = excluded.snippet_text,
-            index_text = excluded.index_text,
-            legacy_source = 0,
-            legacy_truncated = 0,
-            metadata_json = excluded.metadata_json
-         WHERE lcm_raw_messages.session_id = excluded.session_id",
-            params![
-                message.provider.as_str(),
-                message.message_id.as_str(),
-                message.session_id.as_str(),
-                message.role.as_str(),
-                message.ordinal,
-                message.timestamp,
-                whole_message.payload_ref.content_hash.as_str(),
-                LcmStorageKind::External.as_str(),
-                whole_message.payload_ref.payload_ref.as_str(),
-                whole_message.placeholder.as_str(),
-                whole_message.placeholder.as_str(),
-                whole_message.metadata_json.as_str(),
-            ],
-        )
-        .await?;
-    if affected != 1 {
-        return Err(LcmError::SummarySourceNotOwnedBySession);
-    }
+    upsert_owned_raw_message(
+        conn,
+        message,
+        OwnedRawMessageWrite {
+            content: None,
+            content_hash: whole_message.payload_ref.content_hash.as_str(),
+            storage_kind: LcmStorageKind::External,
+            payload_ref: Some(whole_message.payload_ref.payload_ref.as_str()),
+            snippet: whole_message.placeholder.as_str(),
+            index_text: whole_message.placeholder.as_str(),
+            metadata_json: Some(whole_message.metadata_json.as_str()),
+        },
+    )
+    .await?;
     persist_raw_predecessor_range(conn, message).await?;
     Ok(RawMessageUpsert {
         projection_text: whole_message.placeholder,
@@ -1144,14 +1151,7 @@ fn externalize_spans(
 }
 
 fn ingest_payload_placeholder(payload_ref: &LcmPayloadRef, field_path: &str) -> String {
-    format!(
-        "[Externalized LCM ingest payload: kind={}; field={}; chars={}; bytes={}; ref={}]",
-        safe_placeholder_metadata(&payload_ref.kind),
-        safe_placeholder_metadata(field_path),
-        payload_ref.char_count,
-        payload_ref.byte_count,
-        payload_ref.payload_ref
-    )
+    externalized_payload_placeholder(payload_ref, field_path, None)
 }
 
 fn safe_placeholder_metadata(value: &str) -> String {
@@ -1181,7 +1181,7 @@ const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 /// Returns whether the current detector would change this provider metadata.
 ///
 /// This is the at-rest rescan's change probe for the exact transformation
-/// ingest applies through [`protected_metadata_json`]: metadata persisted
+/// ingest applies through `protected_metadata_json`: metadata persisted
 /// under older detector rules is dirty when re-sanitizing it under the
 /// current rules yields a different document. A document the sanitizer
 /// refuses to evaluate is a typed refusal, never implicitly clean.

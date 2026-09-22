@@ -342,9 +342,9 @@ pub(super) fn code_index_hook_sink(
 /// of enumerating paths.
 ///
 /// The caller names who is asking, and the front door decides what that means.
-/// Every demand the daemon raises by itself — host lifecycle hooks, the
+/// Every demand the daemon raises by itself, host lifecycle hooks, the
 /// server's startup catch-up, the path hints arriving through
-/// [`code_index_hook_sink`] — is [`CodeIndexDemandV1::Reconcile`] and stays
+/// [`code_index_hook_sink`], is [`CodeIndexDemandV1::Reconcile`] and stays
 /// behind `sync.watch_linked_worktrees`. Only a route the operator named
 /// (`tracedecay init` / `tracedecay sync` through `tracedecay_admin_sync`) is
 /// [`CodeIndexDemandV1::OperatorReconcile`]. Routing the daemon's own demands
@@ -503,7 +503,7 @@ mod tests {
 
     /// `tracedecay init` reports "code-index reconciliation requested" through
     /// this sink before any scheduler is mounted. The pre-mount request must be
-    /// accepted and must start the demand-driven mount — otherwise init's
+    /// accepted and must start the demand-driven mount, otherwise init's
     /// message is a no-op and the first index never runs.
     #[tokio::test]
     async fn reconcile_request_before_mount_activates_indexing() {
@@ -633,8 +633,8 @@ mod tests {
             crate::mcp::server::CodeIndexDemandAdmissionV1::RefusedByPolicy
         );
         let sink = code_index_reconcile_sink(Arc::clone(&activation));
-        // The daemon's own whole-worktree demands — a `workspaceOpen` /
-        // `sessionStart` hook effect, the server's startup catch-up — are
+        // The daemon's own whole-worktree demands, a `workspaceOpen` /
+        // `sessionStart` hook effect, the server's startup catch-up, are
         // automatic and must honour the same watch policy as a path hint:
         // otherwise every un-opted-in linked worktree is indexed the moment
         // its full server opens, and the typed `linked_worktree_disabled`

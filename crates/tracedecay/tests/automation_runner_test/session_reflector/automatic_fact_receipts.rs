@@ -44,7 +44,7 @@ async fn session_automatic_facts_keep_paraphrases_distinct() {
         ),
         fact(
             "Before merging a PR batch, require stable aggregate verification and a \
-             live PR-state recheck — a single flaky green pass is never enough to merge",
+             live PR-state recheck, a single flaky green pass is never enough to merge",
         ),
         fact(
             "A single flaky green pass is not enough: merging the PR batch needs \
@@ -167,7 +167,7 @@ async fn session_automatic_fact_receipts_remain_immutable_when_paraphrases_apply
     let paraphrase = json!({
         "add_fact_request": {
             "content": "Before merging a PR batch, require stable aggregate verification and a \
-                        live PR-state recheck — a single flaky green pass is never enough to merge",
+                        live PR-state recheck, a single flaky green pass is never enough to merge",
             "category": "project",
             "source_label": "session_reflector",
             "tags": ["session-reflector"],

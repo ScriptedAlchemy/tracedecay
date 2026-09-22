@@ -294,8 +294,8 @@ const TRANSCRIPT_SCHEMA: &str = "
 /// alone was 0.77 GB against 0.66 GB of table. The replacement covers the
 /// ordering columns and lets the scan fetch the blob from the table.
 ///
-/// Both statements are store-sized — on a store with 184k messages the build
-/// measured 33 s and dropping the blob-covering predecessor 1 m 54 s — so
+/// Both statements are store-sized, on a store with 184k messages the build
+/// measured 33 s and dropping the blob-covering predecessor 1 m 54 s, so
 /// neither belongs in the leased schema transaction, where each one outran
 /// the per-statement execution limit and failed every open. They run as
 /// separate independently durable batches on the long-lease migration writer:
@@ -848,6 +848,22 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(RUNTIME_LEDGER_SCHEMA)
         .await
         .map_err(|error| global_db_operation_error("initialize runtime writer ledger", error))?;
+    // Projection raw-twin triggers sit on `lcm_raw_messages`. The table has to
+    // exist before those triggers are created, including on a fresh store
+    // whose authority triggers are installed in this same transaction.
+    tracedecay_lcm::schema::ensure_lcm_schema_in_transaction(transaction)
+        .await
+        .map_err(|error| match error {
+            tracedecay_lcm::LcmError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
+                component: "LCM",
+                found_version,
+                required_version,
+            },
+            error => global_db_operation_error("initialize LCM schema", error),
+        })?;
     // `force_exhaustive` means admission observed damaged or missing guard
     // triggers (for example a dropped guarded table takes its triggers with
     // it). Reinstall them here so the post-commit contract validation sees a
@@ -865,20 +881,6 @@ async fn install_registered_schema_stage_sequence(
             ));
         }
     }
-
-    tracedecay_lcm::schema::ensure_lcm_schema_in_transaction(transaction)
-        .await
-        .map_err(|error| match error {
-            tracedecay_lcm::LcmError::ProfileResetRequired {
-                found_version,
-                required_version,
-            } => tracedecay_domain::errors::TraceDecayError::ProfileResetRequired {
-                component: "LCM",
-                found_version,
-                required_version,
-            },
-            error => global_db_operation_error("initialize LCM schema", error),
-        })?;
     tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction(
             transaction,
         )
@@ -1052,9 +1054,9 @@ pub async fn converge_runtime_writer_ledger(
 /// the leased admission transaction. Rebuilding an index or rewriting rows
 /// does not: each of these measured tens of seconds to minutes on a real
 /// store, so inside that transaction they tripped the per-statement execution
-/// limit and made every open of a large store fail. They run here instead —
+/// limit and made every open of a large store fail. They run here instead,
 /// after the fail-closed admission checks, on the long-lease migration
-/// writer, releasing the writer between units — so admission, retrieval, and
+/// writer, releasing the writer between units, so admission, retrieval, and
 /// ordinary writes never wait for them.
 #[hotpath::measure(future = true, label = "global_db.schema.persist.converge_migrations")]
 async fn converge_store_sized_migrations(
@@ -1112,8 +1114,8 @@ pub async fn converge_attached_registered_schema(
 /// temporal / workflow / configuration / remote-deletion resets) while a
 /// refused store stays untouched for the operator's explicit reset decision.
 /// An admissible store then re-ensures every admission-critical idempotent
-/// schema stage. An admissibly-fresh store — an existing database file with no
-/// schema objects — receives the same admission-critical install as
+/// schema stage. An admissibly-fresh store, an existing database file with no
+/// schema objects, receives the same admission-critical install as
 /// initialization. The returned convergence plan carries the LCM status-index
 /// work for lifecycle-owned daemon maintenance; short-lived callers run that
 /// same work synchronously through [`converge_attached_registered_schema`].
@@ -1491,8 +1493,8 @@ mod tests {
     }
 
     /// The 8-column `code_projects` shape shipped in released binaries
-    /// (through 0.0.66), so admission must migrate it additively in place —
-    /// columns added, existing rows preserved — instead of demanding a reset.
+    /// (through 0.0.66), so admission must migrate it additively in place,
+    /// columns added, existing rows preserved, instead of demanding a reset.
     #[tokio::test]
     async fn released_registry_without_primary_root_columns_migrates_in_place() {
         let directory = TempDir::new().unwrap();

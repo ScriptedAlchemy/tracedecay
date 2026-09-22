@@ -18,12 +18,39 @@ use crate::research::id::digest_id;
 
 /// Whether a canonical repository-relative path is exactly the requested
 /// scope or one of its descendants.
+///
+/// A trailing slash is a literal prefix character. `src/` matches `src/` and
+/// `src//lib.rs`, not `src/lib.rs`. An empty prefix matches only the empty
+/// path and paths that start with `/`. [`path_matches_scope`] is the other
+/// spelling: a prefix that already ends in `/` matches that directory's
+/// children without requiring a second slash.
 pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
     scope_prefix.is_none_or(|prefix| {
         path == prefix
             || path
                 .strip_prefix(prefix)
                 .is_some_and(|suffix| suffix.starts_with('/'))
+    })
+}
+
+/// Whether `path` is exactly `prefix`, or a descendant of it.
+///
+/// A prefix that does not end in `/` matches that path and `prefix/...`.
+/// A prefix that ends in `/` matches names that start with that exact
+/// spelling (`src/` matches `src/lib.rs` and `src/`, not `src`). An empty
+/// prefix matches the empty path and any path that starts with `/`. `None`
+/// matches every path.
+///
+/// Unlike [`repository_path_matches_scope`], a single trailing slash is the
+/// directory separator, not a character that must be followed by another `/`.
+pub fn path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
+    scope_prefix.is_none_or(|prefix| {
+        let with_slash = if prefix.ends_with('/') {
+            prefix.to_string()
+        } else {
+            format!("{prefix}/")
+        };
+        path.starts_with(&with_slash) || path == prefix
     })
 }
 

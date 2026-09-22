@@ -29,10 +29,9 @@ use effect_admission::{
 };
 use host_receipt_review::run_host_receipt_review;
 
-pub(super) fn scheduler_task_log_fields(
+fn scheduler_project_task_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
-    outcome: &str,
+    task: AgentTaskKind,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
@@ -40,8 +39,17 @@ pub(super) fn scheduler_task_log_fields(
             "task",
             tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
         ),
-        ("outcome", outcome.to_string()),
     ]
+}
+
+pub(super) fn scheduler_task_log_fields(
+    project_path: &Path,
+    task: AgentTaskKind,
+    outcome: &str,
+) -> Vec<(&'static str, String)> {
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push(("outcome", outcome.to_string()));
+    fields
 }
 
 fn log_scheduler_task_start(
@@ -56,17 +64,12 @@ fn log_scheduler_task_start(
 
 fn scheduler_task_error_log_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+    task: AgentTaskKind,
     error: &impl std::fmt::Display,
 ) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            tracedecay_automation_runtime::automation::backend::task_key(task).to_string(),
-        ),
-        ("error", error.to_string()),
-    ]
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push(("error", error.to_string()));
+    fields
 }
 
 fn log_scheduler_task_error(
@@ -85,40 +88,28 @@ fn log_scheduler_automation_replay(
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     terminal: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal,
 ) {
-    log_daemon_event(
-        "scheduler_task_application_replay",
-        &[
-            ("project", project_path.display().to_string()),
-            (
-                "task",
-                tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-            ),
-            (
-                "terminal",
-                if terminal.is_completed() {
-                    "completed"
-                } else if terminal.problem().is_some() {
-                    "problem"
-                } else {
-                    "skipped"
-                }
-                .to_owned(),
-            ),
-        ],
-    );
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.push((
+        "terminal",
+        if terminal.is_completed() {
+            "completed"
+        } else if terminal.problem().is_some() {
+            "problem"
+        } else {
+            "skipped"
+        }
+        .to_owned(),
+    ));
+    log_daemon_event("scheduler_task_application_replay", &fields);
 }
 
 pub(super) fn scheduler_application_problem_log_fields(
     project_path: &Path,
-    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+    task: AgentTaskKind,
     problem: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
 ) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        (
-            "task",
-            tracedecay_automation_runtime::automation::backend::task_key(task).to_owned(),
-        ),
+    let mut fields = scheduler_project_task_fields(project_path, task);
+    fields.extend([
         ("request_id", problem.problem.request_id.as_str().to_owned()),
         ("run_id", problem.run_id.as_str().to_owned()),
         (
@@ -130,7 +121,8 @@ pub(super) fn scheduler_application_problem_log_fields(
             "committed_receipt_count",
             problem.committed_receipts.len().to_string(),
         ),
-    ]
+    ]);
+    fields
 }
 
 fn scheduler_run_observer(
@@ -680,9 +672,12 @@ impl DaemonEngine {
     }
 
     #[hotpath::measure(label = "daemon.scheduler.start_automation", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Scheduler start is one handle-spawn and first-tick arming sequence."
+        )
     )]
     pub(super) async fn start_automation_scheduler(
         &self,
@@ -1168,7 +1163,7 @@ async fn run_automation_scheduler_loop(
                     break;
                 }
                 // Still configured or the generation advanced, so stay in the
-                // loop — but yield until the next tick or an explicit wake
+                // loop, but yield until the next tick or an explicit wake
                 // instead of spinning through the gate locks.
                 tokio::select! {
                     () = tokio::time::sleep(Duration::from_secs(
@@ -1189,7 +1184,7 @@ async fn run_automation_scheduler_loop(
                 // the daemon's life and logs identically every time. Back the
                 // retries off, and escalate to a terminal exit once the failure
                 // is clearly not transient. A finished scheduler is dropped
-                // from the registry, so the next reconcile respawns this loop —
+                // from the registry, so the next reconcile respawns this loop,
                 // the exit costs a retry, not the lane.
                 consecutive_open_failures = consecutive_open_failures.saturating_add(1);
                 log_daemon_event(
@@ -1340,8 +1335,16 @@ pub(super) async fn automation_scheduler_tick_secs_for_project(cg: &TraceDecay) 
 /// this often no matter how many projects are active.
 const RETENTION_MIN_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
+/// Owned by [`StoreAdministration`], the daemon-wide handle every project's
+/// scheduler loop already clones, so one daemon runs at most one global
+/// retention pass per [`RETENTION_MIN_INTERVAL_SECS`].
+///
+/// Not a process-wide static: a test binary hosts many daemons, and a sibling
+/// daemon's scheduler tick took the `in_flight` reservation out from under a
+/// retention test, which then observed a pass that returned before it ever
+/// acquired the writer.
 #[derive(Debug, Default)]
-struct GlobalRetentionCadence {
+pub(super) struct GlobalRetentionCadence {
     last_success: Option<std::time::Instant>,
     in_flight: bool,
 }
@@ -1368,14 +1371,9 @@ impl GlobalRetentionCadence {
     }
 }
 
-static GLOBAL_RETENTION_CADENCE: std::sync::Mutex<GlobalRetentionCadence> =
-    std::sync::Mutex::new(GlobalRetentionCadence {
-        last_success: None,
-        in_flight: false,
-    });
-
-#[cfg(test)]
-static GLOBAL_RETENTION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// The daemon-wide cadence handle, shared by every clone of one
+/// [`StoreAdministration`].
+pub(super) type SharedGlobalRetentionCadence = Arc<std::sync::Mutex<GlobalRetentionCadence>>;
 
 #[cfg(test)]
 mod global_retention_cadence_tests {
@@ -1390,12 +1388,12 @@ mod global_retention_cadence_tests {
     /// hanging the suite.
     #[tokio::test]
     async fn denied_reservation_returns_without_relocking_the_cadence() {
-        let _test_lock = super::GLOBAL_RETENTION_TEST_LOCK.lock().await;
+        let cadence = super::SharedGlobalRetentionCadence::default();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let now = Instant::now();
-            let first = super::reserve_global_retention(now);
-            let second = super::reserve_global_retention(now);
+            let first = super::reserve_global_retention(&cadence, now);
+            let second = super::reserve_global_retention(&cadence, now);
             let outcome = (first.is_some(), second.is_some());
             drop(first);
             sender.send(outcome).expect("report reservation outcome");
@@ -1435,12 +1433,13 @@ mod global_retention_cadence_tests {
 }
 
 struct GlobalRetentionReservation {
+    cadence: SharedGlobalRetentionCadence,
     active: bool,
 }
 
 impl GlobalRetentionReservation {
     fn finish(mut self, now: std::time::Instant, succeeded: bool) {
-        finish_global_retention(now, succeeded);
+        finish_global_retention(&self.cadence, now, succeeded);
         self.active = false;
     }
 }
@@ -1448,28 +1447,36 @@ impl GlobalRetentionReservation {
 impl Drop for GlobalRetentionReservation {
     fn drop(&mut self) {
         if self.active {
-            finish_global_retention(std::time::Instant::now(), false);
+            finish_global_retention(&self.cadence, std::time::Instant::now(), false);
         }
     }
 }
 
-fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionReservation> {
-    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
+fn reserve_global_retention(
+    cadence: &SharedGlobalRetentionCadence,
+    now: std::time::Instant,
+) -> Option<GlobalRetentionReservation> {
+    let mut guard = match cadence.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     // `then` (not `then_some`) so the reservation only exists when the
     // cadence granted it: `then_some` constructs the value eagerly, and a
-    // denied reservation would be dropped right here — its Drop re-locks
-    // GLOBAL_RETENTION_CADENCE while this guard is still held, deadlocking
-    // the scheduler tick (and falsely finishing a pass it never owned).
-    guard
-        .reserve(now)
-        .then(|| GlobalRetentionReservation { active: true })
+    // denied reservation would be dropped right here, its Drop re-locks the
+    // cadence while this guard is still held, deadlocking the scheduler tick
+    // (and falsely finishing a pass it never owned).
+    guard.reserve(now).then(|| GlobalRetentionReservation {
+        cadence: Arc::clone(cadence),
+        active: true,
+    })
 }
 
-fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
-    let mut guard = match GLOBAL_RETENTION_CADENCE.lock() {
+fn finish_global_retention(
+    cadence: &SharedGlobalRetentionCadence,
+    now: std::time::Instant,
+    succeeded: bool,
+) {
+    let mut guard = match cadence.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -1505,7 +1512,10 @@ async fn maybe_run_global_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &tracedecay_configuration::RetentionConfig,
 ) {
-    let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
+    let Some(reservation) = reserve_global_retention(
+        administration.global_retention_cadence(),
+        std::time::Instant::now(),
+    ) else {
         return;
     };
     let now_secs = crate::project::current_timestamp();
@@ -1579,29 +1589,6 @@ mod global_retention_tests {
     use crate::daemon::branch_admin::StoreAdministration;
     use tracedecay_global_db::RegisteredGlobalDb;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
-
-    struct ResetGlobalRetentionCadence;
-
-    impl ResetGlobalRetentionCadence {
-        fn new() -> Self {
-            reset_global_retention_cadence();
-            Self
-        }
-    }
-
-    impl Drop for ResetGlobalRetentionCadence {
-        fn drop(&mut self) {
-            reset_global_retention_cadence();
-        }
-    }
-
-    fn reset_global_retention_cadence() {
-        let mut cadence = match GLOBAL_RETENTION_CADENCE.lock() {
-            Ok(cadence) => cadence,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *cadence = GlobalRetentionCadence::default();
-    }
 
     async fn seed_eligible_projected_message(database: &RegisteredGlobalDb) {
         let session = tracedecay_sessions::runtime::SessionRecord {
@@ -1715,8 +1702,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn retention_defers_while_daemon_writer_is_held_and_prunes_once_after_release() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-writer-admission").await;
         let database = harness.registered.clone();
@@ -1785,8 +1770,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn cancelled_admitted_retention_releases_writer_and_cadence_for_retry() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-cancelled-admission").await;
         let database = harness.registered.clone();
@@ -1849,8 +1832,6 @@ mod global_retention_tests {
 
     #[tokio::test]
     async fn failed_retention_releases_writer_and_cadence_for_retry() {
-        let _test_lock = GLOBAL_RETENTION_TEST_LOCK.lock().await;
-        let _cadence_reset = ResetGlobalRetentionCadence::new();
         let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let harness = RegisteredGlobalDbHarness::open("global-retention-prune-failure").await;
         let database = harness.registered.clone();
@@ -2008,9 +1989,12 @@ async fn automation_scheduler_has_work(
     clippy::too_many_arguments,
     reason = "Job dispatch binds retained project memory and pinned configuration to the admitted backend and shared error result."
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "A user-jobs pass is one scan-and-dispatch of due profile jobs."
+    )
 )]
 async fn run_user_jobs_scheduler_pass(
     engine: &DaemonEngine,

@@ -199,7 +199,7 @@ impl GraphCancellation for AtomicGraphCancellationV1 {
 /// The publication is the largest single grower in the process and the only
 /// one that ran outside that authority: the maintenance sampler logged
 /// `daemon_resident_memory_over_budget` at the high watermark while the
-/// projection kept allocating until the kernel OOM-killed the daemon — taking
+/// projection kept allocating until the kernel OOM-killed the daemon, taking
 /// the already-complete text serving down with the graph. Tripping the
 /// existing cancellation checkpoints at the watermark reuses the one abort
 /// path the publication already handles (staging discard, journal untouched);
@@ -353,8 +353,8 @@ fn graph_lifecycle_cancellation(
 /// Per-shard table of publication keys with a sealed publish in flight.
 ///
 /// The seat pass and the background reconcile publish the same sealed
-/// generation; without this, both would run the corpus-sized prepare —
-/// native staging, the sealed-store build, the digest proof — and interleave
+/// generation; without this, both would run the corpus-sized prepare,
+/// native staging, the sealed-store build, the digest proof, and interleave
 /// staging pages in one physical namespace. A publisher that finds its key in
 /// flight waits for the winner and then resumes through the idempotent
 /// historical arm inside prepare. Publishers of different keys proceed
@@ -427,7 +427,7 @@ impl CodeGraphPublicationFlightV1 {
 /// The registry-owned per-project-publication-shard locks.
 ///
 /// `gate` is the serving gate: a leaf lock held only across the short
-/// storage-ordered slices of a publication — manifest-provider bind plus
+/// storage-ordered slices of a publication, manifest-provider bind plus
 /// journal classification, each replay append, and the verified-head
 /// CAS-plus-install swap. The corpus-sized work (native staging, the
 /// sealed-store build, digest proofs, boot-from-sealed recovery) runs with no
@@ -438,7 +438,7 @@ impl CodeGraphPublicationFlightV1 {
 /// worktree/branch scope of the project. The permit is held from manifest
 /// projection through publication. Every scope stages into the one shared
 /// staging store, and each in-flight publish holds a decoded generation, a
-/// projection manifest, staging pages, and the sealed-store copy at once —
+/// projection manifest, staging pages, and the sealed-store copy at once,
 /// several times the corpus in transient memory. A daemon recovering a
 /// quarantined store re-publishes every open scope's generation
 /// concurrently, and unbounded overlap of those transients is what grew the
@@ -502,7 +502,7 @@ impl CodeGraphShardPublicationLocksV1 {
 /// glibc keeps freed pages in the per-thread arena that allocated them, and
 /// each publishing worktree scope publishes on its own thread. Measured on
 /// the 600-file harness at four scopes, arena retention alone accounted for
-/// 0.24 GB of the 0.60 GB that each additional scope added to peak RSS —
+/// 0.24 GB of the 0.60 GB that each additional scope added to peak RSS,
 /// memory that was already dead, held only because nothing asked for it back.
 /// Asking here, at the permit boundary, is what turns "freed" into "not
 /// resident" for the next scope's build.
@@ -557,7 +557,7 @@ fn observe_sealed_staging_release(
 /// the pass decided. Runs beside the staging release on the same lease: the
 /// release trims the head's duplicate rows, this reclaims every predecessor's
 /// journal row, native rows, and sealed artifact. Failure is logged, never
-/// propagated — the next publish or maintenance pass revisits the projection.
+/// propagated, the next publish or maintenance pass revisits the projection.
 fn retire_superseded_replays(
     stage: &'static str,
     graph_registry: &tracedecay_graph_db::GraphDbRegistry,
@@ -646,7 +646,7 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
 /// The offer exists to spare the activation window a second decode of bytes
 /// that stay durable on disk. Once this runtime retires, no consumer can reach
 /// that window again, so continuing to retain a whole decoded generation is
-/// pure resident cost — and before this nothing removed an offer at all, which
+/// pure resident cost, and before this nothing removed an offer at all, which
 /// is one of the holders that let a 16GiB admission limit sit inside a 42GiB
 /// process. Dropping it never loses truth: the canonical seal read remains the
 /// authority and reconstructs the same payload.
@@ -973,7 +973,7 @@ impl RetainedVerifiedGraphRuntimeV1 {
                 // append and the head CAS. `publish_verified` is idempotent
                 // over the journaled replay and computes the authoritative
                 // verdict (completes the pending publication, dedupes an exact
-                // replay, or reports a true conflict) — answering Conflict here
+                // replay, or reports a true conflict), answering Conflict here
                 // would wedge the projection permanently.
                 let publication = publish_journaled(&mut storage, &publication_key)?;
                 return Ok(publication.snapshot);
@@ -1392,8 +1392,8 @@ impl RetainedCodeGraphRuntimeV1 {
         })
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?
         .map_err(refuse_if_resident_memory);
-        // Everything corpus-sized this publication built — the projection
-        // manifest, the staged relational rows, the sealed copy buffers — is
+        // Everything corpus-sized this publication built, the projection
+        // manifest, the staged relational rows, the sealed copy buffers, is
         // dead by here. Free it, release the duplicate staging rows the seal
         // made redundant, and return the emptied arenas to the OS *before*
         // the build permit goes to the next scope. Deferring any of that past
@@ -1601,7 +1601,7 @@ impl RetainedCodeGraphRuntimeV1 {
     /// a deterministic verdict: the journaled pending replay row and
     /// the partial store contents its dead publisher left behind. Every
     /// refusal from the compare-and-swap-shaped discard means the journal
-    /// moved since the diagnosis — the caller re-reads and proceeds, so a
+    /// moved since the diagnosis, the caller re-reads and proceeds, so a
     /// completed or re-journaled publication is never swept (issue #765).
     #[hotpath::measure(label = "daemon.session_registry.publish_snapshot.discard_interrupted")]
     fn discard_interrupted_publication_row(
@@ -1837,7 +1837,7 @@ impl RetainedCodeGraphRuntimeV1 {
     /// arms, pending predecessor completion, and the final publish.
     ///
     /// The per-shard serving gate is held only across the storage-ordered
-    /// slices — manifest-provider bind plus journal classification, each
+    /// slices, manifest-provider bind plus journal classification, each
     /// replay append, and the CAS-plus-install swap inside the publish
     /// closure. Native staging, the sealed-store build, the digest proofs,
     /// and the boot-from-sealed recovery arms all run with no gate held, so
@@ -1978,8 +1978,8 @@ impl RetainedCodeGraphRuntimeV1 {
             // manifest, so publication reconstructs it from the journaled
             // canonical replay source.
             //
-            // Prepare — native staging, the sealed-store build, and the
-            // durable digest proof — runs with no gate held; only the
+            // Prepare, native staging, the sealed-store build, and the
+            // durable digest proof, runs with no gate held; only the
             // CAS-plus-install swap below takes the serving gate.
             let preparation = self.graph_registry.prepare_verified_publication(
                 publish_registration(),
@@ -2006,8 +2006,8 @@ impl RetainedCodeGraphRuntimeV1 {
         // Classification slice: the manifest-provider bind (a shared-map
         // write the gate orders before the publish/recover reads that resolve
         // sealed sources through it) plus the journal lookup that decides the
-        // arm. Everything the decision leads to — recovery, staging, the
-        // sealed-store build — runs after the gate is released.
+        // arm. Everything the decision leads to, recovery, staging, the
+        // sealed-store build, runs after the gate is released.
         let classification = {
             let _gate = self.hold_publication_gate();
             hotpath::measure_block!(
@@ -2020,7 +2020,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 // The idempotent recovery arm: this publication already owns
                 // the verified head (a flight loser after the winner
                 // published, or a re-activation before replay retirement).
-                // Runs gateless — it reads durable state and installs an
+                // Runs gateless, it reads durable state and installs an
                 // idempotent lease, so a boot-from-sealed recovery no longer
                 // sits inside a gate hold. Prefer the immutable sealed
                 // artifact so a cold daemon does not mount and reopen the
@@ -2126,7 +2126,7 @@ impl RetainedCodeGraphRuntimeV1 {
                     // left journal or store state that this exact resume can
                     // never complete (issue #765). Discard the poisoned row
                     // and its partial contents, then republish fresh through
-                    // the append path below — that is what restores service.
+                    // the append path below, that is what restores service.
                     Err(conflict @ GraphDbError::Conflict { .. }) => {
                         drop(staged_bundle);
                         let pending = match storage
@@ -2187,7 +2187,7 @@ impl RetainedCodeGraphRuntimeV1 {
         // The relational journal is an ordered log: a replay journaled by an
         // interrupted publisher blocks every later sequence until it lands,
         // and a dead publisher can never land its own. Answering Conflict
-        // here wedged the projection permanently — every reconcile sealed a
+        // here wedged the projection permanently, every reconcile sealed a
         // newer generation, appended a newer sequence, and conflicted on the
         // orphan forever while sealed artifacts piled up on disk. So this
         // publisher completes pending predecessors first (their sealed
@@ -2370,7 +2370,7 @@ impl RetainedCodeGraphRuntimeV1 {
     /// staged temporary file keeps the derivation out of the publish RAM
     /// peak; nothing becomes visible until [`Self::commit_sealed_read_bundle`]
     /// runs after the publication succeeds. A staging failure is logged and
-    /// degrades to the open-time re-derivation fallback — it never fails the
+    /// degrades to the open-time re-derivation fallback, it never fails the
     /// seal itself.
     fn stage_sealed_read_bundle(
         &self,
@@ -2474,7 +2474,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// physical shard (see `graph_attachment::open_session_relation_owner_for_task`
     /// in `mounts.rs`) and normally keeps it attached for as long as the
     /// project runtime stays mounted. But that owner can be retired
-    /// independently of code-index activity — for example by the
+    /// independently of code-index activity, for example by the
     /// capacity-driven project-server reclaim in `project_composition.rs`,
     /// which calls `retire_project_memory_graph` to admit another project.
     /// Once that happens, every later code-graph reconcile fails permanently
@@ -2483,7 +2483,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     ///
     /// This reuses the exact attach the memory/journey graph mount uses, but
     /// only when the shard is actually missing, and it does not retain the
-    /// resulting attachment — the sole purpose is to leave the registry
+    /// resulting attachment, the sole purpose is to leave the registry
     /// entry `Ready` so the lease immediately below succeeds. Losing a race
     /// to a concurrent attacher (or any other failure here) is swallowed:
     /// the ordinary lease path still runs and surfaces its own, more precise

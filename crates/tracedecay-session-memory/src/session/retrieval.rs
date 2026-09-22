@@ -27,13 +27,14 @@ use crate::context::{
     application_observed_at, application_request_interruption,
     run_application_request_interruptible,
 };
-use crate::session::ports::{
-    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError, SessionTemporalExecutionPort,
-};
 use crate::session::types::{
     SessionAccess, SessionAuthorizationError, SessionDataFreshness, SessionFreshnessPolicy,
     SessionRequestBinding, SessionRetrievalOutcome, SessionRetrievalScope,
     SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+};
+use tracedecay_session_temporal_store::execution::{
+    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
+    SessionTemporalExecutionPort, SessionTemporalExecutionReport,
 };
 
 mod task_session;
@@ -425,7 +426,7 @@ fn temporal_authorized_root(
 }
 
 fn map_report(
-    report: crate::session::ports::SessionTemporalExecutionReport,
+    report: SessionTemporalExecutionReport,
     freshness_policy: SessionFreshnessPolicy,
 ) -> SessionRetrievalOutcome<TemporalKernelResult> {
     let (result, freshness) = report.into_parts();
@@ -565,6 +566,19 @@ fn map_execution_error(
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
         SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
         SessionTemporalExecutionError::ResetRequired => SessionRetrievalOutcome::ResetRequired,
+        // A partial generation is a projection still converging, not an
+        // authoritative empty root: answering `CompleteZero` there publishes
+        // "nothing exists, and that is final" for rows the store has already
+        // committed but not yet published. `map_report` refuses that for an
+        // empty ranked page; the execution-error path owes the same refusal,
+        // so the caller re-reads instead of believing the zero.
+        SessionTemporalExecutionError::Empty {
+            freshness: freshness @ SessionDataFreshness::Partial { generation_lag },
+        } => SessionRetrievalOutcome::Partial {
+            items: Vec::new(),
+            freshness,
+            omitted: generation_lag.max(1),
+        },
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
         }
@@ -1036,6 +1050,19 @@ mod tests {
                 TemporalPortError::EmptyParticipantManifest,
             )),
             SessionRetrievalOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn partial_generation_empty_execution_is_never_an_authoritative_zero() {
+        let freshness = SessionDataFreshness::Partial { generation_lag: 1 };
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Empty { freshness }),
+            SessionRetrievalOutcome::Partial {
+                items: Vec::new(),
+                freshness,
+                omitted: 1,
+            }
         );
     }
 

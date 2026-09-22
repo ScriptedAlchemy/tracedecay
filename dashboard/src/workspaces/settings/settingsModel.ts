@@ -2,14 +2,14 @@
  * Settings read model: turns the untyped `/api/settings` payload
  * (settings_api.rs::get_settings) into a navigable, origin-aware shape.
  *
- * WHAT THE WIRE ACTUALLY CARRIES — this file exists to keep the surface honest
+ * WHAT THE WIRE ACTUALLY CARRIES, this file exists to keep the surface honest
  * about it:
  *
  *   - `project.config` is `project_configuration.config`, a resolved config
  *     struct serialized wholesale. Every key in it is already effective. The
  *     payload never says which file or default supplied a given key.
  *   - `automation` is `automation_config::effective_config(global, project)`.
- *     The daemon really does merge two layers there — and then ships only the
+ *     The daemon really does merge two layers there, and then ships only the
  *     result. The winning layer is not on the wire.
  *   - `user` and `project.config` do not even address the same keys
  *     (`upload_enabled`/`watcher_debounce` vs `include`/`exclude`/…), so they
@@ -17,8 +17,8 @@
  *
  * Therefore this model does NOT rank groups into a resolution stack and does
  * not claim that one group overrides another: nothing in the payload supports
- * it. What it does model is ORIGIN — the source each group is read from, which
- * the payload states directly via `config_path` / `config_endpoint` — and the
+ * it. What it does model is ORIGIN, the source each group is read from, which
+ * the payload states directly via `config_path` / `config_endpoint`, and the
  * one place the payload carries genuine per-value provenance:
  * `environment.variables[]`, where `active` distinguishes an override that is
  * actually in force from one that is unset so a default applies.
@@ -55,7 +55,7 @@ export type ConfigRowKind =
  *
  * `unserved` is the honest default: the payload states an effective value
  * without saying which layer supplied it. Only `environment.variables[]`
- * carries per-value provenance — `explicit` when the variable is set in the
+ * carries per-value provenance, `explicit` when the variable is set in the
  * daemon's process environment (an override in force), `default` when it is
  * unset so whatever default applies, applies. Nothing here is inferred from a
  * value; a key whose provenance is not on the wire stays `unserved`.
@@ -63,7 +63,7 @@ export type ConfigRowKind =
 export type ServedProvenance = 'unserved' | 'explicit' | 'default';
 
 export interface ConfigRow {
-  /** Dotted path within the section — unique, and the row's React key. */
+  /** Dotted path within the section, unique, and the row's React key. */
   readonly id: string;
   /** Leaf label as it appears in the payload. */
   readonly label: string;
@@ -85,14 +85,14 @@ export interface ConfigRow {
 /**
  * Where a group's values come from, as the payload states it.
  *
- * `file`        — read from a configuration file whose path the payload gives.
- * `environment` — the process environment overlay.
- * `resolved`    — state the daemon computed and reported; no source stated.
+ * `file`, read from a configuration file whose path the payload gives.
+ * `environment`, the process environment overlay.
+ * `resolved`, state the daemon computed and reported; no source stated.
  */
 export type OriginKind = 'file' | 'environment' | 'resolved';
 
 export interface ConfigSection {
-  /** Top-level payload key — also the DOM id used for in-page navigation. */
+  /** Top-level payload key, also the DOM id used for in-page navigation. */
   readonly id: string;
   readonly title: string;
   /** What this group is, in one clause. */
@@ -179,7 +179,7 @@ export interface SettingsValidationError {
 }
 
 /**
- * The fields the editor found changed — not the request body.
+ * The fields the editor found changed, not the request body.
  *
  * The contracted body is `ProjectSettingsPatch`, which also carries
  * `expected_revision_id`; the plan holds that separately so a change set can be
@@ -217,7 +217,7 @@ export interface CodeIndexWorkerSettingsChangeSet {
 
 /**
  * The change sets carry omission semantics the generated patch types cannot
- * express — schemars renders every `Option<T>` field as required-and-nullable,
+ * express, schemars renders every `Option<T>` field as required-and-nullable,
  * so `ProjectSettingsPatch` has no way to say "this field was not edited",
  * which is precisely what the daemon's `#[serde(default)]` reads. The field
  * NAMES are still the contract's, and these assertions fail the build if the
@@ -272,7 +272,7 @@ export const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
 
 /**
  * Recognized top-level groups and how to describe them. `origin` records where
- * the group is read from — a fact the payload supports — and deliberately
+ * the group is read from, a fact the payload supports, and deliberately
  * carries no precedence, because the payload states none.
  */
 const GROUP_META: Readonly<
@@ -356,7 +356,7 @@ const SettingsEnvelopeMemberSchema = z.object({ payload: z.record(z.string(), z.
  * groups this file models live under `payload` and never at the top level.
  * Reading the envelope itself as settings would render `schema_revision`,
  * `coverage`, and `freshness` as configuration and, worse, find no revision
- * identity — which the editor would report as an omitted required field.
+ * identity, which the editor would report as an omitted required field.
  */
 export function readSettingsEnvelope(body: unknown): SettingsPayloadRead {
   const envelope = SettingsEnvelopeMemberSchema.safeParse(body);
@@ -371,7 +371,7 @@ export function readSettingsEnvelope(body: unknown): SettingsPayloadRead {
  * The read model walks whatever groups the payload carries, so its parameter
  * stays `unknown` on purpose: a group the daemon starts reporting before the
  * contract is regenerated must still appear here rather than vanish, and every
- * row it emits is a literal it found — it never claims a named field. The
+ * row it emits is a literal it found, it never claims a named field. The
  * editable slice, which does name fields, goes through `buildSettingsEditor`
  * against a contract-parsed payload instead.
  */

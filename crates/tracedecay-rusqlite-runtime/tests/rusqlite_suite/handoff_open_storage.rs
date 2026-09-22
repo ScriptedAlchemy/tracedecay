@@ -13,7 +13,7 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, TaskHandoffTokenStateV1,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RepositoryId, TaskId, UtcMicros, WorkVersion, WorktreeId,
+    ActorId, ProjectId, RepositoryId, TaskId, UtcMicros, WorkVersion, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -37,17 +37,9 @@ impl HandoffOpenTargetPort for CurrentTarget {
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(fill: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", fill.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context(request_id: &str) -> RequestContext {
     context_for_actor(request_id, "actor.handoff.runtime-store")
@@ -331,8 +323,8 @@ fn wrong_session_and_expired_grants_are_concealed_without_consuming() {
 /// The frontier read, against the real durable authority and across a restart.
 ///
 /// The two `open_*` operations can only redeem a bearer the caller already
-/// holds. This proves the store can answer the other question — what is
-/// outstanding — from persisted rows alone, with no bearer anywhere in it.
+/// holds. This proves the store can answer the other question, what is
+/// outstanding, from persisted rows alone, with no bearer anywhere in it.
 #[test]
 fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
     let store = RegisteredWorkflowStore::start("handoff-open-list");

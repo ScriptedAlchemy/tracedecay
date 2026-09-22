@@ -1,7 +1,7 @@
 //! Work product evidence and history, end to end over the registered store.
 //!
-//! Like the graph authority suite next to it, this drives the REAL composition
-//! — the application's `WorkProductEvidenceServiceV1` and
+//! Like the graph authority suite next to it, this drives the REAL composition,
+//! the application's `WorkProductEvidenceServiceV1` and
 //! `WorkHistoryServiceV1` over the registered exact-SQL storage, with no port
 //! doubles. A suite that supplied its own port would not exercise this path.
 //!
@@ -9,8 +9,8 @@
 //! test: the evidence link ids, anchors, digests, and event sequences are the
 //! caller's own declarations read back. Nothing here is derived, defaulted, or
 //! backfilled, and the two places where this authority genuinely cannot see
-//! something — content behind an anchor, and links a caller's own limit
-//! excluded — are asserted as named absences rather than as data.
+//! something, content behind an anchor, and links a caller's own limit
+//! excluded, are asserted as named absences rather than as data.
 //!
 //! ## Why this suite declares evidence at creation
 //!
@@ -38,11 +38,11 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,
-    ManifestDigest, MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, RetrievalAnchorId,
-    TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId, UtcMicros, WorkAcceptanceCriterionV1,
-    WorkCommandId, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
-    WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventSequenceV1,
-    WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorktreeId,
+    MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, RetrievalAnchorId, TaskEvidenceLinkId,
+    TaskEvidenceLinkV1, TaskId, UtcMicros, WorkAcceptanceCriterionV1, WorkCommandId,
+    WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
+    WorkMilestoneV1, WorkPlanId, WorkPlanV1, WorkProductEventSequenceV1, WorkProductGraphV1,
+    WorkTaskEvidenceCoverageV1, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -56,17 +56,9 @@ const REPOSITORY: &str = "repository.work-product-query.fixture";
 const OBSERVED_AT: UtcMicros = UtcMicros(400);
 const TASK: &str = "task.deliver";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn binding() -> WorkProductBindingV1 {
     WorkProductBindingV1::new(
@@ -552,7 +544,7 @@ fn an_expansion_returns_the_declared_anchor_and_says_the_content_was_not_disclos
         expanded.expansion.link().link_id(),
         &id::<TaskEvidenceLinkId>("link.alpha")
     );
-    // The handle is the anchor the caller declared — this authority owns no
+    // The handle is the anchor the caller declared, this authority owns no
     // content store, so it hands back the retrieval handle and marks the
     // content undisclosed rather than claiming a disclosure it never made.
     assert_eq!(expanded.expansion.content_handle(), "retrieval.alpha");
@@ -597,7 +589,7 @@ fn history_returns_the_journaled_events_in_durable_sequence_order() {
     );
     assert_eq!(history.events.len(), 2);
     // The events are the stored ones, identical to the receipts the mutations
-    // returned — not a summary of them.
+    // returned, not a summary of them.
     assert_eq!(&history.events[0], created.event());
     assert_eq!(&history.events[1], accepted.event());
     assert!(history.events[0].sequence() < history.events[1].sequence());
@@ -679,7 +671,7 @@ fn a_selection_covering_no_event_reads_empty_with_a_partial_disclosure() {
 
     // The journal was written under a repository relation scope from its very
     // first event, so a no-Git selection covers none of it. The empty answer is
-    // honest only because the disclosure beside it says so — an unqualified
+    // honest only because the disclosure beside it says so, an unqualified
     // empty history would present a hole as a complete record, which is exactly
     // what the old outright refusal was guarding against.
     let history = history_service(&store)
@@ -798,7 +790,7 @@ fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_history() {
 }
 
 /// Evidence reads the same published versions the graph reads do, so an
-/// unpublished event must be invisible to both — while history, which is about
+/// unpublished event must be invisible to both, while history, which is about
 /// the events themselves, still reports them.
 #[test]
 fn evidence_is_not_served_from_a_version_that_was_never_published() {

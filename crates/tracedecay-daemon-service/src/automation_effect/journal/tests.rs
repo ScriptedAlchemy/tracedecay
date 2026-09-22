@@ -15,8 +15,8 @@ use tracedecay_contracts::{
     OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, FactOwnerV1, ManifestDigest, ProjectId, RepositoryId, RunId,
-    UtcMicros, WorktreeId, canonical_sha256,
+    ActorId, ComponentVersion, FactOwnerV1, ProjectId, RepositoryId, RunId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::EffectClass;
 
@@ -41,9 +41,7 @@ impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend
     }
 }
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn scope() -> ResolvedScope {
     ResolvedScope::new(
@@ -1487,7 +1485,6 @@ async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_prior() {
-    use fs2::FileExt;
     use std::sync::Arc;
     use std::time::Duration;
     use tracedecay_automation_runtime::automation::AutomationRunControl;
@@ -1710,7 +1707,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         .write(true)
         .open(&journal_lock_path)
         .expect("current journal lock");
-    journal_lock.lock_exclusive().expect("block abandonment");
+    journal_lock.lock().expect("block abandonment");
     let (observed_tx, observed_rx) = std::sync::mpsc::channel();
     let (projected_tx, projected_rx) = std::sync::mpsc::channel();
     let waiter = current_authority.start_retained_automation_settlement(
@@ -1746,7 +1743,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     );
     assert!(fixed_task_lock_is_denied(dashboard_root, AgentTaskKind::MemoryCurator).await);
 
-    FileExt::unlock(&journal_lock).expect("release abandonment");
+    journal_lock.unlock().expect("release abandonment");
     assert_eq!(
         observed_rx
             .recv_timeout(Duration::from_secs(5))

@@ -1,7 +1,7 @@
 //! Atomicity coverage for registry garbage collection.
 //!
-//! A project is registered in two generations — the `code_projects` registry
-//! and the older `projects` accounting table — and collection has to remove
+//! A project is registered in two generations, the `code_projects` registry
+//! and the older `projects` accounting table, and collection has to remove
 //! both or neither. A half-applied sweep either strips a live project's
 //! registry row while its accounting row keeps it addressable, or leaves an
 //! orphan behind for the next sweep to trip over. The transaction is the only
@@ -143,9 +143,9 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
 
     // The refresh races the sweep through the *same* registered runtime, which
     // is how a daemon actually reaches this database: one mount, one serialized
-    // writer lane. A second independent mount would not serialize — connection
+    // writer lane. A second independent mount would not serialize, connection
     // policy pins `busy_timeout = 0` precisely so SQLite never waits behind the
-    // runtime's own queue — and would fail the write outright instead.
+    // runtime's own queue, and would fail the write outright instead.
     let concurrent_db = harness.registered.clone();
 
     let transaction = harness
@@ -194,8 +194,8 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
     );
 }
 
-/// Registry liveness must resolve the whole identity — aliases, the shared git
-/// common directory, and registered store instances — before an unreviewed
+/// Registry liveness must resolve the whole identity, aliases, the shared git
+/// common directory, and registered store instances, before an unreviewed
 /// pass retires a row. Deleting `code_projects` cascades those rows away, so a
 /// roots-only check silently destroys a live project's registration.
 mod liveness {

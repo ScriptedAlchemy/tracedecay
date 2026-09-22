@@ -87,7 +87,7 @@ fn log_code_generation_retention_degraded_with_error(
 }
 
 /// Whether a release failure names a graph runtime that cannot serve right
-/// now — the class worth backing off from — as opposed to evidence or store
+/// now, the class worth backing off from, as opposed to evidence or store
 /// defects (conflict, corruption, invalid identity) that must stay loud on
 /// every attempt until someone fixes them.
 fn release_failure_is_runtime_unhealthy(error: &tracedecay_graph_db::GraphDbError) -> bool {
@@ -102,9 +102,9 @@ fn release_failure_is_runtime_unhealthy(error: &tracedecay_graph_db::GraphDbErro
 /// Non-blocking replay-pool probe. The retention pass used to discover a held
 /// pool lock the expensive way: the release reconcile polled it at
 /// five-millisecond intervals for the full 30s graph-operation deadline and
-/// then failed with `DeadlineExceeded` — every tick, for as long as the
+/// then failed with `DeadlineExceeded`, every tick, for as long as the
 /// holder (typically a publisher hashing a multi-GiB seal under the lock)
-/// stayed wedged — and the collection executor behind it would park on the
+/// stayed wedged, and the collection executor behind it would park on the
 /// same lock's *deadline-free* blocking flock. One `try_lock` answers the
 /// same question for the cost of a syscall, before any full-digest planning
 /// is paid. The probe lock is dropped immediately; later acquisitions re-take
@@ -155,7 +155,7 @@ pub async fn reconcile_graph_replay_releases(
     let project_root = lease.project_root();
     // A runtime that answered its last attempts with deadline or
     // unavailability failures is skipped for the bounded backoff window
-    // instead of being polled — and timed out against — on every tick. The
+    // instead of being polled, and timed out against, on every tick. The
     // arming failure was already reported; skips stay quiet on the log and
     // visible on the gauge.
     if !observations.graph_replay_release_attempt_admitted(project_root) {

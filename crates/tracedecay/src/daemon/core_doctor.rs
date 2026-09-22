@@ -250,9 +250,12 @@ async fn doctor_runtime_value(
 }
 
 #[hotpath::measure(label = "daemon.engine.doctor.runtime", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "A missing graph, session, or observation authority is a named unavailable reason in one snapshot; Doctor never fabricates a healthy runtime."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "A missing graph, session, or observation authority is a named unavailable reason in one snapshot; Doctor never fabricates a healthy runtime."
+    )
 )]
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
@@ -304,7 +307,7 @@ async fn doctor_runtime_value_inner(
         .canonicalize()
         .unwrap_or_else(|_| graph_path.clone());
     // A retained admission bool is not a store observation. If the file the
-    // route was opened against is gone, say so — do not project "live".
+    // route was opened against is gone, say so, do not project "live".
     let route_retained = {
         let servers = store_administration.project_servers().lock().await;
         servers.servers.iter().any(|(key, entry)| {

@@ -348,8 +348,8 @@ impl DaemonEngine {
     ///
     /// `catalog_is_provisional` marks a discovery answer served from the
     /// warming bootstrap route, before the project graph is open. That catalog
-    /// is not the published one — its `tracedecay_context` budget is the
-    /// conservative warming budget rather than the node-count budget — so it
+    /// is not the published one, its `tracedecay_context` budget is the
+    /// conservative warming budget rather than the node-count budget, so it
     /// must not mark the client current. Leaving such a client unmarked is
     /// exactly what arms its notification for the first request after warm-up
     /// completes; marking it would strand the provisional catalog for the rest
@@ -680,9 +680,10 @@ impl DaemonEngine {
             // warm-up runs. The open task remains tracked and continues in the
             // background after this bounded wait expires.
             let mut retry_init = handshake.allow_init;
-            let publication_deadline = tokio::time::Instant::now() + PROJECT_OPEN_REQUEST_DEADLINE;
             loop {
                 let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
+                let publication_deadline =
+                    project_open_publication_deadline(tokio::time::Instant::now());
                 let result = match claim {
                     ProjectOpenTaskClaim::InFlight(state) => {
                         let recorded = state.clone();
@@ -692,7 +693,7 @@ impl DaemonEngine {
                                 // The claim proves an open for this exact route is
                                 // in flight, so each iteration only needs to see
                                 // its publication land on the already-bound route
-                                // alias — never a fresh identity resolution.
+                                // alias, never a fresh identity resolution.
                                 if let Some(server) = self
                                     .route_bound_project_server(handshake, requirement)
                                     .await?

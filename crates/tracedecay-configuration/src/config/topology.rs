@@ -3,14 +3,14 @@
 //! The sole resolver combines the typed registry default with explicit layers;
 //! these helpers consume its pinned snapshot and return the complete validated
 //! policy. They never inspect paths, invoke Git, manufacture capability or
-//! repository evidence, or substitute a locally invented default — missing,
+//! repository evidence, or substitute a locally invented default, missing,
 //! mistyped, invalid, or unsupported inputs fail closed.
 
 use thiserror::Error;
 use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ConfigurationSnapshotV1, ConfigurationValueV1, SettingKey, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    WorkTopologyPolicyV1, safe_work_topology_policy_v1,
+    WorkTopologyPolicyV1,
 };
 
 #[derive(Debug, Error)]
@@ -40,12 +40,6 @@ pub fn resolved_work_topology_policy(
     }
 }
 
-/// Exposes the exact safe policy used by the typed registry before any
-/// operator publishes a protected replacement.
-pub fn safe_default_work_topology_policy() -> WorkTopologyPolicyV1 {
-    safe_work_topology_policy_v1()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -63,13 +57,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture id is canonical")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn topology_key() -> SettingKey {
         SettingKey::new(WORK_TOPOLOGY_POLICY_SETTING_KEY).unwrap()

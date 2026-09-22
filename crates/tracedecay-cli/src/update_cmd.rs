@@ -47,7 +47,7 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay_domain::errors::Re
 ///
 /// `integration_id_for_host` is many-to-one (CursorCloud and CursorDesktop both
 /// map to `cursor`), so an id counts as canonical when ANY host behind it has a
-/// non-empty default component set — the transaction owns that id's artifacts.
+/// non-empty default component set, the transaction owns that id's artifacts.
 fn host_owns_canonical_component_set(agent_id: &str) -> bool {
     tracedecay_agent_hosts::agents::host_bundle::stock_host_kinds()
         .into_iter()
@@ -103,7 +103,7 @@ fn refresh_generated_plugins_at(
             Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::NotInstalled) => {}
             // Config-managed integrations (claude, copilot, …) are refreshed by
             // the tracked-agent reinstall in `run_post_update_tasks`, so there
-            // is nothing to do — and nothing to nag about — here.
+            // is nothing to do, and nothing to nag about, here.
             Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::ConfigOnly) => {}
             Ok(tracedecay_agent_hosts::agents::UpdatePluginOutcome::DeferredUserAction(
                 deferred,
@@ -122,7 +122,7 @@ fn refresh_generated_plugins_at(
         }
     }
     if !refreshed_any {
-        eprintln!("No generated plugin installs detected — nothing to update.");
+        eprintln!("No generated plugin installs detected. Nothing to update.");
     }
     if !failures.is_empty() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -259,7 +259,7 @@ pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> 
         ),
         daemon_control::DaemonServiceState::Missing => {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: "no TraceDecay daemon service is installed — restart your `tracedecay daemon run` process manually, or run `tracedecay daemon install-service` to manage it as a service".to_string(),
+                message: "no TraceDecay daemon service is installed, restart your `tracedecay daemon run` process manually, or run `tracedecay daemon install-service` to manage it as a service".to_string(),
             });
         }
         daemon_control::DaemonServiceState::Masked => {
@@ -312,11 +312,8 @@ fn current_tracedecay_exe() -> Option<String> {
 fn current_tracedecay_exe_from(current: Option<&Path>) -> Option<String> {
     let current = current?;
     let stem = current.file_stem()?.to_str()?;
-    (stem == "tracedecay").then(|| normalize_bin_path(current))
-}
-
-fn normalize_bin_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    (stem == "tracedecay")
+        .then(|| tracedecay_domain::forward_slash_text(&current.to_string_lossy()))
 }
 
 /// How the `post-update` re-exec reacts to the binary-upgrade outcome.
@@ -325,14 +322,14 @@ pub(crate) enum RefreshPolicy {
     /// failure fails the command.
     Always,
     /// `upgrade`: refresh only after a real install, and a refresh failure
-    /// only warns — the binary upgrade itself already succeeded (mirroring
+    /// only warns, the binary upgrade itself already succeeded (mirroring
     /// how the health pass inside `post-update` is best-effort).
     AfterInstall,
 }
 
 /// The shared `update` / `upgrade` flow: install the new binary, then re-exec
-/// the NEW binary's `post-update` subcommand — passed the freshly installed
-/// binary path, when known — so the plugin refresh, daemon refresh, and
+/// the NEW binary's `post-update` subcommand, passed the freshly installed
+/// binary path, when known, so the plugin refresh, daemon refresh, and
 /// health pass run on the new version. `policy` decides whether the refresh
 /// runs on a no-op upgrade and whether a refresh failure is fatal.
 ///
@@ -366,7 +363,7 @@ where
             UpgradeOutcome::Installed { binary, version } => {
                 if let Err(error) = post_update(binary.as_deref()) {
                     // Point the retry at the installed binary when we know
-                    // where it lives — a bare `tracedecay` may not be on PATH.
+                    // where it lives, a bare `tracedecay` may not be on PATH.
                     let retry = match &binary {
                         Some(path) => format!("`{} update`", path.display()),
                         None => "`tracedecay update`".to_string(),
@@ -381,7 +378,7 @@ where
             }
             UpgradeOutcome::AlreadyCurrent => {
                 eprintln!(
-                    "Nothing was installed, so plugins were left untouched — \
+                    "Nothing was installed, so plugins were left untouched. \
                      run `tracedecay update` to refresh generated plugins anyway."
                 );
                 Ok(None)
@@ -497,7 +494,7 @@ fn post_update_binary(installed: Option<&Path>) -> tracedecay_domain::errors::Re
 fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> Option<String> {
     installed
         .filter(|path| path.exists())
-        .map(normalize_bin_path)
+        .map(tracedecay_domain::forward_slash_path)
         .or_else(|| current_tracedecay_exe_from(current))
 }
 
@@ -592,7 +589,7 @@ pub(crate) fn record_completed_reinstall_pass(
 /// tracked-agent refresh and may therefore call
 /// [`record_completed_reinstall_pass`].
 ///
-/// The install flow only (re)installs its selection delta — agents that were
+/// The install flow only (re)installs its selection delta, agents that were
 /// already tracked are left untouched. After an upgrade those untouched
 /// agents still carry the previous binary's integration, so the pass may
 /// only record a completed full refresh when every agent that remains tracked
@@ -606,7 +603,7 @@ pub(crate) fn install_pass_covers_tracked_agents(
 }
 
 /// Re-runs the canonical component lifecycle for every tracked agent so tool
-/// permissions, hooks, and MCP config stay in sync with the running binary — a
+/// permissions, hooks, and MCP config stay in sync with the running binary, a
 /// superset of `refresh_generated_plugins`, which rewrites generated artifacts
 /// only. Mirrors the canonical `handle_reinstall_command` (global scope:
 /// `project_root: None`). Continues past a failing agent; returns
@@ -644,7 +641,7 @@ pub(crate) async fn run_post_update_tasks(
     lifecycle_lease: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> tracedecay_domain::errors::Result<()> {
     eprintln!("\nPreparing safe post-update maintenance.");
-    eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
+    eprintln!("  Waiting for TraceDecay writers to shut down cleanly, do not interrupt.");
     let previous_daemon_state = daemon_control::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
     let mutation_result = run_post_update_mutations(no_reinstall, lifecycle_lease).await;
@@ -715,32 +712,45 @@ async fn run_post_update_mutations(
                 Ok(())
             }
         };
-    reconcile_materialized_managed_skills_after_update();
+    deploy_managed_skills_after_lifecycle();
     reinstall_result
 }
 
-/// Reconciles already-Active managed skills into every detected host skills
-/// directory on `tracedecay update`, so a skill approved before this binary
-/// shipped (or a body update applied since the last activation) still lands as
-/// a real, host-loadable `SKILL.md`. Fork-protected and best-effort: a failure
-/// here never fails the update.
-fn reconcile_materialized_managed_skills_after_update() {
+/// Redeploys managed skills after a lifecycle pass (`update`, `reinstall`,
+/// `install`), so both halves of a managed skill converge on the store: the
+/// host-loadable `SKILL.md` files and the per-host prompt index blocks.
+///
+/// Reconciling only the materialized files left the prompt index converging
+/// solely as a side effect of a successful store mutation, so a store that
+/// emptied without one kept advertising skills that no longer exist. Deploying
+/// here makes the lifecycle converge the index whatever the store did.
+/// Best-effort: a failure never fails the lifecycle pass.
+pub(crate) fn deploy_managed_skills_after_lifecycle() {
     let Ok(profile_root) = tracedecay_runtime_core::storage::default_profile_root() else {
         return;
     };
-    let start = std::env::current_dir()
-        .ok()
-        .or_else(tracedecay_agent_hosts::agents::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let Some(home) = tracedecay_agent_hosts::agents::home_dir() else {
+        return;
+    };
+    let start = std::env::current_dir().ok().unwrap_or_else(|| home.clone());
     let project_root =
         tracedecay_automation_runtime::automation::skill_materialization::resolve_project_root(
             &start,
         );
-    tracedecay_automation_runtime::automation::skill_materialization::reconcile_after_activation(
+    let receipt = tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_at(
         &tracedecay_agent_hosts::host_io(),
+        &home,
         &profile_root,
         &project_root,
     );
+    for error in &receipt.errors {
+        tracing::warn!(%error, "managed skill deployment failed");
+    }
+    for report in receipt.exports.iter() {
+        if let Some(error) = &report.error {
+            tracing::warn!(agent = %report.agent, %error, "managed skill export failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -750,7 +760,7 @@ mod tests {
 
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
-        host_owns_canonical_component_set, install_pass_covers_tracked_agents, normalize_bin_path,
+        host_owns_canonical_component_set, install_pass_covers_tracked_agents,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
         prepare_post_update_lease, refresh_generated_plugins_at, restart_daemon_service_with,
         run_install_then_refresh,
@@ -896,8 +906,8 @@ mod tests {
 
     /// Kimi owns a canonical component set, so the receipt-backed transaction
     /// (`reinstall_agent_integrations` → `apply_default_canonical_component_set`)
-    /// is its sole writer. The generated-artifact refresh must leave it alone —
-    /// including its staging directory — and must still succeed rather than
+    /// is its sole writer. The generated-artifact refresh must leave it alone.
+    /// including its staging directory, and must still succeed rather than
     /// treating the skip as a failure that blocks maintenance.
     #[test]
     fn deferred_kimi_refresh_does_not_block_maintenance() {
@@ -996,7 +1006,7 @@ mod tests {
     }
 
     /// An unresolvable tracked id (renamed/removed by a later release, or a
-    /// typo in `installed_agents`) must be SKIPPED, not treated as a failure —
+    /// typo in `installed_agents`) must be SKIPPED, not treated as a failure.
     /// otherwise it gates marker advancement forever and wedges explicit
     /// post-update maintenance into an infinite reinstall loop. The reinstall
     /// pass drops it from the results entirely, so an otherwise-empty pass is
@@ -1292,7 +1302,7 @@ mod tests {
 
         let resolved = post_update_binary(Some(&installed)).expect("installed path should resolve");
 
-        assert_eq!(resolved, normalize_bin_path(&installed));
+        assert_eq!(resolved, tracedecay_domain::forward_slash_path(&installed));
     }
 
     #[test]
@@ -1315,7 +1325,7 @@ mod tests {
 
         // A dangling path (e.g. brew cleaned the keg) must fall back to the
         // normal resolution instead of re-execing a nonexistent file. Either
-        // branch proves the dangling path was rejected — which one runs
+        // branch proves the dangling path was rejected, which one runs
         // depends on whether the test environment has tracedecay on PATH.
         match post_update_binary(Some(&missing)) {
             Ok(resolved) => assert_ne!(resolved, missing.to_string_lossy()),

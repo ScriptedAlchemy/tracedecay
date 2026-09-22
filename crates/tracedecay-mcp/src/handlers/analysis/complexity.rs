@@ -31,8 +31,8 @@ pub async fn handle_complexity(
         let mut fan_in = HashMap::<SymbolOccurrenceId, u64>::new();
         let mut fan_out = HashMap::<SymbolOccurrenceId, u64>::new();
         for edge in edges {
-            *fan_out.entry(edge.edge.from_occurrence).or_default() += 1;
-            *fan_in.entry(edge.edge.to_occurrence).or_default() += 1;
+            *fan_out.entry(edge.from_occurrence).or_default() += 1;
+            *fan_in.entry(edge.to_occurrence).or_default() += 1;
         }
         if let Some(kind) = node_kind {
             symbols
@@ -379,13 +379,13 @@ pub async fn handle_god_class(
             .collect::<HashMap<_, _>>();
         let mut counts = HashMap::<SymbolOccurrenceId, (u64, u64)>::new();
         for edge in edges {
-            let Some(child) = by_occurrence.get(&edge.edge.to_occurrence) else {
+            let Some(child) = by_occurrence.get(&edge.to_occurrence) else {
                 return Err(verified_analysis_unavailable(
                     "god-class",
                     "a containment edge endpoint is absent from the admitted symbol census",
                 ));
             };
-            let count = counts.entry(edge.edge.from_occurrence).or_default();
+            let count = counts.entry(edge.from_occurrence).or_default();
             match child.metadata.kind.as_str() {
                 "function" | "method" | "arrow_function" => count.0 += 1,
                 "field" | "val_field" | "var_field" => count.1 += 1,

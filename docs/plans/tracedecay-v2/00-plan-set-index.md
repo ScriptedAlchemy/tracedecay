@@ -7,9 +7,8 @@ tests, and normal CI remain active delivery work. The repository is not green.
 This file is the sole authority for V2 precedence, rejected mechanisms,
 delivery order, and acceptance. Numbered plans own semantic product behavior,
 failure semantics, fresh-store cutover, and direct acceptance; they are not independent
-queues and do not require one delivery branch per document. `NEXT.md` tracks
-current outcomes and blockers only. Historical gap ledgers and contract-spine
-artifacts are records, not parallel authorities.
+queues and do not require one delivery branch per document. Historical gap
+ledgers and contract-spine artifacts are records, not parallel authorities.
 
 The `TraceDecay V2` roadmap name is independent of contract/schema versioning.
 Only an actually independently released public wire/API protocol may retain an
@@ -100,7 +99,7 @@ invariants and do not by themselves keep a journey open.
   conflict. Plan 09 owns Doctor composition and Plan 27 owns
   host lifecycle/ownership recovery. The host capability/lifecycle reachability
   fixes do not close this Cursor Core ownership conflict, which remains open.
-  (Update 2026-08-07: code repairs landed for both — the doctor composed
+  (Update 2026-08-07: code repairs landed for both, the doctor composed
   report now consults the real read-only authority-audit pass, and Cursor
   Core content drift is reported as `Drifted` distinct from
   `OwnershipConflict`, with the component-set transaction the sole writer of
@@ -275,7 +274,7 @@ records the rejected mechanism, the reason, and the retained replacement:
     retained replacement is exactly three code-intelligence authorities and no
     fourth "semantic" one: lexical search (exact, fielded, phrase, proximity,
     bounded identifier/path splitting, and named query-time aliases that stay
-    visible — never a silent alias from "semantic" to lexical), the code
+    visible, never a silent alias from "semantic" to lexical), the code
     graph, and source-bound shared-code detection. Shared-code detection
     computes conservative and rename-normalized body tokens during the
     existing parse, persists content-addressed clone payloads, occurrence
@@ -539,9 +538,9 @@ send authorized configuration commands through their named daemon operation.
 
 **Implementation and deletion.**
 
-- Ship exactly the original twelve dashboard workspaces — Brain, Explorer,
+- Ship exactly the original twelve dashboard workspaces. Brain, Explorer,
   Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory,
-  Costs, and Settings — plus Work as the thirteenth workspace, with
+  Costs, and Settings, plus Work as the thirteenth workspace, with
   renderer-neutral semantics, a permissive default
   renderer, keyboard/accessibility parity, typed SLOs, and denominator-safe
   measurements with provenance, coverage, cohort, temporal delta, uncertainty,
@@ -560,7 +559,7 @@ send authorized configuration commands through their named daemon operation.
 
 **Implementation architecture.** Finalized 2026-07-23 in
 [Plan 11](11-dashboard-frontend.md) §"Finalized implementation architecture"
-(fresh single-app rebuild on Rsbuild — decided, no ADR; React Router, TanStack
+(fresh single-app rebuild on Rsbuild, decided, no ADR; React Router, TanStack
 Query, bounded Zustand, Zod over one generated contracts module, Radix +
 Tailwind v4 semantic tokens, TanStack Virtual, `d3-force` default graph
 adapter, ECharts as the single charting library, SSE monotone reducer). The
@@ -782,8 +781,8 @@ never silently choose a model, mutate the graph, or execute an unadmitted step.
 ## Supported external development
 
 **User outcome.** Rust and TypeScript users can perform every
-supported public TraceDecay operation—including graph,
-task-intelligence, and workflow additions—through first-party SDKs with the
+supported public TraceDecay operation, including graph,
+task-intelligence, and workflow additions, through first-party SDKs with the
 same behavior and lifecycle as built-in surfaces.
 
 **End-to-end production path.** Revisioned published names, schemas, and

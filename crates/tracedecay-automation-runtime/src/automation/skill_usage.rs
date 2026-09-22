@@ -204,22 +204,6 @@ pub async fn load_skill_usage_ledger(profile_root: &Path) -> Result<SkillUsageLe
     store::load_ledger(profile_root).await
 }
 
-#[hotpath::measure(label = "automation.skill_usage.save", future = true)]
-pub async fn save_skill_usage_ledger(profile_root: &Path, ledger: &SkillUsageLedger) -> Result<()> {
-    // Split the snapshot. Do not rewrite an aggregate file, and do not delete
-    // a skill file that this snapshot does not mention.
-    for record in ledger.records.values() {
-        let owned = record.clone();
-        let skill_id = owned.skill_id.clone();
-        let first_seen_at = owned.first_seen_at;
-        store::update_record(profile_root, &skill_id, first_seen_at, move |slot| {
-            *slot = owned;
-        })
-        .await?;
-    }
-    Ok(())
-}
-
 pub async fn sync_skill_usage_metadata(profile_root: &Path, skill: &ManagedSkill) -> Result<()> {
     let skill = skill.clone();
     let skill_id = skill.metadata.id.clone();

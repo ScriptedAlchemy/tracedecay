@@ -1,5 +1,6 @@
 //! Peak resident-set observation for resource samples.
 
+#[cfg(target_os = "linux")]
 use std::fs;
 
 use tracedecay_query::search_quality::candidate_output::{

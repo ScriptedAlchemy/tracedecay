@@ -14,7 +14,7 @@ use super::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
     ApplicationUnavailableClassV1, CancellationStage, EffectReceipt, EffectResult,
     EvidenceCoverage, EvidencePacket, LegalAction, PreviewResult, ProblemOwningLayer,
-    ProblemTerminality, RetryDirective, RetryScope, SafeDiagnostic,
+    ProblemTerminality, RUNTIME_MOUNTING_REASON_CODE, RetryDirective, RetryScope, SafeDiagnostic,
 };
 
 pub const APPLICATION_PROBLEM_REVISION: u32 = 1;
@@ -91,6 +91,16 @@ pub enum ApplicationOutcome<T> {
     Evidence(EvidencePacket<T>),
     Preview(PreviewResult<T>),
     Effect(EffectResult<T>),
+}
+
+impl<T> ApplicationOutcome<T> {
+    pub fn payload(&self) -> Option<&T> {
+        match self {
+            Self::Evidence(result) => result.payload.as_ref(),
+            Self::Preview(result) => result.payload.as_ref(),
+            Self::Effect(result) => result.payload.as_ref(),
+        }
+    }
 }
 
 /// Successful application result with a stable contract, request, and scope.
@@ -181,6 +191,13 @@ pub struct ApplicationProblemRecord {
     #[serde(skip)]
     #[schemars(skip)]
     source: ApplicationProblem,
+}
+
+impl ApplicationProblemRecord {
+    /// `code: message`, the single line adapters print for a refusal.
+    pub fn summary(&self) -> String {
+        format!("{}: {}", self.code, self.message)
+    }
 }
 
 impl<'de> Deserialize<'de> for ApplicationProblemRecord {
@@ -591,16 +608,33 @@ impl ApplicationProblemRecord {
         self.terminality == ProblemTerminality::AdmittedTerminal
     }
 
-    /// The delay this problem directs before the same request may be sent
-    /// again, when it is a retryable pre-admission state such as a warming or
-    /// still-mounting authority. Admitted terminals and every other retry
-    /// directive answer `None`: nothing about the request should be repeated
-    /// on a timer.
+    /// The delay this problem's retry directive names, when an agent may send
+    /// the same request again. Admitted terminals and every other retry
+    /// directive answer `None`.
+    ///
+    /// This is not a transport instruction to loop. A retained authority that
+    /// is unavailable still carries `after_delay` so the caller can choose to
+    /// retry; only [`Self::owner_mount_resend_delay`] tells the one-shot client to
+    /// re-send on its own.
     pub fn pre_admission_retry_delay(&self) -> Option<Duration> {
         (self.retryable && self.retry == RetryDirective::AfterDelay && self.is_pre_admission())
             .then_some(self.retry_after_millis)
             .flatten()
             .map(Duration::from_millis)
+    }
+
+    /// Delay before the one-shot client re-sends this completed result, or
+    /// `None` when the result is the answer.
+    ///
+    /// Classification keys on [`RUNTIME_MOUNTING_REASON_CODE`]. A publication
+    /// window that is still registering its owner changes if the same request
+    /// is sent again. Every other completed problem is returned on the first
+    /// observation, even when its directive is `after_delay`.
+    pub fn owner_mount_resend_delay(&self) -> Option<Duration> {
+        if self.code != RUNTIME_MOUNTING_REASON_CODE {
+            return None;
+        }
+        self.pre_admission_retry_delay()
     }
 
     pub fn source(&self) -> &ApplicationProblem {
@@ -709,13 +743,10 @@ mod tests {
     use super::*;
     use crate::{EffectTermination, IdempotencyKey};
     use serde_json::Value;
-    use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_domain::{ActorId, ProjectId, RepositoryId, WorktreeId};
     use tracedecay_tool_catalog::{EffectClass, SchemaId, UseCaseId};
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
-            .expect("fixture digest is valid")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn receipt() -> EffectReceipt {
         let expected_state = digest('a');
@@ -1001,5 +1032,41 @@ mod tests {
             envelope_schema["required"],
             serde_json::json!(["contract", "request_id", "problem"])
         );
+    }
+
+    fn retry_directed_record(code: &str, delay_millis: u64) -> ApplicationProblemRecord {
+        let envelope = ApplicationProblemEnvelope::new(
+            ResultContractRef::new(
+                SchemaId::new("schema.test.retry-directed.result").expect("schema id"),
+                1,
+            )
+            .expect("result contract"),
+            RequestId::new("request.test.retry-directed").expect("request id"),
+            ApplicationProblem::unavailable(
+                SafeDiagnostic::new(code, "The authority named by this code is not ready")
+                    .expect("diagnostic"),
+            ),
+        )
+        .expect("retry-directed envelope")
+        .with_retry_after_millis(Some(delay_millis))
+        .expect("retry delay");
+        *envelope.problem
+    }
+
+    #[test]
+    fn only_a_mounting_refusal_is_resent_by_the_one_shot_client() {
+        let mounting = retry_directed_record(RUNTIME_MOUNTING_REASON_CODE, 40);
+        let answered = retry_directed_record("application.retained.authority-unavailable", 40);
+
+        assert_eq!(
+            mounting.owner_mount_resend_delay(),
+            Some(Duration::from_millis(40))
+        );
+        assert_eq!(
+            answered.pre_admission_retry_delay(),
+            Some(Duration::from_millis(40)),
+            "the caller-facing directive still names the delay"
+        );
+        assert_eq!(answered.owner_mount_resend_delay(), None);
     }
 }

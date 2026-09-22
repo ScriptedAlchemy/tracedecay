@@ -625,7 +625,8 @@ pub async fn run_payload_gc_in_transaction(
 
     report.ended_at = now;
     if apply {
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let duration_ms =
+            tracedecay_runtime_core::tracedecay::saturating_duration_millis(started.elapsed());
         let status = if report.errors.is_empty() {
             "ok"
         } else {

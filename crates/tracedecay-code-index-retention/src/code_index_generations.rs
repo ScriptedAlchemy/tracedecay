@@ -67,12 +67,12 @@ pub use text_artifacts::{
 };
 
 use generation_transactions::{
-    GENERATION_RECEIPT_STORE, acquire_graph_replay_pool_lock_checked,
-    cleanup_committed_transaction, cleanup_committed_transaction_under_graph_replay_pool_lock,
-    clear_transaction, expose_staged_generations_under_graph_replay_pool_lock, load_transaction,
-    open_file_sha256_hex_cancellable, path_still_names_open_file, persist_transaction,
-    receipt_is_durable, regular_file_exists, remove_empty_stage_root, rollback_staged_transaction,
-    stage_collectable_generations, transaction_path, write_receipt,
+    GENERATION_RECEIPT_STORE, GENERATION_TRANSACTION_JOURNAL,
+    acquire_graph_replay_pool_lock_checked, cleanup_committed_transaction,
+    cleanup_committed_transaction_under_graph_replay_pool_lock,
+    expose_staged_generations_under_graph_replay_pool_lock, open_file_sha256_hex_cancellable,
+    path_still_names_open_file, regular_file_exists, remove_empty_stage_root,
+    rollback_staged_transaction, stage_collectable_generations, transaction_path,
 };
 #[cfg(test)]
 use generation_transactions::{
@@ -84,14 +84,14 @@ use receipt_store::receipt_digest_file_component;
 use scope_roots::is_code_index_scope_hash;
 #[cfg(test)]
 use scope_roots::{
-    ScopeRootRetentionTransactionV1, build_scope_receipt, persist_scope_transaction,
-    scope_receipt_digest, scope_receipt_path, scope_stage_root, scope_transaction_path,
-    validate_scope_transaction, write_scope_receipt,
+    SCOPE_RECEIPT_STORE, SCOPE_TRANSACTION_JOURNAL, ScopeRootRetentionTransactionV1,
+    build_scope_receipt, scope_receipt_digest, scope_receipt_path, scope_stage_root,
+    scope_transaction_path, validate_scope_transaction,
 };
 #[cfg(test)]
 use text_artifacts::{
-    build_text_artifact_receipt, persist_text_artifact_transaction,
-    stage_collectable_text_artifacts, total_text_artifact_bytes, write_text_artifact_receipt,
+    TEXT_ARTIFACT_RECEIPT_STORE, TEXT_ARTIFACT_TRANSACTION_JOURNAL, build_text_artifact_receipt,
+    stage_collectable_text_artifacts, total_text_artifact_bytes,
 };
 use text_artifacts::{
     execute_text_artifact_retention_under_store_lock, plan_collectable_text_artifacts_cancellable,
@@ -275,7 +275,7 @@ pub fn retain_bounded_generation_index_with_text_head(
 
 /// Receipt of one bounded-history sweep: how many entries it evicted and how
 /// many entry visits its byte accounting performed. The visit count is the
-/// falsifiable cost contract — after the canonical sort it is linear in the
+/// falsifiable cost contract, after the canonical sort it is linear in the
 /// entry count, never proportional to entries × evictions.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GenerationIndexRetentionSweepV1 {
@@ -291,8 +291,8 @@ pub(crate) struct GenerationIndexRetentionSweepV1 {
 /// (active generation and active text head) plus the newest removable suffix.
 /// Rather than recomputing the whole vector's bytes after every eviction, this
 /// accumulates the byte total of each candidate suffix once, newest to oldest,
-/// with shared text artifacts counted the first time they are seen — exactly
-/// the deduped saturating total the whole-vector recomputation produced — and
+/// with shared text artifacts counted the first time they are seen, exactly
+/// the deduped saturating total the whole-vector recomputation produced, and
 /// then compacts the vector once.
 pub(crate) fn retain_bounded_generation_index_accounted(
     entries: &mut Vec<DurableGenerationIndexEntryV1>,
@@ -330,7 +330,7 @@ pub(crate) fn retain_bounded_generation_index_accounted(
             }
         }
         // `suffix_bytes[i]` is the deduped byte total of the protected entries
-        // plus the removable entries from removable ordinal `i` onward — the
+        // plus the removable entries from removable ordinal `i` onward, the
         // exact set that survives once the `i` oldest removable entries are
         // evicted.
         let mut suffix_bytes = vec![protected_bytes; removable.len() + 1];
@@ -442,7 +442,7 @@ pub enum CodeGenerationRetentionModeV1 {
 /// content digest encoded in its name.
 ///
 /// A single generation is routinely ~1 GiB, so [`Self::Full`] costs a whole-file
-/// SHA-256 per generation. That is correct — and mandatory — before unlinking
+/// SHA-256 per generation. That is correct, and mandatory, before unlinking
 /// anything, but it is far too expensive for an observability read, which is why
 /// every byte-budget gate in front of Doctor and the storage report used to fail
 /// closed on real profiles and report nothing at all. [`Self::MetadataOnly`]
@@ -460,7 +460,7 @@ pub enum GenerationDigestVerificationV1 {
 
 /// What a census learned about content-addressed generation segments.
 ///
-/// Marking live segments means streaming every retained manifest end to end —
+/// Marking live segments means streaming every retained manifest end to end,
 /// the same multi-gigabyte read [`GenerationDigestVerificationV1::MetadataOnly`]
 /// exists to avoid, and one that fails closed when a manifest no longer matches
 /// its content-addressed file name. A metadata-only census therefore refuses to
@@ -739,7 +739,7 @@ pub fn code_text_artifact_path(
 ///
 /// Scope-root reconciliation compares directory names against this exact
 /// derivation, so it must never diverge from
-/// [`scoped_code_index_store_root`] — a divergence would classify a live scope
+/// [`scoped_code_index_store_root`], a divergence would classify a live scope
 /// as stranded.
 #[must_use]
 pub fn code_index_scope_hash(canonical_project_root: &Path) -> String {
@@ -778,6 +778,25 @@ pub fn plan_code_generation_retention_with_verification(
     )
 }
 
+/// A store directory that does not exist yet has nothing to collect. The
+/// sealer creates that directory on open; until then the census is the same
+/// unpublished plan an empty directory with no pointer produces.
+fn unpublished_store_plan(
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+) -> CodeGenerationRetentionPlanV1 {
+    CodeGenerationRetentionPlanV1 {
+        active_generation_id: None,
+        vector_readable_sources: vector_readable_sources.clone(),
+        superseded_generations: Vec::new(),
+        collectable_generations: Vec::new(),
+        collectable_text_artifacts: Vec::new(),
+        collectable_generation_segments: GenerationSegmentCensusV1::NoneFound,
+        text_artifact_inventory_bytes: 0,
+        verification: GenerationDigestVerificationV1::Full,
+        active_pointer: None,
+    }
+}
+
 /// Recover any bounded prior apply, then build the next fully verified
 /// collection unit while preserving the caller's cancellation authority.
 ///
@@ -794,6 +813,30 @@ pub fn prepare_next_code_generation_retention_cancellable(
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
+    // The serving seat can name a generation before the scoped store
+    // directory exists. Cold open creates it inside the worker, so a waiter
+    // that only saw `latest_generation_id` plans against a path canonicalize
+    // reports as `Storage(NotFound)`. That is an unpublished store, the same
+    // typed state as a directory with no pointer. It is not
+    // `GenerationStoreBusy` either. An absent root has no publisher to wait
+    // for and stays absent until the project is first indexed, while the only
+    // production caller turns that deferral into a failed maintenance tick on
+    // the short retry delay, so a never-indexed project would report degraded
+    // on every tick forever. The enumerate-then-open sites below keep the
+    // deferral, where `read_dir` already proved the name existed.
+    match std::fs::metadata(store_root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(unpublished_store_plan(vector_readable_sources));
+        }
+        Ok(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "code-generation store '{}' is not a directory",
+                store_root.display()
+            )));
+        }
+        Err(error) => return Err(storage(error)),
     }
     recover_code_generation_retention_cancellable(
         store_root,
@@ -885,6 +928,9 @@ fn plan_code_generation_retention_with_verification_cancellable(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && active_pointer.is_none() => {
             None
         }
+        // A pointer is only durable once its generation directory is, so a
+        // live pointer over an absent directory is loss, not a publisher
+        // race, and must stay loud.
         Err(error) => return Err(storage(error)),
     };
     let mut generations = BTreeMap::new();
@@ -913,7 +959,7 @@ fn plan_code_generation_retention_with_verification_cancellable(
         }
         // Retention plans a file's lifetime from its identity and size, not
         // from a decoded graph, so a revision the readers have retired is
-        // ordinary collectable history — the daemon rebuilds past it, and
+        // ordinary collectable history, the daemon rebuilds past it, and
         // refusing the whole plan here would leave a store that holds one
         // permanently uncollectable. Only a revision from a newer build is
         // unsafe: those bytes were written by a writer this one cannot
@@ -1218,7 +1264,7 @@ fn sweep_unreferenced_generation_segments(
                 continue;
             }
             let mut reader = CancellableGenerationManifestReaderV1 {
-                file: File::open(&path).map_err(storage)?,
+                file: File::open(&path).map_err(deferred_if_absent)?,
                 hasher: Sha256::new(),
                 is_cancelled,
                 cancelled: false,
@@ -1281,7 +1327,7 @@ fn sweep_unreferenced_generation_segments(
         if live_segments.contains(&format!("sha256:{digest}")) {
             continue;
         }
-        let metadata = path.symlink_metadata().map_err(storage)?;
+        let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
         if !metadata.file_type().is_file() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
                 "generation segment '{}' is not a regular file",
@@ -1507,7 +1553,7 @@ pub fn execute_code_generation_retention_cancellable(
             )?),
             None => None,
         };
-        persist_transaction(store_root, &transaction)?;
+        journal::persist_journal(store_root, &GENERATION_TRANSACTION_JOURNAL, &transaction)?;
 
         let result = (|| {
             // Durable before the first unlink: the pointer must never name a
@@ -1533,7 +1579,12 @@ pub fn execute_code_generation_retention_cancellable(
             // the replay reconciler never observes a receipt whose pool
             // survival events are missing.
             graph_replay_release::write_events(store_root, &receipt)?;
-            write_receipt(store_root, &receipt)?;
+            receipt_store::write_receipt(
+                store_root,
+                &GENERATION_RECEIPT_STORE,
+                &receipt.receipt_digest,
+                &receipt,
+            )?;
             cleanup_committed_transaction_under_graph_replay_pool_lock(
                 store_root,
                 &transaction,
@@ -1546,13 +1597,18 @@ pub fn execute_code_generation_retention_cancellable(
                     graph_replay_pool_root,
                     is_cancelled,
                 )?;
-            clear_transaction(store_root)
+            journal::clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
         })();
         if let Err(error) = result {
             drop(graph_replay_pool_lock);
-            if !receipt_is_durable(store_root, &receipt)? {
+            if !receipt_store::receipt_is_durable(
+                store_root,
+                &GENERATION_RECEIPT_STORE,
+                &receipt.receipt_digest,
+                &receipt,
+            )? {
                 rollback_staged_transaction(store_root, &transaction, graph_replay_pool_root)?;
-                clear_transaction(store_root)?;
+                journal::clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)?;
             }
             return Err(error);
         }
@@ -1723,11 +1779,17 @@ fn recover_pending_transaction_unlocked(
     graph_replay_pool_root: Option<&Path>,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let Some(transaction) = load_transaction(store_root)? else {
+    let Some(transaction) = journal::load_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)?
+    else {
         return Ok(());
     };
 
-    if receipt_is_durable(store_root, &transaction.receipt)? {
+    if receipt_store::receipt_is_durable(
+        store_root,
+        &GENERATION_RECEIPT_STORE,
+        &transaction.receipt.receipt_digest,
+        &transaction.receipt,
+    )? {
         cleanup_committed_transaction(
             store_root,
             &transaction,
@@ -1738,14 +1800,34 @@ fn recover_pending_transaction_unlocked(
     } else {
         rollback_staged_transaction(store_root, &transaction, graph_replay_pool_root)?;
     }
-    clear_transaction(store_root)
+    journal::clear_journal(store_root, &GENERATION_TRANSACTION_JOURNAL)
 }
 
 fn read_active_pointer(
     store_root: &Path,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let path = store_root.join(ACTIVE_POINTER_FILE);
-    let bytes = std::fs::read(&path).map_err(storage)?;
+    // A directory in the pointer slot makes `read(2)` return EISDIR. That is
+    // the same corrupt authority the publication store refuses; do not let the
+    // OS error replace the typed unsafe-state.
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+                "active code-generation pointer is not a regular file".to_owned(),
+            ));
+        }
+        Err(error) => return Err(storage(error)),
+    }
+    let bytes = std::fs::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::IsADirectory {
+            CodeGenerationRetentionErrorV1::UnsafeState(
+                "active code-generation pointer is not a regular file".to_owned(),
+            )
+        } else {
+            storage(error)
+        }
+    })?;
     serde_json::from_slice(&bytes).map_err(|error| {
         CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "active pointer '{}' is corrupt: {error}",
@@ -2031,6 +2113,19 @@ fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {
 
 fn storage(error: impl std::fmt::Display) -> CodeGenerationRetentionErrorV1 {
     CodeGenerationRetentionErrorV1::Storage(error.to_string())
+}
+
+/// A path that is not there yet, or that a peer unlinked after this census
+/// listed it, is not a broken disk. The publisher creates the scope root and
+/// the sealed files under the store lock, then drops that lock; a census that
+/// does not hold the lock can observe the gap. The next tick sees a stable
+/// tree. Every other I/O failure stays a storage error.
+pub(super) fn deferred_if_absent(error: std::io::Error) -> CodeGenerationRetentionErrorV1 {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy
+    } else {
+        storage(error)
+    }
 }
 
 #[cfg(test)]

@@ -193,7 +193,8 @@ fn missing_staged_generation_blocks_pool_exposure_before_receipt() {
         active_pointer: plan.active_pointer.clone(),
         receipt: receipt.clone(),
     };
-    persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist transaction journal");
     stage_collectable_generations(store.path(), &transaction).expect("stage generation");
     let missing = transaction_stage_root(store.path(), &receipt)
         .join(&receipt.deleted_generations[0].generation_file);
@@ -241,7 +242,8 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
     };
 
     // Retention: journal, quarantine, and expose before the receipt.
-    persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist transaction journal");
     stage_collectable_generations(store.path(), &transaction).expect("stage generation");
     {
         let pool_lock =
@@ -261,7 +263,13 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
     // Retention: the receipt and its release event become durable, in the
     // same order the production executor uses (events before receipt).
     graph_replay_release::write_events(store.path(), &receipt).expect("write release events");
-    write_receipt(store.path(), &receipt).expect("write durable receipt");
+    receipt_store::write_receipt(
+        store.path(),
+        &GENERATION_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        &receipt,
+    )
+    .expect("write durable receipt");
     let page = code_generation_graph_replay_release_page(store.path(), None)
         .expect("read durable release event");
     assert_eq!(page.releases.len(), 1);
@@ -333,7 +341,8 @@ fn stale_reconciler_retirement_interleaves_with_retention_without_orphan_or_miss
         &|| false,
     )
     .expect("cleanup retries after release completion");
-    clear_transaction(store.path()).expect("clear transaction journal");
+    journal::clear_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL)
+        .expect("clear transaction journal");
 
     // No orphan: the consumed release's pool copy must not be resurrected,
     // and no release event survives without its pool copy.

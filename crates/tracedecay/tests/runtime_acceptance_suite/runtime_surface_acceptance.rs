@@ -58,8 +58,7 @@ use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
-    WorktreeId,
+    ActorId, CommitId, LocatorDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_domain::{
@@ -99,7 +98,7 @@ impl RuntimeFixture {
     /// that canonicalizes to `/private/var/...`, and a linked worktree is
     /// reached through its symlink. On Unix the fixture therefore addresses
     /// the project through a real filesystem alias, so every request in the
-    /// journey — initialize, document routing, feedback reads — has to
+    /// journey, initialize, document routing, feedback reads, has to
     /// preserve the admitted identity across the spelling difference rather
     /// than only on hosts whose temp directory happens to be an alias.
     fn client_project_path(&self) -> PathBuf {
@@ -224,7 +223,7 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
 /// (`crates/tracedecay/src/daemon/project_open_owners.rs`, reason
 /// `warming_without_sealed_generation`), and the deferred owner
 /// (`.../advisory_runtime/deferred.rs`) upgrades it after the first generation
-/// seals — measured here at one to two seconds *after* `status` already reports
+/// seals, measured here at one to two seconds *after* `status` already reports
 /// `code_graph_serving: ready`. Waiting on the index alone therefore still
 /// negotiates against the warming owner.
 ///
@@ -366,7 +365,7 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
     // flight the gateway writes no frame at all, so silence means "not yet"
     // rather than "never" and a client has to keep reading. The old bound of
     // 200 polls gave up after roughly two seconds, which a real analyzer's
-    // cold start — sysroot load and crate graph build — cannot beat.
+    // cold start, sysroot load and crate graph build, cannot beat.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     while std::time::Instant::now() < deadline {
         let (operation_deadline, cancellation) = lsp_control();
@@ -504,9 +503,9 @@ fn initialize_project(home: &Path, project: &Path) {
     // The V2 code index is Git-authority-based end to end: candidate paths come
     // from the gix worktree classification, generations are minted from Git tree
     // captures, and `worktree_stat_signature_for` opens the repository to prove
-    // freshness. A plain directory therefore never seats a serving generation —
+    // freshness. A plain directory therefore never seats a serving generation,
     // `mount_worktree_inner` documents that missing Git authority leaves it
-    // empty — so every code-graph-backed route reads `failed` here. Enrol the
+    // empty, so every code-graph-backed route reads `failed` here. Enrol the
     // fixture as a repository before `tracedecay init`, exactly as this file's
     // `lsp_runtime_fixture` and `git_runtime_fixture` already do; initializing
     // Git afterwards would re-key the project onto a different worktree
@@ -576,7 +575,7 @@ fn run_storage_status(home: &Path, project: &Path, json_output: bool) -> Output 
 /// therefore races the daemon: graph primitives answer `termination: failed`
 /// and `initialize` negotiates none of the routed analyzer's methods.
 ///
-/// The wait polls the product's own readiness evidence rather than sleeping —
+/// The wait polls the product's own readiness evidence rather than sleeping,
 /// the same `code_index_freshness` boundary `mcp_suite::support::\
 /// wait_for_current_graph` observes.
 fn await_published_code_index(home: &Path, project: &Path) {
@@ -2385,15 +2384,15 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     // The gateway compares roots by parsed path rather than by raw string,
     // because a directory URI legitimately arrives with or without a trailing
     // slash, so the projection is checked the same way it is admitted. The
-    // projection names the root the daemon admitted — the canonical directory
-    // — not the alias the client spelled it through.
+    // projection names the root the daemon admitted, the canonical directory,
+    // not the alias the client spelled it through.
     let projected_root = projection["result"]["rootUri"]
         .as_str()
         .expect("projected root URI");
     // The expectation is the root's identity, not `canonicalize`: a file URL
     // never carries the `\\?\` verbatim prefix Windows canonicalization
     // returns, so comparing against that spelling would refuse the very root
-    // the daemon published. The alias the client spelled is still refused —
+    // the daemon published. The alias the client spelled is still refused,
     // it is a different name for this directory, not this name.
     let projected_path = url::Url::parse(projected_root)
         .ok()
@@ -2574,7 +2573,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             // producer or publication exists for the scope yet) and `failed`
             // (a read that ran and failed) are separately carried terminal
             // states and are never collapsed into one another, so both are
-            // legal here — see the diagnostics projection above, which makes
+            // legal here, see the diagnostics projection above, which makes
             // the same distinction for the same first-run condition. What is
             // never legal is claiming completeness, or carrying items that no
             // handle can expand.
@@ -3641,6 +3640,4 @@ fn cancelled_receipt(context: &RequestContext) -> OperationReceipt {
     receipt
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("manifest digest")
-}
+use tracedecay_domain::test_fixtures::digest;

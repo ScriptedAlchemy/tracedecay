@@ -3,7 +3,7 @@
 //! [`super::detect::redact_sensitive_values`] already parses JSON before it
 //! scans, but it does so by rewriting a `serde_json::Value`. Most payloads that
 //! carry secrets are not JSON and must survive sanitization with their original
-//! shape intact — an indexed `.env` file, a `config.toml`, a pasted request
+//! shape intact, an indexed `.env` file, a `config.toml`, a pasted request
 //! header block, a callback URL. This module parses those formats first, uses
 //! the parse to decide which byte ranges are sensitive, and then replaces only
 //! those ranges in the original text.
@@ -154,7 +154,7 @@ struct SensitiveCandidate {
 /// parse proved sensitive, and runs the bounded raw scan over everything else.
 ///
 /// Text that does not parse whole is treated as untrusted raw input and scanned
-/// exactly as before — never implicitly safe.
+/// exactly as before, never implicitly safe.
 pub(crate) fn sanitize_structured_text(
     raw: &str,
 ) -> Result<StructuredTextSanitizationV1, DetectionError> {
@@ -518,11 +518,11 @@ fn locate_value(raw: &str, key: &str, value: &str) -> Option<Vec<Range<usize>>> 
 }
 
 /// Fail-closed fallback when a parsed value cannot be matched byte-for-byte in
-/// the original text — an escaped JSON string, a folded YAML block. Redacting
+/// the original text, an escaped JSON string, a folded YAML block. Redacting
 /// the rest of the key's line cannot leave the value behind.
 ///
 /// The key must be *anchored* to an occurrence that syntactically looks like
-/// a key — an unanchored `raw.find(key)` would happily match a decoy, e.g. a
+/// a key. An unanchored `raw.find(key)` would happily match a decoy, e.g. a
 /// comment mentioning the key name above the real assignment. Redacting a
 /// decoy's line while the real value sails through untouched is a redaction
 /// fail-open, so a candidate with no qualifying key occurrence returns `None`
@@ -550,8 +550,8 @@ fn locate_key_line_tail(raw: &str, key: &str) -> Option<Range<usize>> {
 /// text mentioning the key's name.
 ///
 /// A qualifying occurrence sits at the start of its line, modulo leading
-/// whitespace or quote characters, and is followed — after an optional
-/// closing quote and whitespace — by a `:` or `=` separator. A bare
+/// whitespace or quote characters, and is followed, after an optional
+/// closing quote and whitespace, by a `:` or `=` separator. A bare
 /// substring match inside a comment ("# rotate the `api_key` monthly") or an
 /// earlier string value ("remember to rotate the `api_key` weekly") does not
 /// qualify, so it can never redirect the redaction span away from the real
@@ -602,8 +602,8 @@ pub fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
 /// The caller already resolved the file's language from its registry
 /// descriptor, so whether whole-document structured-format parsing applies is
 /// a declared fact, never something to sniff back out of the bytes. Sniffing
-/// misclassified ordinary code and prose — markdown with YAML frontmatter,
-/// shell scripts with variable assignments — as malformed structured
+/// misclassified ordinary code and prose, markdown with YAML frontmatter,
+/// shell scripts with variable assignments, as malformed structured
 /// documents and quarantined them wholesale.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodeSourceShapeV1 {
@@ -611,8 +611,8 @@ pub enum CodeSourceShapeV1 {
     /// field semantics apply, and an ambiguous parse stays a fail-closed
     /// quarantine.
     StructuredData,
-    /// Ordinary code or prose: the bounded raw credential scan applies — the
-    /// exact treatment an unparseable document always received — and the
+    /// Ordinary code or prose: the bounded raw credential scan applies, the
+    /// exact treatment an unparseable document always received, and the
     /// document is never quarantined for failing to be a data format it
     /// never claimed to be.
     CodeOrProse,

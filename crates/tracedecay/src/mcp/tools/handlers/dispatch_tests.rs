@@ -375,8 +375,13 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                     definition.name
                 );
                 assert!(
-                    concrete_dispatch_group_accepts(group, &definition.name, &cg, options.clone())
-                        .await,
+                    Box::pin(concrete_dispatch_group_accepts(
+                        group,
+                        &definition.name,
+                        &cg,
+                        options.clone()
+                    ))
+                    .await,
                     "{} has no concrete handler-family entry",
                     definition.name
                 );
@@ -638,7 +643,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     .await
     .unwrap();
     // Publish store branch metadata and reopen, so `serving_branch` is a
-    // claim the store would actually make — the exact claim the gate must
+    // claim the store would actually make, the exact claim the gate must
     // withhold while nothing serves.
     cg.checkpoint().await.unwrap();
     let layout = cg.store_layout().clone();
@@ -1474,7 +1479,7 @@ async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_ha
 }
 
 /// An unresolvable ref must fail fast with a typed git error well inside the
-/// carried deadline — never spinning until the horizon.
+/// carried deadline, never spinning until the horizon.
 #[tokio::test]
 async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -1777,7 +1782,7 @@ fn carried_deadline_is_preferred_when_shorter_and_clamped_when_longer() {
 }
 
 /// An already-elapsed carried deadline is rejected rather than dispatched, for
-/// every group — the same rule the git and memory wraps already applied.
+/// every group, the same rule the git and memory wraps already applied.
 #[test]
 fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
     let elapsed =
@@ -1819,7 +1824,7 @@ fn the_ceiling_reports_a_typed_retryable_problem() {
 }
 
 /// Equivalence: a warm call that finishes well inside the ceiling is untouched
-/// by it — the bound changes failure, not work.
+/// by it, the bound changes failure, not work.
 #[tokio::test]
 async fn a_warm_call_is_unaffected_by_the_ceiling() {
     let _env_lock = lock_user_data_dir_test_env();

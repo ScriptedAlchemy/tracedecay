@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::{Edge, Node};
+use sha2::{Digest, Sha256};
 
 use crate::limits::{
     MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS, MAX_GRAPH_IDENTIFIER_BYTES,
@@ -73,6 +74,21 @@ pub(crate) const INDEXED_PROPERTIES: [&str; 6] = [
     QUARANTINE_KEY_PROPERTY,
 ];
 
+/// Durable `{kind}:{sha256}` stem used for graph entity and relation ids.
+///
+/// Kind and value are separated by a NUL byte so a kind cannot be smuggled
+/// in as a prefix of the value. Code-graph symbols, git topology, and
+/// workflow topology all mint ids through this function; the byte layout is
+/// already sealed in stored graphs.
+#[must_use]
+pub fn graph_stable_identity(kind: &str, value: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(kind.as_bytes());
+    digest.update([0]);
+    digest.update(value.as_bytes());
+    format!("{kind}:{}", hex::encode(digest.finalize()))
+}
+
 pub(crate) fn encoded_namespace_key(namespace: &GraphNamespace) -> String {
     hex::encode(namespace.as_str().as_bytes())
 }
@@ -96,8 +112,8 @@ fn key_label(prefix: &str, key: &str) -> String {
 /// The indexed unique-key value for one entity.
 ///
 /// Entity identity resolves through [`ENTITY_KEY_PROPERTY`], never through a
-/// synthetic per-entity label. A label index would mint one native label — and
-/// therefore one columnar node table — per entity, which caps out at grafeo's
+/// synthetic per-entity label. A label index would mint one native label, and
+/// therefore one columnar node table, per entity, which caps out at grafeo's
 /// `u16` table id long before a real repository graph is loaded.
 pub(crate) fn entity_key_value(namespace: &GraphNamespace, identity: &GraphEntityId) -> Value {
     Value::from(stable_key(namespace, identity.as_str()))
@@ -706,9 +722,9 @@ const COMPACT_LABEL_SEPARATOR: char = '|';
 
 /// Every native label `node` carries, whichever store it came from.
 ///
-/// A `CompactStore` files a multi-label node under a *composite* label — the
+/// A `CompactStore` files a multi-label node under a *composite* label, the
 /// node's label set sorted and joined with `|`
-/// (`grafeo-core/src/graph/compact/builder.rs:1129`) — and its `get_node`
+/// (`grafeo-core/src/graph/compact/builder.rs:1129`), and its `get_node`
 /// restores that composite as the node's single label
 /// (`compact/graph_store_impl.rs:31`). An entity carries a record label plus
 /// owner and domain labels, so reading `node.labels` directly sees one fused
@@ -817,5 +833,22 @@ fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod graph_stable_identity_tests {
+    use super::graph_stable_identity;
+
+    #[test]
+    fn kind_and_value_stay_separated_by_a_nul() {
+        assert_eq!(
+            graph_stable_identity("symbol", "occ"),
+            "symbol:199f069a8ccddbb90bd0626b5904f52fbb2d92879bdbbf2c5dc29c1ea4ab66fb"
+        );
+        assert_ne!(
+            graph_stable_identity("symbol", "occ"),
+            graph_stable_identity("symbolo", "cc")
+        );
     }
 }

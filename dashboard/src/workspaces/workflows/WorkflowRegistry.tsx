@@ -104,7 +104,7 @@ export function WorkflowRegistryPanel({
         />
       ) : visible.length === 0 ? (
         <p className="text-3xs text-text-muted" data-testid="workflow-registry-no-match">
-          No registered identity contains “{query.trim()}”. {entries.length} remain registered.
+          No registered identity contains "{query.trim()}". {entries.length} remain registered.
         </p>
       ) : (
         <div className="min-w-0">
@@ -209,7 +209,7 @@ function RegistryRow({
 }
 
 /** The disposition column: the daemon's own answer when it gave one this
- * session, otherwise `unread` — dotted, muted, and spelled out, because the
+ * session, otherwise `unread`, dotted, muted, and spelled out, because the
  * registry serves no disposition and a blank cell would read as "none". */
 export function DispositionCell({
   receipt,

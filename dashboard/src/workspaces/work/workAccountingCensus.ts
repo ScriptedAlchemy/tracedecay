@@ -19,7 +19,7 @@ import type {
  * The census exists so the cards read a tallied structure instead of the
  * attempts: three cards would otherwise each re-walk the same page, and a
  * fourth reading of the same field is a fourth chance to disagree with the
- * other three. Nothing here resolves a contradiction it finds — a page whose
+ * other three. Nothing here resolves a contradiction it finds, a page whose
  * typed `state` and typed `recovery` disagree is COUNTED as a disagreement,
  * because neither field is the authority over the other and the card's job is
  * to say so rather than to pick.
@@ -37,7 +37,7 @@ import type {
  * One walk of the page; the cards below read this rather than the attempts. */
 export interface AttemptCensus {
   readonly attempts: number;
-  /** Attempts with no terminal evidence — right-censored, not failures. */
+  /** Attempts with no terminal evidence, right-censored, not failures. */
   readonly open: number;
   readonly recovery: {
     readonly fresh: number;
@@ -153,7 +153,7 @@ export function coverageSentence(page: WorkAttemptListV1 & { state: 'listed' }):
     case 'complete':
       return `complete over ${coverage.returned} ${coverage.returned === 1 ? 'attempt' : 'attempts'}`;
     case 'capped':
-      return `capped attempt page: ${coverage.returned} returned and ${coverage.remaining} remaining — every count below is a floor`;
+      return `capped attempt page: ${coverage.returned} returned and ${coverage.remaining} remaining, every count below is a floor`;
     default: {
       const unhandled: never = coverage;
       return unhandled;
@@ -196,7 +196,7 @@ export function attemptProvenance(
         unit: 'attempts',
         note:
           page.coverage.coverage === 'capped'
-            ? 'count on the capped attempt page — a floor, not a total'
+            ? 'count on the capped attempt page, a floor, not a total'
             : undefined,
       },
     },

@@ -106,6 +106,7 @@ pub use contract::{
     SessionRetrievalServiceOutcome, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
     SessionRetrievalUnavailableReason, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
+pub(crate) use contract::{temporal_message_type, temporal_session_scope};
 pub use primitive::DaemonSessionLookupPrimitiveV1;
 
 /// Serving identity of the store the daemon currently serves, extracted

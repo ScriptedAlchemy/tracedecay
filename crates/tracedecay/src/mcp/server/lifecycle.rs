@@ -38,7 +38,7 @@ pub(crate) struct VersionCheckState {
 /// caller per window proceeds.
 ///
 /// Note: call sites are inconsistent about additionally special-casing
-/// a `0` (never-checked) stamp before calling `try_claim` — some do,
+/// a `0` (never-checked) stamp before calling `try_claim`, some do,
 /// some don't. That inconsistency predates this extraction and is
 /// preserved as-is here rather than harmonized.
 struct CooldownGate;
@@ -123,14 +123,14 @@ impl McpServer {
     ///
     /// **Serve old, await new.** On drift the caller does *not* wait for the
     /// reopen. `reopen_for_current_branch` is a full DB open plus a sealed
-    /// restore — O(store), seconds to minutes on a large index — and it used to
+    /// restore, O(store), seconds to minutes on a large index, and it used to
     /// run inline on the request that happened to notice the checkout, with
     /// every other caller blocked behind the reopen lock. Now the reopen is
     /// retained and single-flighted, and every caller
-    /// — the one that noticed the drift included — serves the last complete
+    ///, the one that noticed the drift included, serves the last complete
     /// snapshot until the swap lands.
     ///
-    /// If reopening fails the previous instance is kept — the effect-time
+    /// If reopening fails the previous instance is kept, the effect-time
     /// branch identity check in the hook writer and
     /// [`Self::maybe_sync_if_stale`] still protect writes.
     #[hotpath::skip]
@@ -242,8 +242,8 @@ impl McpServer {
 
     /// Catch-up helper for tests and explicit callers. Bypasses the 30 s
     /// cooldown in [`Self::maybe_sync_if_stale`] so changes made while the
-    /// server was down — a terminal `git pull`, IDE edits before the agent
-    /// launched, files touched by another tool — are admitted for authoritative
+    /// server was down, a terminal `git pull`, IDE edits before the agent
+    /// launched, files touched by another tool, are admitted for authoritative
     /// reconciliation. This method waits only for scheduler admission, never
     /// for indexing. The staleness-check stamp is updated on the way out so the
     /// next lazy request does not immediately enqueue duplicate work.
@@ -283,10 +283,7 @@ impl McpServer {
                 return;
             }
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = crate::project::current_timestamp();
         self.last_staleness_check_at.store(now, Ordering::Release);
 
         self.startup_catch_up.settle();
@@ -311,7 +308,7 @@ impl McpServer {
     }
 
     /// Claim the lazy-reconciliation window for edit-shaped tools and enqueue it
-    /// in the background — but only if at least 30 s have passed since the last
+    /// in the background, but only if at least 30 s have passed since the last
     /// successful admission. The cooldown is the gate: while it holds, this returns
     /// immediately, so dropping it into every `tools/call` handler is cheap.
     ///
@@ -319,14 +316,14 @@ impl McpServer {
     /// reindex the entire stale set inline, on the request
     /// path, with no bound: one `git pull` ahead of an edit tool turned that
     /// call into an O(store) reindex the client waited on. The claim is still
-    /// made here — so the cooldown and single-flight semantics are unchanged —
+    /// made here, so the cooldown and single-flight semantics are unchanged,
     /// but the bounded request is retained through the same mechanism read tools
-    /// already use ([`Self::spawn_read_refresh_task`]), and the caller serves
+    /// already use (`Self::spawn_read_refresh_task`), and the caller serves
     /// immediately on the current snapshot. Freshness is reported separately by
     /// the code-index authority after reconciliation completes.
     ///
     /// Concurrent callers are serialized via
-    /// [`Self::last_staleness_check_at`]: the first caller stamps `now`
+    /// `Self::last_staleness_check_at`: the first caller stamps `now`
     /// into the field with `compare_exchange`; later callers within the
     /// same window see the stamp and bail. If admission fails, the stamp still
     /// advances so every subsequent tool call does not retry immediately.
@@ -336,10 +333,7 @@ impl McpServer {
             return;
         }
         let cg = self.cg_snapshot().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = crate::project::current_timestamp();
         let previous = self.last_staleness_check_at.load(Ordering::Acquire);
         if previous != 0 && now.saturating_sub(previous) < 30 {
             return;
@@ -394,8 +388,8 @@ impl McpServer {
     ///
     /// R4: this runs before any cooldown claim, so it is on the hot path of
     /// every read tool call. It takes the caller's request-scoped branch memo
-    /// — the same resolution `reopen_if_branch_drifted` already made for this
-    /// request — instead of re-opening the repository.
+    ///, the same resolution `reopen_if_branch_drifted` already made for this
+    /// request, instead of re-opening the repository.
     pub(crate) fn maybe_spawn_read_refresh(
         &self,
         cg: &Arc<TraceDecay>,
@@ -406,7 +400,7 @@ impl McpServer {
         }
         // A checkout racing this call would diff the new branch against the
         // old branch's DB; `tools/call` reopens onto the live branch before
-        // dispatch, so this only fires on an in-flight race. Skip it — the
+        // dispatch, so this only fires on an in-flight race. Skip it, the
         // next call runs on the reopened snapshot.
         if cg.branch_drifted_with(live_branch) {
             return;

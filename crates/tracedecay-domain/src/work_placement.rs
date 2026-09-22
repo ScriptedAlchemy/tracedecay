@@ -307,7 +307,7 @@ impl WorkPlacementObservationV1 {
     /// The typed blockers that forbid *removing* this placement's bytes.
     ///
     /// Removal is judged more strictly than admission, and deliberately so:
-    /// dirt in a linked worktree — which does not block creating one — does
+    /// dirt in a linked worktree, which does not block creating one, does
     /// block deleting one. An unmanaged placement owns no bytes, so it has
     /// nothing removal could destroy.
     pub fn removal_blockers(
@@ -564,17 +564,7 @@ mod tests {
         }
     }
 
-    /// `Path::is_absolute` is host-specific: a bare `/workspace/...` literal
-    /// is not absolute on Windows, where an absolute path needs a drive or a
-    /// UNC prefix. The fixture must name a root the running host agrees is
-    /// absolute, or the contract rejects it as `InvalidTargetRoot`.
-    fn absolute_root(posix: &str) -> String {
-        if cfg!(windows) {
-            format!("C:{}", posix.replace('/', "\\"))
-        } else {
-            posix.to_owned()
-        }
-    }
+    use crate::test_fixtures::fixture_abs_root as absolute_root;
 
     fn linked() -> WorkPlacementTargetV1 {
         WorkPlacementTargetV1::new(

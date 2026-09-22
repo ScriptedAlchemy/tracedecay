@@ -10,7 +10,7 @@ const PATTERN: Record<EvidenceQuality, string> = {
 };
 
 /** Evidence quality rendered as the plan's PATTERN axis (solid, hatched,
- * dotted, dashed) — never a color — with the label alongside so the meaning
+ * dotted, dashed), never a color, with the label alongside so the meaning
  * survives monochrome, forced-colors, and screen readers alike. */
 export function EvidencePattern({
   quality,

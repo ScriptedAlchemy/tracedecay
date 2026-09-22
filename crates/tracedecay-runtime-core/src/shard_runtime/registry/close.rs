@@ -414,7 +414,6 @@ impl StoreRuntimeRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -439,13 +438,7 @@ mod tests {
     };
     use crate::shard_runtime::shard::ShardRuntime;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn profile_shard() -> StoreShardIdV1 {
         StoreShardIdV1::profile(

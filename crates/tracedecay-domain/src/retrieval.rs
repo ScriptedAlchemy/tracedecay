@@ -1121,7 +1121,7 @@ pub enum PublicRetrieverStatus {
 /// and hashed with
 /// [`QUERY_FALLBACK_SUBPAYLOAD_DIGEST_DOMAIN`]; the `digest` field is excluded
 /// from the hashed bytes. It contains the complete accepted
-/// exact+lexical+graph result — IDs, order, contributions, explanations,
+/// exact+lexical+graph result. IDs, order, contributions, explanations,
 /// coverage, and cursor bytes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1281,13 +1281,7 @@ mod tests {
     const ONE_DIGEST: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn freshness() -> SourceFreshness {
         SourceFreshness {

@@ -183,8 +183,6 @@ impl BranchMemo {
 
 /// Acquires the shared branch-add lock.
 pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::File> {
-    use fs2::FileExt;
-
     std::fs::create_dir_all(tracedecay_dir)?;
     let lock_path = tracedecay_dir.join(".branch-add.lock");
     let file = std::fs::OpenOptions::new()
@@ -192,7 +190,8 @@ pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> Result<std::fs::Fil
         .write(true)
         .truncate(false)
         .open(&lock_path)?;
-    file.try_lock_exclusive()
+    file.try_lock()
+        .map_err(std::io::Error::from)
         .map_err(|e| TraceDecayError::SyncLock {
             message: format!("branch add already running at {}: {e}", lock_path.display()),
         })?;
@@ -320,7 +319,7 @@ mod branch_memo_tests {
     use super::BranchMemo;
 
     /// A memo answers repeated reads of its own root from one resolution, and
-    /// refuses to answer for a different root — a different repository is a
+    /// refuses to answer for a different root, a different repository is a
     /// different HEAD, so it must be resolved directly.
     #[test]
     fn memo_serves_its_own_root_and_bypasses_for_another() {

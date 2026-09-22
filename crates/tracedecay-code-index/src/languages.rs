@@ -59,7 +59,7 @@ pub(crate) fn canonical_language_id(language_name: &str) -> String {
 ///
 /// Markdown qualifies: a heading owns its whole section, and nested headings
 /// are stable child spans. That is what keeps a chunk from splitting mid
-/// section — an oversized section splits at its sub-heading boundaries via
+/// section, an oversized section splits at its sub-heading boundaries via
 /// `structural_segments` instead of at an arbitrary byte window, and a section
 /// that fits the budget stays one chunk.
 fn has_stable_member_spans(language: &str) -> bool {
@@ -207,14 +207,22 @@ impl StaticLanguageRegistry {
             // struct-literal initialisers (never method calls or constructor-like
             // names), records restricted `pub` re-export scopes separately
             // from unrestricted exports, and resolves inherent impl methods across files of
-            // the owning type. Pinning these behaviors forces older file
-            // artifacts to be re-extracted.
+            // the owning type. Every language moved one revision when clone-body
+            // eligibility gained its token bound and again when it gained the
+            // pre-tokenization byte bound: one multi-megabyte literal is only
+            // a few tokens but still cannot fit a text-artifact page. Rust v11
+            // stopped emitting the bare method name of a dotted call, so an
+            // unrelated same-file callable sharing that name is no longer a
+            // caller, and types `self` through the enclosing impl or trait.
+            // Rust v12 resolves a receiver whose type is a type parameter with
+            // one trait bound to `Trait::method`, so that call now has a
+            // callee. Only re-extraction removes the poisoned record.
             let extractor_revision = if language == "rust" {
-                8
+                12
             } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
-                4
+                6
             } else {
-                3
+                5
             };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())
@@ -415,7 +423,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v8");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v12");
 
         assert_eq!(
             registry

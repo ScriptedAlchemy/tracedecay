@@ -22,10 +22,10 @@
 //! references, backticked `/skill` invocations, and `tracedecay_*` MCP tool
 //! mentions must all resolve against the bundle / the live MCP tool list.
 //!
-//! The generic per-file intersection contract — frontmatter whitelist,
+//! The generic per-file intersection contract, frontmatter whitelist,
 //! name/folder match, description budgets/trigger/uniqueness, one plain-title
 //! H1 / heading levels / no `## When to Use`, the 500-line cap, LF hygiene,
-//! placeholder + reserved-prefix checks, and resource-dir layout — now lives
+//! placeholder + reserved-prefix checks, and resource-dir layout, now lives
 //! once in `tests/agent_suite/shared_skill_contract_test.rs` over the single
 //! `plugin/skills/` tree. The receipt-backed lifecycle suite owns install
 //! byte-parity + host-extra frontmatter + metadata budgets. This file keeps
@@ -48,7 +48,7 @@ const CURSOR_COMMAND_ROOT: &str = "plugin/overlays/cursor/commands";
 
 /// Stages the Cursor skill *source* set into a temp dir: the 17 shared
 /// model-invocable skills from `plugin/skills/` (all non-`tracedecay-*` slugs).
-/// This is exactly the skill set Cursor deploys — the `tracedecay-*` workflow
+/// This is exactly the skill set Cursor deploys, the `tracedecay-*` workflow
 /// slugs are native commands there (see [`command_slugs`]), not skills.
 fn staged_cursor_skills() -> TempDir {
     let staged = TempDir::new().expect("temp cursor skill source");

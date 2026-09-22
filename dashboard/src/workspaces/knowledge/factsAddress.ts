@@ -4,8 +4,8 @@
  * Camera (`view`), applied query (`q`), sort (`sort`) and selected fact
  * (`fact`) are all URL parameters so a reload or a shared link reopens the
  * exact reading. All writes replace rather than push: panning across facts is
- * not a trail of places to go back to. Inspection — the fact under the pointer
- * or focus — is deliberately NOT in the address; it is transient by
+ * not a trail of places to go back to. Inspection, the fact under the pointer
+ * or focus, is deliberately NOT in the address; it is transient by
  * definition and would otherwise rewrite the URL on every hover.
  *
  * Fact identity is owned by a project (`FactId::validate_owner`), so a

@@ -55,13 +55,7 @@ fn names(result: &ExtractionResult, kind: NodeKind) -> Vec<&str> {
         .collect()
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Display,
-{
-    T::try_from(value.to_owned()).unwrap_or_else(|error| panic!("{value}: {error}"))
-}
+use tracedecay_domain::test_fixtures::id;
 
 #[test]
 fn metal_dispatches_on_its_extension() {

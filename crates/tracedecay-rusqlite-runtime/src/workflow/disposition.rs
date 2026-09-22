@@ -2,8 +2,8 @@
 //!
 //! `candidate`, `validate`, `activate`, `retire`, and `reject` are retained
 //! lifecycle operations over immutable definition versions. The definition
-//! payload never changes — editing creates a new version and admitted runs
-//! remain pinned — so the disposition is a separate compare-and-swap
+//! payload never changes, editing creates a new version and admitted runs
+//! remain pinned, so the disposition is a separate compare-and-swap
 //! aggregate, and every state a transition passes through is appended to an
 //! immutable journal.
 

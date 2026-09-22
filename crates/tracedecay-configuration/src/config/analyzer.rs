@@ -5,7 +5,7 @@
 //! layers; these helpers consume that pinned snapshot and return the complete
 //! validated selection set. They never probe an executable, read host state,
 //! consult an adapter default, or substitute an empty selection for a value
-//! they could not read — a missing, mistyped, tampered, or invalid input fails
+//! they could not read, a missing, mistyped, tampered, or invalid input fails
 //! closed with a typed error.
 
 use thiserror::Error;
@@ -79,13 +79,7 @@ mod tests {
 
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture id is canonical")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn analyzer_key() -> SettingKey {
         SettingKey::new(ANALYZER_SETTINGS_SETTING_KEY).unwrap()
@@ -150,7 +144,7 @@ mod tests {
         );
 
         // The published selection is reachable per language, including the
-        // explicitly disabled one — the accessor never hides a row.
+        // explicitly disabled one, the accessor never hides a row.
         let rust = configured_language_selection(
             resolved,
             &AnalyzerLanguageId::new("rust".to_owned()).unwrap(),

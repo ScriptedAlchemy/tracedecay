@@ -4,7 +4,6 @@ mod work_product_attempt_support;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use tracedecay_contracts::{
@@ -57,27 +56,13 @@ pub const SHA256_B: &str =
 const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
     include_str!("../../../../tracedecay-policy/tests/fixtures/source_authorization/core.json");
 
-pub fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("fixture identity is canonical")
-}
+pub use tracedecay_domain::test_fixtures::id;
 
 pub fn digest(value: &str) -> ManifestDigest {
     ManifestDigest::new(value).expect("fixture digest is canonical")
 }
 
-/// Platform-absolute fixture root: the work and registered-root contracts
-/// require `Path::is_absolute`, which a bare `/...` literal fails on Windows.
-pub fn fixture_abs_root(posix: &str) -> String {
-    if cfg!(windows) {
-        format!("C:{}", posix.replace('/', "\\"))
-    } else {
-        posix.to_owned()
-    }
-}
+pub use tracedecay_domain::test_fixtures::fixture_abs_root;
 
 /// Canonical digest fixture for the Work-attempt product journey.
 pub fn work_digest(value: char) -> ManifestDigest {

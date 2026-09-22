@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::{DaemonServiceSpec, DaemonServiceState};
+use super::{DaemonServiceSpec, DaemonServiceState, xml_escape, xml_unescape};
 
 #[cfg(any(windows, test))]
 const TASK_NAME_PREFIX: &str = "TraceDecay Daemon";
@@ -1812,30 +1812,6 @@ fn missing_task(operation: &str) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("cannot {operation} TraceDecay daemon task: task is not registered"),
     }
-}
-
-fn xml_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-fn xml_unescape(value: &str) -> String {
-    value
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
 }
 
 fn xml_element_text<'a>(xml: &'a str, element: &str) -> Option<&'a str> {

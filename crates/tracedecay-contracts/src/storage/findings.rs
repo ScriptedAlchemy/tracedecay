@@ -48,8 +48,8 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
 
 /// Report a store whose historical schema migrations have not completed.
 ///
-/// These migrations cost what the store costs — a full index rebuild, a
-/// whole-table rewrite — so they run as background convergence after
+/// These migrations cost what the store costs: a full index rebuild, a
+/// whole-table rewrite, so they run as background convergence after
 /// admission rather than inside an open's write lease, and the daemon serves
 /// while they run. `state` carries what the convergence authority observed:
 /// `Stale` while a store is behind its current schema but readable, and
@@ -94,17 +94,12 @@ fn evidence(
     ))
 }
 
-/// Truncate to at most `max` bytes, cutting at a char boundary so the result
-/// stays valid UTF-8 (and a truncated reference identifier stays well formed).
+/// Truncate to at most `max` bytes on a char boundary.
+///
+/// The cut is `utf8_prefix_at_or_before`. This only owns the `String` the
+/// evidence identifiers store.
 pub(crate) fn truncate_at_char_boundary(value: &str, max: usize) -> String {
-    if value.len() <= max {
-        return value.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_string()
+    tracedecay_domain::utf8_prefix_at_or_before(value, max).to_string()
 }
 
 fn coverage(
@@ -294,7 +289,7 @@ pub fn table_growth_finding(
 
 /// Produce the `OverBudgetStore` finding from a telemetry read and its budget.
 ///
-/// An over-budget store is *always* a non-healthy finding — the budget is never
+/// An over-budget store is *always* a non-healthy finding. The budget is never
 /// silently ignored. Unobservable telemetry yields an honest
 /// unsupported/denied/unknown finding, and a within-budget store yields a
 /// healthy finding only when coverage is genuinely complete.
@@ -464,8 +459,8 @@ pub fn incident_debris_finding(
 
 /// Produce the `RetentionBacklog` finding from a retention backlog record.
 ///
-/// Backlog past the retention window is `Stale` — evidence held past its
-/// watermark — and references the retention-collection operation.
+/// Backlog past the retention window is `Stale`: evidence held past its
+/// watermark, and references the retention-collection operation.
 pub fn retention_backlog_finding(
     record: &RetentionBacklogRecordV1,
     completeness: DoctorCoverageCompletenessV1,
@@ -502,7 +497,7 @@ pub fn retention_backlog_finding(
 /// stranded-scope class one level up.
 ///
 /// Both classes share one finding because they describe the same store from the
-/// owner's point of view — "how many code-index bytes are being held that
+/// owner's point of view: "how many code-index bytes are being held that
 /// nothing reads". They are reported as separate numbers because a scope-local
 /// generation census structurally cannot see a stranded sibling scope, and
 /// folding the two totals together would let a clean generation census hide

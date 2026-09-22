@@ -394,7 +394,7 @@ impl InMemoryCodeGraphProjectionBuilder {
     /// symbol index, so the interactive reader can resolve qualified names and
     /// kinds. [`Self::publish_with_cancellation`] publishes edges and chunks
     /// alone, which leaves every symbol without metadata and therefore
-    /// unresolvable by name — the shape integration fixtures need.
+    /// unresolvable by name, the shape integration fixtures need.
     #[cfg(feature = "test-helpers")]
     pub fn publish_indexed_with_cancellation(
         &self,
@@ -478,25 +478,12 @@ impl InMemoryCodeGraphProjectionBuilder {
         freshness: SourceFreshness,
         cancellation: &CancellationSignal,
     ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
-        let snapshot = self
-            .snapshot
-            .read()
-            .map_err(|_| {
-                CodeGraphProjectionError::Unavailable(
-                    "code graph verified snapshot lock is poisoned".to_owned(),
-                )
-            })?
-            .clone()
-            .ok_or_else(|| {
-                CodeGraphProjectionError::Unavailable(
-                    "code graph generation is not published".to_owned(),
-                )
-            })?;
-        CodeGraphProjectionStore::from_verified_snapshot(
-            snapshot.as_ref().clone(),
-            generation.clone(),
-        )?
-        .evidence_reader(generation, repository_id, freshness, cancellation)
+        self.verified_store(generation)?.evidence_reader(
+            generation,
+            repository_id,
+            freshness,
+            cancellation,
+        )
     }
 }
 
@@ -628,8 +615,8 @@ pub fn code_graph_projection_identity(
     Ok(GraphProjectionIdentity::new(namespace, projection()?))
 }
 
-/// The code-graph generation's manifest identity — the metadata half a
-/// sealed-read-bundle binding digest hashes — reconstructed without touching
+/// The code-graph generation's manifest identity, the metadata half a
+/// sealed-read-bundle binding digest hashes, reconstructed without touching
 /// any bulk row. Every field is a pure function of the namespace, the sealed
 /// code generation, and the projector revision, exactly as
 /// [`build_code_graph_manifest_checked`] would set them.

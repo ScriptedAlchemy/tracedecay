@@ -1,7 +1,7 @@
 //! Compaction policy (Plan 38 §6).
 //!
 //! Stores accumulate unreclaimed free pages. This module decides *whether* an
-//! incremental vacuum should be scheduled — never *when* it runs on the hot
+//! incremental vacuum should be scheduled, never *when* it runs on the hot
 //! path. The policy is a pure function of a size sample and a free-page-ratio
 //! threshold. Placement is structurally constrained to a deferred background
 //! lane ([`CompactionPlacementV1`]) so a compaction can never be scheduled to
@@ -137,7 +137,7 @@ impl CompactionDecisionV1 {
     }
 
     /// The placement, if scheduled. Always the deferred background lane by
-    /// construction — foreground placement is unrepresentable.
+    /// construction, foreground placement is unrepresentable.
     #[must_use]
     #[hotpath::skip]
     pub const fn placement(&self) -> Option<CompactionPlacementV1> {

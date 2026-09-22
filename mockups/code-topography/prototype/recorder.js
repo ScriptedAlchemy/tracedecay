@@ -2,7 +2,7 @@
  * Flight recorder for the TRACE prototype.
  *
  * Round two exists to be measured, not admired. Every claim about feel in the
- * report — settle frames, follow ratios, frame-time p95 — comes out of a
+ * report, settle frames, follow ratios, frame-time p95, comes out of a
  * recording made by this module, so a number in the README can be traced to a
  * captured frame rather than to an impression.
  *
@@ -67,7 +67,7 @@ export function createRecorder({ getPositions, nodeIds, now, maxFrames = 20000 }
      * simulation has stepped, so frame N holds the positions frame N drew.
      *
      * Two different times are recorded and they answer different questions:
-     * `frameMs` is the INTERVAL since the previous captured frame — at a healthy
+     * `frameMs` is the INTERVAL since the previous captured frame, at a healthy
      * 60 Hz it is 16.7 ms by definition, so it detects dropped frames and
      * nothing else. `workMs` is the time the page spent stepping and painting,
      * which is the number that has to fit inside the budget. Conflating them
@@ -95,7 +95,7 @@ export function createRecorder({ getPositions, nodeIds, now, maxFrames = 20000 }
       return this;
     },
 
-    /** Annotate the timeline — gesture boundaries, theme flips, releases. */
+    /** Annotate the timeline, gesture boundaries, theme flips, releases. */
     mark(label, detail) {
       if (!recording) return this;
       marks.push({ t: clock() - startedAt, frame: frames.length, label, detail });
@@ -146,7 +146,7 @@ export function createRecorder({ getPositions, nodeIds, now, maxFrames = 20000 }
  *
  * Lives beside the recorder rather than in the QA script because it is the
  * definition of "followed" that every assertion and every reported ratio
- * shares — one definition, so the gate and the report cannot drift.
+ * shares, one definition, so the gate and the report cannot drift.
  *
  * @param {{nodeIds: string[], frames: Array<{positions: number[]}>}} take
  * @param {number} fromFrame
@@ -166,7 +166,7 @@ export function displacements(take, fromFrame, toFrame) {
 
 /**
  * First frame at or after `fromFrame` where every node moved less than
- * `restPx` between consecutive frames — the recorded definition of settled.
+ * `restPx` between consecutive frames. The recorded definition of settled.
  *
  * @returns {number} frame index, or -1 if the take never settles.
  */

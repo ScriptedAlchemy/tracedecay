@@ -25,6 +25,7 @@ use super::wake::{
     SessionTemporalRefreshWakeState, TerminalAttemptGuard,
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_session_temporal_store::{
     SessionRefreshRecoveryV1, SessionRefreshRestartStateV1, SessionTemporalStore,
 };
@@ -74,8 +75,8 @@ enum LcmConvergencePage {
 /// history perpetually needs another pass would otherwise never repair a
 /// range persisted before the policy-anchor role filter. Every
 /// `HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE`-th such pass therefore
-/// spends its admission — the same permit and bounded budget one history page
-/// takes — on the rewrite alone, which caps the rewrite's starvation at that
+/// spends its admission, the same permit and bounded budget one history page
+/// takes, on the rewrite alone, which caps the rewrite's starvation at that
 /// many passes per page while leaving history the other passes.
 fn lcm_convergence_admission(
     outcome: Option<SessionHistoricalIngestOutcome>,
@@ -97,6 +98,30 @@ fn lcm_convergence_admission(
 /// has no free permit. The worker retries after the history-retry delay while
 /// projection serving continues unblocked.
 pub(super) const HISTORY_ADMISSION_SATURATED_REASON: &str = "history_admission_saturated";
+
+/// How the worker schedules the pass after one that still needs history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryContinuation {
+    /// The window admitted work and yielded. Run the next window now.
+    Immediate,
+    /// The pass needs another window but admitted nothing. Back off.
+    Backoff,
+    /// History does not need another pass.
+    Settled,
+}
+
+/// A Codex catch-up yields after one rollout. That yield is progress, so the
+/// continuation must not pay the no-progress retry delay or a corpus larger
+/// than one window misses the import deadline.
+fn history_continuation(outcome: Option<SessionHistoricalIngestOutcome>) -> HistoryContinuation {
+    match outcome {
+        Some(SessionHistoricalIngestOutcome::Pending {
+            made_progress: true,
+        }) => HistoryContinuation::Immediate,
+        Some(outcome) if outcome.needs_another_pass() => HistoryContinuation::Backoff,
+        _ => HistoryContinuation::Settled,
+    }
+}
 
 pub(super) async fn run_session_temporal_refresh_scheduler(
     database: RegisteredGlobalDbLeaseV1,
@@ -386,7 +411,21 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             } else if history_needs_another_pass {
                 state.mark_running();
                 retry_attempt = 0;
-                state.update_history_retry_state(true);
+                match history_continuation(history_outcome) {
+                    // A bounded window that admitted work already yielded. The
+                    // next window is continuation of that import, not a failure
+                    // retry: the 250ms backoff below is only for passes that
+                    // made no progress. Sleeping on every successful window
+                    // makes a multi-window corpus miss the import deadline.
+                    HistoryContinuation::Immediate => {
+                        state.update_history_retry_state(false);
+                        state.wake_history();
+                    }
+                    HistoryContinuation::Backoff => {
+                        state.update_history_retry_state(true);
+                    }
+                    HistoryContinuation::Settled => {}
+                }
             } else {
                 if history_outcome.is_some() {
                     state.update_history_retry_state(false);
@@ -596,11 +635,34 @@ async fn session_projection_refresh(
     run_session_temporal_refresh_pass(database, state, projector, policy).await
 }
 
-fn classify_store_error(error: &SessionStoreError) -> SessionTemporalRefreshRetryClass {
-    if error.is_storage() {
-        SessionTemporalRefreshRetryClass::Storage
-    } else {
-        SessionTemporalRefreshRetryClass::Projector
+/// True when replaying this store failure unchanged could still succeed.
+///
+/// `is_storage` only says the failure came from the storage adapter; it does
+/// not say the failure is transient. A schema-contract trigger refusing the
+/// submitted row, or an exact-SQL ceiling refusing the submitted statement, is
+/// deterministic: the worker resubmits the identical request every pass, so
+/// treating it as retryable is an unbounded spin at the backoff cap rather
+/// than a recovery. Those are terminal, and the caller durably fails the
+/// refresh instead of retrying it.
+fn is_retryable_storage(error: &SessionStoreError) -> bool {
+    matches!(error, SessionStoreError::Storage { .. }) && !is_deterministic_refusal(error)
+}
+
+/// True when the durable contract refused the exact submitted row or
+/// statement: a typed store refusal, or an engine failure that replays
+/// identically. Only such a refusal retires a running refresh. An
+/// interrupted pass (cancelled control, deadline, budget) and transient
+/// storage leave the operation for the next pass, which may hold a
+/// different control.
+fn is_deterministic_refusal(error: &SessionStoreError) -> bool {
+    match error {
+        SessionStoreError::Cancelled
+        | SessionStoreError::DeadlineExceeded
+        | SessionStoreError::BudgetExceeded { .. } => false,
+        SessionStoreError::Storage { source, .. } => source
+            .downcast_ref::<EngineError>()
+            .is_some_and(EngineError::is_deterministic_refusal),
+        _ => true,
     }
 }
 
@@ -629,7 +691,7 @@ pub async fn process_refresh_begin_requests(
                     tracedecay_store::SessionRefreshDispositionV1::Joined => report.joined += 1,
                 }
             }
-            Err(error) if error.is_storage() => {
+            Err(error) if is_retryable_storage(&error) => {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -671,7 +733,7 @@ pub async fn begin_admitted_session_refreshes(
     {
         Ok(page) => page,
         Err(error) => {
-            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+            if is_retryable_storage(&error) {
                 report.last_error = Some(format!("{error:?}"));
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -729,7 +791,7 @@ async fn complete_ready_refresh(
         Ok(_) => {
             report.completed += 1;
         }
-        Err(error) if error.is_storage() => {
+        Err(error) if is_retryable_storage(&error) => {
             report.last_error = Some(format!("{error:?}"));
             report.retryable_errors += 1;
             report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
@@ -758,6 +820,48 @@ fn record_projector_error(
     }
 }
 
+/// Typed failure recorded when the durable contract refuses the projected
+/// progress row. It is not a projector fault: the row was well formed for the
+/// state the projector read, and the durable state disagrees.
+const REFRESH_PROGRESS_REFUSED: &str = "refresh_progress_refused";
+
+/// Builds the durable failure request that retires one running refresh.
+fn durable_failure_request(
+    recovery: &SessionRefreshRecoveryV1,
+    failure_code: String,
+) -> Option<SessionRefreshFailureRequestV1> {
+    let (frontier, coverage) = match recovery.progress() {
+        Some(progress) => (progress.frontier(), *progress.coverage()),
+        None => (
+            SessionRefreshFrontierV1::new(
+                recovery.target_frontier().observed_through(),
+                recovery.source_frontier(),
+            )
+            .ok()?,
+            zero_refresh_coverage(),
+        ),
+    };
+    let request = SessionRefreshFailureRequestV1::new(
+        recovery.operation_id().clone(),
+        recovery.session_id().clone(),
+        frontier,
+        coverage,
+        failure_code,
+    )
+    .ok()?;
+    Some(
+        match recovery
+            .progress()
+            .and_then(SessionRefreshProgressV1::source_coverage)
+            .cloned()
+            .or_else(|| recovery.source_coverage(frontier.committed_through()).ok())
+        {
+            Some(source_coverage) => request.with_source_coverage(source_coverage),
+            None => request,
+        },
+    )
+}
+
 pub async fn apply_refresh_effect(
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
     state: &SessionTemporalRefreshWakeState,
@@ -776,40 +880,70 @@ pub async fn apply_refresh_effect(
                 .await
             {
                 Ok(_) => report.projected_batches += 1,
-                Err(error) if error.is_storage() => {
+                Err(error) if is_retryable_storage(&error) => {
                     report.last_error = Some(format!("{error:?}"));
                     report.retryable_errors += 1;
                     report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
                 }
+                Err(error) if is_deterministic_refusal(&error) => {
+                    // A refused progress row is not work the next pass can
+                    // finish: rediscovery hands the projector the same durable
+                    // state and the same row comes back refused. Retire the
+                    // operation so it leaves `running` and a fresh refresh can
+                    // be admitted, instead of resubmitting it forever.
+                    report.last_error = Some(format!("{error:?}"));
+                    match durable_failure_request(
+                        recovery,
+                        durable_projector_failure_code(REFRESH_PROGRESS_REFUSED),
+                    ) {
+                        Some(request) => {
+                            apply_fail_effect(store, state, recovery, request, report).await;
+                        }
+                        None => report.terminal_errors += 1,
+                    }
+                }
                 Err(error) => {
+                    // Cancelled control, budget ceiling: this pass could not
+                    // persist, but the row itself was not refused, so the
+                    // operation stays `running` for the next pass.
                     report.last_error = Some(format!("{error:?}"));
                     report.terminal_errors += 1;
                 }
             }
         }
         SessionTemporalRefreshEffect::Fail(request) => {
-            if !state.claim_terminal_attempt(recovery) {
-                return;
-            }
-            let mut attempt = TerminalAttemptGuard::new(state, recovery);
-            match store.fail_session_refresh(request).await {
-                Ok(_) => {
-                    report.failed += 1;
-                    state.record_terminal_discovery_failure(recovery);
-                }
-                Err(error) if error.is_storage() => {
-                    report.last_error = Some(format!("{error:?}"));
-                    report.retryable_errors += 1;
-                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-                }
-                Err(error) => {
-                    attempt.retain();
-                    report.last_error = Some(format!("{error:?}"));
-                    report.terminal_errors += 1;
-                }
-            }
+            apply_fail_effect(store, state, recovery, request, report).await;
         }
         SessionTemporalRefreshEffect::Deferred => report.deferred += 1,
+    }
+}
+
+async fn apply_fail_effect(
+    store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
+    state: &SessionTemporalRefreshWakeState,
+    recovery: &SessionRefreshRecoveryV1,
+    request: SessionRefreshFailureRequestV1,
+    report: &mut SessionTemporalRefreshPassReport,
+) {
+    if !state.claim_terminal_attempt(recovery) {
+        return;
+    }
+    let mut attempt = TerminalAttemptGuard::new(state, recovery);
+    match store.fail_session_refresh(request).await {
+        Ok(_) => {
+            report.failed += 1;
+            state.record_terminal_discovery_failure(recovery);
+        }
+        Err(error) if is_retryable_storage(&error) => {
+            report.last_error = Some(format!("{error:?}"));
+            report.retryable_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+        }
+        Err(error) => {
+            attempt.retain();
+            report.last_error = Some(format!("{error:?}"));
+            report.terminal_errors += 1;
+        }
     }
 }
 
@@ -856,35 +990,7 @@ async fn project_running_refresh(
         Err(error) => {
             let failure_code = durable_projector_failure_code(&error.code);
             report.last_error = Some(failure_code.clone());
-            let (frontier, coverage) = if let Some(progress) = recovery.progress() {
-                (progress.frontier(), *progress.coverage())
-            } else {
-                let Ok(frontier) = SessionRefreshFrontierV1::new(
-                    recovery.target_frontier().observed_through(),
-                    recovery.source_frontier(),
-                ) else {
-                    report.terminal_errors += 1;
-                    return;
-                };
-                (frontier, zero_refresh_coverage())
-            };
-            let request = if let Ok(request) = SessionRefreshFailureRequestV1::new(
-                recovery.operation_id().clone(),
-                recovery.session_id().clone(),
-                frontier,
-                coverage,
-                failure_code,
-            ) {
-                match recovery
-                    .progress()
-                    .and_then(SessionRefreshProgressV1::source_coverage)
-                    .cloned()
-                    .or_else(|| recovery.source_coverage(frontier.committed_through()).ok())
-                {
-                    Some(source_coverage) => request.with_source_coverage(source_coverage),
-                    None => request,
-                }
-            } else {
+            let Some(request) = durable_failure_request(recovery, failure_code) else {
                 report.terminal_errors += 1;
                 return;
             };
@@ -894,22 +1000,15 @@ async fn project_running_refresh(
     if state.cancelled.load(Ordering::Acquire) {
         return;
     }
-    let deadline = hotpath::future!(
-        tokio::time::sleep_until(deadline_at),
-        label = "daemon.scheduler.session_temporal.effect_apply_deadline"
-    );
-    tokio::pin!(deadline);
+    // The generation seed commits each page. Dropping this apply at the
+    // projector deadline rolled back only the in-flight page, then the next
+    // pass never recorded progress because the batch itself had not committed.
     tokio::select! {
         biased;
         () = hotpath::future!(
             state.wait_for_cancellation(),
             label = "daemon.scheduler.session_temporal.effect_apply_cancel"
         ) => {}
-        () = &mut deadline => {
-            report.last_error = Some("effect_apply_deadline_exceeded".to_string());
-            report.deadline_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
-        }
         () = apply_refresh_effect(store, state, recovery, effect, report) => {}
     }
 }
@@ -922,7 +1021,7 @@ async fn running_refreshes(
         Ok(recoveries) => Some(recoveries),
         Err(error) => {
             report.last_error = Some(format!("{error:?}"));
-            if classify_store_error(&error) == SessionTemporalRefreshRetryClass::Storage {
+            if is_retryable_storage(&error) {
                 report.retryable_errors += 1;
                 report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
             } else {
@@ -1084,6 +1183,36 @@ mod tests {
     use tracedecay_store::ParseOffset;
 
     #[test]
+    fn deterministic_storage_refusals_are_not_retryable() {
+        // The schema-contract trigger that refused eleven hours of identical
+        // progress rows in #1794: transport-level `Storage`, but replaying it
+        // can never succeed.
+        let refused = SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::Sqlite {
+                operation: "execute",
+                code: Some(19),
+                extended_code: Some(1811),
+                message: "invalid session refresh progress".to_owned(),
+            },
+        );
+        assert!(!is_retryable_storage(&refused));
+
+        // Contention is the transient case the retry loop exists for.
+        assert!(is_retryable_storage(&SessionStoreError::storage(
+            "persist session refresh progress",
+            EngineError::Busy,
+        )));
+
+        // Typed contract failures were already terminal and stay terminal.
+        assert!(!is_retryable_storage(
+            &SessionStoreError::InvalidStateTransition {
+                context: "refresh progress successor",
+            }
+        ));
+    }
+
+    #[test]
     fn dropping_worker_instrumentation_clears_pending_state_once() {
         let state = SessionTemporalRefreshWakeState::default();
         {
@@ -1102,6 +1231,34 @@ mod tests {
         state.cancel();
         assert!(!state.dirty.load(Ordering::Acquire));
         assert!(!state.has_pending_work());
+    }
+
+    #[test]
+    fn a_progressing_history_window_continues_without_the_retry_backoff() {
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Pending {
+                made_progress: true,
+            })),
+            HistoryContinuation::Immediate
+        );
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Pending {
+                made_progress: false,
+            })),
+            HistoryContinuation::Backoff
+        );
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Retryable {
+                reason_code: "history_admission_saturated",
+                made_progress: true,
+            })),
+            HistoryContinuation::Backoff,
+            "a retryable failure keeps the backoff even when the pass wrote rows"
+        );
+        assert_eq!(
+            history_continuation(Some(SessionHistoricalIngestOutcome::Complete)),
+            HistoryContinuation::Settled
+        );
     }
 
     #[test]

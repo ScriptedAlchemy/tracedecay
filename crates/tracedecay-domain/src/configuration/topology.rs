@@ -348,16 +348,6 @@ pub enum BranchNameSeparatorV1 {
     Slash,
 }
 
-impl BranchNameSeparatorV1 {
-    pub const fn as_char(self) -> char {
-        match self {
-            Self::Hyphen => '-',
-            Self::Underscore => '_',
-            Self::Slash => '/',
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum BranchCollisionPolicyV1 {

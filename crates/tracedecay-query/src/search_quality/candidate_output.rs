@@ -16,6 +16,7 @@ use tracedecay_code_index::chunks::content_digest;
 use tracedecay_contracts::historical_query::HistoricalGitReadUnavailableReasonV1;
 use tracedecay_contracts::is_canonical_repository_relative_path;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::collapse_whitespace;
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
     CalibrationProfileId, DiversityPolicy, DiversityPolicyId, FusionProfile, FusionProfileId,
@@ -72,6 +73,13 @@ pub struct CandidateWorkloadV1 {
     pub execution_contract: EvaluationExecutionContractV1,
     pub corpus: Vec<CorpusDocumentV1>,
     pub profile_matrix: Vec<ProfileSpecV1>,
+    /// Observed ranking receipts for `train` and `validation`.
+    ///
+    /// These bind ordered ranking rows and public lane coverage. They are not
+    /// workload inputs: [`compute_workload_digest`] omits them, so re-pinning a
+    /// receipt does not rewrite the packaged workload identity. Generation and
+    /// extractor-revision changes reseal candidate occurrence ids without
+    /// changing those rows, and must not move this field either.
     pub expected_query_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
 }
@@ -157,9 +165,9 @@ pub struct ProfileSpecV1 {
 
 /// One need class a workload query belongs to.
 ///
-/// Closed vocabulary: a stratum decides how a query is judged — whether recall
-/// must be complete, and whether the query re-runs retrieval at a past commit —
-/// so an unrecognized name is refused instead of silently scored as ordinary.
+/// Closed vocabulary: a stratum decides how a query is judged, whether recall
+/// must be complete, and whether the query re-runs retrieval at a past commit.
+/// So an unrecognized name is refused instead of silently scored as ordinary.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryStratumV1 {
@@ -393,7 +401,12 @@ pub fn load_candidate_workload(path: &Path) -> Result<CandidateWorkloadV1, Candi
 pub fn compute_workload_digest(
     workload: &CandidateWorkloadV1,
 ) -> Result<String, CandidateOutputError> {
-    canonical_sha256(workload)
+    // Ranking receipts observe the run. Including them made a receipt re-pin
+    // look like a different workload, including when only a sealed generation
+    // id moved.
+    let mut identity = workload.clone();
+    identity.expected_query_fallback_digests.clear();
+    canonical_sha256(&("tracedecay.search-eval.workload-identity.v1", &identity))
 }
 
 pub fn compute_profile_material_digest(
@@ -490,10 +503,6 @@ fn normalized_document_prose(bytes: &[u8]) -> String {
     collapse_whitespace(&joined)
 }
 
-fn collapse_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn compute_corpus_digest_from_document_bytes<'a>(
     workload: &CandidateWorkloadV1,
     mut document_bytes: impl FnMut(&CorpusDocumentV1) -> Result<Cow<'a, [u8]>, CandidateOutputError>,
@@ -530,7 +539,7 @@ fn validate_source_bindings(
     repo_root: &Path,
     workload: &CandidateWorkloadV1,
 ) -> Result<(), CandidateOutputError> {
-    let repo = gix::open(repo_root).map_err(|error| {
+    let repo = tracedecay_runtime_core::git_open::open(repo_root).map_err(|error| {
         CandidateOutputError::Contract(format!(
             "open source repository {}: {error}",
             repo_root.display()
@@ -551,7 +560,7 @@ fn validate_source_bindings(
     let tree_id = commit.tree_id().map_err(|error| {
         CandidateOutputError::Contract(format!("resolve fixture source tree: {error}"))
     })?;
-    if tree_id.to_string() != workload.source_repository_tree {
+    if tree_id != workload.source_repository_tree {
         return Err(CandidateOutputError::Contract(format!(
             "fixture source tree mismatch: declared {}, resolved {tree_id}",
             workload.source_repository_tree
@@ -617,8 +626,8 @@ fn validate_source_bindings(
 ///
 /// This attests the fitness of measurement *inputs*: schema, execution
 /// contract, corpus identity, partitions, labels, and need provenance. It is
-/// not a qualification verdict — there is no held-out methodology in schema 1
-/// to qualify against — so a workload passing here still says nothing about
+/// not a qualification verdict, there is no held-out methodology in schema 1
+/// to qualify against, so a workload passing here still says nothing about
 /// whether any retrieval profile may be activated.
 pub fn validate_workload_for_tuning(
     workload: &CandidateWorkloadV1,
@@ -967,34 +976,8 @@ pub fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, CandidateOutp
 }
 
 pub fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, CandidateOutputError> {
-    let mut bytes = serde_json::to_vec(value)
-        .map_err(|error| CandidateOutputError::Contract(format!("serialize: {error}")))?;
-    // Stable formatting: re-parse and dump sorted keys via serde_json Value.
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| CandidateOutputError::Contract(format!("reparse: {error}")))?;
-    bytes = serde_json::to_vec(&sort_value(value))
-        .map_err(|error| CandidateOutputError::Contract(format!("reserialize: {error}")))?;
-    Ok(bytes)
-}
-
-pub fn sort_value(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut ordered = serde_json::Map::new();
-            let mut keys: Vec<_> = map.keys().cloned().collect();
-            keys.sort();
-            for key in keys {
-                if let Some(child) = map.get(&key) {
-                    ordered.insert(key, sort_value(child.clone()));
-                }
-            }
-            serde_json::Value::Object(ordered)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(sort_value).collect())
-        }
-        other => other,
-    }
+    tracedecay_domain::canonical_json_bytes(value)
+        .map_err(|error| CandidateOutputError::Contract(format!("canonical json: {error}")))
 }
 
 #[cfg(test)]
@@ -1037,6 +1020,24 @@ mod need_provenance_tests {
         assert_eq!(
             workload.profile_matrix[0].profile_id,
             crate::search_quality::evaluate::QUERY_BASELINE_PROFILE
+        );
+    }
+
+    #[test]
+    fn ranking_receipt_edits_do_not_move_workload_identity() {
+        let workload = workload();
+        let identity = super::compute_workload_digest(&workload).expect("workload identity");
+        assert_eq!(identity, packaged::WORKLOAD_SHA256);
+        let mut moved = workload;
+        let train = moved
+            .expected_query_fallback_digests
+            .get_mut("train")
+            .expect("train receipt");
+        *train = format!("sha256:{}", "ab".repeat(32));
+        assert_eq!(
+            super::compute_workload_digest(&moved).expect("moved identity"),
+            identity,
+            "re-pinning a ranking receipt must not rewrite the workload identity"
         );
     }
 

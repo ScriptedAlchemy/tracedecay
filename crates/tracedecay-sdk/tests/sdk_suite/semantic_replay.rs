@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,10 +47,11 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
     let home = scratch.path().join("home");
     let profile = home.join(".tracedecay");
     let project = scratch.path().join("project");
-    initialize_project(&home, &profile, &project);
+    scaffold_project(&home, &project);
 
     let binary = production_binary();
     let (daemon, authority) = spawn_daemon(&binary, &home, &profile, &project, None);
+    initialize_project(&binary, &home, &profile, &project);
     let project_id = project_id(&binary, &home, &profile, &project);
     let client = sdk_client(&authority, &project_id);
 
@@ -81,7 +82,7 @@ fn public_curator_client_replays_one_durable_effect_and_rejects_foreign_identiti
         .expect("daemon authorization token");
     let client = sdk_client(&authority, &project_id);
 
-    let replay = execute_curate(&client, &request, &request_id)
+    let replay = curate_once_mounted(&client, &request, &request_id)
         .unwrap_or_else(|error| panic!("same-identity replay must return its terminal: {error}"));
     assert_eq!(
         replay, accepted,
@@ -229,6 +230,34 @@ fn execute_curate(
     )
 }
 
+/// A restarted daemon remounts the project runtime in the background and
+/// refuses admitted work with the typed retryable `runtime_mounting` problem
+/// until it is serving. Honour that retry directive instead of racing the
+/// mount. A refusal is pre-admission, so no attempt here can run the curator,
+/// and the caller's run-record assertions still prove that.
+fn curate_once_mounted(
+    client: &Client,
+    request: &tracedecay_contracts::retained_surfaces::FactStoreCurateRequestV1,
+    request_id: &RequestId,
+) -> Result<
+    TypedResponse<tracedecay_contracts::retained_surfaces::AutomationRunResultV1>,
+    ClientError,
+> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let outcome = execute_curate(client, request, request_id);
+        let mounting = matches!(
+            &outcome,
+            Err(ClientError::Problem(problem))
+                if problem.code == tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+        );
+        if !mounting || Instant::now() >= deadline {
+            return outcome;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn raw_application_request(
     client: &reqwest::blocking::Client,
     endpoint: &str,
@@ -274,7 +303,7 @@ fn assert_zero_effect_rejection(response: &(u16, Value), rejected_request_ids: &
     );
 }
 
-fn initialize_project(home: &Path, profile: &Path, project: &Path) {
+fn scaffold_project(home: &Path, project: &Path) {
     fs::create_dir_all(home).expect("create isolated home");
     fs::create_dir_all(project.join("src")).expect("create project source root");
     fs::write(
@@ -290,8 +319,11 @@ fn initialize_project(home: &Path, profile: &Path, project: &Path) {
     run(Command::new("git")
         .args(["init", "--quiet"])
         .current_dir(project));
+}
 
-    let binary = production_binary();
+/// `tracedecay init` is brokered through the daemon-owned code-index
+/// scheduler, so the daemon must already serve this profile before it runs.
+fn initialize_project(binary: &Path, home: &Path, profile: &Path, project: &Path) {
     let mut init = Command::new(binary);
     init.arg("init").current_dir(project);
     isolated(&mut init, home, profile);
@@ -343,34 +375,8 @@ fn application_run_record_count(profile: &Path, run_id: &str) -> usize {
         .count()
 }
 
-fn production_binary() -> PathBuf {
-    let path = std::env::var_os("TRACEDECAY_TEST_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../../target/debug/tracedecay"));
-    fs::canonicalize(&path)
-        .unwrap_or_else(|error| panic!("missing production daemon {}: {error}", path.display()))
-}
-
-fn isolated(command: &mut Command, home: &Path, profile: &Path) {
-    command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TRACEDECAY_DATA_DIR", profile)
-        .env("TRACEDECAY_GLOBAL_DB", profile.join("global.db"))
-        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
-}
-
-fn run(command: &mut Command) -> Vec<u8> {
-    let output = command.output().expect("run subprocess");
-    assert!(
-        output.status.success(),
-        "command failed: {}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
+use crate::isolated_profile::apply_isolated_profile_env as isolated;
+use crate::{production_binary, run};
 
 fn wait_for_authority(child: &mut Child, path: &Path, prior_epoch: Option<u64>) -> Value {
     let deadline = Instant::now() + Duration::from_secs(15);

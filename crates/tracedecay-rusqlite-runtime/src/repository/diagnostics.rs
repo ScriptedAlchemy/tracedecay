@@ -253,8 +253,8 @@ impl DiagnosticExecutor {
 /// starting record.
 ///
 /// Each step follows the record's `Superseded { successor_generation }` edge to
-/// the record in the successor generation carrying the same logical finding key
-/// — repository, producer, code, file occurrence, span, and message digest.
+/// the record in the successor generation carrying the same logical finding key,
+/// repository, producer, code, file occurrence, span, and message digest.
 /// The walk stops at a current, cleared, or missing successor. An anchor
 /// already visited also stops the walk, so a cyclic `state_generation` graph
 /// cannot spin here.

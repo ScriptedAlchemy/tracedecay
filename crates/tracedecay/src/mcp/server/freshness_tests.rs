@@ -386,7 +386,7 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
         elapsed < Duration::from_millis(100),
         "maybe_spawn_read_refresh must not block on the sync (took {elapsed:?})"
     );
-    // The refresh should have been claimed (running flag set) — proving a
+    // The refresh should have been claimed (running flag set), proving a
     // task was spawned rather than run inline.
     // (It may already have finished on a very fast machine; in that case
     // the cooldown stamp still advanced, which we assert below.)

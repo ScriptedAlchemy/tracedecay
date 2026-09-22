@@ -605,7 +605,7 @@ mod tests {
     ///
     /// `/dev/full` is the only portable-enough way to force `ENOSPC` *after*
     /// the delivery file is open. Linux has it; macOS does not, and there the
-    /// symlink made the failure land at open instead — an unattempted
+    /// symlink made the failure land at open instead, an unattempted
     /// delivery, which is a different outcome than the one under test. Probe
     /// for the device rather than assuming every unix has it.
     #[cfg(unix)]

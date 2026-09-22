@@ -1,7 +1,7 @@
 //! Deterministic diversity-cap stage contracts (Plan 15 pipeline step 9:
 //! profile-owned caps per source namespace, source instance, repository,
 //! session/thread, logical-copy cluster, and evidence role apply after
-//! fusion; a cap must carry its locked evaluation anchor — absent evidence
+//! fusion; a cap must carry its locked evaluation anchor, absent evidence
 //! leaves the cap disabled except resource-safety ceilings).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -280,13 +280,7 @@ mod cap_key_tests {
         FreshnessCompatibilityV1, RetrievalAnchorId, SourceFreshness, UtcMicros,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn occurrence(name: &str, file: &str) -> OccurrenceProvenance {
         OccurrenceProvenance {

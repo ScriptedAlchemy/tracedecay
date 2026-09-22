@@ -111,7 +111,7 @@ async fn memory_curator_runner_records_noop_fallback_when_backend_run_task_fails
     .unwrap();
 
     // The backend failure is transient, but this test pins the noop-fallback
-    // record, not retry semantics (covered by backend.rs retry tests) —
+    // record, not retry semantics (covered by backend.rs retry tests),
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert!(run.backend_response.is_none());

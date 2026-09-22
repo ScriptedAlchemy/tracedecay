@@ -143,7 +143,7 @@ pub fn cost_of_usage(
     cost.is_finite().then_some(cost)
 }
 
-/// Reads a price field that `OpenRouter` serves as a per-token decimal string
+/// Reads a price field that `OpenRouter` returns as a per-token decimal string
 /// (sometimes a bare number) and converts it to USD per million tokens.
 fn price_per_mtok(pricing: &Value, key: &str) -> Option<f64> {
     let raw = pricing.get(key)?;

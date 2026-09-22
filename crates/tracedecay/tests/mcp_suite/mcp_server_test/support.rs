@@ -13,10 +13,6 @@ use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 /// Creates a temporary Rust project and returns a direct protocol server.
 ///
 /// Graph journeys use [`crate::support::production_composition_fixture`]
@@ -51,7 +47,7 @@ pub(crate) async fn run_server_with_messages(
 }
 
 /// As [`run_server_with_messages`], but leaves the server running when the
-/// client disconnects — [`McpServer::run_connection`] is the entry point the
+/// client disconnects, [`McpServer::run_connection`] is the entry point the
 /// daemon uses per client socket. Scenarios where a hook arrives on the host's
 /// hook socket and the follow-up tool call arrives on the agent's own socket
 /// need this: two independent connections against one live server.
@@ -309,7 +305,7 @@ pub(crate) async fn expect_mcp_runtime_event(
 }
 
 /// As [`mcp_runtime_events`], but through the production composition's
-/// retained profile authority — a second profile-scoped test runtime cannot
+/// retained profile authority, a second profile-scoped test runtime cannot
 /// open the daemon-owned profile stores.
 #[cfg(feature = "test-transport")]
 pub(crate) async fn harness_mcp_runtime_events(
@@ -403,11 +399,4 @@ pub(crate) fn analytics_metadata(event: &tracedecay_global_db::AnalyticsEventRec
             .expect("analytics event metadata"),
     )
     .expect("analytics event metadata is JSON")
-}
-
-// ---------------------------------------------------------------------------
-// Repository setup used by routed hook journeys.
-// ---------------------------------------------------------------------------
-pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
-    crate::common::fixture::git_run(project, args);
 }

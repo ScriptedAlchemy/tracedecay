@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use regex::Regex;
+use tracedecay_domain::collapse_whitespace;
 
 const LARGE_TOOL_OUTPUT_CHARS: usize = 256 * 1024;
 // Mirrors hermes-lcm `_GENERIC_BASE64_MIN_CHARS` (ingest_protection.py:103).
@@ -71,7 +72,7 @@ pub fn heartbeat_noise_reason(role: &str, content: &str) -> Option<&'static str>
     ) {
         return None;
     }
-    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = collapse_whitespace(content);
     if normalized.is_empty() || char_count_exceeds(&normalized, 256) {
         return None;
     }
@@ -114,8 +115,7 @@ pub fn ignore_message_reason_with_compiled(
 }
 
 pub fn matches_any_pattern<S: AsRef<str>>(patterns: &[S], value: &str) -> bool {
-    let compiled = cached_session_patterns(patterns);
-    matches_any_compiled_pattern(&compiled, value)
+    cached_session_patterns(patterns).is_match(value)
 }
 
 /// Session pattern lists come from configuration and repeat on every LCM
@@ -138,10 +138,6 @@ fn cached_session_patterns<S: AsRef<str>>(patterns: &[S]) -> Arc<CompiledPattern
     }
     cache.insert(key, Arc::clone(&compiled));
     compiled
-}
-
-pub fn matches_any_compiled_pattern(patterns: &CompiledPatternSet, value: &str) -> bool {
-    patterns.is_match(value)
 }
 
 #[hotpath::measure(label = "sessions.lcm.compile_session")]
@@ -234,7 +230,7 @@ fn assistant_output_is_high_repetition(content: &str) -> bool {
         return false;
     }
 
-    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = collapse_whitespace(content);
     let tokens = word_tokens(&normalized);
     if tokens.len() < QUARANTINED_ASSISTANT_MIN_TOKENS {
         return tokens.len() >= 20 && distinct_char_count(&normalized) <= 12;
@@ -285,7 +281,7 @@ fn word_tokens(text: &str) -> Vec<String> {
 
 fn repetition_segments(text: &str) -> Vec<String> {
     text.split(['\n', '.', '!', '?'])
-        .map(|segment| segment.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(collapse_whitespace)
         .map(|segment| segment.to_ascii_lowercase())
         .filter(|segment| char_count_at_least(segment, 32))
         .collect()

@@ -297,7 +297,7 @@ fn client_version_skew_flags_only_real_mismatches() {
 }
 
 /// A client whose handshake this daemon cannot decode (wire drift between
-/// build revisions) must read one typed refusal frame and a clean EOF —
+/// build revisions) must read one typed refusal frame and a clean EOF,
 /// never a raw `Connection reset by peer` from a dropped socket.
 #[cfg(unix)]
 #[tokio::test]
@@ -401,7 +401,7 @@ async fn non_json_handshake_reads_invalid_handshake_refusal() {
 }
 
 /// A client whose auth preface this daemon rejects must read one typed
-/// `authentication_rejected` refusal frame and a clean EOF — never a bare
+/// `authentication_rejected` refusal frame and a clean EOF, never a bare
 /// connection close its transport reports as "outcome unknown". The daemon
 /// serves the refusal and survives; it never echoes the supplied token.
 #[cfg(unix)]
@@ -427,7 +427,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
 
     let (reader, mut writer) = client.into_split();
     // The real client pipeline: auth preface (here with a token the daemon
-    // did not mint), handshake, then the first request — all written before
+    // did not mint), handshake, then the first request, all written before
     // the client starts reading.
     let preface = tracedecay_daemon_protocol::transport::DaemonAuthPreface::new("stale-token")
         .to_line()
@@ -905,7 +905,7 @@ fn proxy_records_negotiated_catalog_capability_and_version() {
 ///
 /// The saturation rejection path parsed the client handshake with `?` and
 /// dropped the socket when it failed, leaving the client's pipelined request
-/// unread — the kernel answers that with `Connection reset by peer`, the exact
+/// unread, the kernel answers that with `Connection reset by peer`, the exact
 /// signature reported in #753 for a day-old eval client. Saturation is not a
 /// reason to hide a protocol refusal behind a transport error.
 #[cfg(unix)]

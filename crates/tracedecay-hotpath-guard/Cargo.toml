@@ -1,0 +1,30 @@
+[package]
+name = "tracedecay-hotpath-guard"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "MIT"
+description = "Process-boundary Hotpath display limit for the shipped binary"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[dependencies]
+hotpath.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
+
+# No `hotpath` feature of its own. Only a composition root can select the
+# backend, because `tracedecay-sdk` mirrors it onto its host build-script
+# context (see its manifest). A leaf selector lit the one shared
+# `hotpath-macros` while the host `hotpath` lib stayed off, so every
+# instrumented crate failed with E0433, and it left `tracedecay-cli/hotpath`
+# off, compiling out the guard that starts and flushes the profiler. The live
+# proof names the dependency features instead, the selector the workspace-wide
+# hotpath graph check already uses.
+[[test]]
+name = "functions_limit_live"
+path = "tests/functions_limit_live.rs"
+required-features = ["hotpath/hotpath", "hotpath/hotpath-mcp"]

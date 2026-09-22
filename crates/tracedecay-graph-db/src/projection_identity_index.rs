@@ -5,7 +5,7 @@
 //! covers, read each node twice (once to confirm the record label, once for
 //! the identity property), and threw away all but one page. Warming a large
 //! catalog therefore ran in O(N^2 / page) and was measured at 47 back-to-back
-//! `graph_db.projection.read` calls of ~21.7s each — 76% of a daemon lifetime.
+//! `graph_db.projection.read` calls of ~21.7s each, 76% of a daemon lifetime.
 //!
 //! This module builds the sorted identity list *once* per store epoch and
 //! answers each page from it with a binary search plus a `limit`-sized copy, so
@@ -27,6 +27,7 @@ use std::sync::{Arc, RwLock};
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+use crate::projection::check_cancelled;
 use crate::projection_read::IdentityScope;
 use crate::schema::{has_native_label, nodes_with_label};
 use crate::{GraphCancellation, GraphDbError};
@@ -219,12 +220,4 @@ fn build_identity_index(
         identities: identities.into_boxed_slice(),
         node_count,
     }))
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
-    } else {
-        Ok(())
-    }
 }

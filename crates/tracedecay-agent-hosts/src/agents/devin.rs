@@ -249,7 +249,7 @@ fn doctor_check_devin_registration(
 ) {
     if !config_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent {}` if you use {}",
+            "{} not found, run `tracedecay install --agent {}` if you use {}",
             config_path.display(),
             labels.agent_id,
             labels.product

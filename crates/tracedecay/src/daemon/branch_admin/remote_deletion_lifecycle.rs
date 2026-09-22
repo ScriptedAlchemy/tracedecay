@@ -58,9 +58,12 @@ impl StoreAdministration {
     /// before any runtime is retired or store directory is removed, so a
     /// failed cleanup stays fail-closed and a retry resumes safely.
     #[hotpath::measure(label = "daemon.branch_admin.remote_deletion", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Remote deletion is one fail-closed tombstone-then-retire lifecycle; phases must stay ordered together."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Remote deletion is one fail-closed tombstone-then-retire lifecycle; phases must stay ordered together."
+        )
     )]
     pub(in super::super) async fn execute_remote_deletion(
         &self,
@@ -964,7 +967,7 @@ impl StoreAdministration {
                 // Upstream followed the reservation with a separate
                 // `prove_no_external_branch_store_holders` sweep. That API no
                 // longer exists at this tip: `begin_destructive_code_maintenance`
-                // *is* the holder proof — it fails closed unless every physical
+                // *is* the holder proof, it fails closed unless every physical
                 // runtime for these paths is closed, and it retires each closed
                 // shard's code authority so no stale handle can reopen the store.
                 // A second textual sweep would only restate what the reservation

@@ -68,7 +68,7 @@ pub(super) fn assert_live_task_rooted_retrieval(
     // `retrieve-evidence` is the TaskId-rooted read behind the dashboard's
     // selected-task evidence panel and the typed SDK operation. The new task
     // has no accepted attempt yet, so complete zero selected sources is a
-    // measured result from the exact graph—not an unavailable authority or a
+    // measured result from the exact graph, not an unavailable authority or a
     // fabricated empty product graph. All temporal modes still bind the same
     // verified Work root; provider-session semantics begin only after an
     // accepted attempt publishes a qualified session relation.

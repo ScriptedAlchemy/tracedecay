@@ -55,7 +55,7 @@ const RAW_ROLE_PENALTY_CASE: &str =
 /// Maximum grep hits retained per session in a cross-session (`scope: all`)
 /// page. Keeps one noisy session (e.g. a review session full of transcript
 /// inventory tool calls) from flooding the page and crowding out distinct
-/// sessions. Single-session scopes (`current`/`session`) are exempt — capping
+/// sessions. Single-session scopes (`current`/`session`) are exempt, capping
 /// there would silently drop legitimate same-session recall.
 const PER_SESSION_HIT_CAP: usize = 3;
 
@@ -613,8 +613,8 @@ impl ExpandQueryAssembler {
     ) -> Option<(String, LcmContentRange)> {
         // Drop pure machine-noise blocks (base64 thinking-signature blobs and
         // other binary-ish payloads) before they consume the context budget or
-        // pollute the synthesized answer. Dropping is silent — no pagination
-        // entry — because there is nothing meaningful to resume.
+        // pollute the synthesized answer. Dropping is silent, no pagination
+        // entry, because there is nothing meaningful to resume.
         if is_noise_block_content(content) {
             return None;
         }
@@ -993,30 +993,19 @@ fn grep_order_by(
     recency_column: &str,
     role_penalty_expr: Option<&str>,
 ) -> String {
-    match sort {
-        LcmGrepSort::Relevance => match role_penalty_expr {
-            Some(role_penalty_expr) => {
-                format!("rank ASC, {role_penalty_expr} ASC, {recency_column} DESC")
-            }
-            None => format!("rank ASC, {recency_column} DESC"),
-        },
-        LcmGrepSort::Hybrid => {
-            let blended = format!(
+    let (leading, trailing) = match sort {
+        LcmGrepSort::Relevance => ("rank ASC".to_string(), format!("{recency_column} DESC")),
+        LcmGrepSort::Hybrid => (
+            format!(
                 "(rank / (1 + (MAX(0.0, ((strftime('%s','now') - {recency_column}) / 3600.0)) * {AGE_DECAY_RATE})))"
-            );
-            match role_penalty_expr {
-                Some(role_penalty_expr) => {
-                    format!("{blended} ASC, {role_penalty_expr} ASC, {recency_column} DESC")
-                }
-                None => format!("{blended} ASC, {recency_column} DESC"),
-            }
-        }
-        LcmGrepSort::Recency => match role_penalty_expr {
-            Some(role_penalty_expr) => {
-                format!("{recency_column} DESC, {role_penalty_expr} ASC, rank ASC")
-            }
-            None => format!("{recency_column} DESC, rank ASC"),
-        },
+            ),
+            format!("{recency_column} DESC"),
+        ),
+        LcmGrepSort::Recency => (format!("{recency_column} DESC"), "rank ASC".to_string()),
+    };
+    match role_penalty_expr {
+        Some(penalty) => format!("{leading}, {penalty} ASC, {trailing}"),
+        None => format!("{leading}, {trailing}"),
     }
 }
 

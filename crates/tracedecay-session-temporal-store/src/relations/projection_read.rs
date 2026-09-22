@@ -70,6 +70,63 @@ impl SessionRelationGraphStore {
         }
         decode_projection(scope, session_id, generation, page.entities, page.relations)
     }
+
+    /// Counts logical-copy relations without loading the generation.
+    ///
+    /// A single `load_projection` asks for up to 100_000 relations. That read
+    /// is one exact-SQL page, whose ceiling is 10_000 rows, so a large parent
+    /// generation fails and refresh retries it as storage busy. The successor
+    /// baseline only needs the count.
+    pub fn logical_copy_count(
+        &self,
+        scope: &super::SessionRelationScope,
+        session_id: &SessionId,
+        generation: u64,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<u64, SessionRelationError> {
+        // Stay under the exact-SQL materialization ceiling (10_000 rows).
+        const RELATION_PAGE: usize = 4_096;
+        let namespace = namespace(scope)?;
+        let projection_id = projection(session_id, generation)?;
+        if self
+            .database
+            .projection_telemetry(GraphProjectionTelemetryRequest {
+                namespace: namespace.clone(),
+                projection: projection_id.clone(),
+                cancellation: Arc::clone(&cancellation),
+            })
+            .map_err(map_graph_error)?
+            .is_none()
+        {
+            return Err(SessionRelationError::NotFound);
+        }
+        let mut after_relation = None;
+        let mut copies = 0_u64;
+        loop {
+            let page = self
+                .database
+                .read_projection(GraphProjectionReadRequest {
+                    namespace: namespace.clone(),
+                    projection: projection_id.clone(),
+                    after_entity: None,
+                    after_relation,
+                    max_entities: 1,
+                    max_relations: RELATION_PAGE,
+                    cancellation: Arc::clone(&cancellation),
+                })
+                .map_err(map_graph_error)?;
+            for relation in &page.relations {
+                if relation.kind.as_str() == LOGICAL_COPY_KIND {
+                    copies = copies.saturating_add(1);
+                }
+            }
+            match page.next_relation {
+                Some(next) => after_relation = Some(next),
+                None => break,
+            }
+        }
+        Ok(copies)
+    }
 }
 
 fn decode_projection(
@@ -402,10 +459,7 @@ fn string_property<'a>(
     relation: &'a tracedecay_graph_db::GraphRelation,
     property: &GraphPropertyName,
 ) -> Result<&'a str, SessionRelationError> {
-    match relation.properties.get(property) {
-        Some(GraphProperty::String(value)) => Ok(value),
-        _ => Err(SessionRelationError::Corrupt),
-    }
+    super::read::string_property(relation, property).ok_or(SessionRelationError::Corrupt)
 }
 
 #[cfg(test)]
@@ -421,13 +475,7 @@ mod tests {
         GraphWatermark, NeverCancelled, ProjectionReplacement, SourceGeneration,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid test identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn relation_projection() -> SessionRelationProjection {
         SessionRelationProjection {

@@ -17,10 +17,10 @@ use tracedecay_contracts::RetainedSurfaceOperation;
 use tracedecay_contracts::multi_root::multi_root_capability_manifest;
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, BindingSurface, CancellationContract, CancellationPoint,
-    EffectClass, ExecutableBindingV1, McpDeadlineContractV1, McpDispatchAvailability,
-    McpDispatchCatalogV1, McpDispatchContractInputV1, McpDispatchContractV1,
-    McpDispatchUnavailableReason, McpIdempotencyContract, McpInverseContract,
-    McpInverseUnavailableReason, McpTerminalState,
+    EffectClass, ExecutableBindingRegistryV1, ExecutableBindingV1, McpDeadlineContractV1,
+    McpDispatchAvailability, McpDispatchCatalogV1, McpDispatchContractInputV1,
+    McpDispatchContractV1, McpDispatchUnavailableReason, McpIdempotencyContract,
+    McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 
 mod work;
@@ -139,7 +139,7 @@ fn application_surface_branch_sensitivity(
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
         // host-integration lifecycle, session identity, store identity, or
-        // process observability — never the checkout, code graph, or files.
+        // process observability, never the checkout, code graph, or files.
         ConfigurationList
         | ConfigurationGet
         | ConfigurationSet
@@ -239,130 +239,88 @@ pub struct McpToolBinding {
     pub project: RegisteredProjectAccess,
 }
 
+struct BindingGroup {
+    group: Option<McpToolDispatchGroup>,
+    project: RegisteredProjectAccess,
+    names: &'static [&'static str],
+}
+
+macro_rules! binding_groups {
+    ($([$group:expr, $project:expr, $($name:literal),+ $(,)?]),+ $(,)?) => {
+        &[$(BindingGroup { group: $group, project: $project, names: &[$($name),+] },)+]
+    };
+}
+
+/// Dispatch-catalog order. Consecutive tools that share a group and project
+/// access are one slice; a different access starts a new slice.
 #[rustfmt::skip]
-const MCP_TOOL_BINDING_SPECS: &[McpToolBinding] = &[
-    McpToolBinding { name: "tracedecay_search", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_grep", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_ast_grep_search", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_retrieve", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_context", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_callers", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_callees", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_impact", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_node", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_similar", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_redundancy", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_rename_preview", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_implementations", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_callers_for", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_find_exact_symbol", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_by_qualified_name", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_signature", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_impls", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_derives", group: Some(McpToolDispatchGroup::Graph), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_status", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_remote_status", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_active_project", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_project_list", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_project_search", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_project_context", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_files", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_admin_sync", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_port_status", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_port_order", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_type_hierarchy", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_body", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_todos", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_read", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_outline", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_config", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_signature_search", group: Some(McpToolDispatchGroup::Info), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_hook_runtime", group: Some(McpToolDispatchGroup::Admin), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_admin_cli", group: Some(McpToolDispatchGroup::Admin), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_admin_project", group: Some(McpToolDispatchGroup::Admin), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_dead_code", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_circular", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_hotspots", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_unmounted_files", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_rank", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_largest", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_coupling", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_inheritance_depth", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_distribution", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_recursion", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_complexity", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_doc_coverage", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_god_class", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_unsafe_patterns", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_constructors", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_field_sites", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_admin_branch_add", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_affected", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_diff_context", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_changelog", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_commit_context", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_pr_context", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_branch_search", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_branch_diff", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_branch_list", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_str_replace", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_multi_str_replace", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_insert_at", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_ast_grep_rewrite", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_replace_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_insert_at_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_move_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_rename_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_source_edit_reconcile", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_source_edit_rollback", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_test_map", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_gini", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_dependency_depth", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_health", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_runtime", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_dsm", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_test_risk", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_automation_run_list", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_automation_run_view", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_automation_run_artifact_view", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_analytics", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_skill_list", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_skill_view", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_hermes_skill_bridge", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_multi_root_scope_set_read", group: Some(McpToolDispatchGroup::MultiRoot), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_multi_root_scope_set_compare_and_swap", group: Some(McpToolDispatchGroup::MultiRoot), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_multi_root_execute", group: Some(McpToolDispatchGroup::MultiRoot), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_diagnose", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_run_affected_tests", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_dashboard", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_fact_feedback", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_lcm_describe", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_doctor", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_expand", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_expand_query", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_grep", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_load_session", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_session_refresh_begin", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_session_refresh_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_session_refresh_cancel", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_sessions_for", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_workflows", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_fact_store_curate", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_fact_store_add", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_probe", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_related", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_reason", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_contradict", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_get", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_update", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_remove", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_supersede", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_list", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_memory_status", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
+const BINDING_GROUPS: &[BindingGroup] = binding_groups![
+    [Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_search", "tracedecay_grep", "tracedecay_ast_grep_search", "tracedecay_retrieve",
+        "tracedecay_context", "tracedecay_callers", "tracedecay_callees", "tracedecay_impact",
+        "tracedecay_node", "tracedecay_similar", "tracedecay_redundancy", "tracedecay_rename_preview",
+        "tracedecay_implementations", "tracedecay_callers_for", "tracedecay_find_exact_symbol",
+        "tracedecay_by_qualified_name", "tracedecay_signature", "tracedecay_impls", "tracedecay_derives"],
+    [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_status", "tracedecay_remote_status", "tracedecay_active_project",
+        "tracedecay_project_list", "tracedecay_project_search"],
+    [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::SelectorOnly,
+        "tracedecay_project_context"],
+    [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_files", "tracedecay_admin_sync", "tracedecay_port_status", "tracedecay_port_order",
+        "tracedecay_type_hierarchy", "tracedecay_body", "tracedecay_todos", "tracedecay_read",
+        "tracedecay_outline", "tracedecay_config", "tracedecay_signature_search"],
+    [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_hook_runtime", "tracedecay_admin_cli", "tracedecay_admin_project"],
+    [Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_dead_code", "tracedecay_circular", "tracedecay_hotspots", "tracedecay_unmounted_files",
+        "tracedecay_rank", "tracedecay_largest", "tracedecay_coupling", "tracedecay_inheritance_depth",
+        "tracedecay_distribution", "tracedecay_recursion", "tracedecay_complexity", "tracedecay_doc_coverage",
+        "tracedecay_god_class", "tracedecay_unsafe_patterns", "tracedecay_constructors", "tracedecay_field_sites"],
+    [Some(McpToolDispatchGroup::Git), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_admin_branch_add", "tracedecay_affected", "tracedecay_diff_context", "tracedecay_changelog",
+        "tracedecay_commit_context", "tracedecay_pr_context", "tracedecay_branch_search",
+        "tracedecay_branch_diff", "tracedecay_branch_list"],
+    [Some(McpToolDispatchGroup::Edit), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_str_replace", "tracedecay_multi_str_replace", "tracedecay_insert_at", "tracedecay_ast_grep_rewrite",
+        "tracedecay_replace_symbol", "tracedecay_insert_at_symbol", "tracedecay_move_symbol", "tracedecay_rename_symbol",
+        "tracedecay_source_edit_reconcile", "tracedecay_source_edit_rollback"],
+    [Some(McpToolDispatchGroup::Health), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_test_map", "tracedecay_gini", "tracedecay_dependency_depth", "tracedecay_health",
+        "tracedecay_runtime", "tracedecay_dsm", "tracedecay_test_risk"],
+    [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_automation_run_list", "tracedecay_automation_run_view", "tracedecay_automation_run_artifact_view"],
+    [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::SelectorOnly, "tracedecay_analytics"],
+    [Some(McpToolDispatchGroup::Memory), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_skill_list", "tracedecay_skill_view", "tracedecay_hermes_skill_bridge"],
+    [Some(McpToolDispatchGroup::MultiRoot), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_multi_root_scope_set_read", "tracedecay_multi_root_scope_set_compare_and_swap",
+        "tracedecay_multi_root_execute"],
+    [Some(McpToolDispatchGroup::SessionWorkflow), RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_diagnose", "tracedecay_run_affected_tests", "tracedecay_dashboard"],
+    [None, RegisteredProjectAccess::SelectorOnly, "tracedecay_fact_feedback"],
+    [None, RegisteredProjectAccess::ActiveProjectOnly,
+        "tracedecay_lcm_describe", "tracedecay_lcm_doctor", "tracedecay_lcm_expand", "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_grep", "tracedecay_lcm_load_session", "tracedecay_lcm_status",
+        "tracedecay_session_refresh_begin", "tracedecay_session_refresh_status", "tracedecay_session_refresh_cancel",
+        "tracedecay_sessions_for", "tracedecay_workflows", "tracedecay_fact_store_curate"],
+    [None, RegisteredProjectAccess::SelectorOnly,
+        "tracedecay_fact_store_add", "tracedecay_fact_store_search", "tracedecay_fact_store_probe",
+        "tracedecay_fact_store_related", "tracedecay_fact_store_reason", "tracedecay_fact_store_contradict",
+        "tracedecay_fact_store_get", "tracedecay_fact_store_update", "tracedecay_fact_store_remove",
+        "tracedecay_fact_store_supersede", "tracedecay_fact_store_list", "tracedecay_memory_status",
+        "tracedecay_message_search"],
 ];
+
+fn binding_specs() -> impl Iterator<Item = McpToolBinding> {
+    BINDING_GROUPS.iter().flat_map(|group| {
+        group.names.iter().copied().map(|name| McpToolBinding {
+            name,
+            group: group.group,
+            project: group.project,
+        })
+    })
+}
 
 pub static MCP_TOOL_BINDINGS: LazyLock<Vec<McpToolBinding>> =
     LazyLock::new(assemble_mcp_tool_bindings);
@@ -379,12 +337,11 @@ fn registered_project_readers() -> &'static HashSet<&'static str> {
 fn assemble_mcp_tool_bindings() -> Vec<McpToolBinding> {
     let readers = registered_project_readers();
     let mut assigned = HashSet::new();
-    let bindings = MCP_TOOL_BINDING_SPECS
-        .iter()
+    let bindings = binding_specs()
         .map(|spec| {
             assert!(
                 spec.project != RegisteredProjectAccess::Reader,
-                "MCP_TOOL_BINDING_SPECS must not encode Reader for '{}'; list it in tracedecay-mcp::project_access",
+                "binding specs must not encode Reader for '{}'; list it in tracedecay-mcp::project_access",
                 spec.name
             );
             let project = if readers.contains(spec.name) {
@@ -409,7 +366,7 @@ fn assemble_mcp_tool_bindings() -> Vec<McpToolBinding> {
         .collect();
     assert!(
         missing.is_empty(),
-        "tracedecay-mcp reader tools have no MCP_TOOL_BINDING_SPECS row: {missing:?}"
+        "tracedecay-mcp reader tools have no binding spec row: {missing:?}"
     );
     bindings
 }
@@ -517,6 +474,40 @@ pub(super) struct DispatchCatalogBinding {
     pub(super) executable_binding: Option<&'static ExecutableBindingV1>,
 }
 
+pub(super) fn project_family_dispatch(
+    group: McpToolDispatchGroup,
+    registry: &'static ExecutableBindingRegistryV1,
+    operations: impl IntoIterator<Item = (String, String)>,
+    identity: (&'static str, &'static str),
+    missing: (&'static str, &'static str),
+) -> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
+    operations
+        .into_iter()
+        .map(|(name, operation_id)| {
+            let operation_id = tracedecay_tool_catalog::OperationId::new(operation_id)
+                .map_err(|_| dispatch_invalid(identity.0, identity.1))?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .ok_or_else(|| dispatch_invalid(missing.0, missing.1))?;
+            Ok(DispatchCatalogBinding {
+                name,
+                group: Some(group),
+                executable_binding: Some(binding),
+            })
+        })
+        .collect()
+}
+
+fn dispatch_invalid(
+    field: &'static str,
+    reason: &'static str,
+) -> super::dispatch::McpDispatchMetadataError {
+    super::dispatch::McpDispatchMetadataError::CatalogValidation(
+        tracedecay_tool_catalog::CatalogValidationError::InvalidValue { field, reason },
+    )
+}
+
 fn dispatch_catalog_bindings()
 -> Result<Vec<DispatchCatalogBinding>, super::dispatch::McpDispatchMetadataError> {
     let mut bindings = MCP_TOOL_BINDINGS
@@ -619,9 +610,9 @@ pub fn canonical_tool_dispatch_ceiling(
 /// The three predicates below run several times per dispatched request
 /// (connection loop, routing, dispatch controls), and each uncached
 /// evaluation linearly scans the application catalog
-/// (`application_capability_for_tool`). Their inputs — the static binding
+/// (`application_capability_for_tool`). Their inputs, the static binding
 /// table, the application-surface catalog, and the Work/Workflow executable
-/// registries — are process-stable, so the answers are precomputed for every
+/// registries, are process-stable, so the answers are precomputed for every
 /// cataloged name. The dispatch-contract cancellation/effect metadata is not
 /// a substitute: it folds in workflow bindings and per-capability contracts
 /// that deliberately diverge from these predicates.
@@ -1044,8 +1035,8 @@ mod tests {
     }
 
     /// The budget that cut `tracedecay_context` at ten seconds in the #1203
-    /// dogfood run is this capability's own deadline contract — the retrieval
-    /// primitive declares `DeadlineContract::new(10_000, ..)` — and not
+    /// dogfood run is this capability's own deadline contract, the retrieval
+    /// primitive declares `DeadlineContract::new(10_000, ..)`, and not
     /// `TOOL_DISPATCH_CEILING`, the CLI request deadline, or any settlement or
     /// ledger budget. `prepare_dispatch_control` hands this ceiling straight to
     /// `DispatchControl`, and a caller deadline can only shorten it, so this
@@ -1141,7 +1132,7 @@ mod tests {
     #[rustfmt::skip]
     const PINNED_BRANCH_SENSITIVITY: &[(&str, BranchSensitivity)] = &[
         // Memory: ledger / skill / analytics reads. Handlers use project_root,
-        // store_layout, and memory identity — never the code graph.
+        // store_layout, and memory identity, never the code graph.
         ("tracedecay_automation_run_list", BranchSensitivity::Independent),
         ("tracedecay_automation_run_view", BranchSensitivity::Independent),
         ("tracedecay_automation_run_artifact_view", BranchSensitivity::Independent),

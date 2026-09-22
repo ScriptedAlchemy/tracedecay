@@ -9,7 +9,7 @@
 //! and total byte length so 1-based line indexing stays valid.
 //!
 //! ## Format-capture carry-over
-//! Rust's formatting macros accept implicit captures — `println!("{name}")`
+//! Rust's formatting macros accept implicit captures. `println!("{name}")`
 //! references the binding `name`, so `name` is a real use of that identifier.
 //! When `preserve_format_captures` is set, the contents of the format-string
 //! argument of a standard formatting macro are blanked *except* for those
@@ -18,7 +18,7 @@
 //! delimiter walk over the remaining *code* bytes tracks which macro and which
 //! argument position each string sits at, so that only the real format-string
 //! literal earns the capture exception. Supported macros and their format-arg
-//! position (in top-level commas) are listed in [`format_macro_argument_index`].
+//! position (in top-level commas) are listed in `format_macro_argument_index`.
 
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -44,20 +44,13 @@ impl MaskOptions {
     };
 }
 
-/// Returns a copy of `source` with comment and string/char literal contents
-/// blanked, preserving implicit format captures. Equivalent to
-/// [`masked_rust_source_with`] using [`MaskOptions::UNUSED_IMPORTS`].
-pub fn masked_rust_source(source: &str) -> String {
-    masked_rust_source_with(source, MaskOptions::UNUSED_IMPORTS)
-}
-
 /// Returns a copy of `source` with comments and string/char literals blanked.
 /// `opts` controls whether implicit format captures survive.
 /// Blanked bytes become ASCII spaces; newlines and total byte length are
 /// preserved so line/byte indexing over the result stays valid.
 ///
 /// If the source cannot be parsed (grammar unavailable), the original source is
-/// returned unmasked — a defensive fallback that only trades masking for the
+/// returned unmasked, a defensive fallback that only trades masking for the
 /// pre-existing false-positive risk on that one file.
 pub fn masked_rust_source_with(source: &str, opts: MaskOptions) -> String {
     let Some(tree) = parse(source) else {
@@ -201,7 +194,7 @@ fn parse(source: &str) -> Option<tree_sitter::Tree> {
 struct MaskSpan {
     start: usize,
     end: usize,
-    /// A string/raw-string literal that is not byte-prefixed — the only kind
+    /// A string/raw-string literal that is not byte-prefixed. The only kind
     /// that can be a formatting macro's format-string argument. Char literals
     /// and byte strings are `false`.
     format_string_candidate: bool,
@@ -408,7 +401,7 @@ fn format_capture_identifier_end(bytes: &[u8], start: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MaskOptions, masked_rust_source, masked_rust_source_with};
+    use super::{MaskOptions, masked_rust_source_with};
 
     /// Whole-token match used by the scanners: does `identifier` appear as a
     /// real token (non-identifier boundaries) anywhere on `line`? Mirrors the
@@ -436,7 +429,7 @@ mod tests {
 
     /// Does `identifier` survive default import-discovery masking of `source`?
     fn referenced(source: &str, identifier: &str) -> bool {
-        masked_rust_source(source)
+        masked_rust_source_with(source, MaskOptions::UNUSED_IMPORTS)
             .lines()
             .any(|line| contains_token(line, identifier))
     }
@@ -584,7 +577,7 @@ mod tests {
     #[test]
     fn masking_preserves_line_count_and_length() {
         let src = "fn f() {\n    // comment HashMap\n    let s = \"str\";\n}\n";
-        let masked = masked_rust_source(src);
+        let masked = masked_rust_source_with(src, MaskOptions::UNUSED_IMPORTS);
         assert_eq!(masked.len(), src.len());
         assert_eq!(masked.lines().count(), src.lines().count());
     }

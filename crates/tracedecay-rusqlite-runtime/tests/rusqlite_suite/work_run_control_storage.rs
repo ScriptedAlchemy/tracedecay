@@ -19,10 +19,10 @@ use tracedecay_contracts::{
     WorkRunControlStoragePort,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros,
-    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1,
-    WorkAttemptV1, WorkAuthority, WorkBlockedIntervalCauseV1, WorkBlockedIntervalClosureV1,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId,
+    ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy,
+    WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
+    WorkAuthority, WorkBlockedIntervalCauseV1, WorkBlockedIntervalClosureV1,
     WorkBlockedIntervalIdentityV1, WorkBlockedIntervalReceiptV1, WorkCancellationStateV1,
     WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference, WorkExecutionEnvelopeV1,
     WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
@@ -39,17 +39,9 @@ use work_registered_store::RegisteredWorkStore;
 
 const ADMITTED_DEADLINE: UtcMicros = UtcMicros(1_000_000);
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn authority(actor: &str) -> WorkAuthority {
     WorkAuthority::new(
@@ -546,7 +538,7 @@ fn control_rows_are_isolated_per_authority_and_survive_a_restart() {
         .publish_run_control(&mine, None, &control, &[])
         .unwrap();
 
-    // Another actor sees no control row at all — not a running one.
+    // Another actor sees no control row at all, not a running one.
     assert_eq!(
         store
             .storage()

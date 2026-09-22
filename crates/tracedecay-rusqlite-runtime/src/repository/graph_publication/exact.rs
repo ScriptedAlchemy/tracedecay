@@ -790,8 +790,8 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
             .as_ref()
             .map_or(0, |cursor| cursor.sequence.get());
         // One keyset metadata page (limit + 1 signals a further page), then
-        // one batched materialization of the admitted records — the same
-        // page shape `replay_page` uses — instead of three reader round
+        // one batched materialization of the admitted records, the same
+        // page shape `replay_page` uses, instead of three reader round
         // trips per tombstone. The snapshot keeps both reads consistent.
         let metadata = retired_cleanup_metadata_page(
             &snapshot,

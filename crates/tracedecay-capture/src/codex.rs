@@ -51,7 +51,7 @@ pub fn codex_current_user_message(payload: &Value) -> Option<CodexCurrentUserMes
         .filter(|item_id| !item_id.is_empty())?;
     ObservationId::new(item_id).ok()?;
     let content = item.get("content")?;
-    let visible_text = codex_message_visible_text(content);
+    let visible_text = tracedecay_store::codex_message_visible_text(content);
     if visible_text.trim().is_empty() {
         return None;
     }
@@ -76,18 +76,13 @@ pub fn codex_response_goal_context(payload: &Value) -> Option<CodexResponseGoalC
         return None;
     }
     let content = payload.get("content")?;
-    let visible_text = codex_message_visible_text(content);
+    let visible_text = tracedecay_store::codex_message_visible_text(content);
     tracedecay_store::codex_goal_context_from_text(&visible_text)?;
     Some(CodexResponseGoalContext {
         item_id,
         content,
         visible_text,
     })
-}
-
-/// Collect the visible text carried by current and legacy Codex content bags.
-pub fn codex_message_visible_text(value: &Value) -> String {
-    tracedecay_store::codex_message_visible_text(value)
 }
 
 pub fn codex_observation_record_supported(value: &Value) -> bool {
@@ -636,13 +631,13 @@ fn append_codex_turn_lifecycle_fact(
 ) {
     // Exact singular task_complete / task_started / turn_aborted only
     // (write_codex_rollout_with_structured_events, task_events_become_turn_boundary_rows).
-    // Do not index last_agent_message as content — classic turn rows exclude it.
+    // Do not index last_agent_message as content. Classic turn rows exclude it.
     let provider_reference = payload
         .get("turn_id")
         .and_then(Value::as_str)
         .filter(|turn_id| !turn_id.is_empty())
         .map(str::to_string);
-    // Keep native `reason` in content only — do not promote it to status
+    // Keep native `reason` in content only. Do not promote it to status
     // (no fixture evidence that abort reason is a workflow status vocabulary).
     let mut content = serde_json::Map::new();
     content.insert("type".to_string(), Value::String(event.to_string()));
@@ -744,7 +739,7 @@ fn append_codex_response_item_facts(
                     return;
                 }
                 facts.push(CanonicalObservationFactV1::Message {
-                    role: canonical_message_role(role),
+                    role: crate::content::canonical_message_role(role),
                     content,
                     model: payload
                         .get("model")
@@ -893,16 +888,6 @@ fn timestamp_from_record(record: &Value) -> Option<i64> {
         .get("timestamp")
         .and_then(Value::as_str)
         .and_then(parse_rfc3339_timestamp)
-}
-
-fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
 }
 
 fn canonical_native_observation_id(

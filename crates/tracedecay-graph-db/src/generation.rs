@@ -9,7 +9,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
+use tracedecay_domain::canonical_text::{
+    encode_lowercase_hex, encode_tagged_lowercase_hex, sha256_hex,
+};
 use tracedecay_store::runtime::{
     GraphDependencyGenerationClosureDigestV1, GraphDependencyGenerationIdentityV1,
     GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
@@ -117,8 +119,8 @@ pub struct GraphGenerationManifest {
     pub dependencies: Vec<GraphGenerationDependency>,
     pub entities: Vec<GraphEntity>,
     pub relations: Vec<GraphGenerationRelation>,
-    /// Memoized canonical digests of this instance. Never serialized — the
-    /// canonical replay payload and every digest byte are unchanged — and
+    /// Memoized canonical digests of this instance. Never serialized, the
+    /// canonical replay payload and every digest byte are unchanged, and
     /// invisible to equality; re-validated against the fields on every read.
     #[serde(skip)]
     digest_memo: ManifestDigestMemo,
@@ -127,9 +129,9 @@ pub struct GraphGenerationManifest {
 /// The small, cheaply cloned metadata half of a generation manifest: exactly
 /// the fields that name a generation and bind it to its dependency closure.
 ///
-/// Every stage after the staged rows are durable — the close/reopen
+/// Every stage after the staged rows are durable, the close/reopen
 /// recovered-digest proof, quarantine, lease seating, and the finalization
-/// receipt — reads only these fields. Carrying them separately lets the bulk
+/// receipt, reads only these fields. Carrying them separately lets the bulk
 /// `entities`/`relations` vectors (multiple gigabytes on a first index) be
 /// released the moment the last staging page commits, instead of staying live
 /// through reopen and verification alongside the rebuilt in-RAM store.
@@ -268,7 +270,7 @@ impl fmt::Debug for DependencyClosureDigestMemo {
 /// every mutation pattern the repository exercises (dependency, generation,
 /// source, watermark, and row-set size changes). The bulk rows are validated
 /// by count only: replacing a row in place on the same instance after a
-/// digest read would go unobserved, and no flow does that — production
+/// digest read would go unobserved, and no flow does that, production
 /// manifests are constructed, proven, and then held behind `Arc`, while
 /// fixtures mutate freshly constructed or freshly cloned (cold) instances
 /// before their first digest read.
@@ -387,9 +389,24 @@ impl GraphGenerationManifest {
                 MAX_VERIFIED_GENERATION_RELATIONS,
             ));
         }
-        let dependencies = checked_sorted_dependencies(dependencies, check)?;
-        let entities = checked_sorted_entities(entities, check)?;
-        let relations = checked_sorted_relations(relations, check)?;
+        let dependencies = checked_sorted_by(
+            dependencies,
+            check,
+            Ord::cmp,
+            "a graph generation repeats a dependency",
+        )?;
+        let entities = checked_sorted_by(
+            entities,
+            check,
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats an entity identity",
+        )?;
+        let relations = checked_sorted_by(
+            relations,
+            check,
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats a relation identity",
+        )?;
         let manifest = Self {
             projection,
             generation,
@@ -550,8 +567,8 @@ impl GraphGenerationManifest {
 
     /// The metadata half of this manifest, cloned away from its bulk rows.
     /// Carries the memoized dependency-closure digest along when it still
-    /// binds, so later phases that hold only the identity — staging, the
-    /// close/reopen recovered-digest proof, recovery — do not recompute a
+    /// binds, so later phases that hold only the identity, staging, the
+    /// close/reopen recovered-digest proof, recovery, do not recompute a
     /// digest this manifest already proved.
     #[must_use]
     pub fn identity(&self) -> GraphGenerationManifestIdentity {
@@ -775,58 +792,22 @@ impl GraphGenerationManifest {
     }
 }
 
-fn checked_sorted_dependencies(
-    mut dependencies: Vec<GraphGenerationDependency>,
+fn checked_sorted_by<T>(
+    mut items: Vec<T>,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphGenerationDependency>, GraphDbError> {
+    mut order: impl FnMut(&T, &T) -> std::cmp::Ordering,
+    duplicate: &'static str,
+) -> Result<Vec<T>, GraphDbError> {
     check()?;
-    dependencies.sort_unstable();
-    for pair in dependencies.windows(2) {
+    items.sort_unstable_by(&mut order);
+    for pair in items.windows(2) {
         check()?;
-        if pair[0] == pair[1] {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats a dependency",
-            ));
+        if order(&pair[0], &pair[1]).is_eq() {
+            return Err(GraphDbError::invalid(duplicate));
         }
     }
     check()?;
-    Ok(dependencies)
-}
-
-fn checked_sorted_entities(
-    mut entities: Vec<GraphEntity>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphEntity>, GraphDbError> {
-    check()?;
-    entities.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
-    for pair in entities.windows(2) {
-        check()?;
-        if pair[0].identity == pair[1].identity {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats an entity identity",
-            ));
-        }
-    }
-    check()?;
-    Ok(entities)
-}
-
-fn checked_sorted_relations(
-    mut relations: Vec<GraphGenerationRelation>,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<Vec<GraphGenerationRelation>, GraphDbError> {
-    check()?;
-    relations.sort_unstable_by(|left, right| left.identity.cmp(&right.identity));
-    for pair in relations.windows(2) {
-        check()?;
-        if pair[0].identity == pair[1].identity {
-            return Err(GraphDbError::invalid(
-                "a graph generation repeats a relation identity",
-            ));
-        }
-    }
-    check()?;
-    Ok(relations)
+    Ok(items)
 }
 
 /// The dependency-closure digest, shared by the full manifest and its
@@ -885,10 +866,7 @@ pub(crate) fn physical_namespace(
             "failed to encode physical graph generation identity: {error}"
         ))
     })?;
-    GraphNamespace::new(format!(
-        "generation:{}",
-        hex::encode(Sha256::digest(encoded))
-    ))
+    GraphNamespace::new(format!("generation:{}", sha256_hex(&encoded)))
 }
 
 pub(crate) fn is_physical_generation_namespace(namespace: &GraphNamespace) -> bool {
@@ -945,8 +923,8 @@ pub(crate) fn verify_sealed_copy_generation(
     #[cfg(test)]
     SEALED_COPY_PROOFS.with(|count| count.set(count.get() + 1));
     // The canonical byte count is the same stream the staging proof would
-    // have hashed (the digests match byte for byte), so a sealed *build* —
-    // which enumerated the staging database's rows to produce this copy —
+    // have hashed (the digests match byte for byte), so a sealed *build*,
+    // which enumerated the staging database's rows to produce this copy,
     // may file it with the publication's verify-once marker.
     verify_recovered_rows(database, identity, expected, check)
 }
@@ -997,7 +975,7 @@ fn verify_recovered_rows(
     if &actual != expected {
         // Name the row set the observed digest was taken over. A digest pair
         // on its own cannot distinguish "these rows changed" from "a
-        // different number of rows was enumerated" — the released-row and
+        // different number of rows was enumerated", the released-row and
         // partial-restage failures are exactly the second kind, and without
         // the counts every such report reads as unexplained corruption.
         let (entities, relations) = projection_node_counts(
@@ -1768,8 +1746,8 @@ fn write_generation_identity_frames(
 /// Big-endian `(tag length, payload length)` headers of one digest frame.
 ///
 /// The streaming writer ([`write_frame`]) and the parallel proof's chunk
-/// encoder (`generation::recovered`) emit the identical frame layout —
-/// `tag_len | tag | byte_len | bytes` — so the length encoding lives here
+/// encoder (`generation::recovered`) emit the identical frame layout,
+/// `tag_len | tag | byte_len | bytes`, so the length encoding lives here
 /// once and the two emitters cannot drift.
 fn frame_length_headers(tag: &str, bytes: &[u8]) -> Result<([u8; 8], [u8; 8]), GraphDbError> {
     let tag_len =
@@ -2042,7 +2020,7 @@ mod checked_vec_writer_tests {
     use super::{
         CheckedVecWriter, GraphDbError, GraphGenerationManifest, ManifestDigestChunk,
         ManifestDigestChunkEncoding, ManifestDigestPipelineConfig, ManifestDigestPipelineMetrics,
-        canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_entities,
+        canonical_buffer_allocation_growths, checked_canonical_bytes, checked_sorted_by,
         encode_manifest_digest_chunk, frame_length_headers, recovered_generation_digest,
         recovered_generation_digest_with_config, reset_canonical_buffer_allocation_growths,
     };
@@ -2264,7 +2242,13 @@ mod checked_vec_writer_tests {
         entities.shrink_to_fit();
         let allocation = entities.as_ptr();
 
-        let sorted = checked_sorted_entities(entities, &|| Ok(())).unwrap();
+        let sorted = checked_sorted_by(
+            entities,
+            &|| Ok(()),
+            |left, right| left.identity.cmp(&right.identity),
+            "a graph generation repeats an entity identity",
+        )
+        .unwrap();
 
         assert_eq!(
             sorted.as_ptr(),

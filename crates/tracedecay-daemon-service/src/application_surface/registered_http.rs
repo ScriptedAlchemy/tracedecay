@@ -1,3 +1,4 @@
+use super::problems::{application_contract_error_response, registered_adapter_unavailable};
 use axum::response::Response;
 use serde::Serialize;
 use tracedecay_api::{
@@ -5,15 +6,12 @@ use tracedecay_api::{
     WorkflowOperation,
 };
 use tracedecay_contracts::{
-    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, LegalAction,
-    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ProblemOwningLayer,
+    RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceAdapterError, DaemonInvocationError, InvocationCancellationPolicy,
 };
-use tracedecay_tool_catalog::RouteExposureV1;
-
-use super::problems::{application_contract_error_response, registered_adapter_unavailable};
 
 pub(crate) trait RegisteredHttpOperation: Copy {
     fn operation_id(self) -> String;
@@ -248,7 +246,7 @@ where
             &format!("The {family} operation is not advertised by this build"),
         );
     };
-    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+    let Some((binding_id, _)) = binding.public_route() else {
         return registered_adapter_unavailable(
             request_id,
             &problem_code("route_unavailable"),
@@ -332,7 +330,7 @@ where
             &format!("The {family} operation is not advertised by this build"),
         );
     };
-    let RouteExposureV1::Public { binding_id, .. } = binding.exposure() else {
+    let Some((binding_id, _)) = binding.public_route() else {
         return registered_adapter_unavailable(
             request_id,
             &problem_code("route_unavailable"),
@@ -388,14 +386,7 @@ where
             tracedecay_daemon_protocol::DaemonInvocationOutcome::Problem { problem } => match problem {
                 tracedecay_daemon_protocol::DaemonInvocationProblem::InvalidRequest
                 | tracedecay_daemon_protocol::DaemonInvocationProblem::UnsupportedRevision => {
-                    ApplicationProblem::InvalidRequest {
-                        diagnostic: SafeDiagnostic {
-                            code: problem_code("invalid_request"),
-                            message: format!("The {family} application request is invalid"),
-                        },
-                        retry: RetryDirective::Never,
-                        legal_actions: vec![LegalAction::CorrectRequest],
-                    }
+                    ApplicationProblem::invalid_request(problem_code("invalid_request"), format!("The {family} application request is invalid"))
                 }
                 tracedecay_daemon_protocol::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)

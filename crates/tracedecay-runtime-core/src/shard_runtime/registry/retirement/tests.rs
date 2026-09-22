@@ -1,4 +1,3 @@
-use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -172,13 +171,7 @@ impl StoreRuntimeOwnerAttachmentRetirementReservationV1 for FailingOwnerAttachme
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn profile_shard(profile: &str) -> StoreShardIdV1 {
     StoreShardIdV1::profile(

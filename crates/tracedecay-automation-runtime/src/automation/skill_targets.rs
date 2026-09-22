@@ -307,6 +307,51 @@ pub fn load_active_managed_skills_for_target(
         .collect())
 }
 
+/// Managed-skill ids a host's prompt index still advertises that the profile's
+/// skill store no longer holds.
+///
+/// A non-empty result means the index was written against an earlier store
+/// state and no later lifecycle pass reconverged it, so the host is being told
+/// about skills `tracedecay_skill_view` can no longer serve.
+pub fn stale_prompt_index_ids(
+    profile_root: &Path,
+    prompt_path: &Path,
+    target: SkillInstallTarget,
+) -> Result<Vec<String>> {
+    let existing = match fs::read_to_string(prompt_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let (start_marker, end_marker) = prompt_index_markers(target);
+    let range = match managed_block_range(&existing, target, &start_marker, &end_marker)? {
+        Some(range) => Some(range),
+        // Mirror the removal path's legacy fallback: an unslugged block is this
+        // target's only when no other target has claimed the file with a slug.
+        None if !has_other_slugged_block(&existing, target) => {
+            managed_block_range(&existing, target, PROMPT_INDEX_START, PROMPT_INDEX_END)?
+        }
+        None => None,
+    };
+    let Some((start, end)) = range else {
+        return Ok(Vec::new());
+    };
+    let active = load_active_managed_skills_for_target(profile_root, target)?
+        .into_iter()
+        .map(|skill| skill.metadata.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    Ok(listed_prompt_index_ids(&existing[start..end])
+        .filter(|id| !active.contains(id))
+        .collect())
+}
+
+fn listed_prompt_index_ids(block: &str) -> impl Iterator<Item = String> + '_ {
+    block.lines().filter_map(|line| {
+        let (id, _) = line.trim_start().strip_prefix("- `")?.split_once('`')?;
+        (!id.is_empty()).then(|| id.to_string())
+    })
+}
+
 fn render_prompt_index_block(target: SkillInstallTarget, skills: &[ManagedSkill]) -> String {
     let mut block = String::new();
     let (start, end) = prompt_index_markers(target);

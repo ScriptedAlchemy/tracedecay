@@ -55,7 +55,7 @@ pub trait HostBundleRegistrationInspectorV1 {
 
 /// Read-only classification of one installed component (or one of its
 /// artifacts). This type is `Serialize`-only and is never persisted into a
-/// receipt, journal, or any other durable control file — it exists solely for
+/// receipt, journal, or any other durable control file, it exists solely for
 /// the transient [`HostBundleDoctorReportV1`]. Adding a variant therefore
 /// widens the doctor's reported vocabulary without making any previously
 /// written artifact unreadable.
@@ -71,7 +71,7 @@ pub enum HostBundleComponentDoctorStateV1 {
     /// converges without an operator first resolving a foreign claim.
     Drifted,
     OwnershipConflict,
-    /// A `TraceDecay`-named host registration that no install receipt owns —
+    /// A `TraceDecay`-named host registration that no install receipt owns,
     /// an uninstall that removed the receipt-owned artifacts but left the host
     /// still advertising the extension. Reported so the leftover registration
     /// is visible; repairing it is an explicit operator command.
@@ -79,8 +79,8 @@ pub enum HostBundleComponentDoctorStateV1 {
     /// Every receipt-owned artifact of a component whose host activates only
     /// through an interactive UI is absent, and the host's staged source bundle
     /// is present but unactivated. Nothing TraceDecay can drive non-interactively
-    /// deploys these bytes — the host materialises them when the operator
-    /// activates the extension — so this is a pending user action rather than
+    /// deploys these bytes, the host materialises them when the operator
+    /// activates the extension, so this is a pending user action rather than
     /// receipt drift. Ranked below `Missing`: a component that still holds SOME
     /// of its receipt-owned bytes lost the rest after activation, which is real
     /// drift and stays blocking.
@@ -567,7 +567,7 @@ fn receipt_ownership_claims(receipt_paths: &[PathBuf]) -> BTreeMap<String, BTree
 }
 
 /// Doctor-side mirror of the planner's (`plan_artifact_action`) marker-vs-digest boundary
-/// under `Repair` — the operation every repair action recommends.
+/// under `Repair`, the operation every repair action recommends.
 ///
 /// The ownership marker is the only conflict gate: a foreign or absent marker
 /// is a contested path that planning refuses outside the narrow pre-receipt
@@ -601,7 +601,7 @@ pub(super) fn doctor_artifact_state(
 ///
 /// This is what separates a never-activated component from real drift. A
 /// component that holds even one of its receipt-owned files was materialised at
-/// some point, so the absent siblings are bytes that went missing afterwards —
+/// some point, so the absent siblings are bytes that went missing afterwards,
 /// exactly the receipt-integrity failure the blocking `Missing` state exists to
 /// report. Only a wholly absent set can honestly be attributed to an activation
 /// the operator has not performed yet. A receipt with no artifacts at all proves

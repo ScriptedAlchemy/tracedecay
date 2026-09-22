@@ -293,7 +293,7 @@ async fn condensation_orders_same_depth_candidates_by_source_time() {
 // Mirrors hermes-lcm `_maybe_condense` with the default
 // `incremental_max_depth = 1`: only depth-0 nodes are eligible for
 // condensation, so unparented depth-1 nodes never get condensed to depth 2
-// at default settings — they stay in active replay instead.
+// at default settings. They stay in active replay instead.
 #[tokio::test]
 async fn condensation_respects_default_incremental_max_depth() {
     let tmp = TempDir::new().unwrap();

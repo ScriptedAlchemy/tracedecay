@@ -16,13 +16,7 @@ use tracedecay_domain::{
     RepositoryDirtyStateV1, RepositoryId, SourceSpan, TreeId, WorktreeId,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Display,
-{
-    T::try_from(value.to_owned()).unwrap_or_else(|error| panic!("{value}: {error}"))
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn identity(commit: &str, tree: &str, dirty: RepositoryDirtyStateV1) -> ParseDocumentIdentity {
     identity_in_worktree(commit, tree, dirty, "worktree.incremental")
@@ -555,7 +549,7 @@ fn file_root_end_line(result: &ExtractionResult) -> u32 {
 /// through the changed-region path, and after a line-changing edit that takes
 /// the multiline reset path. The last shape moves the terminating newline
 /// without changing the row delta, so the file root's `end_line` changes on a
-/// same-line edit — reusing the prior span would be wrong there.
+/// same-line edit. Reusing the prior span would be wrong there.
 #[test]
 fn file_root_span_matches_cold_extraction_for_every_line_ending_shape() {
     let shapes = [

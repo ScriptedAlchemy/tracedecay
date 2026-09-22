@@ -7,9 +7,12 @@
 use super::*;
 
 #[hotpath::measure(label = "daemon.project.handshake.open", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Handshake open is one identity-bind and route-publish sequence."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Handshake open is one identity-bind and route-publish sequence."
+    )
 )]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
@@ -67,7 +70,7 @@ pub(super) async fn open_project_for_handshake(
     // First-touch enrollment: persist the minted identity in the `.git/`
     // repository identity marker so a subsequent open resolves the same
     // identity before the registry row lands. A non-git root persists
-    // nothing — its identity is deterministic from the canonical path and
+    // nothing, its identity is deterministic from the canonical path and
     // the registry registration below is its durable home. TraceDecay never
     // creates files inside a project's working tree.
     if first_touch {

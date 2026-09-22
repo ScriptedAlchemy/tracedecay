@@ -450,9 +450,12 @@ impl McpServer {
     }
 
     #[hotpath::measure(label = "mcp.server.hook_event", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Hook-event notification is one decode-admit-ack of a host envelope."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Hook-event notification is one decode-admit-ack of a host envelope."
+        )
     )]
     pub(crate) async fn handle_hook_event_notification(
         &self,
@@ -500,7 +503,7 @@ impl McpServer {
             }
         };
         dispatch_server.record_request_accounting("tracedecay/hookEvent", false);
-        // R4: one branch resolution for this notification — the drift check
+        // R4: one branch resolution for this notification, the drift check
         // below and the hook-plan branch label both read it.
         let (cg, live_branch) = dispatch_server.reopen_if_branch_drifted_memoized().await;
         let root = cg.project_root().to_path_buf();
@@ -533,7 +536,7 @@ impl McpServer {
             && let Some(sink) = &dispatch_server.code_index_hook_sink
         {
             // An accepted admission means the paths really entered a mounted
-            // worktree's incremental queue — the exact moment indexing work is
+            // worktree's incremental queue, the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone())
                 .await
@@ -600,7 +603,7 @@ impl McpServer {
     /// `"claude-code"`, `"codex"`, `"cursor"`) so subsequent `tools/call`
     /// analytics events can attribute per-host adoption instead of every
     /// call recording the same opaque `provider="mcp"`. Only the short
-    /// name field is retained — never the full `clientInfo` payload.
+    /// name field is retained, never the full `clientInfo` payload.
     #[hotpath::measure(label = "mcp.server.initialize")]
     pub(crate) fn handle_initialize(
         &self,
@@ -1045,7 +1048,7 @@ impl McpServer {
         // ("after"), before any banners/metrics lines are appended.
         let response_tokens = Self::response_token_count(result);
         // "Before" counterfactual: reading every referenced file raw,
-        // in full. Counters credit only the net saving per call —
+        // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.
         let raw_file_tokens = self
             .raw_file_tokens(cg.project_root(), &result.touched_files)
@@ -1099,7 +1102,7 @@ impl McpServer {
         };
 
         // Persist to the cross-project savings ledger (best-effort, non-blocking).
-        // Clone the Arc — no new connection is opened. The counters
+        // Clone the Arc, no new connection is opened. The counters
         // and notify make the write's completion observable to
         // [`Self::ledger_writes_settled`] without making it awaited
         // anywhere on the request path.
@@ -1224,7 +1227,7 @@ impl McpServer {
         result: &mut ToolResult,
     ) {
         // Borrowed-worktree heads-up (#312). Inserted LAST so it
-        // appears FIRST in the response — the index serving the
+        // appears FIRST in the response, the index serving the
         // wrong branch is the most serious of these warnings to
         // surface to the agent.
         if include_connection_worktree_warning && let Some(ref m) = self.worktree_mismatch {
@@ -1271,7 +1274,10 @@ impl McpServer {
                         join_required_live_transcript_refresh(
                             &tool_name,
                             &analytics_arguments,
-                            selected_owner.is_some(),
+                            // This server executed the write. Its wakes are
+                            // the owners, including when a workspace route
+                            // selected it. Dropping them leaves the projection
+                            // dirty until an unrelated scheduler wake.
                             self.project_session_refresh_wake.as_deref(),
                             self.user_session_refresh_wake.as_deref(),
                         ),
@@ -1458,9 +1464,14 @@ impl McpServer {
         cancellation: tracedecay_session_memory::context::CancellationToken,
     ) -> JsonRpcResponse {
         let started = timings_enabled.then(std::time::Instant::now);
-        let mut response = self
-            .handle_tools_call_inner(id, params, timings_enabled, connection, cancellation)
-            .await;
+        let mut response = Box::pin(self.handle_tools_call_inner(
+            id,
+            params,
+            timings_enabled,
+            connection,
+            cancellation,
+        ))
+        .await;
         Self::attach_missing_response_timing(
             &mut response,
             started.map(|started| started.elapsed().as_micros() as u64),
@@ -1552,10 +1563,15 @@ impl McpServer {
 
         // Transport cancellation is owned by the connection server, then the
         // same signal is mirrored into the already-selected target below.
+        // The registration's `Drop` removes the request from the cancellation
+        // table. Naming it `_registration` is not enough: this binding is never
+        // read, and the compiler ends its drop range at the `let`, so a cancel
+        // that arrives once the worker is inside a candidate batch finds an
+        // empty table. Hold it across the worker await.
         let PreparedDispatchControl {
             request_id: application_request_id,
             control,
-            registration: _registration,
+            registration: connection_cancellation,
         } = match self.prepare_dispatch_control(
             &id,
             &tool_name,
@@ -1636,10 +1652,15 @@ impl McpServer {
                 .dispatch_authority
                 .register_cancellation(request_id.clone(), control.cancellation());
         }
-        let _target_cancellation_registration = ApplicationCancellationRegistration::new(
+        let target_cancellation = ApplicationCancellationRegistration::new(
             dispatch_server.dispatch_authority.cancellations(),
             target_request_id,
         );
+        // `ManuallyDrop` so an earlier destructor of this binding cannot remove
+        // the row. The explicit drop below is the last use, after the worker
+        // returns, which is the whole time a transport cancel can still land.
+        let mut connection_cancellation = std::mem::ManuallyDrop::new(connection_cancellation);
+        let mut target_cancellation = std::mem::ManuallyDrop::new(target_cancellation);
         let worker_server = dispatch_server.dispatch_authority.server();
         let worker_tool_name = tool_name.clone();
         let worker_control = control.clone();
@@ -1673,6 +1694,12 @@ impl McpServer {
                 .run_retained(dispatch_server.dispatch_authority.registry(), worker)
                 .await
         };
+        // Safety: each guard is dropped exactly once, here, after the worker
+        // has settled, and neither is used again.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut connection_cancellation);
+            std::mem::ManuallyDrop::drop(&mut target_cancellation);
+        }
         tracing::trace!(
             tool_name,
             settlement = ?dispatch_outcome.settlement(),

@@ -101,10 +101,8 @@ pub fn truncated_json_envelope_with_handle(project_root: Option<&Path>, formatte
     let original_chars = formatted.chars().count();
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
-        while end > 0 && !formatted.is_char_boundary(end) {
-            end -= 1;
-        }
-        let preview = &formatted[..end];
+        let preview = utf8_prefix_at_or_before(formatted, end);
+        end = preview.len();
         let mut envelope = serde_json::json!({
             "truncated": true,
             "original_chars": original_chars,
@@ -631,8 +629,8 @@ pub fn risky_patterns_md(value: &Value) -> String {
 
 /// Dedicated markdown renderer for `tracedecay_unmounted_files`.
 ///
-/// An empty answer here is a real and welcome verdict — "every source file is
-/// reachable" — so it is spelled out rather than left as the generic renderer's
+/// An empty answer here is a real and welcome verdict, "every source file is
+/// reachable", so it is spelled out rather than left as the generic renderer's
 /// silence. The per-ecosystem section is not decoration: "unmounted" means
 /// something stronger for cargo than for a bundler, and a language nobody
 /// modelled must say so out loud rather than let a clean report imply coverage
@@ -732,7 +730,7 @@ fn render_ecosystem(md: &mut Md, ecosystem: &Value) {
     let number = |key: &str| ecosystem.get(key).and_then(Value::as_u64).unwrap_or(0);
     let findings = number("unmounted_file_count");
     md.bullet(&format!(
-        "**{name}** — {status} · {} package(s) · {} entry point(s) · {} file(s) scanned · {findings} unmounted",
+        "**{name}**, {status} · {} package(s) · {} entry point(s) · {} file(s) scanned · {findings} unmounted",
         number("package_count"),
         number("entry_point_count"),
         number("scanned_file_count"),

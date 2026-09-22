@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_store::{
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
@@ -12,8 +12,8 @@ use tracedecay_store::{
 };
 
 use crate::exact_sql::{
-    ExactSqlColumnError, ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlRow,
-    ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
+    ExactSqlColumnError, ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle,
+    ExactSqlReaderRefusalV1, ExactSqlRow, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
 
 pub(super) use crate::exact_sql::{optional_text, text};
@@ -27,8 +27,6 @@ use super::{
     ExactPublicationRead, ExactQueryAuthority, REPLAY_COLUMNS, REPLAY_METADATA_COLUMNS,
     REPLAY_READER_ACQUIRE_SLICE, TOMBSTONE_COLUMNS,
 };
-
-const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
 
 /// Maximum owner sequences bound into one `IN (...)` dependency lookup.
 ///
@@ -59,35 +57,99 @@ const BEGIN_BUSY_ATTEMPT_BUDGET: u32 = 64;
 /// exceeded the row cap in one chunk.
 const GRAPH_REPLAY_DEPENDENCY_BATCH: usize = 38;
 
+/// Wall-clock budget for one begin acquisition, retries included.
+///
+/// `ExactSqlError::Busy` answers two different questions with one variant: the
+/// exact-SQL command queue was full (`map_writer_send_error`), or the writer's
+/// own `EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT` lock loop was exhausted. Only the
+/// first is worth another attempt. A wall-clock budget separates them without a
+/// second error variant: an exhausted lock attempt has already spent this whole
+/// window inside `begin_immediate`, so it gets exactly one attempt and its
+/// 64ms answer is never multiplied into seconds, while a queue refusal returns
+/// at once and still has the window to drain in.
+const BEGIN_ACQUIRE_BUDGET: Duration = Duration::from_millis(64);
+
+/// Pause between admission retries, matching the writer's own busy pause.
+const BEGIN_BUSY_RETRY_PAUSE: Duration = Duration::from_millis(1);
+
+/// What one failed acquisition attempt tells the begin loop to do next.
+///
+/// A lane that declines to admit the work and a lane whose reader or writer
+/// failed are different answers, and only the first leaves the caller free to
+/// reach the data another way. Collapsing them turns a broken store into a
+/// successful read on whatever lane still answers.
+enum BeginAcquireDecision {
+    /// The lane is contended. Another attempt inside the budget may be admitted.
+    RetryWithinBudget,
+    /// The lane declined for good. Waiting out the budget cannot change it.
+    Decline,
+    /// Something failed. The caller must see it rather than route around it.
+    Surface,
+}
+
+fn classify_begin_acquire_failure(error: &ExactSqlError) -> BeginAcquireDecision {
+    match error {
+        // The writer's command queue was full, or the reader lane was fully
+        // leased for its slice. Both drain on their own.
+        ExactSqlError::Busy | ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Saturated) => {
+            BeginAcquireDecision::RetryWithinBudget
+        }
+        // A draining pool admits nothing further, so spending the budget on it
+        // only delays the fallback that will serve this read.
+        ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Draining) => {
+            BeginAcquireDecision::Decline
+        }
+        _ => BeginAcquireDecision::Surface,
+    }
+}
+
+/// Runs `attempt` until it answers, a lane declines it, or the caller is
+/// interrupted.
+///
+/// `Ok(None)` means one thing: no lane would admit the work, and the caller
+/// may serve it another way. Anything that failed is an `Err`, so a caller
+/// cannot mistake a broken store for contention.
+fn acquire_within_begin_budget<T>(
+    context: &GraphPublicationOperationContextV1<'_>,
+    mut attempt: impl FnMut() -> Result<T, ExactSqlError>,
+) -> GraphPublicationStoreResultV1<Option<T>> {
+    let deadline = Instant::now() + BEGIN_ACQUIRE_BUDGET;
+    loop {
+        ensure_not_interrupted(context)?;
+        let error = match attempt() {
+            Ok(value) => {
+                ensure_not_interrupted(context)?;
+                return Ok(Some(value));
+            }
+            Err(error) => error,
+        };
+        ensure_not_interrupted(context)?;
+        match classify_begin_acquire_failure(&error) {
+            BeginAcquireDecision::RetryWithinBudget => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(BEGIN_BUSY_RETRY_PAUSE);
+            }
+            BeginAcquireDecision::Decline => return Ok(None),
+            BeginAcquireDecision::Surface => {
+                return Err(GraphPublicationStoreErrorV1::Infrastructure);
+            }
+        }
+    }
+}
+
 #[hotpath::measure(label = "rusqlite.graph_publication.begin")]
 pub(super) fn begin(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactSqlTransaction> {
-    let mut busy_attempts = 0_u32;
-    loop {
-        ensure_not_interrupted(context)?;
-        match hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
+    acquire_within_begin_budget(context, || {
+        hotpath::measure_block!("rusqlite.graph_publication.begin_immediate", {
             handle.begin_immediate()
-        }) {
-            Ok(transaction) => {
-                ensure_not_interrupted(context)?;
-                return Ok(transaction);
-            }
-            Err(ExactSqlError::Busy) => {
-                busy_attempts = busy_attempts.saturating_add(1);
-                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
-                    return Err(GraphPublicationStoreErrorV1::Infrastructure);
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                ensure_not_interrupted(context)?;
-            }
-            Err(_) => {
-                ensure_not_interrupted(context)?;
-                return Err(GraphPublicationStoreErrorV1::Infrastructure);
-            }
-        }
-    }
+        })
+    })?
+    .ok_or(GraphPublicationStoreErrorV1::Infrastructure)
 }
 
 pub(super) fn ensure_owner(
@@ -128,30 +190,16 @@ pub(super) fn begin_read(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
 ) -> GraphPublicationStoreResultV1<ExactPublicationRead> {
-    let mut busy_attempts = 0_u32;
-    loop {
-        ensure_not_interrupted(context)?;
-        match hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
+    if let Some(snapshot) = acquire_within_begin_budget(context, || {
+        hotpath::measure_block!("rusqlite.graph_publication.begin_read_snapshot", {
             handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE)
-        }) {
-            Ok(snapshot) => {
-                ensure_not_interrupted(context)?;
-                return Ok(ExactPublicationRead::Snapshot(snapshot));
-            }
-            Err(ExactSqlError::Busy) => {
-                busy_attempts = busy_attempts.saturating_add(1);
-                if busy_attempts >= BEGIN_BUSY_ATTEMPT_BUDGET {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                ensure_not_interrupted(context)?;
-            }
-            Err(_) => {
-                ensure_not_interrupted(context)?;
-                break;
-            }
-        }
+        })
+    })? {
+        return Ok(ExactPublicationRead::Snapshot(snapshot));
     }
+    // The deferred fallback waits the writer without consulting `context`, so
+    // this is the last point that can answer a cancelled or expired caller.
+    ensure_not_interrupted(context)?;
     hotpath::measure_block!("rusqlite.graph_publication.begin_deferred", {
         handle
             .begin_deferred()
@@ -814,7 +862,7 @@ pub(super) fn retired_cleanup_metadata_page(
 
 /// Batched tombstone materialization for one already-selected cleanup page:
 /// one `IN (...)` query for the tombstone rows, one for their retained
-/// replay sources, and the chunked dependency batch — instead of the former
+/// replay sources, and the chunked dependency batch, instead of the former
 /// three queries per tombstone. The page's byte cap
 /// (`MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1`, well under the exact-SQL
 /// transport's 64 MiB materialization bound) keeps the batched source fetch
@@ -1436,7 +1484,7 @@ mod dependency_batch_tests {
         }
     }
 
-    fn context(suffix: &str) -> GraphPublicationOperationContextV1<'static> {
+    pub(super) fn context(suffix: &str) -> GraphPublicationOperationContextV1<'static> {
         let cancellation = RuntimeCancellationIdentityV1 {
             cancellation_id: RuntimeCancellationIdV1::new(format!("cancellation.{suffix}"))
                 .unwrap(),
@@ -1461,9 +1509,7 @@ mod dependency_batch_tests {
         GraphPublicationOperationContextV1::new(&control, probe).unwrap()
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     /// A valid hex digit character for `digest()`, cycling over `index`.
     /// Unlike a plain ASCII letter range, every value this returns is
@@ -1938,7 +1984,7 @@ mod dependency_batch_tests {
     }
 
     /// RED (pre-fix behaviour, reproduced explicitly below): materializing N
-    /// cleanup tombstones issued three queries per tombstone — the tombstone
+    /// cleanup tombstones issued three queries per tombstone, the tombstone
     /// row, its retained replay source, and its dependency rows.
     ///
     /// GREEN (this crate's current behaviour):
@@ -1967,7 +2013,7 @@ mod dependency_batch_tests {
 
         // A three-publication verified chain on one projection: the first
         // two become historical once the third holds the head, so both are
-        // retire-able. The first carries dependencies, the second none —
+        // retire-able. The first carries dependencies, the second none,
         // covering both decode shapes in one batched page.
         let (first, first_head) = publish_verified_head(
             &mut storage,
@@ -2043,5 +2089,126 @@ mod dependency_batch_tests {
         assert_eq!(batched, vec![first_tombstone, second_tombstone]);
 
         transaction.rollback().unwrap();
+    }
+}
+
+/// Coverage for how [`acquire_within_begin_budget`] answers each acquisition
+/// failure, driven by an injected attempt rather than a live store.
+///
+/// A real reader worker crash or a saturated lane is not reproducible on
+/// demand, so the attempt closure stands in for the exact-SQL call. What is
+/// under test is the decision the helper returns, which is what routes a
+/// caller to the deferred writer lane or to an error.
+#[cfg(test)]
+mod begin_acquire_tests {
+    use std::cell::Cell;
+
+    use super::dependency_batch_tests::context;
+    use super::*;
+
+    #[test]
+    fn a_failed_reader_surfaces_instead_of_deferring() {
+        let context = context("begin-acquire.failed-reader");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::ReaderUnavailable(
+                "reader worker failed: worker closed".to_owned(),
+            ))
+        });
+
+        assert_eq!(
+            outcome,
+            Err(GraphPublicationStoreErrorV1::Infrastructure),
+            "a reader that failed must reach the caller, not be answered by a \
+             deferred read on the writer lane"
+        );
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a failed reader is a final answer, so it is never retried"
+        );
+    }
+
+    #[test]
+    fn writer_backpressure_through_the_whole_budget_defers() {
+        let context = context("begin-acquire.writer-backpressure");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::Busy)
+        });
+
+        assert_eq!(
+            outcome,
+            Ok(None),
+            "backpressure that outlasts the budget leaves the caller to route \
+             around it"
+        );
+        assert!(
+            attempts.get() > 1,
+            "the budget spans more than one attempt, so a queue refusal that \
+             returns at once is retried while the window lasts"
+        );
+    }
+
+    #[test]
+    fn a_saturated_reader_lane_is_retried_then_defers() {
+        let context = context("begin-acquire.saturated");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::ReaderRefused(
+                ExactSqlReaderRefusalV1::Saturated,
+            ))
+        });
+
+        assert_eq!(outcome, Ok(None));
+        assert!(
+            attempts.get() > 1,
+            "a saturated lane can clear inside the budget, so it is retried \
+             before the caller gives up on it"
+        );
+    }
+
+    #[test]
+    fn a_draining_reader_lane_defers_without_spending_the_budget() {
+        let context = context("begin-acquire.draining");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(ExactSqlError::ReaderRefused(
+                ExactSqlReaderRefusalV1::Draining,
+            ))
+        });
+
+        assert_eq!(outcome, Ok(None));
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a draining pool admits nothing further, so retrying it only \
+             delays the fallback"
+        );
+    }
+
+    #[test]
+    fn backpressure_that_clears_inside_the_budget_acquires() {
+        let context = context("begin-acquire.backpressure-clears");
+        let attempts = Cell::new(0_usize);
+
+        let outcome = acquire_within_begin_budget(&context, || {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                return Err(ExactSqlError::Busy);
+            }
+            Ok(7_u8)
+        });
+
+        assert_eq!(outcome, Ok(Some(7)));
+        assert_eq!(attempts.get(), 3);
     }
 }

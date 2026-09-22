@@ -476,7 +476,7 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
 /// Table-size telemetry walks `dbstat` for the whole store, so on a
 /// multi-gigabyte database the scan runs for minutes. A caller that cannot
 /// get its reply within the bound must receive a typed deadline error and
-/// interrupt the worker instead of being captured for the scan's duration —
+/// interrupt the worker instead of being captured for the scan's duration,
 /// captured callers on runtime workers are what starved the daemon shutdown
 /// drain of its own deadlines.
 #[test]
@@ -799,10 +799,15 @@ fn snapshot_admissions_count_only_successful_exact_sql_snapshot_starts() {
     let second = pool
         .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO)
         .expect("second snapshot admission");
-    assert!(matches!(
-        pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
-        Err(crate::exact_sql::ExactSqlError::ReaderUnavailable(_))
-    ));
+    assert!(
+        matches!(
+            pool.begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::ZERO),
+            Err(crate::exact_sql::ExactSqlError::ReaderRefused(
+                crate::exact_sql::ExactSqlReaderRefusalV1::Saturated
+            ))
+        ),
+        "a full lane declines the lease, which is not a reader that failed"
+    );
 
     assert_eq!(
         pool.snapshot().snapshot_admissions,
@@ -1109,7 +1114,7 @@ fn saturated_general_lane_recovers_when_long_held_leases_release() {
     // Live defect probe: under store-scale load every general worker is held by
     // a long-lived snapshot and concurrent acquirers report
     // `Saturated { ReaderPool }`. Recovery must not depend on the acquisition
-    // loop retiring idle burst workers on every poll tick — retirement is gated
+    // loop retiring idle burst workers on every poll tick, retirement is gated
     // to entry and notified wakes, and a waiter parked on a timed-out poll must
     // still be woken and served the moment a lease is returned.
     let store = TestStore::new();
@@ -1295,7 +1300,7 @@ fn foreground_reservation_leaves_background_at_least_one_worker() {
 
 /// Occupancy alone cannot tell a busy lane from a starving one. The pool has
 /// to report blocked acquisitions too, and release the count on every exit
-/// path — including the saturated one, which is exactly when it is read.
+/// path, including the saturated one, which is exactly when it is read.
 #[test]
 fn a_blocked_acquisition_is_reported_as_a_waiter_and_released() {
     let store = TestStore::new();

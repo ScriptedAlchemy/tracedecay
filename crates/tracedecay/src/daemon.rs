@@ -77,6 +77,18 @@ const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
 const MAX_CACHED_PROJECT_OPEN_FAILURES: usize = 64;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
+
+/// Instant a foreground request stops waiting for an open it has already claimed.
+///
+/// Measured from the claim, not from connection arrival. Route enrollment and
+/// git discovery have their own bounds. Charging them to this deadline made a
+/// restart's first request answer warming for a store whose open had already
+/// recorded `reset_required`: the connection spent the budget before it joined
+/// the watch, so the publication wait returned immediately and never read the
+/// refusal.
+fn project_open_publication_deadline(claimed_at: tokio::time::Instant) -> tokio::time::Instant {
+    claimed_at + PROJECT_OPEN_REQUEST_DEADLINE
+}
 /// One budget for every blocking repository probe a route resolution runs.
 ///
 /// Route resolution reads the repository's topology, enrollment marker, and
@@ -183,7 +195,7 @@ pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value
 /// True when a one-shot tool-call transport error should be retried by a
 /// journey (or any client riding out a transient open/retirement).
 ///
-/// Keys only on typed reason codes — never on English detail prose.
+/// Keys only on typed reason codes, never on English detail prose.
 pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
@@ -340,6 +352,7 @@ use projectless::{
 };
 mod project_composition;
 mod project_delivery_mount;
+pub(crate) use project_composition::daemon_transcript_source_home;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
 #[cfg(test)]

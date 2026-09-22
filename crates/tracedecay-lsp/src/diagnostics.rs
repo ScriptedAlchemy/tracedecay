@@ -165,7 +165,7 @@ impl GatewayDiagnostic {
     /// Normalizes one diagnostic into its merge lane.
     ///
     /// The lane is authoritative, but within the `TraceDecay` lane a producer
-    /// already named by the projection is preserved — merging must not erase
+    /// already named by the projection is preserved, merging must not erase
     /// `tracedecay-github`/`tracedecay-ci`/`tracedecay-proximity` back into an
     /// anonymous `tracedecay`.
     fn normalize(mut self, lane: DiagnosticSource) -> Self {
@@ -436,14 +436,7 @@ fn utf16_column_to_byte_offset(
 }
 
 pub(crate) fn truncate_utf8(value: &mut String, max_bytes: usize) {
-    if value.len() <= max_bytes {
-        return;
-    }
-    let mut boundary = max_bytes;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value.truncate(boundary);
+    value.truncate(value.floor_char_boundary(max_bytes));
 }
 
 #[cfg(test)]

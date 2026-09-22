@@ -3,7 +3,7 @@
  *
  * Observatory's findings section and the nav rail's health dot both call
  * `/api/storage/findings`. They used to spell the key and the URL separately
- * and name different `refetchInterval`s — 30 seconds and 60. Because the key
+ * and name different `refetchInterval`s, 30 seconds and 60. Because the key
  * was the same, React Query never honoured both: the shared entry polled on the
  * shorter of the two whenever both were mounted, so the rail's stated minute
  * was not a period that existed. These tests hold the entry to a single

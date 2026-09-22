@@ -183,8 +183,8 @@ const TIERED_MEMORY_FRACTION: f64 = 0.25;
 /// memory budget to spill against.
 ///
 /// Both knobs are prerequisites, not triggers. `with_spill_path` only decides
-/// *where* a spill lands — grafeo's `SectionConsumer::spill` returns
-/// `SpillError::NoSpillDirectory` without it — and `with_memory_fraction` sets
+/// *where* a spill lands, grafeo's `SectionConsumer::spill` returns
+/// `SpillError::NoSpillDirectory` without it, and `with_memory_fraction` sets
 /// the budget the buffer manager measures pressure against. Section tiers are
 /// left at grafeo's default `TierOverride::Auto` on purpose:
 ///

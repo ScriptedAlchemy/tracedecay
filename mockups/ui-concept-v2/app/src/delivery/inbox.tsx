@@ -485,7 +485,7 @@ export function LocalFirst() {
             <span className="chip">PULL REQUESTS</span>
             <span className="chip chip-violet">NOT PUBLISHED</span>
           </span>
-          <span>last indexed — not commit time</span>
+          <span>last indexed. Not commit time</span>
         </h3>
         <div className="dl-metrics six">
           <div className="dl-metric">
@@ -655,7 +655,7 @@ export function LocalFirst() {
             ))}
           </div>
           <p className="dl-hint">
-            Local authority remains useful. Provider absence is not empty-PR success — CI identity is unavailable (
+            Local authority remains useful. Provider absence is not empty-PR success, CI identity is unavailable (
             {CHECK_MATRIX.filter((c) => c.provider !== "COMPLETE").length} projections not published).
           </p>
         </div>

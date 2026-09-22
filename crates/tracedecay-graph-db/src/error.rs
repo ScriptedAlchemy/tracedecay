@@ -145,6 +145,56 @@ pub enum GraphDbError {
     Closed,
 }
 
+/// Store failure folded into a projection error that does not carry graph-db
+/// context fields. Callers that keep richer variants map [`GraphDbError`]
+/// themselves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphStoreFailureClass {
+    Cancelled,
+    BudgetExhausted,
+    Contract(String),
+    Corrupt(String),
+    Unavailable(String),
+}
+
+/// Classify a store error the way git topology and workflow topology do.
+///
+/// `conflict_unavailable` is the caller-specific conflict message. Every other
+/// arm is identical for those projections, including the closed-store wording.
+#[must_use]
+pub fn classify_graph_store_error(
+    error: GraphDbError,
+    conflict_unavailable: &str,
+) -> GraphStoreFailureClass {
+    match error {
+        GraphDbError::Cancelled => GraphStoreFailureClass::Cancelled,
+        GraphDbError::BudgetExhausted { .. } | GraphDbError::DeadlineExceeded => {
+            GraphStoreFailureClass::BudgetExhausted
+        }
+        GraphDbError::InvalidRequest { message } => GraphStoreFailureClass::Contract(message),
+        GraphDbError::Corrupt { message }
+        | GraphDbError::ResetRequired { message }
+        | GraphDbError::DurabilityUncertain { message }
+        | GraphDbError::ProjectionMismatch { message, .. }
+        | GraphDbError::GenerationMismatch { message, .. } => {
+            GraphStoreFailureClass::Corrupt(message)
+        }
+        GraphDbError::Conflict { .. } => {
+            GraphStoreFailureClass::Unavailable(conflict_unavailable.to_owned())
+        }
+        GraphDbError::Unavailable { message } | GraphDbError::SealedStoreImmutable { message } => {
+            GraphStoreFailureClass::Unavailable(message)
+        }
+        error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
+        | GraphDbError::SealedRevisionIncompatible { .. }) => {
+            GraphStoreFailureClass::Unavailable(error.to_string())
+        }
+        GraphDbError::Closed => {
+            GraphStoreFailureClass::Unavailable("graph store is closed".to_owned())
+        }
+    }
+}
+
 impl From<GraphPublicationStoreErrorV1> for GraphDbError {
     fn from(error: GraphPublicationStoreErrorV1) -> Self {
         match error {
@@ -232,7 +282,10 @@ pub(crate) fn rollback_failure(
 
 #[cfg(test)]
 mod tests {
-    use super::{GraphBudgetKind, GraphDbError, rollback_failure};
+    use super::{
+        GraphBudgetKind, GraphDbError, GraphStoreFailureClass, classify_graph_store_error,
+        rollback_failure,
+    };
 
     #[test]
     fn budget_kind_from_name_round_trips_and_rejects_unnamed() {
@@ -254,6 +307,25 @@ mod tests {
         );
         assert_eq!(GraphBudgetKind::from_name(""), None);
         assert_eq!(GraphBudgetKind::from_name("unnamed"), None);
+    }
+
+    #[test]
+    fn store_failure_classification_keeps_shared_verdicts() {
+        assert_eq!(
+            classify_graph_store_error(GraphDbError::Cancelled, "unused"),
+            GraphStoreFailureClass::Cancelled
+        );
+        assert_eq!(
+            classify_graph_store_error(GraphDbError::Closed, "unused"),
+            GraphStoreFailureClass::Unavailable("graph store is closed".to_owned())
+        );
+        assert_eq!(
+            classify_graph_store_error(
+                GraphDbError::conflict("site"),
+                "Git topology publication conflict",
+            ),
+            GraphStoreFailureClass::Unavailable("Git topology publication conflict".to_owned())
+        );
     }
 
     #[test]

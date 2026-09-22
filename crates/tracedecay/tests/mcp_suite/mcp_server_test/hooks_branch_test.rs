@@ -1,3 +1,4 @@
+use crate::common::fixture::git_run as git;
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
@@ -188,7 +189,7 @@ impl RoutedProjects {
     ///
     /// `TraceDecay::init` registered each store under its own identity id, so
     /// re-registering under a synthetic id would leave the root's alias
-    /// pointing at a project row that owns no store — the ambiguity
+    /// pointing at a project row that owns no store, the ambiguity
     /// [`hook_route_to_ambiguously_registered_project_fails_closed`] covers
     /// deliberately.
     async fn registered_runtime(&self) -> ProjectScopedTestRuntimeV1 {
@@ -226,7 +227,7 @@ impl RoutedProjects {
 }
 
 /// A `workspaceOpen` notification naming the workspace `cwd` a host just
-/// opened, with no route identity — it can only steer follow-up calls on the
+/// opened, with no route identity, it can only steer follow-up calls on the
 /// same connection.
 fn workspace_open(cwd: &Path) -> String {
     jsonrpc_notification_with_params(

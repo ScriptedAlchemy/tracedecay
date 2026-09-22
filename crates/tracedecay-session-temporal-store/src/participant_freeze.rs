@@ -539,9 +539,7 @@ mod tests {
         .expect("valid authorized root")
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn execution_request() -> AuthorizedTemporalExecutionRequest {
         let snapshot = TemporalSnapshotRequest::new(
@@ -1232,8 +1230,8 @@ mod tests {
         assert!(report.result().next_cursor.is_none());
     }
 
-    /// A strict tier that is verified empty — scanned to exhaustion under these
-    /// filters and this snapshot — takes exactly one named step down the ladder,
+    /// A strict tier that is verified empty, scanned to exhaustion under these
+    /// filters and this snapshot, takes exactly one named step down the ladder,
     /// and the answer says which tier produced it.
     #[tokio::test]
     async fn a_verified_zero_strict_tier_relaxes_one_named_step() {
@@ -1324,7 +1322,7 @@ mod tests {
 
     /// The refusal this reproduces: one rare hit across 300 sessions, wrapped in a
     /// span whose membership dwarfs `record_limit`. The query must return its hit
-    /// under the unchanged ceiling, because a group costs its bounds — not its
+    /// under the unchanged ceiling, because a group costs its bounds, not its
     /// census.
     #[tokio::test]
     async fn root_rare_hit_executes_under_the_unchanged_record_ceiling() {

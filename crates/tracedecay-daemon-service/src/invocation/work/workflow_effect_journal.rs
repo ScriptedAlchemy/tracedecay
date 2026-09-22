@@ -236,11 +236,10 @@ pub(super) fn execute_journaled_workflow_effect(
     {
         return DaemonInvocationResponse::application_problem(
             request_id,
-            ApplicationProblem::InvalidRequest {
-                diagnostic: diagnostic.clone(),
-                retry: tracedecay_contracts::RetryDirective::Never,
-                legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-            },
+            ApplicationProblem::invalid_request(
+                diagnostic.code.clone(),
+                diagnostic.message.clone(),
+            ),
         );
     }
     let outcome = match workflow_effect_outcome(terminal) {

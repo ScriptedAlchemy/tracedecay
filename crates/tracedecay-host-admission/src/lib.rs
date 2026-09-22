@@ -553,12 +553,15 @@ impl<'a> HostAdmissionFacade<'a> {
             )
             .await
             .map_err(|error| classify_error(&error))?;
-        project_captured_outcome(
+        let mut projected = project_captured_outcomes(
             database,
             self.authorities.repository_provenance.as_ref(),
-            outcome,
+            vec![outcome],
         )
-        .await
+        .await?;
+        projected.pop().ok_or_else(|| {
+            HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+        })
     }
 
     /// Sanitize then persist a bounded window through one store-owned batch.
@@ -905,6 +908,9 @@ const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmission
         ProjectionStoreError::OutputCollision { .. } => {
             HostAdmissionOutcome::degraded("projection_output_collision")
         }
+        ProjectionStoreError::SessionOutputCollision { .. } => {
+            HostAdmissionOutcome::degraded("projection_session_collision")
+        }
         ProjectionStoreError::Contract(_) => {
             HostAdmissionOutcome::degraded("projection_contract_rejected")
         }
@@ -979,38 +985,6 @@ fn classify_external_source_error(
         }
         _ => HostAdmissionOutcome::retained_unavailable("external_source_commit_failed"),
     }
-}
-
-async fn project_captured_outcome(
-    database: &RegisteredGlobalDb,
-    repository_provenance: Option<&RepositoryProvenanceAdmissionContext>,
-    outcome: CaptureObservationOutcome,
-) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
-    let CaptureObservationOutcome::Persisted {
-        outcome: persisted, ..
-    } = &outcome
-    else {
-        return Ok(outcome);
-    };
-    let projection =
-        tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
-            database.runtime_client(),
-        )
-        .capture_host_observation(persisted.receipt())
-        .await
-        .map_err(classify_external_source_error)?;
-    publish_canonical_git_evidence(
-        database,
-        repository_provenance,
-        std::slice::from_ref(&outcome),
-    )
-    .await?;
-    let outcome = if let tracedecay_session_memory::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(receipt) = projection {
-        accepted_for_external_source_replay(outcome, receipt)?
-    } else {
-        outcome
-    };
-    Ok(outcome)
 }
 
 async fn project_captured_outcomes(
@@ -1165,7 +1139,7 @@ fn accepted_for_external_source_replay(
 }
 
 fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
-    match error {
+    let reason_code = match error {
         ObservationStoreError::BatchRequiresScalarFallback { cause } => {
             return HostAdmissionOutcome::batch_requires_scalar_fallback(*cause);
         }
@@ -1184,9 +1158,9 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
                 "observation_retrieval_anchor_alias_collision",
             );
         }
-        _ => {}
-    }
-    let reason_code = match error {
+        ObservationStoreError::CursorConflict { .. } | ObservationStoreError::Storage { .. } => {
+            unreachable!("retryable store failures are classified before static reason mapping")
+        }
         ObservationStoreError::CursorObservationMismatch => "observation_cursor_mismatch",
         ObservationStoreError::CursorCoverageMismatch => "observation_cursor_coverage_mismatch",
         ObservationStoreError::CursorAdvanceCollision => "observation_cursor_advance_collision",
@@ -1195,10 +1169,6 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         }
         ObservationStoreError::CursorSanitizationReceiptMismatch => {
             "observation_cursor_sanitization_receipt_mismatch"
-        }
-        ObservationStoreError::ObservationCollision { .. } => "observation_identity_collision",
-        ObservationStoreError::SanitizationReceiptCollision => {
-            "observation_sanitization_receipt_collision"
         }
         ObservationStoreError::RetrievalAnchorObservationMismatch => {
             "observation_retrieval_anchor_observation_mismatch"
@@ -1228,14 +1198,8 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         ObservationStoreError::RepositoryProvenanceContract(_) => {
             "observation_repository_provenance_contract_invalid"
         }
-        ObservationStoreError::RetrievalAnchorAliasCollision { .. } => {
-            "observation_retrieval_anchor_alias_collision"
-        }
         ObservationStoreError::InvalidReplayLimit { .. } => "observation_replay_limit_invalid",
         ObservationStoreError::Contract(_) => "observation_store_contract_invalid",
-        ObservationStoreError::CursorConflict { .. } | ObservationStoreError::Storage { .. } => {
-            unreachable!("retryable store failures are classified before static reason mapping")
-        }
         _ => "observation_store_failed",
     };
     admission_outcome(HostAdmissionStatus::Degraded, false, Some(reason_code))
@@ -1251,7 +1215,7 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
         // A worker that stopped before finishing left the batch unapplied
         // without saying anything about the observations themselves, so this
         // is an availability failure the caller re-drives once a worker is
-        // back — not a rejection of the payload.
+        // back, not a rejection of the payload.
         ObservationApplicationError::PreparationWorkerStopped => admission_outcome(
             HostAdmissionStatus::Unavailable,
             true,

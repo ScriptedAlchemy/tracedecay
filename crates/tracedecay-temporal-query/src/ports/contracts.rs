@@ -333,7 +333,7 @@ fn commit_pulled_page<T>(
 ) -> Result<BoundedPage<T>, TemporalPortError> {
     if page.status() == PageStatus::More && state.is_exhausted() {
         // Producer still has pages, but item/total caps already consumed the
-        // read budget. Propagate incomplete coverage — never downgrade to Complete.
+        // read budget. Propagate incomplete coverage, never downgrade to Complete.
         return Err(state.incomplete_coverage_error(resources));
     }
     state.advanced_page(page.continuation.clone());

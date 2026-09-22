@@ -83,7 +83,7 @@ impl DoctorTestRuntime {
 }
 
 /// Sync cloud probes admitted by the CLI binary. Doctor never opens ureq
-/// itself — the composition root cannot depend on the CLI crate.
+/// itself, the composition root cannot depend on the CLI crate.
 #[derive(Clone, Copy)]
 pub struct AdmittedDoctorNetworkProbes {
     pub fetch_worldwide_total: fn() -> Option<u64>,
@@ -155,7 +155,7 @@ pub async fn run_doctor(
     if let Some(ref home) = agents::home_dir() {
         // Host integration health is read-only: every `healthcheck` only reads
         // the host's own on-disk registration and reports findings. Doctor
-        // never repairs them — remediation stays with `tracedecay install`.
+        // never repairs them, remediation stays with `tracedecay install`.
         let hctx = HealthcheckContext {
             home: home.clone(),
             project_path: project_path.clone(),
@@ -171,10 +171,10 @@ pub async fn run_doctor(
                 // The host itself is on this machine but carries no tracedecay
                 // integration. Silence here read as "nothing to say", which
                 // hid exactly the hosts an operator most likely wants wired
-                // up — warn uniformly, like the deferred-lifecycle hosts do.
+                // up, warn uniformly, like the deferred-lifecycle hosts do.
                 eprintln!("\n\x1b[1m{} integration\x1b[0m", agent.name());
                 dc.warn(&format!(
-                    "{} detected ({}) but tracedecay is not integrated — run `tracedecay install --agent {}`",
+                    "{} detected ({}) but tracedecay is not integrated, run `tracedecay install --agent {}`",
                     agent.name(),
                     surface.display(),
                     agent.id()
@@ -390,8 +390,8 @@ fn database_health_from_storage_runtime_findings<'a>(
 
 /// Gates the doctor exit code.
 ///
-/// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown` — a
-/// diagnostic that could not run — is reported to the user but never laundered
+/// Only an observed storage *failure* is fatal. `DatabaseHealth::Unknown`, a
+/// diagnostic that could not run, is reported to the user but never laundered
 /// into a healthy verdict nor turned into a hard failure.
 fn doctor_result(
     dc: &DoctorCounters,
@@ -602,7 +602,7 @@ fn print_database_recovery_guidance(dc: &DoctorCounters, db_path: &Path) {
 }
 
 /// Diagnose the managed user-service unit, then prove a running unit by
-/// initialize — not by `systemctl is-active` or a connectable socket.
+/// initialize, not by `systemctl is-active` or a connectable socket.
 ///
 /// A stopped or disabled unit is visible without treating it as permission to
 /// activate the service; it may be an intentional operator hold.
@@ -697,13 +697,13 @@ fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
 /// from the daemon log (systemd journal on Linux, launchd err-log on macOS). It
 /// reports whether an explicitly enabled project watcher is active or using
 /// bounded scheduler reconciliation. Absent telemetry is reported as info, not
-/// a failure — activation comes from each project's pinned configuration.
+/// a failure, activation comes from each project's pinned configuration.
 #[hotpath::measure(label = "doctor.check.watcher")]
 fn check_watcher(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mWatcher\x1b[0m");
 
     if !tracedecay_daemon_control::daemon_reachable() {
-        dc.info("Daemon not running — watcher inactive; sync happens on hook/read events");
+        dc.info("Daemon not running, watcher inactive; sync happens on hook/read events");
         return;
     }
 
@@ -724,7 +724,7 @@ fn check_watcher(dc: &mut DoctorCounters) {
                     degraded += 1;
                     dc.warn(&format!(
                         "{project}: degraded (bounded scheduler-reconciliation fallback){}",
-                        ev.detail.map(|d| format!(" — {d}")).unwrap_or_default()
+                        ev.detail.map(|d| format!(", {d}")).unwrap_or_default()
                     ));
                 }
                 "git_watch_restart" => {
@@ -756,8 +756,8 @@ const DOMAIN_SYMBOL_RULES_FILENAME: &str = "domain-symbols.toml";
 ///
 /// `docs/DOMAIN-EXTRACTORS.md` documents `.tracedecay/domain-symbols.toml` as a
 /// design rather than a shipped feature: no extractor parses it. Without this
-/// check, authoring one is a silent no-op — no error, no warning, and no domain
-/// nodes — so Doctor is where the author finds out. `None` (the normal case)
+/// check, authoring one is a silent no-op, no error, no warning, and no domain
+/// nodes, so Doctor is where the author finds out. `None` (the normal case)
 /// keeps Doctor silent about a file that is not there.
 fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
     let rules = crate::config::get_tracedecay_dir(project_path).join(DOMAIN_SYMBOL_RULES_FILENAME);
@@ -819,7 +819,7 @@ async fn configured_upload_enabled(project_path: &Path) -> tracedecay_domain::er
     let envelope =
         result.result.map_err(
             |problem| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("{}: {}", problem.problem.code, problem.problem.message),
+                message: problem.problem.summary(),
             },
         )?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {

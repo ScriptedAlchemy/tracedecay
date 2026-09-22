@@ -161,6 +161,8 @@ val_logs              {"debug_id": 3}
 
 Hotpath 0.24 detail calls accept IDs, not names, and have no per-call `limit`. Retention is controlled globally by `HOTPATH_LOGS_LIMIT`.
 
+Published hotpath 0.24 applies `HOTPATH_FUNCTIONS_LIMIT`, else `HOTPATH_LIMIT`, when the exit report is built. Live `functions_timing` and `functions_alloc` use the builder limit captured at guard start. The shipped `tracedecay` process copies that environment onto the builder before the server starts, so a limit set for the process is what those tools return. Setting the variable after the process is already running does not resize the worker.
+
 Recommended order:
 
 1. `profiler_status`.
@@ -181,7 +183,7 @@ Recommended order:
 - Async `#[measure]` bridges allocation attribution per poll. A synchronous `measure_block!` spanning `.await` can migrate threads; wall time remains useful but allocation attribution may be unavailable.
 - Axum/HTTP client durations end at response headers. Measure streamed body/download/decode separately.
 - Direct rusqlite emits no automatic SQL report. Use TraceDecay's writer/reader/transaction/checkpoint spans and truthful work gauges.
-- The `sql` report and `sql_logs` tools are fed only by the crate's third-party front-ends: the `sqlx` feature's `sqlx_tracing_layer()` — a `tracing_subscriber` layer that harvests sqlx's `sqlx::query` completed-query events (sqlx-measured `elapsed`, statement text normalized into parameter-insensitive buckets, attribution to the innermost measured frame via the caller stack) — the `toasty` feature's equivalent layer, and the `diesel` feature's `instrument_diesel_sql`. The layer never times anything itself and holds every other target at `Interest::never`, but a *global* `EnvFilter` runs before per-layer filters and can suppress `sqlx::query` for the whole stack: attach `EnvFilter` per layer. Bridges fit third-party emitters that already pay tracing's cost; first-party code keeps compile-out macros.
+- The `sql` report and `sql_logs` tools are fed only by the crate's third-party front-ends: the `sqlx` feature's `sqlx_tracing_layer()`, a `tracing_subscriber` layer that harvests sqlx's `sqlx::query` completed-query events (sqlx-measured `elapsed`, statement text normalized into parameter-insensitive buckets, attribution to the innermost measured frame via the caller stack), the `toasty` feature's equivalent layer, and the `diesel` feature's `instrument_diesel_sql`. The layer never times anything itself and holds every other target at `Interest::never`, but a *global* `EnvFilter` runs before per-layer filters and can suppress `sqlx::query` for the whole stack: attach `EnvFilter` per layer. Bridges fit third-party emitters that already pay tracing's cost; first-party code keeps compile-out macros.
 - I/O wrapper timing starts on first poll and completes on Ready. Cancellation while Pending is not detected; do not treat it as a full future-lifecycle replacement.
 - Dynamic HTTP paths, SQL identifiers/comments, debug values, and per-instance `iter = true` can leak or explode cardinality. Keep production keys static and bounded.
 

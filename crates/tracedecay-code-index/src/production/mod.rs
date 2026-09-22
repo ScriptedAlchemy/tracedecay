@@ -318,22 +318,14 @@ impl CodeIndexGenerationScopeV1 {
         }
     }
 
-    pub fn for_branch_stack_node(node: &tracedecay_domain::BranchStackNodeV1) -> Self {
-        Self {
-            repository: node.repository_id.clone(),
-            reference: Some(node.reference.clone()),
-            worktree: node.worktree_id.clone(),
-        }
-    }
-
     /// Whether two scopes name the same physical checkout.
     ///
     /// Repository and worktree are checkout identity: a generation sealed
     /// under either of them differing belongs to another checkout and may
     /// never be adopted or served for this one. `reference` is deliberately
-    /// excluded — it is the branch label HEAD happens to carry, and it moves
+    /// excluded, it is the branch label HEAD happens to carry, and it moves
     /// under a fixed worktree on every ordinary commit, branch switch, or
-    /// rebase — so serving gates that need only checkout identity keep
+    /// rebase, so serving gates that need only checkout identity keep
     /// admitting the checkout's own generations across a label move. Slot
     /// dispatch is stricter: [`CodeIndexProductionOwnerV1::active_generation`]
     /// demands the complete scope, label included, because branch and worktree
@@ -434,7 +426,7 @@ const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
 ///
 /// Failure semantics are the sequential ones: the returned error is always
 /// the lowest-index failure, independent of completion order. Unlike the
-/// batched form this does not abandon later files after a failure — the
+/// batched form this does not abandon later files after a failure, the
 /// tradeoff for having no barrier. Cancellation still short-circuits, because
 /// every per-file closure checkpoints the execution control first and
 /// returns immediately once the reconcile is cancelled.
@@ -836,7 +828,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// The exact generation scope this generation was sealed under:
     /// repository, sealed branch label, and worktree.
     ///
-    /// This — never a filesystem path and never the generation id — is the
+    /// This, never a filesystem path and never the generation id, is the
     /// key that partitions active-generation slots and code shards, so a
     /// sealed generation can only ever be dispatched onto the scope whose
     /// snapshot sealed it.
@@ -1291,7 +1283,7 @@ impl CodeIndexPublishedGenerationV1 {
     /// The first call runs every canonical check; later calls are O(1). This is
     /// sound because a published generation is immutable: no field can change
     /// after construction, so re-validating identical bytes cannot change the
-    /// answer. It is fail-closed because only success is memoized — a
+    /// answer. It is fail-closed because only success is memoized, a
     /// generation that has never validated still runs the full check, and a
     /// generation that fails keeps failing on every subsequent call.
     pub(crate) fn validate(&self) -> Result<(), CodeIndexProductionErrorV1> {
@@ -1350,7 +1342,7 @@ impl CodeIndexPublishedGenerationV1 {
         }
         let shared_occurrences = parent
             .map(|parent| {
-                // O(files) pointer membership — not nested scans.
+                // O(files) pointer membership, not nested scans.
                 let current_by_ptr = self
                     .files
                     .iter()
@@ -1861,11 +1853,11 @@ where
     ///
     /// Reuse is full-scope exact: the loaded generation must have been sealed
     /// under the requested repository, reference, and worktree. A same-checkout
-    /// reference label move is a rebuild (`Ok(None)`), not reuse — the
+    /// reference label move is a rebuild (`Ok(None)`), not reuse, the
     /// worktree-scoped slot still holds the prior label's incumbent, which
     /// [`Self::build_and_publish`] keeps as the compare-and-swap expected
     /// token. A publication authority that answers a scope with a generation
-    /// sealed for a *foreign checkout* has broken its slot partition — or the
+    /// sealed for a *foreign checkout* has broken its slot partition, or the
     /// caller's checkout identity resolution regressed, e.g. a repository
     /// misclassified as not-a-git-path. That is the terminal
     /// [`CodeIndexPublicationStoreErrorV1::CorruptionResetRequired`] state:
@@ -1947,7 +1939,7 @@ where
         let started = crate::hotpath_observe::start_build_to_queryable();
         crate::hotpath_observe::record_generation_state("building");
         crate::hotpath_observe::record_rebuild_state("unknown");
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
             &request.repository_parse_identity,
@@ -1956,7 +1948,7 @@ where
         let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
         let lookup = self.lookup_active_generation(&scope)?;
         let active = lookup.reusable;
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let intake = self.intake_at(request.sealed_at, registry_for_snapshot(&request.snapshot)?);
         let capability = intake
@@ -1974,7 +1966,7 @@ where
                     .fold(0_u64, u64::saturating_add),
             );
         }
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let planner = GenerationPlanner::new(
             self.config.project_id.clone(),
@@ -2027,7 +2019,7 @@ where
                 None,
             ),
         };
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let parser_registry = Arc::new(tracedecay_code_extraction::LanguageRegistry::new());
         let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
@@ -2079,7 +2071,7 @@ where
                 ));
             }
         };
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
         let candidate = hotpath::measure_block!("code_index.build.assemble", {
             let coverage = coverage_summary(&validated.snapshot, &staged.files);
             let changes = match (active.as_ref(), staged.parent_shared_occurrences.as_ref()) {
@@ -2157,10 +2149,10 @@ where
                 changes,
                 &staged.chunks,
             )?;
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let projection = project_for_publication(&mut self.projection, projection_request)
                 .map_err(CodeIndexProductionErrorV1::Projection)?;
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let imports = hotpath::measure_block!(
                 "code_index.build.assemble.import_evidence",
                 derive_import_evidence(&staged.files)
@@ -2242,22 +2234,6 @@ where
         }
     }
 
-    fn checkpoint(
-        control: &dyn CodeIndexExecutionControlV1,
-    ) -> Result<(), CodeIndexProductionErrorV1> {
-        if control.is_cancelled() {
-            Err(CodeIndexProductionErrorV1::Interrupted(
-                CodeIndexInterruptionV1::Cancelled,
-            ))
-        } else if control.is_deadline_exceeded() {
-            Err(CodeIndexProductionErrorV1::Interrupted(
-                CodeIndexInterruptionV1::DeadlineExceeded,
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
     fn interruption_error(control: &dyn CodeIndexExecutionControlV1) -> CodeIndexProductionErrorV1 {
         if control.is_deadline_exceeded() {
             CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
@@ -2295,7 +2271,7 @@ where
         CodeIndexProductionErrorV1,
     > {
         crate::hotpath_observe::measure_hot_loop!("code_index.materialize.file", {
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let captured = captured_files
                 .get(&file.file_occurrence_id)
                 .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
@@ -2334,7 +2310,7 @@ where
                     u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
                     0,
                 );
-                Self::checkpoint(control)?;
+                lexical_page_source::checkpoint(control)?;
                 let clone_stats = ClonePayloadBuildStatsV1 {
                     reused: u64::try_from(reused.artifacts.clone_bodies.len()).unwrap_or(u64::MAX),
                     computed: 0,
@@ -2384,7 +2360,7 @@ where
                 control,
             ) {
                 Ok((parse_artifacts, parsed_len)) => {
-                    Self::checkpoint(control)?;
+                    lexical_page_source::checkpoint(control)?;
                     extractor
                         .extract_preparsed(
                             &receipt_bound,
@@ -2408,12 +2384,12 @@ where
                         ..
                     }),
                 ) => {
-                    Self::checkpoint(control)?;
+                    lexical_page_source::checkpoint(control)?;
                     return Err(error);
                 }
                 Err(error) => return Err(error),
             };
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let (artifacts, exact_authority, clone_stats) = chunker
                 .index_file_with_authority_from_extraction_reusing(
                     &receipt_bound,
@@ -2428,7 +2404,7 @@ where
                     error => CodeIndexProductionErrorV1::Chunk(error),
                 })?;
             physical_artifacts.record_clone_payloads(clone_stats.reused, clone_stats.computed);
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             let (authority, extraction, _) = extraction.into_parts();
             let artifact = Arc::new(FileGenerationArtifactsV1 {
                 authority,
@@ -2518,11 +2494,11 @@ where
         // subsequent physical reuse remain deterministic.
         let mut files = Vec::with_capacity(extracted.len());
         for (reuse_key, artifact, _) in extracted {
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             physical_artifacts.insert(reuse_key, &artifact);
             files.push(artifact);
         }
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
         staged_generation(manifest.generation_id.clone(), files, Vec::new(), None)
     }
 
@@ -2630,7 +2606,7 @@ where
                  worker|
                  -> Result<(usize, IncrementFileMaterializationV1), CodeIndexProductionErrorV1> {
                 let (index, file_plan) = *item;
-                Self::checkpoint(control)?;
+                lexical_page_source::checkpoint(control)?;
                 let materialization = match &file_plan.action {
                     FileExtractionActionV1::CarryForward {
                         file_occurrence_id,
@@ -2816,7 +2792,7 @@ where
         let mut clone_stale_invalidations = 0_u64;
 
         for materialization in file_materializations {
-            Self::checkpoint(control)?;
+            lexical_page_source::checkpoint(control)?;
             match materialization {
                 IncrementFileMaterializationV1::CarryForward {
                     artifact,
@@ -2851,7 +2827,7 @@ where
                 }
             }
         }
-        Self::checkpoint(control)?;
+        lexical_page_source::checkpoint(control)?;
 
         let mut staged = staged_generation(
             manifest.generation_id.clone(),

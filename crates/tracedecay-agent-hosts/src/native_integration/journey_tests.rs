@@ -41,7 +41,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     ActorId, AuthorityRef, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1,
     BranchStackRevisionId, BranchStackRevisionV1, BranchStackSourceV1, CapabilityId, CommitId,
-    ConfigurationRevisionId, FrozenBranchStackSnapshotV1, LocatorDigest, ManifestDigest,
+    ConfigurationRevisionId, FrozenBranchStackSnapshotV1, LocatorDigest,
     MechanicalIntegrationModeV1, NativeIntegrationAnalysisCoverageV1,
     NativeIntegrationAnalysisGapV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
     NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
@@ -92,9 +92,7 @@ impl NativeIntegrationAnalysisPort for UnexpectedAnalysis {
     }
 }
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn git(root: &Path, arguments: &[&str]) -> String {
     let output = Command::new(try_git_program().expect("resolve the git program"))

@@ -6,9 +6,7 @@ use tracedecay_domain::{
     SourcePartitionIdV1, SourceSnapshotIdV1,
 };
 
-fn digest(seed: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn acquisition_contract(
     capture_mode: SourceCaptureModeV1,

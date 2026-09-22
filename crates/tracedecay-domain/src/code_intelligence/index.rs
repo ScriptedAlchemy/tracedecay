@@ -2,7 +2,7 @@
 //! across the workspace.
 //!
 //! These are storage-neutral logical records. The index stores only typed
-//! references to `GenerationDiagnosticV1` (`crate::diagnostics`) — never a
+//! references to `GenerationDiagnosticV1` (`crate::diagnostics`), never a
 //! duplicate diagnostic record.
 //!
 //! Intake-rejection, extraction, and lineage records are owned by
@@ -28,7 +28,7 @@ use super::identity::{
 use super::language::EdgeAuthorityV1;
 use super::search::CodeGenerationSourceCommitmentsV1;
 
-/// One receipt-bound sanitized repository snapshot — the only legal intake.
+/// One receipt-bound sanitized repository snapshot, the only legal intake.
 /// Carries repository, checkout, worktree, ref, source revision,
 /// sanitizer revision, and content identity. Missing, stale, mixed-snapshot,
 /// or unsanitized input is rejected before parsing.
@@ -518,17 +518,9 @@ fn validate_language_revisions<T>(
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use crate::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot() -> SanitizedCodeSnapshotV1 {
         SanitizedCodeSnapshotV1 {

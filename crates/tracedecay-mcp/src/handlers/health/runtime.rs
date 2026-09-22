@@ -1,4 +1,4 @@
-//! `tracedecay_runtime` — daemon, store, and session-observation health, including the optional doctor report.
+//! `tracedecay_runtime`, daemon, store, and session-observation health, including the optional doctor report.
 
 use std::time::Duration;
 

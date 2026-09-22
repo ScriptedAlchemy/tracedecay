@@ -4,7 +4,9 @@ use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Serialize, de::DeserializeOwned};
-use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
+use tracedecay_runtime_core::db::{
+    DatabaseMemoryTransaction as Transaction, decode_stored_json, encode_stored_json,
+};
 
 use tracedecay_domain::{FactCategoryV1, FactOwnerV1, PayloadAccessState, UtcMicros};
 use tracedecay_store::{FactReadControl, FactStoreError, FactStoreResult};
@@ -114,14 +116,14 @@ pub(super) fn to_json<T: Serialize + ?Sized>(
     value: &T,
     operation: &'static str,
 ) -> FactStoreResult<String> {
-    serde_json::to_string(value).map_err(|error| storage_error(operation, error))
+    encode_stored_json(value).map_err(|error| storage_error(operation, error))
 }
 
 pub(super) fn from_json<T: DeserializeOwned>(
     value: &str,
     operation: &'static str,
 ) -> FactStoreResult<T> {
-    serde_json::from_str(value).map_err(|error| storage_error(operation, error))
+    decode_stored_json(value).map_err(|error| storage_error(operation, error))
 }
 
 pub(super) fn row_string(

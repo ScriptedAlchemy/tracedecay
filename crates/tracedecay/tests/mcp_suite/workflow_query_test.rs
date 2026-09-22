@@ -250,7 +250,6 @@ async fn call(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (_env, project_root) = common::IsolatedEnv::acquire().await;
     let cg = TraceDecay::init(&project_root)
         .await
@@ -287,7 +286,6 @@ async fn workflow_queries_distinguish_missing_schema_from_empty_results() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn workflows_query_surface_end_to_end() {
-    let _env_lock = crate::mcp_handler_test::GLOBAL_DB_ENV_LOCK.lock().await;
     let (env, project_root) = common::IsolatedEnv::acquire().await;
     let home = env.home().to_path_buf();
 
@@ -433,6 +431,451 @@ async fn workflows_query_surface_end_to_end() {
         started.elapsed()
     );
     assert_eq!(by_absent["count"], 0, "{by_absent}");
+
+    drop(runtime);
+    cg.close();
+}
+
+const PHASE_JSON: &str = r#"[{"detail":"harvest scenarios","title":"Mine"},{"detail":"run it","model":"fable","title":"Run"}]"#;
+const RESULT_SUMMARY: &str = "Mine real transcripts into a broad eval corpus then score them";
+const DESCRIPTION: &str = "Mine real transcripts into a broad eval corpus\nthen score them";
+const STARTED_TS: i64 = 1_783_142_254;
+const ENDED_TS: i64 = 1_783_143_237;
+const AGENT_ENDED_TS: i64 = 1_783_142_280;
+
+fn agent_transcript(home: &Path, agent_id: &str) -> String {
+    home.join(".claude")
+        .join("projects")
+        .join(SLUG)
+        .join(SESSION_ID)
+        .join("subagents")
+        .join("workflows")
+        .join(RUN_ID)
+        .join(format!("agent-{agent_id}.jsonl"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn expected_run() -> Value {
+    json!({
+        "run_id": RUN_ID,
+        "parent_session_id": SESSION_ID,
+        "name": "tracedecay-triggering-evals",
+        "description": DESCRIPTION,
+        "phase_json": PHASE_JSON,
+        "status": "completed",
+        "started_ts": STARTED_TS,
+        "ended_ts": ENDED_TS,
+        "result_summary": RESULT_SUMMARY,
+        "agent_count": 2
+    })
+}
+
+fn expected_agent(
+    home: &Path,
+    label: &str,
+    agent_id: &str,
+    phase: &str,
+    status: &str,
+    tokens: i64,
+    started_ts: i64,
+) -> Value {
+    json!({
+        "run_id": RUN_ID,
+        "agent_label": label,
+        "agent_id": agent_id,
+        "phase": phase,
+        "transcript_path": agent_transcript(home, agent_id),
+        "agent_session_id": format!("agent-{agent_id}"),
+        "status": status,
+        "model": "claude-fable-5",
+        "tokens": tokens,
+        "started_ts": started_ts,
+        "ended_ts": AGENT_ENDED_TS
+    })
+}
+
+fn refusal_envelope(error: &str) -> Value {
+    let marker = "answered with a retained refusal: ";
+    let (_, body) = error.split_once(marker).unwrap_or_else(|| {
+        panic!("tracedecay_workflows refusal was not a retained problem: {error}")
+    });
+    serde_json::from_str(body).unwrap_or_else(|parse_error| {
+        panic!("tracedecay_workflows refusal was not JSON: {parse_error}\n{error}")
+    })
+}
+
+fn stable_problem(envelope: &Value) -> Value {
+    let mut problem = envelope
+        .get("problem")
+        .cloned()
+        .unwrap_or_else(|| panic!("refusal has no problem record: {envelope}"));
+    let request_id = envelope["request_id"].clone();
+    assert_eq!(problem["request_id"], request_id, "{envelope}");
+    assert_eq!(problem["trace_id"], request_id, "{envelope}");
+    let Some(object) = problem.as_object_mut() else {
+        panic!("refusal problem is not an object: {problem}");
+    };
+    object.insert("request_id".to_owned(), json!("<request>"));
+    object.insert("trace_id".to_owned(), json!("<request>"));
+    problem
+}
+
+fn assert_refusal(error: &str, problem: Value) {
+    let envelope = refusal_envelope(error);
+    assert_eq!(
+        envelope["contract"],
+        json!({
+            "schema_id": "schema.application.retained.workflows.result",
+            "schema_revision": 1
+        }),
+        "{envelope}"
+    );
+    assert_eq!(stable_problem(&envelope), problem, "{envelope}");
+}
+
+fn invalid_request_problem() -> Value {
+    json!({
+        "revision": 1,
+        "kind": "invalid_request",
+        "code": "application.retained.invalid-request",
+        "message": "The retained operation request is invalid.",
+        "diagnostic": {
+            "code": "application.retained.invalid-request",
+            "message": "The retained operation request is invalid."
+        },
+        "committed_receipt": null,
+        "owning_layer": "application",
+        "terminality": "pre_admission",
+        "retryable": false,
+        "retry": "never",
+        "retry_scope": null,
+        "retry_after_millis": null,
+        "cancellation_stage": null,
+        "unavailable_classification": null,
+        "execution_failure_classification": null,
+        "request_id": "<request>",
+        "trace_id": "<request>",
+        "details": [],
+        "legal_actions": ["correct_request"],
+        "coverage": null
+    })
+}
+
+fn unbuilt_index_problem() -> Value {
+    json!({
+        "revision": 1,
+        "kind": "unavailable",
+        "code": "application.retained.authority-unavailable",
+        "message": "The retained operation authority is unavailable: workflow_index_not_built: the workflow index has not been built for this project yet",
+        "diagnostic": {
+            "code": "application.retained.authority-unavailable",
+            "message": "The retained operation authority is unavailable: workflow_index_not_built: the workflow index has not been built for this project yet"
+        },
+        "committed_receipt": null,
+        "owning_layer": "application",
+        "terminality": "pre_admission",
+        "retryable": true,
+        "retry": "after_delay",
+        "retry_scope": "same_request",
+        "retry_after_millis": 250,
+        "cancellation_stage": null,
+        "unavailable_classification": "authority",
+        "execution_failure_classification": null,
+        "request_id": "<request>",
+        "trace_id": "<request>",
+        "details": [],
+        "legal_actions": ["retry"],
+        "coverage": null
+    })
+}
+
+async fn refuse(cg: &TraceDecay, args: Value) -> String {
+    crate::support::handle_tool_call(cg, "tracedecay_workflows", args, None, None)
+        .await
+        .expect_err("tracedecay_workflows should refuse this request")
+        .to_string()
+}
+
+/// Calls `tracedecay_workflows` through MCP `tools/call` and compares each
+/// observed document with the result a caller can act on.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn workflows_tool_returns_literal_query_documents() {
+    let (env, project_root) = common::IsolatedEnv::acquire().await;
+    let home = env.home().to_path_buf();
+    let cg = TraceDecay::init(&project_root)
+        .await
+        .unwrap_or_else(|error| panic!("init project: {error}"));
+    let project_key = cg.project_root().to_string_lossy().to_string();
+    write_workflow_fixture(&home, cg.project_root());
+    let runtime = cg
+        .test_runtime_for_test()
+        .expect("init retains registered project session runtime");
+    let stats = runtime
+        .ingest_workflows_for_test(cg.project_root())
+        .await
+        .unwrap_or_else(|error| panic!("ingest workflows: {error}"));
+    assert_eq!(stats.runs_ingested, 1);
+    assert_eq!(stats.agents_ingested, 2);
+
+    let mine = expected_agent(
+        &home,
+        AGENT_MINE_LABEL,
+        AGENT_MINE_ID,
+        "Mine",
+        "completed",
+        140,
+        STARTED_TS,
+    );
+    let run_agent = expected_agent(
+        &home,
+        AGENT_RUN_LABEL,
+        AGENT_RUN_ID,
+        "Run",
+        "running",
+        18,
+        1_783_142_260,
+    );
+    let run = expected_run();
+
+    let by_session = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "session_id": SESSION_ID }),
+    )
+    .await;
+    assert_eq!(
+        by_session,
+        json!({
+            "status": "ok",
+            "count": 1,
+            "mode": "session",
+            "runs": [run.clone()],
+            "session_id": SESSION_ID
+        })
+    );
+
+    let by_run = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "run_id": RUN_ID }),
+    )
+    .await;
+    assert_eq!(
+        by_run,
+        json!({
+            "status": "ok",
+            "agent_count": 2,
+            "agents": [mine.clone(), run_agent],
+            "agents_complete": true,
+            "agents_coverage": "complete",
+            "agents_returned": 2,
+            "found": true,
+            "mode": "run",
+            "run": run.clone(),
+            "run_id": RUN_ID
+        })
+    );
+
+    let bounded = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "run_id": RUN_ID, "limit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        bounded,
+        json!({
+            "status": "ok",
+            "agent_count": 2,
+            "agents": [mine.clone()],
+            "agents_complete": false,
+            "agents_coverage": "bounded_prefix",
+            "agents_returned": 1,
+            "found": true,
+            "mode": "run",
+            "run": run.clone(),
+            "run_id": RUN_ID
+        })
+    );
+
+    let drill = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "run_id": RUN_ID, "agent_label": AGENT_MINE_LABEL }),
+    )
+    .await;
+    assert_eq!(
+        drill,
+        json!({
+            "status": "ok",
+            "agent": mine,
+            "agent_count": 2,
+            "agent_label": AGENT_MINE_LABEL,
+            "agents_returned": 1,
+            "found": true,
+            "lookup_complete": true,
+            "lookup_coverage": "conclusive",
+            "mode": "agent",
+            "run": run.clone(),
+            "run_id": RUN_ID
+        })
+    );
+
+    let missing_agent = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "run_id": RUN_ID, "agent_label": "missing:label" }),
+    )
+    .await;
+    assert_eq!(
+        missing_agent,
+        json!({
+            "status": "ok",
+            "agent_count": 2,
+            "agent_label": "missing:label",
+            "agents_returned": 0,
+            "found": false,
+            "lookup_complete": true,
+            "lookup_coverage": "conclusive",
+            "mode": "agent",
+            "run": run.clone(),
+            "run_id": RUN_ID
+        })
+    );
+
+    let missing_run = json!({
+        "status": "ok",
+        "count": 0,
+        "found": false,
+        "mode": "run",
+        "run_id": "wf_missing",
+        "runs": []
+    });
+    assert_eq!(
+        call(
+            &cg,
+            &runtime,
+            "tracedecay_workflows",
+            json!({ "run_id": "wf_missing" }),
+        )
+        .await,
+        missing_run.clone()
+    );
+    assert_eq!(
+        call(
+            &cg,
+            &runtime,
+            "tracedecay_workflows",
+            json!({ "run_id": "wf_missing", "agent_label": AGENT_MINE_LABEL }),
+        )
+        .await,
+        missing_run
+    );
+
+    runtime
+        .record_project_span_for_test(
+            &span(SESSION_ID, "feat/evals", &project_key, STARTED_TS),
+            DEFAULT_SPAN_MERGE_GAP_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("record span: {error}"));
+
+    let by_branch = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "branch": "feat/evals" }),
+    )
+    .await;
+    assert_eq!(
+        by_branch,
+        json!({
+            "status": "ok",
+            "count": 1,
+            "git_filter": { "branch": "feat/evals", "worktree": null, "commit": null },
+            "mode": "git_scope",
+            "runs": [run.clone()]
+        })
+    );
+    let by_worktree = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "worktree": project_key }),
+    )
+    .await;
+    assert_eq!(
+        by_worktree,
+        json!({
+            "status": "ok",
+            "count": 1,
+            "git_filter": { "branch": null, "worktree": project_key, "commit": null },
+            "mode": "git_scope",
+            "runs": [run]
+        })
+    );
+    let by_absent = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "branch": "feat/absent" }),
+    )
+    .await;
+    assert_eq!(
+        by_absent,
+        json!({
+            "status": "ok",
+            "count": 0,
+            "git_filter": { "branch": "feat/absent", "worktree": null, "commit": null },
+            "mode": "git_scope",
+            "runs": []
+        })
+    );
+    let by_commit = call(
+        &cg,
+        &runtime,
+        "tracedecay_workflows",
+        json!({ "commit": "ABC123" }),
+    )
+    .await;
+    assert_eq!(
+        by_commit,
+        json!({
+            "status": "ok",
+            "count": 0,
+            "git_filter": { "branch": null, "worktree": null, "commit": "abc123" },
+            "mode": "git_scope",
+            "runs": []
+        })
+    );
+
+    let invalid = invalid_request_problem();
+    for args in [
+        json!({}),
+        json!({ "session_id": SESSION_ID, "run_id": RUN_ID }),
+        json!({ "run_id": RUN_ID, "agent_label": " " }),
+        json!({ "commit": "zz" }),
+        json!({ "session_id": SESSION_ID, "limit": 0 }),
+    ] {
+        assert_refusal(&refuse(&cg, args).await, invalid.clone());
+    }
+
+    runtime
+        .drop_project_workflow_schema_for_test()
+        .await
+        .unwrap_or_else(|error| panic!("drop workflow schema: {error}"));
+    assert_refusal(
+        &refuse(&cg, json!({ "session_id": SESSION_ID })).await,
+        unbuilt_index_problem(),
+    );
+    assert_refusal(&refuse(&cg, json!({})).await, invalid);
 
     drop(runtime);
     cg.close();

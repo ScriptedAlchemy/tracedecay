@@ -173,7 +173,7 @@ impl McpServer {
     /// Persists the tokens-saved counter, flushes pending tokens to the
     /// worldwide counter, checkpoints the WAL, and logs a session summary.
     ///
-    /// Idempotent — safe to call multiple times. `run` invokes it once when
+    /// Idempotent, safe to call multiple times. `run` invokes it once when
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
     #[hotpath::skip]
@@ -248,10 +248,7 @@ impl McpServer {
                                 )
                             {
                                 config.pending_upload = 0;
-                                let now = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs() as i64;
+                                let now = crate::project::current_timestamp();
                                 config.last_upload_at = now;
                             }
                             if let Err(err) = config.save() {

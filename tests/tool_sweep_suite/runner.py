@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
@@ -52,6 +51,7 @@ from outcomes import (
     response_problem_code,
     response_handle,
     text_blocks,
+    utc_now,
 )
 
 def response_row(
@@ -244,10 +244,6 @@ def load_manifest(path: Path) -> dict[str, Any]:
     if value != canonical:
         raise SweepError("catalog manifest does not match its canonical negotiated surface")
     return canonical
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class McpClient:
@@ -716,8 +712,9 @@ def _mounting_producer_call(
                     f"{tool} producer omitted the enabled _meta.duration_us receipt"
                 )
             return response
+        # Must match tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE.
         if (
-            row["problem_code"] != "application.surface.unavailable"
+            row["problem_code"] != "application.runtime.mounting"
             or time.monotonic() >= ends_at
         ):
             raise SweepError(
@@ -2622,8 +2619,8 @@ MOUNT_RETRY_BUDGET_S = 60
 MOUNT_RETRY_DELAY_S = 0.5
 # The code-index branch-diff authority is the last to activate after project
 # open (~120s observed on a cold hermetic fixture, returning a typed
-# `authority_unavailable` until then), so its row alone carries a larger —
-# still bounded and falsifiable — mount budget.
+# `authority_unavailable` until then), so its row alone carries a larger,
+# still bounded and falsifiable, mount budget.
 MOUNT_RETRY_BUDGET_OVERRIDES_S = {"tracedecay_branch_diff": 180}
 
 
@@ -2862,7 +2859,7 @@ def run_phase(args: argparse.Namespace) -> int:
     report: dict[str, Any] = {
         "schema_version": 1,
         "phase": args.phase,
-        "started_at": _utc_now(),
+        "started_at": utc_now(),
         "entries": [],
         "summary": {"discovered": 0, "completed": 0, "failed": 0, "cancelled": 0},
     }
@@ -2955,7 +2952,7 @@ def run_phase(args: argparse.Namespace) -> int:
             client.close()
         report["entries"] = sorted(report["entries"], key=lambda row: (row["kind"], row["name"]))
         report["summary"] = _phase_summary(report["entries"])
-        report["finished_at"] = _utc_now()
+        report["finished_at"] = utc_now()
         _write_phase_report(args.out, report)
     return 0 if "fatal" not in report and report["summary"]["failed"] == 0 else 1
 

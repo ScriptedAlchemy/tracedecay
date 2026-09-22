@@ -74,7 +74,7 @@ HINT_SIGNATURES = (
     "for durable facts, prefer tracedecay_fact_store_add",  # memory_store
     "enriches each hit with its enclosing symbol",  # search context
     "gives a file's table of contents",           # file_read context
-    "usage this session —",                        # escalation prefix
+    "usage this session.",                        # escalation prefix
 )
 
 # Channel labels used in per-scenario results and the aggregate table.
@@ -103,7 +103,7 @@ def find_hint_source(start: str) -> Optional[str]:
     """Walk up from `start` to find the tool-hints source, or None if absent.
 
     Returns None (not an error) when running from a published package that ships
-    without the Rust source tree — callers decide whether that is skippable.
+    without the Rust source tree, callers decide whether that is skippable.
     """
     d = os.path.abspath(start)
     while True:
@@ -119,7 +119,7 @@ def find_hint_source(start: str) -> Optional[str]:
 def hint_signature_drift(source_text: str) -> list[str]:
     """Return HINT_SIGNATURES that no longer appear in the tool-hints source.
 
-    Comparison is lowercased substring — the same match grade.py uses to detect
+    Comparison is lowercased substring, the same match grade.py uses to detect
     a hint in a transcript. A non-empty result means channel attribution would
     misclassify hint-driven adoptions, so callers should treat it as fatal.
     """
@@ -128,7 +128,7 @@ def hint_signature_drift(source_text: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Neutrality lint (USER DOCTRINE: scenario prompts must be neutral — they may
+# Neutrality lint (USER DOCTRINE: scenario prompts must be neutral, they may
 # never name tracedecay, MCP, a specific tool, or a skill, so adoption is earned
 # by the discovery machinery rather than begged for in the prompt).
 # --------------------------------------------------------------------------- #

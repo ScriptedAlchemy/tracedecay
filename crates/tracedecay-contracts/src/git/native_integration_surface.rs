@@ -3,15 +3,8 @@
 //! `apply_native_integration`, `native_integration_status`, and
 //! `cancel_native_integration`.
 //!
-//! Plan 36 slice 1 extends "the shipped application and CLI/MCP surfaces with
-//! `stack_snapshot` and `preflight_native_integration`", slice 3 adds
-//! `apply_native_integration`, `native_integration_status`, and
-//! `cancel_native_integration`, `approve_native_integration` is the
-//! owner-decided (2026-08-07) sixth operation that issues the one-use
-//! apply approval, and slice 4 requires the whole journey to be
-//! exposed consistently through CLI and MCP over one application result. That
-//! is a different family from the Plan 08 Git *index-transaction* bindings,
-//! which stay limited to `git_preview`/`git_apply`; this module never exposes
+//! This is a different family from the Git index-transaction bindings, which
+//! stay limited to `git_preview` / `git_apply`. This module never exposes
 //! `stage_hunks`, `unstage_hunks`, or `commit_index`.
 //!
 //! Requests carry exact typed identity only. Filesystem paths, free-form
@@ -33,14 +26,14 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{
     ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
-    CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
-    LifecycleClass, PrivacyClass, ProfileId, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    TerminalState, TerminalStateContract, UseCaseId,
+    CancellationContract, CapabilityId, CapabilityManifestV1, CatalogContributionInputV1,
+    CatalogContributionV1, ContributionId, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableSchemaAuthority, LifecycleClass, PrivacyClass, ProfileId, RevalidationContract,
+    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
+    StreamingContract, TerminalStateContract, UseCaseId,
 };
 
+use super::effect_surface::{cancellation_points, deadline_behavior, terminal_states};
 use crate::CancellationSignal;
 use crate::capability_manifest::{
     ApplicationCapabilityManifestInput, application_capability_manifest,
@@ -131,7 +124,7 @@ pub struct NativeIntegrationPreflightSurfaceRequest {
 /// The caller names one unexpired preview by exact identity *and* digest;
 /// approving an identity without its content digest is unrepresentable. The
 /// daemon mints the one-use approval bound to the requesting principal, the
-/// apply capability, the current grant lineage, and a bounded expiry — none
+/// apply capability, the current grant lineage, and a bounded expiry, none
 /// of which the caller can choose.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -910,52 +903,6 @@ fn capability(
             required_features: Vec::new(),
         },
     )?)
-}
-
-fn cancellation_points(effect: EffectClass) -> Vec<CancellationPoint> {
-    if effect.is_effect() {
-        vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeEffect,
-            CancellationPoint::EffectInFlight,
-            CancellationPoint::AfterCommit,
-        ]
-    } else {
-        vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeRead,
-            CancellationPoint::DuringRead,
-        ]
-    }
-}
-
-fn deadline_behavior(effect: EffectClass) -> DeadlineBehavior {
-    if effect.is_effect() {
-        DeadlineBehavior::ReturnEffectReceipt
-    } else {
-        DeadlineBehavior::ReturnOperationReceipt
-    }
-}
-
-fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
-    if effect.is_effect() {
-        vec![
-            TerminalState::Completed,
-            TerminalState::Cancelled,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::EffectUnknown,
-            TerminalState::Partial,
-        ]
-    } else {
-        vec![
-            TerminalState::Completed,
-            TerminalState::Cancelled,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::Partial,
-        ]
-    }
 }
 
 fn handler_descriptor(

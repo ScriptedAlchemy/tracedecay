@@ -2,7 +2,7 @@
  * The typed payload transport's refusal readings.
  *
  * The failure this file exists to catch is a refused write that reads as
- * something else: a generic `error` the reader can only retry, or — worse — a
+ * something else: a generic `error` the reader can only retry, or, worse, a
  * successful empty payload. The project gateway answers a write against a
  * non-active project with 405 and a body naming the cause, and that is the one
  * refusal a control can actually act on, so it gets its own outcome and its
@@ -58,8 +58,8 @@ describe('fetchPayloadWrite', () => {
     expect(result.refusal).toEqual({ projectId: 'proj_b', detail: REFUSAL_DETAIL });
   });
 
-  // A 405 the dashboard cannot account for. It was refused — that much is
-  // known — but the read-only explanation is not this dashboard's to assume.
+  // A 405 the dashboard cannot account for. It was refused, that much is
+  // known, but the read-only explanation is not this dashboard's to assume.
   it.each([
     ['a different status', { status: 'not_found', detail: 'gone', project_id: 'proj_b' }],
     ['no status field', { detail: REFUSAL_DETAIL, project_id: 'proj_b' }],
@@ -105,7 +105,7 @@ describe('fetchPayload', () => {
     // The read result type has no arm for a refusal a read cannot provoke, so
     // a mutating caller on this helper gets `error`. It carries the daemon's
     // own sentence rather than `HTTP 405`, so even the folded reading says
-    // what happened — but a control that needs to disable itself has to use
+    // what happened, but a control that needs to disable itself has to use
     // `fetchPayloadWrite` to get the outcome.
     stub(405, readOnlyBody);
     const result = await fetchPayload('/api/projects/proj_b/x', PayloadSchema, { method: 'POST' });
@@ -134,7 +134,7 @@ describe('fetchPayload', () => {
  * `registry_unavailable`, 404 for `not_found`, each with the generated payload
  * in the body. Reading only the status code discarded that body, so three
  * conditions with three different remedies all arrived as `HTTP 503`/`HTTP
- * 404` — and every payload branch written to render them was unreachable.
+ * 404`, and every payload branch written to render them was unreachable.
  *
  * Stubbed at those statuses on purpose. A 200 fixture would exercise a shape
  * the daemon never sends and prove nothing about the path that was broken.
@@ -181,7 +181,7 @@ describe('fetchPayload on the canonical failure statuses', () => {
 
   it('leaves a 404 without a canonical status as a plain error', async () => {
     // An ordinary not-found from anywhere else in the stack, including a
-    // proxy. Nothing named a condition, so nothing is reported as one — the
+    // proxy. Nothing named a condition, so nothing is reported as one, the
     // open record schemas here would otherwise accept any object at all.
     stub(404, { detail: 'no route' });
     expect(await fetchPayload('/api/x', z.record(z.string(), z.unknown()))).toEqual({
@@ -224,7 +224,7 @@ describe('fetchPayload on the canonical failure statuses', () => {
  * aborted, and the caller that aborts here is a scope change: selecting
  * another project abandons the previous project's in-flight reads. Folding
  * that into `offline` would mint a daemon-is-down state out of a request this
- * dashboard cancelled — and cache it against the abandoned scope, so returning
+ * dashboard cancelled, and cache it against the abandoned scope, so returning
  * to that project would show a failure nobody ever received.
  */
 describe('fetchPayload under cancellation', () => {
@@ -284,8 +284,8 @@ describe('fetchPayload under cancellation', () => {
 
   // Headers arrived, so `fetch` resolved; the cancellation now surfaces from
   // the body read instead. Every status branch consumes a body, and each one
-  // used to swallow that rejection into a reading — `unsupported_schema` for a
-  // 2xx, `HTTP 405`/`HTTP 503` for the rest — about a body nobody finished.
+  // used to swallow that rejection into a reading, `unsupported_schema` for a
+  // 2xx, `HTTP 405`/`HTTP 503` for the rest, about a body nobody finished.
   it.each([200, 405, 503])(
     'preserves an abort that lands while a %i body is still being read',
     async (status) => {

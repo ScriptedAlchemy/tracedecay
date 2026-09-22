@@ -96,7 +96,7 @@ function lifecycleRoute(action: WorkflowLifecycleAction) {
 }
 
 /** The refusal a lifecycle command outside the writable scope reports without
- * issuing a request — the same `locked` reading Work commands answer, because
+ * issuing a request, the same `locked` reading Work commands answer, because
  * the gateway rule it repeats is the same one (`scopeWritable`). */
 function notWritable(reason: string): WorkResult<WorkflowDefinitionDisposition> {
   return { outcome: 'refused', state: 'locked', detail: reason };

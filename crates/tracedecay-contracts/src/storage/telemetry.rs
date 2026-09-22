@@ -6,8 +6,8 @@
 //! Those reads live behind [`StoreSizeTelemetryPort`], whose implementation is
 //! owned by the storage runtime (see the module docs on the port). This module
 //! owns only the typed read models, the budget contract, and the pure
-//! projections over them. A budget overage is always observable — never a silent
-//! result — via [`StoreSizeBudgetV1::evaluate`].
+//! projections over them. A budget overage is always observable, never a silent
+//! result, via [`StoreSizeBudgetV1::evaluate`].
 
 use std::future::Future;
 use std::pin::Pin;
@@ -121,11 +121,6 @@ impl TableGrowthSampleV1 {
     #[must_use]
     pub fn growth_bytes(&self) -> StorageByteSizeV1 {
         self.current_bytes.saturating_sub(self.previous_bytes)
-    }
-
-    #[must_use]
-    pub fn is_growing(&self) -> bool {
-        self.current_bytes > self.previous_bytes
     }
 }
 

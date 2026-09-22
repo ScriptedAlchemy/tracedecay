@@ -1,4 +1,4 @@
-//! `tracedecay dashboard` — local HTTP server for the dashboard UIs.
+//! `tracedecay dashboard`, local HTTP server for the dashboard UIs.
 //!
 //! Serves TraceDecay's embedded dashboard and its project-scoped JSON APIs:
 //!
@@ -37,7 +37,7 @@ pub use tracedecay::DashboardProjectContext;
 /// `Database::publish_test_runtime` materialises a profile-scoped sidecar shard
 /// that the kernel initialises through
 /// `tracedecay_runtime_core::ports::registered_schema`. That port fails closed
-/// until the real schema — owned by `tracedecay-global-db` — is registered.
+/// until the real schema, owned by `tracedecay-global-db`, is registered.
 /// Production wires it from the daemon composition root; this crate's test
 /// target reuses the identical installer through its `test-helpers`
 /// dev-dependency. Idempotent: the port keeps the first registration, so every
@@ -145,7 +145,6 @@ pub mod feedback_api;
 mod graph_api;
 mod graph_service;
 mod graph_structure_api;
-pub mod hooks;
 mod lcm_api;
 mod remote_status_api;
 pub use lcm_api::{
@@ -1525,12 +1524,12 @@ impl ActiveProjectApplicationRoutes {
 /// Builds the complete dashboard router shared by direct and daemon-managed
 /// startup. The supplied state is the active writable project authority.
 ///
-/// `spa_routes` carries the embedded single-page-app surface — the app index,
+/// `spa_routes` carries the embedded single-page-app surface, the app index,
 /// `/static/{*tail}`, and the SPA fallback for unmatched non-API client routes
 /// (`/brain?scope=…` deep links). It is built by the owning binary because the
 /// bundle is generated into `OUT_DIR` by that crate's `build.rs`. It must be a
 /// stateless `axum::Router` (it is merged after `.with_state(…)`), it must set
-/// its own `.fallback(…)`, and it must not define any `/api/**` route — axum
+/// its own `.fallback(…)`, and it must not define any `/api/**` route, axum
 /// panics on overlapping paths. Pass `Router::new()` to serve the JSON API
 /// with no UI.
 pub async fn router(
@@ -1541,7 +1540,7 @@ pub async fn router(
     // application primitive routes are bound to the active-project daemon. When the
     // daemon authority record is unavailable (standalone `tracedecay dashboard`
     // or the in-process test server), mounting them would otherwise fail the
-    // whole server before it binds. Degrade gracefully instead — serve the core
+    // whole server before it binds. Degrade gracefully instead, serve the core
     // dashboard and skip the `/api/application` surface.
     let application = match ActiveProjectApplicationRoutes::for_active_project(
         cg,
@@ -3425,8 +3424,8 @@ mod authority_tests {
     }
 
     /// The V2 read-model routes must be reachable through both
-    /// router construction paths — the active-project gateway (`/api/…`) and the
-    /// project-scoped gateway (`/api/projects/{id}/…`) — mirroring how the
+    /// router construction paths, the active-project gateway (`/api/…`) and the
+    /// project-scoped gateway (`/api/projects/{id}/…`), mirroring how the
     /// existing families are exposed.
     #[tokio::test]
     async fn v2_read_models_are_reachable_through_both_gateways() {
@@ -3488,7 +3487,7 @@ mod authority_tests {
     }
 
     /// Graph reads are served only from an admitted, verified projection, so a
-    /// dashboard that never mounted one cannot answer `ready` — it must answer
+    /// dashboard that never mounted one cannot answer `ready`, it must answer
     /// an enveloped `unknown` naming the missing registry, and must never
     /// fabricate totals from the raw store connection the state still holds.
     ///

@@ -1,8 +1,8 @@
 /**
  * Pure spring simulation for the TRACE surface.
  *
- * This module is the honesty boundary. Every felt quantity in the prototype —
- * weight, latency, deformation, settle time — is computed HERE from a stated
+ * This module is the honesty boundary. Every felt quantity in the prototype,
+ * weight, latency, deformation, settle time. Is computed HERE from a stated
  * measurement, and the renderer only draws what comes out. Nothing in this file
  * touches the DOM, a canvas, `Date.now`, `performance.now` or `Math.random`, so
  * the same seed and the same gesture script produce a bit-identical trajectory
@@ -23,7 +23,7 @@
  *
  * Mass is the symbol's degree. With a uniform damping RATIO (not a uniform
  * damping coefficient) the closed form of the anchored oscillator gives
- * settle time ∝ mass^(anchorMassExponent/2 … ) — monotone in mass, which is
+ * settle time ∝ mass^(anchorMassExponent/2 … ), monotone in mass, which is
  * the "hubs are slow and deep, leaves flick" clause of the sensory contract,
  * and `sim.test.mjs` asserts the monotonicity rather than trusting the algebra.
  *
@@ -40,7 +40,7 @@ export const DEFAULT_PARAMS = Object.freeze({
   /**
    * Exponent applied to mass when scaling anchor stiffness. 0 would make every
    * node oscillate at its own natural frequency and a 63-degree hub would take
-   * ~4.6x as long as a 3-degree leaf to settle — true to the measurement but
+   * ~4.6x as long as a 3-degree leaf to settle, true to the measurement but
    * unusable as an interface. 1 would cancel mass out entirely and destroy the
    * weight channel. 0.5 keeps latency strictly monotone in degree with a ~2.1x
    * spread across this subgraph, which reads as weight without stalling.
@@ -50,7 +50,7 @@ export const DEFAULT_PARAMS = Object.freeze({
   edgeStiffnessScale: 6,
   /**
    * Damping ratio of the anchored oscillator. Below 1 is underdamped. 0.72
-   * gives one small overshoot — flesh, not jelly — and no ringing.
+   * gives one small overshoot, flesh, not jelly, and no ringing.
    */
   dampingRatio: 0.72,
   /** Integrator substep, in seconds. `step(dt)` subdivides down to this. */
@@ -72,7 +72,7 @@ export const DEFAULT_PARAMS = Object.freeze({
 /**
  * Deterministic PRNG (mulberry32). Used ONCE, at construction, to break the
  * perfect symmetry of the layout so the field visibly breathes into place.
- * Never called during stepping — that is what makes replay exact.
+ * Never called during stepping. That is what makes replay exact.
  */
 function mulberry32(seed) {
   let a = seed >>> 0;
@@ -295,7 +295,7 @@ export function createSimulation(spec) {
     /**
      * Advance by `dt` seconds, subdivided into equal substeps no larger than
      * `params.substep`. Callers MUST pass a fixed `dt` (the page drives one
-     * fixed step per animation frame) — wall-clock jitter never reaches the
+     * fixed step per animation frame), wall-clock jitter never reaches the
      * integrator, which is the whole reason a recording can be replayed.
      */
     step(dt) {
@@ -317,7 +317,7 @@ export function createSimulation(spec) {
       return this;
     },
 
-    /** Release every pinned node. Velocity stays zero — no fling. */
+    /** Release every pinned node. Velocity stays zero, no fling. */
     release() {
       pinned.fill(0);
       return this;
@@ -446,7 +446,7 @@ export function hopDistances(sim, sourceId) {
 /**
  * One exponential-approach step of the hover bloom.
  *
- * Bloom is not physics — it is the hover channel of the sensory contract, and
+ * Bloom is not physics. It is the hover channel of the sensory contract, and
  * it lives here so it is testable and lifts with the simulation rather than
  * with a renderer. The approach RATE is divided by mass, so a leaf snaps and a
  * hub arrives late and keeps arriving: "hover-response latency scales with

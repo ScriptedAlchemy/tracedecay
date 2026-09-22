@@ -475,7 +475,13 @@ pub struct SimilarFamilyV1 {
 pub enum SimilarCoverageV1 {
     Complete,
     Partial,
-    ExcludedTooSmall { minimum_tokens: u32 },
+    ExcludedTooSmall {
+        minimum_tokens: u32,
+    },
+    ExcludedTooLarge {
+        maximum_tokens: u32,
+        maximum_bytes: u64,
+    },
     ExcludedIncompleteTokenization,
 }
 

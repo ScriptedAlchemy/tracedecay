@@ -40,7 +40,7 @@ fn read_varint(bytes: &[u8], start: usize) -> Option<(u64, usize)> {
 }
 
 /// Extract length-delimited field-1 entries that are exactly 32 bytes long and
-/// hex-encode them — the content-addressed child ids of a DAG node blob. A
+/// hex-encode them, the content-addressed child ids of a DAG node blob. A
 /// light protobuf scanner that skips unrelated fields by wire type.
 pub(super) fn protobuf_child_refs(bytes: &[u8]) -> Option<Vec<String>> {
     let mut refs = Vec::new();
@@ -286,7 +286,7 @@ pub(super) async fn order_store_messages_bounded(
         }
     }
 
-    // Fallback: id-sorted leaf scan — ids only first, then length-gated
+    // Fallback: id-sorted leaf scan, ids only first, then length-gated
     // fetches. The scan is already `LIMIT`-bounded, so one buffered page
     // reproduces the original cursor semantics exactly.
     let ids = conn
@@ -455,6 +455,6 @@ pub(super) const MAX_COMPOSER_STORE_META_BYTES: u64 = MAX_SNAPSHOT_METADATA_BYTE
 /// decoded metadata ceiling.
 pub(super) const MAX_COMPOSER_STORE_META_HEX_BYTES: u64 = MAX_COMPOSER_STORE_META_BYTES * 2;
 
-/// Cap on DAG blob visits / child refs per store — aligns with the default
+/// Cap on DAG blob visits / child refs per store, aligns with the default
 /// ingest discovery unit ceiling (`IngestPassBounds::discovered_units`).
 pub(super) const MAX_COMPOSER_STORE_BLOB_VISITS: usize = 4096;

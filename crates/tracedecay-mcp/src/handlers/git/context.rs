@@ -308,7 +308,7 @@ fn all_symbols_in_files(
 /// Repo open, tree diff, status classification, and rev-walk are all
 /// synchronous and unbounded on a large or pathological repository. Running
 /// them inline on a runtime worker starves every other request sharing that
-/// worker, and — the sharper problem — makes the carried git dispatch deadline
+/// worker. The sharper problem makes the carried git dispatch deadline
 /// unenforceable: `tokio::time::timeout` can only preempt at an await point, so
 /// an inline blocking call runs to completion regardless. Awaiting the
 /// `spawn_blocking` join handle restores exactly that composition, which
@@ -450,7 +450,7 @@ pub async fn handle_diff_context(
     let mut impacted_seen: HashSet<String> = HashSet::new();
     let mut affected_tests: HashSet<String> = HashSet::new();
     let mut all_touched_files: Vec<String> = Vec::new();
-    // Callers can (and in the wild do) pass the same path twice — e.g. when
+    // Callers can (and in the wild do) pass the same path twice, e.g. when
     // synthesising the list from a directory walk that double-counts symlinked
     // or canonicalised entries. Dedup early so downstream loops don't emit
     // the same node N times for the same path.
@@ -477,7 +477,7 @@ pub async fn handle_diff_context(
 
     // Single multi-source BFS over the union of impact radii. Sharing a
     // `visited` set means each downstream node is walked at most once, even
-    // when many modified symbols reach it through diamond dependencies — the
+    // when many modified symbols reach it through diamond dependencies, the
     // old per-symbol loop re-traversed the same subtree N times.
     let impacted = if modified_ids.is_empty() {
         tracedecay_code_index::graph_projection::CodeGraphImpactBatchV1 {
@@ -573,9 +573,9 @@ pub async fn handle_diff_context(
 }
 
 /// Changelog is git-first: the tree diff is the answer, and symbol enrichment
-/// comes from [`exact_semantic_symbol_diff`], which reports its own typed
+/// comes from `exact_semantic_symbol_diff`, which reports its own typed
 /// coverage when the code index is unavailable. The handler therefore takes no
-/// verified graph query at all — a repository that git itself refuses must
+/// verified graph query at all, a repository that git itself refuses must
 /// report its typed git error rather than whatever state the graph projection
 /// mount is in.
 #[hotpath::measure(future = true, label = "mcp.git.changelog.total")]
@@ -783,8 +783,8 @@ pub async fn handle_commit_context(
         file_roles.push(json!({"file": file, "role": role, "symbols": symbols.len()}));
 
         // Config files (Cargo.toml, *.yaml, package.json, ...) explode into
-        // one node per key. Surface a single summary entry per file instead
-        // — agents only need to know "Cargo.toml changed, N keys touched",
+        // one node per key. Surface a single summary entry per file instead.
+        // Agents only need to know "Cargo.toml changed, N keys touched",
         // not the name of every dependency listed.
         if role == "config" {
             symbols_by_role.entry(role).or_default().push(json!({
@@ -888,7 +888,7 @@ impl PrContextControls {
 }
 
 fn elapsed_micros(started: std::time::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).map_or(u64::MAX, |value| value)
+    tracedecay_runtime_core::tracedecay::saturating_duration_micros(started.elapsed())
 }
 
 fn pr_context_impact_snapshot(

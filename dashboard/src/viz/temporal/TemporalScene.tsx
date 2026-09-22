@@ -2,8 +2,8 @@
  * Renderer for a laid-out `TemporalSceneModel`.
  *
  * Two layers over one coordinate space. A Canvas2D substrate carries the
- * atmosphere — rails, grid, cluster bodies, glowing threads, the unrevealed
- * hatch — and is painted once per model or palette change; nothing here
+ * atmosphere, rails, grid, cluster bodies, glowing threads, the unrevealed
+ * hatch, and is painted once per model or palette change; nothing here
  * animates. A crisp SVG overlay carries every selectable mark, every label and
  * every title, so the surface stays complete when the canvas is missing and
  * every pointer action has a keyboard path.

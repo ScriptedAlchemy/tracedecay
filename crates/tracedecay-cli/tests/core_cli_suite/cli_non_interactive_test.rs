@@ -73,7 +73,7 @@ fn assert_namespace_absent(path: &Path, context: &str) {
 
 /// Guarantees a fixture project carries no repo-local `.tracedecay` marker
 /// directory. Repository identity moved into the git common dir, so the
-/// profile-sharded fixture no longer plants one — a fixture that must model
+/// profile-sharded fixture no longer plants one, a fixture that must model
 /// the "registry-backed, no repo marker" shape treats an already-absent
 /// directory as exactly that shape rather than a setup failure.
 pub(crate) fn remove_repo_local_marker_dir_if_present(project: &Path) {
@@ -339,7 +339,7 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     // `application.retained.authority-unavailable` otherwise: the daemon's
     // full project open reads an attached git HEAD before it exposes the
     // registered session authority, and `HostAdmissionTestRuntimeV1::project`
-    // below `git init`s any project root that is not already a repository —
+    // below `git init`s any project root that is not already a repository.
     // which would move the repository identity out from under the project id
     // `init` just registered.
     write_git_fixture(&project_root);
@@ -416,7 +416,7 @@ fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
 /// A profile-scoped refresh travels CLI → daemon on the projectless route and
 /// settles through the profile session authority: begin issues an opaque
 /// handle bound to the profile store, status reads it back, cancel returns the
-/// durable receipt, and the receipt stays terminal — all with the canonical
+/// durable receipt, and the receipt stays terminal, all with the canonical
 /// `scope.kind=profile` request and no project anywhere.
 #[cfg(unix)]
 #[test]
@@ -745,6 +745,30 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
             .is_file()
     );
     assert!(!kimi_home.join("plugins/installed.json").exists());
+}
+
+#[test]
+fn install_without_any_detected_agent_succeeds_with_a_notice() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let mut install = tracedecay_command_without_daemon(home.path(), project.path());
+    let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    install.arg("install");
+
+    let output = run_with_timeout(install, cli_timeout());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the first command a user runs, before any agent exists, is not a failure\nstderr:\n{stderr}"
+    );
+    assert!(stderr.contains("No supported agents detected"), "{stderr}");
+    assert!(stderr.contains("Claude Code"), "{stderr}");
+    assert!(stderr.contains("Cursor"), "{stderr}");
+    assert!(
+        stderr.contains("run `tracedecay install` again"),
+        "{stderr}"
+    );
 }
 
 fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
@@ -1309,7 +1333,7 @@ fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspe
     // The ledger is append-only with an enforced lifecycle: a run that already
     // reached a terminal status cannot be re-appended, so attaching an artifact
     // to the curate run's own `skipped` row is refused with "invalid lifecycle
-    // transition". Cover the artifact surface on a run of its own instead —
+    // transition". Cover the artifact surface on a run of its own instead.
     // one terminal row that already carries the artifact, which is the only
     // shape the ledger accepts.
     let artifact_run_id = format!("{run_id}-artifact");
@@ -1983,7 +2007,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     // The shard exists on disk with a reconstructable manifest but was never
     // registered, so `list --all` must say exactly that. Reporting it as a
     // plain `profile-sharded` row would promote an unregistered store to a
-    // registered-looking one — the ambient registry fallback this fixture
+    // registered-looking one, the ambient registry fallback this fixture
     // exists to forbid. `list_all_uses_registry_profile_shard_when_enrollment_marker_missing`
     // covers the registered spelling.
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2069,7 +2093,7 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     );
 }
 
-/// Durable debris in the shape of issue #765's wedge — a sealed code
+/// Durable debris in the shape of issue #765's wedge, a sealed code
 /// generation that can never seat plus its graph container and WAL. Wipe and
 /// forget must treat these as plain bytes: nothing in the escape hatches may
 /// open, replay, or await the graph runtime that would wedge on them.
@@ -2104,7 +2128,7 @@ fn write_profile_sharded_enrollment_marker(project: &Path) {
 
 /// The #765 operator journey: the managed daemon holds its lifetime shared
 /// lease and is wedged in a terminal activation retry loop, so it never
-/// exits. Without an installed service to stop, the holder never releases —
+/// exits. Without an installed service to stop, the holder never releases.
 /// wipe must refuse typed within its bound instead of advising an operator
 /// to wait forever ("retry after it finishes").
 #[test]
@@ -2992,7 +3016,7 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
 /// `storage report` is read-only and works against an explicit
 /// `--profile-root` without any daemon or registered project, reporting a
 /// real registered store's size and an unregistered directory's presence
-/// (plan 38 §7 — size observability reachable from a command).
+/// (plan 38 §7, size observability reachable from a command).
 #[test]
 fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     let home = TempDir::new().unwrap();

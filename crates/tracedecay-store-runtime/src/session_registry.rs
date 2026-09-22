@@ -125,8 +125,8 @@ pub trait RemoteRecoveryProjectLifecycle: Send + Sync {
 /// these owners: capacity eviction cannot reclaim a mounted project, because
 /// it holds its owner attachment for the life of the mount and so is never a
 /// candidate. A ceiling this high therefore lets residency grow with the
-/// number of projects actually touched. That is the deliberate trade —
-/// refusing the fourth project was the worse failure — and the real fix is
+/// number of projects actually touched. That is the deliberate trade,
+/// refusing the fourth project was the worse failure, and the real fix is
 /// idle-project hibernation, which is follow-up work.
 ///
 /// This is the *only* declared project-population ceiling; every other ceiling
@@ -144,7 +144,7 @@ const PROJECT_GRAPH_OWNER_ADMISSION_DEMAND: usize = 3;
 /// actually reachable. Written as arithmetic rather than a literal because the
 /// profile-wide owners take their slots first: a hand-picked number is short by
 /// exactly that many, and the last project then fails inside the graph registry
-/// before ever reaching [`MAX_RETAINED_PROJECT_RUNTIME_OWNERS`].
+/// before ever reaching `MAX_RETAINED_PROJECT_RUNTIME_OWNERS`.
 pub const MAX_RETAINED_GRAPH_DB_OWNERS: usize = PROFILE_WIDE_GRAPH_DB_OWNERS
     + PROJECT_GRAPH_OWNER_ADMISSION_DEMAND * MAX_RETAINED_PROJECT_RUNTIME_OWNERS;
 
@@ -2700,7 +2700,7 @@ pub fn mark_process_long_lived_for_session_maintenance() {
 ///
 /// Successful schema convergence (`outcome=complete`) is an ordinary
 /// completion and must not occupy the default WARN surface. WARN is reserved
-/// for degraded outcomes — a failed converge, a poisoned status lock, or a
+/// for degraded outcomes, a failed converge, a poisoned status lock, or a
 /// memory-release failure after the audit.
 pub fn log_store_runtime_event(event: &str, fields: &[(&str, String)]) {
     if store_runtime_event_is_success(fields) {

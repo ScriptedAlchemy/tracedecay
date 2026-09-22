@@ -64,9 +64,12 @@ pub(super) fn hook_v2_native_context_scout_lifecycle(
 }
 
 #[hotpath::measure(future = true, label = "mcp.hook_runtime.scout_lifecycle")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Context-scout admission is one native lifecycle bind for the scout claim."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Context-scout admission is one native lifecycle bind for the scout claim."
+    )
 )]
 pub(super) async fn admit_native_context_scout_lifecycle(
     sessions: &RegisteredGlobalDb,
@@ -130,7 +133,7 @@ pub(super) async fn admit_native_context_scout_lifecycle(
             Err(_) => return false,
         };
     let binding = sessions.binding();
-    let authorities = HostAdmissionAuthorities::registered_for_project(
+    let authorities = HostAdmissionAuthorities::for_project(
         binding.shard_id.brain_id.clone(),
         binding.shard_id.profile_id.clone(),
         project_id,

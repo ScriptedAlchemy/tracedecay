@@ -50,9 +50,12 @@ fn project_server_has_in_flight_response(server: &Arc<crate::mcp::McpServer>) ->
 }
 
 #[hotpath::measure(label = "daemon.project.compose.release_idle", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Idle-server release is one cache-evict-and-shutdown before the next project open."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Idle-server release is one cache-evict-and-shutdown before the next project open."
+    )
 )]
 async fn release_one_idle_project_server_before_open(
     store_administration: &StoreAdministration,
@@ -225,13 +228,24 @@ async fn release_one_idle_project_server_before_open(
     Ok(capacity_admission)
 }
 
-#[cfg(test)]
-pub(super) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
+/// The one home a composed daemon reads host transcripts from.
+///
+/// Both readers resolve it here: the composition pins it onto the session
+/// refresh schedulers that own the background sweep, and the MCP server scopes
+/// every tool dispatch to it so a hook-triggered ingest cannot resolve a
+/// different one.
+///
+/// Gated exactly like the `production_harness` module that owns the isolated
+/// layout: an integration test links this crate without `cfg(test)`, so a
+/// `cfg(test)`-only pin left `mcp_suite` compositions sweeping the developer's
+/// real `$HOME` transcripts.
+#[cfg(any(test, feature = "test-transport"))]
+pub(crate) fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
     profile_root.parent().map(Path::to_path_buf)
 }
 
-#[cfg(not(test))]
-pub(super) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
+#[cfg(not(any(test, feature = "test-transport")))]
+pub(crate) fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
     tracedecay_sessions::runtime::home_dir()
 }
 
@@ -364,7 +378,7 @@ pub(super) async fn production_project_server(
 /// is checked out on the *same* branch as its primary.
 ///
 /// `ProjectServerKey` is root-bound so distinct linked worktrees keep exact
-/// root-bound servers over one shared `StoreOwnerKey` — a worktree on another
+/// root-bound servers over one shared `StoreOwnerKey`, a worktree on another
 /// branch (or detached) serves a different generation and must not be answered
 /// from the primary's graph. A worktree on the same branch serves the same
 /// branch content from the same store owner and the same graph database, so a
@@ -714,9 +728,12 @@ impl ProjectOpenInputs<'_> {
     /// Build every route-owned port and construct the core (graph, search,
     /// diagnostics) server candidate. Nothing is published yet.
     #[hotpath::measure(label = "daemon.project.compose.core", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Core server composition wires one project's ports into a single McpServer."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Core server composition wires one project's ports into a single McpServer."
+        )
     )]
     async fn compose_core_server(
         &self,
@@ -1098,9 +1115,12 @@ impl ProjectOpenInputs<'_> {
     /// is deliberately absent; the bounded code-index activation owns
     /// background indexing.
     #[hotpath::measure(label = "daemon.project.compose.construct_full", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Full server construction is one owner-and-port assembly for a published project route."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Full server construction is one owner-and-port assembly for a published project route."
+        )
     )]
     async fn construct_full_server(
         &self,

@@ -112,6 +112,32 @@ pub struct ExactSqlHandle {
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
 
+/// Waits for the serialized writer actor's reply without stalling the async
+/// worker that issued the command.
+///
+/// Every synchronous storage port in this workspace (`WorkAttemptStoragePort`,
+/// `WorkflowRunStoragePort`, and their siblings) reaches the writer through
+/// these one-shot replies, and the daemon calls those ports from Tokio tasks.
+/// A plain `recv_blocking` therefore parks a whole worker for as long as the
+/// writer's command queue takes to reach this command. On a small runtime two
+/// concurrent waits starve every other task on it, including the HTTP reads
+/// whose admitted deadline then expires. `block_in_place` hands the worker's
+/// run queue to another thread for the wait; it panics outside a multi-thread
+/// runtime, so the flavor is checked first and everything else
+/// (current-thread runtimes, plain threads) keeps the previous inline
+/// behavior. The remaining `block_in_place` panic case is a `LocalSet` on a
+/// multi-thread runtime, which this workspace does not use.
+fn recv_writer_reply<T>(
+    response: async_channel::Receiver<T>,
+) -> Result<T, async_channel::RecvError> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| response.recv_blocking())
+        }
+        _ => response.recv_blocking(),
+    }
+}
+
 impl ExactSqlHandle {
     pub fn attach<E: ReaderQueryExecutor>(
         writer: &PersistentWriter,
@@ -381,8 +407,7 @@ impl ExactSqlHandle {
     }
 
     pub fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows, ExactSqlError> {
-        self.enqueue_checkpoint_wal_truncate()?
-            .recv_blocking()
+        recv_writer_reply(self.enqueue_checkpoint_wal_truncate()?)
             .map_err(|_| ExactSqlError::WriterUnavailable)?
     }
 
@@ -420,7 +445,7 @@ impl ExactSqlHandle {
     /// Reader caches are released through the reader pool. A writer, when
     /// present, is released on the writer actor. A handle that cannot release
     /// anything reports a typed no-op instead of [`ExactSqlError::WriterUnavailable`];
-    /// a reader release that *errored* is never a no-op — it propagates so
+    /// a reader release that *errored* is never a no-op, it propagates so
     /// the maintenance caller's degraded log fires.
     pub fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let readers = (self.release_reader_memory)()?;
@@ -461,35 +486,6 @@ impl ExactSqlHandle {
         Ok(merge_memory_release(readers, writer))
     }
 
-    /// Enables incremental auto-vacuum through its fixed maintenance rebuild.
-    fn enqueue_repair_incremental_auto_vacuum(
-        &self,
-    ) -> Result<async_channel::Receiver<Result<(), ExactSqlError>>, ExactSqlError> {
-        let (reply, response) = async_channel::bounded(1);
-        self.writer
-            .as_ref()
-            .ok_or(ExactSqlError::WriterUnavailable)?
-            .try_send(WriterCommand::Vacuum {
-                reply,
-                authority: self.write_authority.clone(),
-            })
-            .map_err(map_writer_send_error)?;
-        Ok(response)
-    }
-
-    pub fn repair_incremental_auto_vacuum(&self) -> Result<(), ExactSqlError> {
-        self.enqueue_repair_incremental_auto_vacuum()?
-            .recv_blocking()
-            .map_err(|_| ExactSqlError::WriterUnavailable)?
-    }
-
-    pub async fn repair_incremental_auto_vacuum_async(&self) -> Result<(), ExactSqlError> {
-        self.enqueue_repair_incremental_auto_vacuum()?
-            .recv()
-            .await
-            .map_err(|_| ExactSqlError::WriterUnavailable)?
-    }
-
     /// Interactive read snapshot. Admits against the whole general lane.
     pub fn begin_read_snapshot(
         &self,
@@ -523,7 +519,7 @@ impl ExactSqlHandle {
     ///
     /// The span covers dispatching to the exact-SQL worker, waiting for that
     /// single thread to reach this command, and the lock acquisition it then
-    /// performs — not the lock alone. Long-running commands on the same worker
+    /// performs, not the lock alone. Long-running commands on the same worker
     /// (vacuum, WAL truncation, a long-lease transaction) are therefore visible
     /// here as begin latency even when SQLite was never contended, which is the
     /// distinction `rusqlite.exact_sql.write_lock` exists to make.
@@ -551,7 +547,7 @@ impl ExactSqlHandle {
 
     /// Begins the only transaction mode whose lease renews on progress.
     ///
-    /// Reserved for schema installation and full-index bulk replacement — work
+    /// Reserved for schema installation and full-index bulk replacement, work
     /// that legitimately outlives one lease while continuously committing
     /// progress. The mode is intentionally not configurable: callers must
     /// attach a live write authority and opt into the long-lease transaction
@@ -636,9 +632,7 @@ impl ExactSqlHandle {
         policy: TransactionPolicy,
     ) -> Result<ExactSqlTransaction, ExactSqlError> {
         let (transaction, response) = self.enqueue_transaction(behavior, policy)?;
-        response
-            .recv_blocking()
-            .map_err(|_| ExactSqlError::WriterUnavailable)??;
+        recv_writer_reply(response).map_err(|_| ExactSqlError::WriterUnavailable)??;
         Ok(transaction)
     }
 
@@ -682,8 +676,7 @@ impl ExactSqlHandle {
 
     fn dispatch_writer(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
         hotpath::measure_block!("rusqlite.exact_sql.dispatch", {
-            self.enqueue_writer_request(request)?
-                .recv_blocking()
+            recv_writer_reply(self.enqueue_writer_request(request)?)
                 .map_err(|_| ExactSqlError::WriterUnavailable)?
         })
     }
@@ -750,8 +743,7 @@ impl ExactSqlTransaction {
     }
     pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
         let lease = Arc::clone(&self.lease);
-        self.enqueue_attach_database(attachment)?
-            .recv_blocking()
+        recv_writer_reply(self.enqueue_attach_database(attachment)?)
             .map_err(|_| transaction_terminal_error(&lease))?
     }
 
@@ -896,9 +888,7 @@ impl ExactSqlTransaction {
     }
     pub fn commit(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
         let lease = Arc::clone(&self.lease);
-        self.enqueue_commit()?
-            .recv_blocking()
-            .map_err(|_| transaction_terminal_error(&lease))?
+        recv_writer_reply(self.enqueue_commit()?).map_err(|_| transaction_terminal_error(&lease))?
     }
 
     pub async fn commit_async(self) -> Result<ExactSqlCommitReceipt, ExactSqlError> {
@@ -940,8 +930,7 @@ impl ExactSqlTransaction {
 
     pub fn rollback(self) -> Result<ExactSqlRollbackReceipt, ExactSqlError> {
         match self.begin_rollback() {
-            RollbackDispatch::Awaiting { lease, response } => response
-                .recv_blocking()
+            RollbackDispatch::Awaiting { lease, response } => recv_writer_reply(response)
                 .unwrap_or_else(|_| settled_rollback_or_terminal_error(&lease)),
             RollbackDispatch::Settled(result) => result,
         }
@@ -994,8 +983,7 @@ impl ExactSqlTransaction {
         request: SqlRequest,
         execution_policy: ExecutionPolicy,
     ) -> Result<SqlResult, ExactSqlError> {
-        self.enqueue_transaction_request(request, execution_policy)?
-            .recv_blocking()
+        recv_writer_reply(self.enqueue_transaction_request(request, execution_policy)?)
             .map_err(|_| transaction_terminal_error(&self.lease))?
     }
 
@@ -1383,7 +1371,7 @@ fn transaction_terminal_error(lease: &TransactionLeaseState) -> ExactSqlError {
 /// Answers a caller's rollback for a transaction the writer already released.
 ///
 /// Every writer-side release rolls back and publishes its receipt before
-/// dropping the command channel, so the honest answer here is that rollback —
+/// dropping the command channel, so the honest answer here is that rollback,
 /// not a rollback failure. Only a genuinely failed `SQLite` rollback, or a
 /// release that published nothing, surfaces as an error.
 fn settled_rollback_or_terminal_error(

@@ -6,7 +6,7 @@ use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlAttachment, ExactSqlHandle, ExactSqlTransaction as RuntimeTransaction,
 };
 
-use super::{Error, IntoParams, Result, Rows, Value, WriteStatement, connection::statement};
+use super::{Error, IntoParams, Result, Rows, WriteStatement, connection::statement};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransactionBehavior {
@@ -128,15 +128,7 @@ impl Transaction {
         })
         .await
         .map_err(join_error)??;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        Ok(Rows::from_exact(rows))
     }
 
     #[hotpath::skip]

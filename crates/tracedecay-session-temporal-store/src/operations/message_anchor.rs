@@ -9,7 +9,7 @@
 //! The temporal occurrence is generation-bound, so it only exists once a refresh
 //! has materialized the message. A summary published while a refresh is still
 //! pending must therefore resolve through the durable observation authority
-//! instead — the exact-observation anchor identity is retained when the
+//! instead, the exact-observation anchor identity is retained when the
 //! observation is persisted and does not change when the refresh later
 //! materializes the occurrence, so both routes agree on the anchor.
 //!
@@ -17,9 +17,9 @@
 //! occurrences of the whole message set are read in one statement, and the
 //! messages that leaves unresolved share one pass over the session's canonical
 //! observation effects, each observation decoded and projected once. Per
-//! message the outcome is exactly the single-message resolution — same anchor
+//! message the outcome is exactly the single-message resolution, same anchor
 //! derivation, ownership, receipt agreement, readability and ambiguity
-//! refusals — so `K` sources cost one scan of `N` effects instead of `K`.
+//! refusals, so `K` sources cost one scan of `N` effects instead of `K`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,7 +51,7 @@ struct MaterializedOccurrence {
 /// source order) for one session, reading the shared authorities once.
 ///
 /// A message absent from the returned map has no canonical anchor in this
-/// store at all — the only case in which the publication falls back to a
+/// store at all, the only case in which the publication falls back to a
 /// legacy compatibility anchor. A refusal raised by one message's own
 /// evidence names that message; a refusal the shared observation scan raises
 /// before any message matched (missing or undecodable observation authority)
@@ -322,7 +322,7 @@ fn require_session_owned_observation(
         || observation.source().session_id().as_str() != session_id
         || observation.scope() != expected_scope
         || anchor.owner() != observation.scope()
-        || serde_json::to_string(anchor.owner()).ok().as_deref() != Some(owner_json)
+        || !anchor.owner_column_matches(owner_json)
         || retained_receipt_id != observation.receipt().receipt().receipt_id().as_str()
     {
         return Err(LcmError::SummarySourceNotOwnedBySession);
@@ -825,7 +825,7 @@ mod tests {
             &malformed.to_string(),
             &observation,
             &anchor,
-            &serde_json::to_string(anchor.owner()).expect("owner json"),
+            &anchor.owner_column_json().expect("owner json"),
         )
         .await;
 
@@ -862,7 +862,7 @@ mod tests {
             &malformed.to_string(),
             &observation,
             &anchor,
-            &serde_json::to_string(anchor.owner()).expect("owner json"),
+            &anchor.owner_column_json().expect("owner json"),
         )
         .await;
 
@@ -931,7 +931,7 @@ mod tests {
             &serde_json::to_string(&observation).expect("observation json"),
             &observation,
             &foreign_anchor,
-            &serde_json::to_string(foreign_anchor.owner()).expect("owner json"),
+            &foreign_anchor.owner_column_json().expect("owner json"),
         )
         .await;
 
@@ -1123,7 +1123,7 @@ mod tests {
                 &serde_json::to_string(&observation).expect("observation json"),
                 &observation,
                 &anchor,
-                &serde_json::to_string(anchor.owner()).expect("owner json"),
+                &anchor.owner_column_json().expect("owner json"),
                 index + 1,
             )
             .await;
@@ -1247,7 +1247,7 @@ mod tests {
             &serde_json::to_string(&canonical).expect("observation json"),
             &canonical,
             &canonical_anchor,
-            &serde_json::to_string(canonical_anchor.owner()).expect("owner json"),
+            &canonical_anchor.owner_column_json().expect("owner json"),
             1,
         )
         .await;
@@ -1268,7 +1268,7 @@ mod tests {
                 &serde_json::to_string(&observation).expect("observation json"),
                 &observation,
                 &anchor,
-                &serde_json::to_string(anchor.owner()).expect("owner json"),
+                &anchor.owner_column_json().expect("owner json"),
                 sequence,
             )
             .await;

@@ -9,8 +9,8 @@ use tracedecay_domain::errors::Result;
 /// Returns the first plausible unexpanded `${...}` template variable in a
 /// `--path` argument (e.g. `${workspaceFolder}`), or `None` when the value
 /// contains no template syntax. The brace contents must look like a variable
-/// name — a leading ASCII letter followed by word/`.`/`-` characters,
-/// optionally with a `:`-introduced modifier such as a default value — so
+/// name, a leading ASCII letter followed by word/`.`/`-` characters,
+/// optionally with a `:`-introduced modifier such as a default value, so
 /// degenerate forms (`${}`, `${ }`, `${a/b}`) and directories that merely
 /// contain `$` are not misclassified. A matching value is overwhelmingly more
 /// likely to be an unexpanded host template than a real directory name, so
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn dollar_signs_without_brace_syntax_are_not_templates() {
-        // Real directories can contain `$` — only `${...}` is template syntax.
+        // Real directories can contain `$`, only `${...}` is template syntax.
         assert_eq!(unexpanded_template_variable("/tmp/pri$ce/data"), None);
         assert_eq!(unexpanded_template_variable("$workspaceFolder"), None);
         assert_eq!(unexpanded_template_variable("/tmp/{braces}/x"), None);

@@ -1,5 +1,3 @@
-use std::fmt::Debug;
-
 use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{
@@ -20,13 +18,7 @@ use tracedecay_store::{
     VerifiedStoreLocatorV1,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn binding() -> StoreRuntimeBindingV1 {
     serde_json::from_value(serde_json::json!({

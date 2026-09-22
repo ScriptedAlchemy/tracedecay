@@ -4,6 +4,7 @@
 
 pub(crate) const TOP_LEVEL_AFTER_HELP: &str = "\
 Quick start:
+  tracedecay daemon install-service     Install + start the daemon (required first)
   tracedecay init                       Index the current repo (once per project)
   tracedecay sync                       Refresh the index after changes
   tracedecay tool                       List every MCP tool callable from the CLI
@@ -27,13 +28,18 @@ flags to target another project.
 For more help on a command: tracedecay <command> --help";
 
 pub(crate) const INIT_LONG_ABOUT: &str = "\
-Walks the project tree, parses sources across the supported languages, and \
-writes the code graph plus memory/session stores under .tracedecay/. Run once \
+Enrolls the repository and publishes its first code generation. Requires a \
+running daemon: init is brokered through the daemon-owned code-index \
+scheduler, and without one it refuses with \
+`code_index_scheduler_unavailable` before writing anything. Start the daemon \
+with `tracedecay daemon install-service` (or `tracedecay daemon start`) and \
+confirm with `tracedecay daemon status`. Storage is daemon-owned. Run once \
 per repository; afterwards `tracedecay sync` keeps the index fresh \
 incrementally. Respects .gitignore by default (see `tracedecay gitignore`).";
 
 pub(crate) const INIT_AFTER_HELP: &str = "\
 Examples:
+  tracedecay daemon install-service              Start the daemon init brokers through
   tracedecay init                                Index the current directory
   tracedecay init /path/to/repo                  Index another repository
   tracedecay init --skip-folder vendor --skip-folder dist
@@ -42,8 +48,9 @@ Examples:
   tracedecay init /new/path --yes                Adopt the unique moved non-git store
   tracedecay init /new/path --fresh              Mint a new identity, never adopt
 
-Related: tracedecay sync (incremental refresh), tracedecay status,
-tracedecay gitignore, tracedecay wipe (delete local stores).";
+Related: tracedecay daemon (the daemon init requires), tracedecay sync
+(incremental refresh), tracedecay status, tracedecay gitignore,
+tracedecay wipe (delete local stores).";
 
 pub(crate) const SYNC_LONG_ABOUT: &str = "\
 Re-parses only files that changed since the last index and updates the code \
@@ -100,7 +107,7 @@ Examples:
 Related: tracedecay status (index freshness).";
 
 pub(crate) const TOOL_LONG_ABOUT: &str = "\
-Invoke any MCP tool from the shell — the full MCP surface with the same \
+Invoke any MCP tool from the shell. The full MCP surface with the same \
 arguments and the same payloads, no MCP client required. This is the fallback \
 path when an MCP transport fails and the primary path for scripts, hooks, and \
 subagents that only have shell access.
@@ -134,7 +141,7 @@ Notes:
     newlines, or non-scalar values, and for payloads near/over the ~128 KiB
     per-argument shell limit.
   - --dry-run parses, validates, and prints the resolved arguments object
-    without dispatching the tool — pre-flight destructive edits with it.
+    without dispatching the tool, pre-flight destructive edits with it.
   - --json prints the raw JSON payload instead of the human text rendering.
   - Any per-key value starting with @ is read from that file (@- is stdin).
   - --project <path> targets another project; the default is the nearest
@@ -146,7 +153,7 @@ Related: tracedecay serve (same tools over MCP stdio), tracedecay status.";
 pub(crate) const LSP_LONG_ABOUT: &str = "\
 Shows which language servers the dashboard's code-diagnostics panel can use \
 on this machine: detected binaries, versions, and install hints for missing \
-ones. Purely informational — nothing is installed or started.";
+ones. Purely informational. Nothing is installed or started.";
 
 pub(crate) const LSP_AFTER_HELP: &str = "\
 Examples:
@@ -209,7 +216,7 @@ tracedecay update (binary + plugins + daemon + health pass).";
 pub(crate) const UNINSTALL_LONG_ABOUT: &str = "\
 Removes tracedecay's MCP server registration, permissions, hooks, and prompt \
 rules from agent configuration. Removes every detected agent's integration \
-when --agent is omitted. Project indexes under .tracedecay/ are left intact — \
+when --agent is omitted. Project indexes under .tracedecay/ are left intact. \
 use `tracedecay wipe` to delete data.";
 
 pub(crate) const UNINSTALL_AFTER_HELP: &str = "\
@@ -283,7 +290,7 @@ tracedecay status --runtime (server resource snapshot).";
 
 pub(crate) const SERVE_LONG_ABOUT: &str = "\
 Runs the MCP server on stdin/stdout for a single client. This is the command \
-agent hosts execute from their MCP configuration — you rarely run it by hand \
+agent hosts execute from their MCP configuration, you rarely run it by hand \
 except to debug the protocol. For ad-hoc tool calls from a shell, use \
 `tracedecay tool` instead; both dispatch the same tool registry.";
 
@@ -351,7 +358,7 @@ Examples:
 Related: tracedecay upgrade, tracedecay update.";
 
 pub(crate) const CURRENT_COUNTER_LONG_ABOUT: &str = "\
-Prints the project-local resettable token counter — tokens tracedecay saved \
+Prints the project-local resettable token counter, tokens tracedecay saved \
 this project since the last `reset-counter`. Useful for before/after \
 comparisons of a working session; the permanent ledger lives in \
 `tracedecay gain`.";
@@ -378,8 +385,8 @@ Related: tracedecay current-counter, tracedecay gain.";
 
 pub(crate) const DISABLE_UPLOAD_COUNTER_LONG_ABOUT: &str = "\
 Opts this machine out of contributing anonymous token-savings counts to the \
-public worldwide counter. Only aggregate numbers are ever uploaded — never \
-code, paths, or queries — but uploading is entirely optional.";
+public worldwide counter. Only aggregate numbers are ever uploaded, never \
+code, paths, or queries, but uploading is entirely optional.";
 
 pub(crate) const DISABLE_UPLOAD_COUNTER_AFTER_HELP: &str = "\
 Examples:
@@ -391,7 +398,7 @@ is unaffected).";
 pub(crate) const ENABLE_UPLOAD_COUNTER_LONG_ABOUT: &str = "\
 Re-enables contributing anonymous token-savings counts to the public \
 worldwide counter after a previous `disable-upload-counter`. Only aggregate \
-numbers are uploaded — never code, paths, or queries.";
+numbers are uploaded, never code, paths, or queries.";
 
 pub(crate) const ENABLE_UPLOAD_COUNTER_AFTER_HELP: &str = "\
 Examples:
@@ -456,7 +463,7 @@ Related: tracedecay status (index size context).";
 
 pub(crate) const GAIN_LONG_ABOUT: &str = "\
 Reports token savings (and dollar estimates) recorded in the persistent \
-global ledger — the long-term view, unlike the resettable per-project \
+global ledger, the long-term view, unlike the resettable per-project \
 counter. Defaults to the current project over the last 30 days.";
 
 pub(crate) const GAIN_AFTER_HELP: &str = "\
@@ -537,7 +544,7 @@ Queries the global registry of every initialised tracedecay project on this \
 machine: list, search by id/path/alias/remote/branch, or resolve one \
 project's full context. Use it to find the right --project-id/--project-path \
 value for cross-project commands. `projects forget` deregisters exactly one \
-project — registry rows plus its profile store directories — without \
+project, registry rows plus its profile store directories, without \
 touching other projects or any repo-local file, and completes even when the \
 project's runtime is wedged (the managed daemon service is stopped for the \
 removal and restored afterward).";
@@ -629,7 +636,7 @@ Destructive and unrecoverable; re-create indexes with `tracedecay init`. \
 Prompts for a `go!` confirmation unless `--yes` is passed. When the managed \
 daemon holds the profile (even wedged or hung), wipe stops the installed \
 service within the supervisor's bounded stop, runs offline, and restores the \
-previous service state afterward — it never waits indefinitely.";
+previous service state afterward, it never waits indefinitely.";
 
 pub(crate) const WIPE_AFTER_HELP: &str = "\
 Examples:
@@ -642,7 +649,7 @@ Related: tracedecay list (inspect nearby project stores), tracedecay init
 
 pub(crate) const LIST_LONG_ABOUT: &str = "\
 Lists tracedecay projects relative to the current directory (itself, \
-parents, and children) with their store locations — the quick \"what is \
+parents, and children) with their store locations, the quick \"what is \
 indexed around here?\" check. Use `tracedecay projects` for the global \
 registry with search.";
 

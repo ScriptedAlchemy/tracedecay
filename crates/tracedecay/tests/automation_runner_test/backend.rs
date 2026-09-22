@@ -47,7 +47,7 @@ fn fake_codex_response_timeout_secs() -> u64 {
 /// lives in `tracedecay_sessions::runtime`, and `tracedecay_agent_hosts` only calls it
 /// through a slot the composition root fills. An unwired process reports the
 /// backend as unavailable instead of spawning anything, which is the correct
-/// production behavior — but it means a test binary, which never passes
+/// production behavior, but it means a test binary, which never passes
 /// through `main`, must install the same wiring before driving the real
 /// backend end-to-end. Registration is `OnceLock`-based and idempotent.
 fn register_runtime_ports() {

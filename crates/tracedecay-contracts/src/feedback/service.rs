@@ -271,8 +271,8 @@ struct FeedbackCycleTerminal {
 enum FeedbackCycleFinishPath {
     Immediate,
     AfterRuntime {
-        /// Boxed so this variant does not widen the enum — and every
-        /// `FeedbackCycleTerminal` that carries it — by the whole runtime
+        /// Boxed so this variant does not widen the enum, and every
+        /// `FeedbackCycleTerminal` that carries it, by the whole runtime
         /// state, which is ~441 bytes against a unit `Immediate`.
         runtime: Option<Box<FeedbackRuntimeStateV1>>,
         stage_emission: FeedbackCycleStageEmission,

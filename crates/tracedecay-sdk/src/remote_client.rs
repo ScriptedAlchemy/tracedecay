@@ -564,22 +564,7 @@ fn take_response_field<T: DeserializeOwned>(
 }
 
 fn status_matches_problem(status: reqwest::StatusCode, kind: ApplicationProblemKind) -> bool {
-    let expected = match kind {
-        ApplicationProblemKind::InvalidRequest => reqwest::StatusCode::BAD_REQUEST,
-        ApplicationProblemKind::NotFoundOrNotAuthorized => reqwest::StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict
-        | ApplicationProblemKind::PartialEffect
-        | ApplicationProblemKind::Stale => reqwest::StatusCode::CONFLICT,
-        ApplicationProblemKind::Unsupported => reqwest::StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::Unavailable | ApplicationProblemKind::ResetRequired => {
-            reqwest::StatusCode::SERVICE_UNAVAILABLE
-        }
-        ApplicationProblemKind::ExecutionFailed => reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-        ApplicationProblemKind::Saturated => reqwest::StatusCode::TOO_MANY_REQUESTS,
-        ApplicationProblemKind::Cancelled => reqwest::StatusCode::REQUEST_TIMEOUT,
-        ApplicationProblemKind::TimedOut => reqwest::StatusCode::GATEWAY_TIMEOUT,
-    };
-    status == expected
+    status.as_u16() == tracedecay_api::application_problem_status(kind).as_u16()
 }
 
 #[cfg(test)]

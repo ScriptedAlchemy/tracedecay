@@ -2,7 +2,7 @@
 //!
 //! The adapter decodes one strict request DTO, resolves the project-scoped
 //! daemon route, and returns the daemon's canonical application outcome. It
-//! owns no work state, scheduling, retry, provider, or persistence logic — the
+//! owns no work state, scheduling, retry, provider, or persistence logic, the
 //! CLI is one more caller of the same daemon invocation the HTTP mount, the
 //! dashboard, and the generated SDKs already use.
 
@@ -13,9 +13,9 @@ use tracedecay_api::WorkOperation;
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand,
-    CancellationSignal, CreateWorkTaskRequestV1, Deadline, ExecutionTopologyMetricsRequestV1,
-    GenerateProposalRequest, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    ApplicationProblem, ApplicationResult, CancelWorkAttemptCommand, CancellationSignal,
+    CreateWorkTaskRequestV1, Deadline, ExecutionTopologyMetricsRequestV1, GenerateProposalRequest,
+    PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
     PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResultContractRef,
     ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryWorkAttemptCommandV1,
     ReviewWorkProposalRequestV1, SafeDiagnostic, StartWorkAttemptCommand,
@@ -364,11 +364,13 @@ pub async fn invoke_work_cli_with_delivery(
     let invocation = match decode_work_invocation(operation, body) {
         Ok(invocation) => invocation,
         Err(_) => {
-            return Ok(WorkCliResponse::without_delivery(Err(work_problem(
-                result_contract,
-                request_id,
-                WORK.invalid_request(),
-            )?)));
+            return Ok(WorkCliResponse::without_delivery(Err(
+                crate::application_cli::problem_envelope(
+                    result_contract,
+                    request_id,
+                    WORK.invalid_request(),
+                )?,
+            )));
         }
     };
     let request = DaemonInvocationRequest::work_application(
@@ -378,8 +380,7 @@ pub async fn invoke_work_cli_with_delivery(
         deadline.clone(),
         cancellation.context(),
     );
-    let handshake =
-        tracedecay::daemon::handshake_for_current_client(Some(project_root), None, false, false)?;
+    let handshake = crate::commands::client_handshake(Some(&project_root))?;
     let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
     let result = match client
         .invoke_controlled_with_delivery(
@@ -392,11 +393,13 @@ pub async fn invoke_work_cli_with_delivery(
     {
         Ok(result) => result,
         Err(error) => {
-            return Ok(WorkCliResponse::without_delivery(Err(work_problem(
-                result_contract,
-                request_id,
-                error.into_application_problem(),
-            )?)));
+            return Ok(WorkCliResponse::without_delivery(Err(
+                crate::application_cli::problem_envelope(
+                    result_contract,
+                    request_id,
+                    error.into_application_problem(),
+                )?,
+            )));
         }
     };
     let (response, delivery) = result.into_parts();
@@ -419,15 +422,17 @@ pub async fn invoke_work_cli_with_delivery(
                 outcome: erase_work_outcome(outcome)?,
             })
         }
-        DaemonInvocationOutcome::ApplicationProblem { problem } => {
-            Err(work_problem(result_contract, request_id.clone(), problem)?)
+        DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
+            crate::application_cli::problem_envelope(result_contract, request_id.clone(), problem)?,
+        ),
+        DaemonInvocationOutcome::Problem { problem } => {
+            Err(crate::application_cli::problem_envelope(
+                result_contract,
+                request_id.clone(),
+                WORK.daemon_problem(problem),
+            )?)
         }
-        DaemonInvocationOutcome::Problem { problem } => Err(work_problem(
-            result_contract,
-            request_id.clone(),
-            WORK.daemon_problem(problem),
-        )?),
-        _ => Err(work_problem(
+        _ => Err(crate::application_cli::problem_envelope(
             result_contract,
             request_id.clone(),
             ApplicationProblem::unavailable(SafeDiagnostic {
@@ -454,10 +459,10 @@ fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplication
         (WorkOperation::StartAttempt, WorkApplicationOutcomeV1::StartAttempt(outcome))
         | (WorkOperation::AttemptStatus, WorkApplicationOutcomeV1::AttemptStatus(outcome))
         | (WorkOperation::CancelAttempt, WorkApplicationOutcomeV1::CancelAttempt(outcome)) => {
-            application_outcome_payload(outcome).is_some()
+            outcome.payload().is_some()
         }
         (WorkOperation::HydrateArtifacts, WorkApplicationOutcomeV1::HydrateArtifacts(outcome)) => {
-            application_outcome_payload(outcome).is_some_and(|hydration| {
+            outcome.payload().is_some_and(|hydration| {
                 matches!(
                     hydration,
                     tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
@@ -466,14 +471,6 @@ fn work_delivery_is_eligible(operation: WorkOperation, outcome: &WorkApplication
             })
         }
         _ => false,
-    }
-}
-
-fn application_outcome_payload<T>(outcome: &ApplicationOutcome<T>) -> Option<&T> {
-    match outcome {
-        ApplicationOutcome::Evidence(result) => result.payload.as_ref(),
-        ApplicationOutcome::Preview(result) => result.payload.as_ref(),
-        ApplicationOutcome::Effect(result) => result.payload.as_ref(),
     }
 }
 
@@ -515,14 +512,6 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::ReleasePlacement(outcome) => serde_json::to_value(outcome),
     }?;
     serde_json::from_value(outcome).map_err(Into::into)
-}
-
-fn work_problem(
-    result_contract: ResultContractRef,
-    request_id: tracedecay_contracts::RequestId,
-    problem: ApplicationProblem,
-) -> Result<ApplicationProblemEnvelope> {
-    ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
 fn decode<T>(body: Value) -> Result<T>

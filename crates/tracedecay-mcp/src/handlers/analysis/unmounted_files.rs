@@ -1,4 +1,4 @@
-//! `tracedecay_unmounted_files` — source files on disk that nothing declares.
+//! `tracedecay_unmounted_files`, source files on disk that nothing declares.
 //!
 //! The reachability audit itself is
 //! [`tracedecay_code_index::unmounted_files`]; this handler only reads the
@@ -75,10 +75,7 @@ pub async fn handle_unmounted_files(
                         .map(move |entry| (ecosystem.ecosystem, entry))
                 })
                 .filter(|(_, entry)| {
-                    tracedecay_runtime_core::path_scope::path_matches_scope(
-                        &entry.file,
-                        path_filter.as_deref(),
-                    )
+                    tracedecay_domain::path_matches_scope(&entry.file, path_filter.as_deref())
                 })
                 .collect::<Vec<_>>();
             let unmounted_file_count = matching.len();

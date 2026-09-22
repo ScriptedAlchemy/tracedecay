@@ -31,7 +31,7 @@ TRACEDECAY_DISABLE_GLOBAL_DB = { value = "1", force = false }
 # profile; tests that need a private profile still override per-test with
 # `set_var`/`Command::env`, and the HOME-fallback tests remove the variable
 # in-process. Installed binaries run outside cargo and are unaffected, but the
-# profile does apply to `cargo run` — use the installed binary for real
+# profile does apply to `cargo run`. Use the installed binary for real
 # `daemon install-service` runs.
 # Enforced by crates/tracedecay-cli/tests/core_cli_suite/test_profile_isolation_test.rs.
 TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = true, relative = true }
@@ -45,7 +45,7 @@ TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = true,
 # x86_64-unknown-linux-gnu with its bundled rust-lld, CI symlinks ld -> mold
 # (see .github/actions/setup-linux-mold; `-fuse-ld=mold` needs GCC >= 12),
 # and driver-only flags such as `-B` would land on the raw linker command
-# line — and fail — for anyone who sets `target.<triple>.linker` or
+# line, and fail, for anyone who sets `target.<triple>.linker` or
 # CARGO_TARGET_<TRIPLE>_LINKER to a linker executable directly. Developers
 # who want mold locally opt in through their own linker config or RUSTFLAGS
 # (a user-set RUSTFLAGS env var replaces these flags entirely).
@@ -67,11 +67,15 @@ rustflags = ["-C", "split-debuginfo=unpacked"]
 #
 # `test-ci` is the hosted acceptance selection: nextest's `ci` policy
 # (.config/nextest.toml: fail-fast off, one retry that still fails flaky
-# results, 8 threads, slow-timeout termination) and only the root fixture
-# feature. `.github/workflows/ci.yml` runs this exact alias, and its support
-# binaries/archives are built with `--profile perf` so they share artifacts
-# with it. Extra flags append: `cargo test-ci --locked -E 'binary(=x)'`.
-test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers --cargo-profile perf"
+# results, 8 threads, slow-timeout termination), the root fixture feature and
+# `search-eval`, which is what compiles the evaluator acceptance suites (the
+# root crate's dependency on the evaluator is optional so the Linux transport
+# partition does not build the eval-only lexical projection; a `--workspace`
+# run resolves the evaluator anyway). `.github/workflows/ci.yml` runs this
+# exact alias, and its support binaries/archives are built with `--profile
+# perf` so they share artifacts with it. Extra flags append: `cargo test-ci
+# --locked -E 'binary(=x)'`.
+test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf"
 # Deliberately broader than CI: every optional feature (test-transport
 # acceptance suites, hotpath, …) under the same cargo profile, with the
 # default nextest policy (no retries).

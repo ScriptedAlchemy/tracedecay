@@ -1,7 +1,6 @@
 use crate::common;
 
 use std::collections::BTreeSet;
-use std::fmt;
 
 use serde_json::json;
 use tracedecay_contracts::{
@@ -11,25 +10,17 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    UserProfileId, UtcMicros, WorktreeId,
+    ActorId, BrainId, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision, UserProfileId,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 const CAPABILITY: &str = "capability.multi-root.query";
 const USE_CASE: &str = "use-case.multi-root.query";
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn context(worktree: &str, suffix: &str) -> RequestContext {
     context_at("project.fixture", "repository.fixture", worktree, suffix)
@@ -250,7 +241,7 @@ fn scope_set_cas_selects_exact_registered_roots() {
 
 /// `0a9ebc97a` made every federated root carry the one shared profile-store
 /// locator. That locator is a *shared physical store* identity, and the
-/// authorized set still refuses a mixed one — it is not a substitute for the
+/// authorized set still refuses a mixed one. It is not a substitute for the
 /// per-project authorization each root brings.
 #[test]
 fn federated_roots_refuse_a_foreign_profile_store_locator() {

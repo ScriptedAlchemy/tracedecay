@@ -31,13 +31,7 @@ use crate::registered_workflow_store;
 
 use registered_workflow_store::RegisteredWorkflowStore;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn digest(byte: char) -> ManifestDigest {
     let hex = format!("{:02x}", u32::from(byte) & 0xff);

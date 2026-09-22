@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::*;
+use super::{journal, receipt_store};
 use tracedecay_domain::sha256_hex_suffix;
 
 mod graph_replay_pool_lock_tests;
@@ -997,6 +998,52 @@ fn text_artifact_retention_collects_staging_database_sidecars_with_their_owner()
     );
 }
 
+/// The inventory scans the artifact root without the generation-store lock, so
+/// the text-artifact builder can retire a `.staging` family between the
+/// directory listing and the stat. A vanished entry is already reclaimed and
+/// must leave the plan intact rather than failing it with a storage error.
+#[test]
+fn text_artifact_inventory_skips_an_entry_reclaimed_during_the_scan() {
+    let store = tempfile::TempDir::new().expect("artifact store");
+    let artifacts_root = code_text_artifacts_root(store.path());
+    std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
+    let staging_family = ["a", "b", "c"]
+        .into_iter()
+        .map(|seed| {
+            let path = artifacts_root.join(format!(".text-artifact-{}.staging", seed.repeat(64)));
+            std::fs::write(&path, b"staging").expect("write staging evidence");
+            path
+        })
+        .collect::<Vec<_>>();
+
+    // The scan probes cancellation once on entry and once per directory entry,
+    // before it takes that entry. Retiring from the third probe on leaves the
+    // listing already taken and one entry already inspected, so every further
+    // name the scan holds names a file that is gone from disk.
+    let probes = std::sync::atomic::AtomicUsize::new(0);
+    let retire_during_the_scan = || {
+        if probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 2 {
+            for path in &staging_family {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        false
+    };
+
+    let inventory = plan_collectable_text_artifacts_cancellable(
+        store.path(),
+        None,
+        GenerationDigestVerificationV1::Full,
+        &retire_during_the_scan,
+    )
+    .expect("an entry reclaimed mid-scan leaves the store plannable");
+    assert!(
+        inventory.candidates.len() < staging_family.len(),
+        "an entry that vanished before its stat is reclaimed, not planned: {:?}",
+        inventory.candidates
+    );
+}
+
 #[test]
 fn applied_retention_refuses_a_busy_generation_store_and_retries() {
     let (store, _) = fixture_store(2);
@@ -1258,8 +1305,12 @@ fn text_artifact_recovery_rolls_back_before_receipt_and_commits_after_receipt() 
         active_pointer: plan.active_pointer.clone(),
         receipt: receipt.clone(),
     };
-    persist_text_artifact_transaction(store.path(), &transaction)
-        .expect("journal artifact retention");
+    journal::persist_journal(
+        store.path(),
+        &TEXT_ARTIFACT_TRANSACTION_JOURNAL,
+        &transaction,
+    )
+    .expect("journal artifact retention");
     stage_collectable_text_artifacts(store.path(), &transaction).expect("quarantine artifact");
     assert!(!orphan_path.exists());
     recover_code_generation_retention(store.path(), &BTreeSet::new(), None)
@@ -1269,11 +1320,21 @@ fn text_artifact_recovery_rolls_back_before_receipt_and_commits_after_receipt() 
         "uncommitted artifact staging must roll back"
     );
 
-    persist_text_artifact_transaction(store.path(), &transaction)
-        .expect("journal second transaction");
+    journal::persist_journal(
+        store.path(),
+        &TEXT_ARTIFACT_TRANSACTION_JOURNAL,
+        &transaction,
+    )
+    .expect("journal second transaction");
     stage_collectable_text_artifacts(store.path(), &transaction)
         .expect("quarantine second artifact");
-    write_text_artifact_receipt(store.path(), &receipt).expect("durably commit artifact receipt");
+    receipt_store::write_receipt(
+        store.path(),
+        &TEXT_ARTIFACT_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        &receipt,
+    )
+    .expect("durably commit artifact receipt");
     recover_code_generation_retention(store.path(), &BTreeSet::new(), None)
         .expect("finish a committed artifact transaction");
     assert!(
@@ -1306,8 +1367,12 @@ fn cancellable_recovery_preserves_pending_artifact_journal_for_retry() {
         active_pointer: plan.active_pointer.clone(),
         receipt,
     };
-    persist_text_artifact_transaction(store.path(), &transaction)
-        .expect("journal artifact retention");
+    journal::persist_journal(
+        store.path(),
+        &TEXT_ARTIFACT_TRANSACTION_JOURNAL,
+        &transaction,
+    )
+    .expect("journal artifact retention");
     stage_collectable_text_artifacts(store.path(), &transaction)
         .expect("quarantine uncommitted candidate");
     assert!(!orphan_path.exists());
@@ -1735,7 +1800,8 @@ fn recovery_restores_quarantined_generations_without_a_durable_receipt() {
     let generations_root = store.path().join(GENERATIONS_DIRECTORY);
     let staged_root = transaction_stage_root(store.path(), &receipt);
 
-    persist_transaction(store.path(), &transaction).expect("persist transaction journal");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist transaction journal");
     stage_collectable_generations(store.path(), &transaction).expect("stage generation");
     assert!(!generations_root.join(&collectable.generation_file).exists());
     assert!(staged_root.join(&collectable.generation_file).is_file());
@@ -2320,7 +2386,8 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     let staged_root = scope_stage_root(store.path(), &receipt);
 
     // Crash exactly between quarantine and the durable receipt.
-    persist_scope_transaction(store.path(), &transaction).expect("persist journal");
+    journal::persist_journal(store.path(), &SCOPE_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist journal");
     quarantine
         .stage(&transaction.receipt.collected_scopes)
         .expect("quarantine stranded scope");
@@ -2366,11 +2433,18 @@ fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
 
     // Crash after the receipt is durable but before the quarantine is
     // unlinked: the decision is committed, so recovery rolls forward.
-    persist_scope_transaction(store.path(), &transaction).expect("persist journal");
+    journal::persist_journal(store.path(), &SCOPE_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist journal");
     quarantine
         .stage(&transaction.receipt.collected_scopes)
         .expect("quarantine stranded scope");
-    write_scope_receipt(store.path(), &receipt).expect("commit reconciliation receipt");
+    receipt_store::write_receipt(
+        store.path(),
+        &SCOPE_RECEIPT_STORE,
+        &receipt.receipt_digest,
+        &receipt,
+    )
+    .expect("commit reconciliation receipt");
 
     recover_scope_root_retention(store.path()).expect("recover committed reconciliation");
 
@@ -2629,7 +2703,7 @@ fn applied_retention_refuses_a_metadata_only_plan() {
 /// The OOM-crash debris shape: sealed generation files and derived artifacts
 /// exist, but the publish never reached its pointer write, so no active
 /// pointer file exists. The pass must reclaim everything through the ordinary
-/// journal/receipt/release machinery — before this, such stores were
+/// journal/receipt/release machinery, before this, such stores were
 /// unreachable by every retention pass while their worktree root stayed live.
 #[test]
 fn unpublished_store_retention_reclaims_orphaned_partial_generations() {
@@ -2953,7 +3027,8 @@ fn pointer_rewrite_fixture() -> PointerRewriteFixture {
         active_pointer: Some(original.clone()),
         receipt,
     };
-    persist_transaction(store.path(), &transaction).expect("journal the collection unit");
+    journal::persist_journal(store.path(), &GENERATION_TRANSACTION_JOURNAL, &transaction)
+        .expect("journal the collection unit");
     PointerRewriteFixture {
         store,
         original,
@@ -3031,8 +3106,13 @@ fn recovery_keeps_the_rewritten_index_once_the_receipt_is_durable() {
     .expect("publish the rewritten index");
     stage_collectable_generations(fixture.store.path(), &fixture.transaction)
         .expect("quarantine the collectable generations");
-    write_receipt(fixture.store.path(), &fixture.transaction.receipt)
-        .expect("commit the deletion receipt");
+    receipt_store::write_receipt(
+        fixture.store.path(),
+        &GENERATION_RECEIPT_STORE,
+        &fixture.transaction.receipt.receipt_digest,
+        &fixture.transaction.receipt,
+    )
+    .expect("commit the deletion receipt");
 
     recover_code_generation_retention(fixture.store.path(), &BTreeSet::new(), None)
         .expect("finish a committed collection unit");
@@ -3053,8 +3133,13 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
     let fixture = pointer_rewrite_fixture();
     stage_collectable_generations(fixture.store.path(), &fixture.transaction)
         .expect("quarantine the collectable generations");
-    write_receipt(fixture.store.path(), &fixture.transaction.receipt)
-        .expect("commit the deletion receipt");
+    receipt_store::write_receipt(
+        fixture.store.path(),
+        &GENERATION_RECEIPT_STORE,
+        &fixture.transaction.receipt.receipt_digest,
+        &fixture.transaction.receipt,
+    )
+    .expect("commit the deletion receipt");
     assert_eq!(
         read_active_pointer(fixture.store.path()).expect("read pointer"),
         fixture.original,
@@ -3071,4 +3156,48 @@ fn recovery_completes_a_committed_rewrite_that_never_reached_the_pointer() {
     );
     plan_code_generation_retention(fixture.store.path(), &BTreeSet::new())
         .expect("a recovered store must stay plannable");
+}
+
+/// The census opens every name `read_dir` just returned. Publication can
+/// unlink that name first. `NotFound` is the same deferral as a held writer,
+/// not a storage failure. Any other open failure stays storage.
+#[test]
+fn vanished_listed_generation_open_defers_instead_of_storage_loss() {
+    let root = tempfile::tempdir().expect("census root");
+    let missing = root.path().join(format!("generation-{:064x}.json", 1));
+    let error = super::generation_scan::read_generation_format_revision(&missing, &|| false)
+        .expect_err("a vanished listed generation defers the census");
+    assert!(
+        matches!(error, CodeGenerationRetentionErrorV1::GenerationStoreBusy),
+        "a missing listed generation is a publisher race, not a storage failure: {error:?}"
+    );
+
+    let directory = root.path().join("not-a-generation-file");
+    std::fs::create_dir(&directory).expect("directory where a file was listed");
+    let storage_error =
+        super::generation_scan::read_generation_format_revision(&directory, &|| false)
+            .expect_err("a directory is not a vanished file");
+    assert!(
+        matches!(storage_error, CodeGenerationRetentionErrorV1::Storage(_)),
+        "non-NotFound census I/O stays a storage failure: {storage_error:?}"
+    );
+}
+
+#[test]
+fn missing_store_is_an_unpublished_plan_not_a_storage_failure() {
+    let missing = std::env::temp_dir().join(format!(
+        "tracedecay-missing-code-store-{}",
+        std::process::id()
+    ));
+    assert!(!missing.exists());
+    let plan = prepare_next_code_generation_retention_cancellable(
+        &missing,
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("a store that has not been opened is unpublished");
+    assert_eq!(plan.active_generation_id, None);
+    assert!(plan.collectable_generations.is_empty());
+    assert!(!plan.has_collectable_work());
 }

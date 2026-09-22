@@ -51,8 +51,8 @@ pub trait VerifiedGraphRuntimePortV1: Send + Sync {
 /// `Bound` carries a weak pointer resolved at construction and proves graph
 /// activation had completed when the proxy was minted. `DeferredActivation`
 /// carries the originating database's shared activation cell and resolves it
-/// on every operation, so a proxy bound during composition — before deferred
-/// graph activation completes — starts answering the moment activation
+/// on every operation, so a proxy bound during composition, before deferred
+/// graph activation completes, starts answering the moment activation
 /// publishes the runtime, without any rebind choreography. The cell only ever
 /// holds a weak pointer, so neither variant retains the database, a Store
 /// lease, or the graph map owner.

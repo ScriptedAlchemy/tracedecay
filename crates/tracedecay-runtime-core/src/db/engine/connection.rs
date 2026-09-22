@@ -10,8 +10,7 @@ pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolStat
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Statement;
 use super::{
-    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, Value,
-    WriteStatement,
+    Error, IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBehavior, WriteStatement,
 };
 
 const READER_WAIT: Duration = Duration::from_secs(5);
@@ -103,7 +102,7 @@ impl Connection {
     /// Background maintenance that runs on a *write* connection needs this:
     /// [`Self::attach`] defaults to `Foreground`, so a bulk sweep driven from
     /// the writer would otherwise contend for the same reserved lane slice as
-    /// interactive queries — and, because reader leases are bounded, be the
+    /// interactive queries, and, because reader leases are bounded, be the
     /// first thing to fail once it has saturated that lane itself.
     #[must_use]
     pub fn background_reads(&self) -> Self {
@@ -166,30 +165,14 @@ impl Connection {
         })
         .await
         .map_err(join_error)??;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        Ok(Rows::from_exact(rows))
     }
 
     #[hotpath::skip]
     pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
         let runtime = Arc::clone(&self.runtime);
         let rows = runtime.checkpoint_wal_truncate_async().await?;
-        Ok(Rows::from_parts(
-            rows.columns,
-            rows.rows
-                .into_iter()
-                .map(|row| {
-                    super::Row::from_values(row.values.into_iter().map(Value::from).collect())
-                })
-                .collect(),
-        ))
+        Ok(Rows::from_exact(rows))
     }
 
     #[hotpath::skip]
@@ -212,15 +195,6 @@ impl Connection {
             .map_err(Into::into)
     }
 
-    #[hotpath::skip]
-    pub async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        runtime
-            .repair_incremental_auto_vacuum_async()
-            .await
-            .map_err(Into::into)
-    }
-
     #[cfg(any(test, feature = "test-helpers"))]
     #[hotpath::skip]
     pub async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
@@ -237,7 +211,7 @@ impl Connection {
     /// Live reader-pool occupancy for the store behind this connection.
     ///
     /// Lock-free and lease-free, so it still answers while the pool is
-    /// saturated — which is the only moment the numbers matter.
+    /// saturated, which is the only moment the numbers matter.
     #[must_use]
     pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
         self.runtime.reader_pool_occupancy()
@@ -306,7 +280,7 @@ impl Connection {
     /// Begins the authority-bound transaction whose lease renews on progress.
     ///
     /// Reserved for schema installation on a fresh or index-less store and for
-    /// full-index bulk replacement — writes that legitimately outlive one fixed
+    /// full-index bulk replacement, writes that legitimately outlive one fixed
     /// lease while continuously making progress. It steps no store forward from
     /// an older shape. Only its explicit authority-revalidated batch may bypass
     /// the ordinary per-statement deadline; all other operations retain

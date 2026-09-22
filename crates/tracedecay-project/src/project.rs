@@ -2,8 +2,8 @@
 //!
 //! This module root holds the [`TraceDecay`] struct and its shared result
 //! types; the behavior is implemented in focused submodules:
-//! [`lifecycle`] (init/open/branch provenance), [`queries`]
-//! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
+//! `lifecycle` (init/open/branch provenance), [`queries`]
+//! (read-side graph queries), `diagnostics` (branch state), [`facts`]
 //! (session memory), and source-edit orchestration.
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -58,7 +58,7 @@ pub struct TraceDecay {
     read_only: bool,
     /// Memoized result of [`diagnostics::TraceDecay::db_path`]. All inputs
     /// (`project_root`, `store_layout.data_root`, `serving_branch`) are
-    /// immutable for the lifetime of an instance — branch changes produce a
+    /// immutable for the lifetime of an instance, branch changes produce a
     /// new `TraceDecay` rather than mutating an existing one, so the resolved
     /// path is safe to cache for the instance's lifetime.
     db_path_cache: OnceLock<PathBuf>,

@@ -52,9 +52,7 @@ fn normalize_plan_detail(detail: &str) -> String {
         .to_ascii_uppercase()
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn snapshot(generation: u64) -> TemporalExecutionSnapshot {
     TemporalExecutionSnapshot::new_authorized(
@@ -2684,7 +2682,7 @@ async fn derived_candidate_materializes_boundaries_with_canonical_evidence_linka
     );
 }
 
-/// A group's cost must follow what the ranking needs from it — its bounds — not
+/// A group's cost must follow what the ranking needs from it, its bounds, not
 /// how many messages happen to sit inside it. Charging every member against the
 /// record budget is what let one wide span refuse a whole query.
 #[tokio::test]

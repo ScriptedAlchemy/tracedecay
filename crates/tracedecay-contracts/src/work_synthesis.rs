@@ -1,7 +1,7 @@
 //! Admitted Work-family synthesis over fan-out sibling evidence (Plan 32).
 //!
 //! Synthesis is another admitted attempt under the same deadline,
-//! cancellation generation, and effect ledger as every other attempt — never
+//! cancellation generation, and effect ledger as every other attempt, never
 //! a rewrite of the evidence it consumes. Admission seals the ordered source
 //! envelopes it was asked to synthesize: each sibling attempt's terminal
 //! outcome is captured verbatim from the Work authority (success with its
@@ -33,9 +33,9 @@ use crate::work_attempt::{
 };
 use crate::workflow_synthesis::WorkflowSynthesisDraft;
 use crate::{
-    ApplicationProblem, LegalAction, RequestContext, RetryDirective, SafeDiagnostic,
-    WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1, WorkProductBindingV1,
-    WorkProductOwnerAuthorizationPortV1, WorkProductRevisionPinsV1,
+    ApplicationProblem, RequestContext, SafeDiagnostic, WorkGraphReadPortV1,
+    WorkProductAttemptAdmissionPortV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
+    WorkProductRevisionPinsV1,
 };
 
 const WORK_SYNTHESIS_SOURCE_SET_DOMAIN: &str =
@@ -164,8 +164,8 @@ pub struct WorkSynthesisAdmissionV1 {
     /// every citable source digest and is verified downstream by
     /// [`crate::workflow_synthesis::verify_workflow_synthesis_draft`].
     pub draft: WorkflowSynthesisDraft,
-    /// Sources preserved without citations — failures, unknowns, and
-    /// artifact-less successes — in the caller's requested order.
+    /// Sources preserved without citations: failures, unknowns, and
+    /// artifact-less successes, in the caller's requested order.
     pub uncited: Vec<WorkAttemptIdentityV1>,
 }
 
@@ -192,8 +192,8 @@ pub enum WorkSynthesisAttemptV1 {
 
 /// Validates the source set against the canonical product graph, seals it,
 /// and atomically commits the product link, attempt, and synthesis record.
-/// Every source outcome is read from the attempt authority — never trusted
-/// from the caller — and preserved verbatim in the admission record.
+/// Every source outcome is read from the attempt authority, never trusted
+/// from the caller, and preserved verbatim in the admission record.
 /// Provider instructions are prepared only after replay and source validation;
 /// their hydrated content is not part of the caller's immutable request identity.
 #[hotpath::measure(label = "application.work.synthesis.admit")]
@@ -218,7 +218,7 @@ where
         registered_topology,
     )?;
     if command.sources.is_empty() {
-        return Err(invalid_problem(
+        return Err(ApplicationProblem::invalid_request(
             "application.work-synthesis.no-sources",
             "A synthesis attempt must name at least one source attempt.",
         ));
@@ -226,7 +226,7 @@ where
     let mut seen = BTreeSet::new();
     for source in &command.sources {
         if !seen.insert(source.clone()) {
-            return Err(invalid_problem(
+            return Err(ApplicationProblem::invalid_request(
                 "application.work-synthesis.duplicate-source",
                 "A synthesis source attempt was named more than once.",
             ));
@@ -235,7 +235,7 @@ where
             && source.run_id() == &command.start.run_id
             && source.attempt_id() == &command.start.attempt_id
         {
-            return Err(invalid_problem(
+            return Err(ApplicationProblem::invalid_request(
                 "application.work-synthesis.self-citation",
                 "A synthesis attempt cannot name itself as a source.",
             ));
@@ -392,17 +392,6 @@ fn evidence_groups(sources: &[WorkSynthesisSourceEnvelopeV1]) -> Vec<WorkSynthes
             .then_with(|| left.artifacts.cmp(&right.artifacts))
     });
     groups
-}
-
-fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
 }
 
 fn contract_problem() -> ApplicationProblem {

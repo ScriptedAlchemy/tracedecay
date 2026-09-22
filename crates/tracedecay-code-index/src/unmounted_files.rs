@@ -1,10 +1,10 @@
-//! Source files on disk that nothing declares — the reachability audit behind
+//! Source files on disk that nothing declares, the reachability audit behind
 //! `tracedecay_unmounted_files`.
 //!
 //! A compiler only ever sees a file that something else reaches: Rust follows
 //! `mod` declarations from a cargo target root, a bundler follows `import` and
 //! `require` from a declared entry point. A file nobody reaches is invisible to
-//! `cargo check`, to `tsc`, and to every test run — but it is fully visible to a
+//! `cargo check`, to `tsc`, and to every test run, but it is fully visible to a
 //! code-graph indexer, which walks the working tree rather than the module
 //! tree. That asymmetry is the exact failure this report exists to name: seven
 //! files under `src/daemon/` sat in this repository indexed as healthy-looking
@@ -16,13 +16,13 @@
 //! The audit is per ecosystem, because "reachable" means something different in
 //! each one and pretending otherwise would be the same lie in a new place:
 //!
-//!   - [`rust`] answers "which `.rs` files under a cargo package's own source
+//!   - `rust` answers "which `.rs` files under a cargo package's own source
 //!     directories are NOT reachable from its targets by following `mod`?".
 //!     Unreachable there means the compiler genuinely never parses the file.
-//!   - [`typescript`] answers "which source files are NOT reachable from any
+//!   - `typescript` answers "which source files are NOT reachable from any
 //!     declared entry point by following static `import` / `require` /
-//!     `export … from`?". Unreachable there is a *weaker* claim — `tsc` still
-//!     type-checks anything matched by a tsconfig `include` — and the report
+//!     `export … from`?". Unreachable there is a *weaker* claim, `tsc` still
+//!     type-checks anything matched by a tsconfig `include`, and the report
 //!     says so in its own verdict line rather than borrowing Rust's certainty.
 //!
 //! Three deliberate choices keep the answer truthful rather than merely
@@ -56,7 +56,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 /// that would mount it.
 pub struct UnmountedFile {
     pub file: String,
-    /// Package that owns the file — a crate name, an npm package name.
+    /// Package that owns the file, a crate name, an npm package name.
     pub package: String,
     /// Project-relative manifest path, so a finding names something a reader
     /// can open rather than an absolute path from this machine.
@@ -100,7 +100,7 @@ pub struct EcosystemAudit {
     pub entry_point_count: usize,
     pub scanned_file_count: usize,
     pub mounted_file_count: usize,
-    /// Files of this ecosystem's languages that no package claims — outside
+    /// Files of this ecosystem's languages that no package claims, outside
     /// every package's source directories, so out of scope by construction.
     pub unclaimed_file_count: usize,
     /// What "unmounted" asserts here, stated so a reader never has to assume
@@ -192,7 +192,7 @@ impl ProjectFiles {
             .collect()
     }
 
-    /// Every walked file with this exact file name — the manifest sweep both
+    /// Every walked file with this exact file name, the manifest sweep both
     /// ecosystems use to find packages nobody declared.
     pub(super) fn named(&self, file_name: &str) -> Vec<&Path> {
         self.files
@@ -211,10 +211,7 @@ impl ProjectFiles {
 
 /// Project-relative, forward-slashed rendering of `path`.
 pub(super) fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    tracedecay_domain::forward_slash_path(path.strip_prefix(root).unwrap_or(path))
 }
 
 /// Lexical `.`/`..` normalization.
@@ -319,7 +316,7 @@ fn unmodelled_ecosystems(files: &ProjectFiles) -> Vec<EcosystemAudit> {
             verdict: "no reachability model; these files were counted, not audited",
             blind_spots: Vec::new(),
             note: Some(format!(
-                "{count} {ecosystem} source file(s) are present and were not audited — \
+                "{count} {ecosystem} source file(s) are present and were not audited, \
                  this report cannot say whether any of them is unreachable"
             )),
             excluded_globs: Vec::new(),

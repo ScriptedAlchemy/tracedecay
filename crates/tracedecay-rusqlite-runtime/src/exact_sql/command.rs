@@ -15,12 +15,12 @@ use std::{
 
 use rusqlite::{Connection, DropBehavior, ErrorCode, Transaction, TransactionBehavior};
 
-use super::guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
+use super::guard::with_exact_sql_guard;
 use super::{
     EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlAttachment,
     ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
     ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
-    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database, execute_batch,
+    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database,
     execute_query_unchecked, execute_request, publish_last_insert_rowid, sqlite_error,
     verify_write_authority,
 };
@@ -46,10 +46,6 @@ pub(crate) enum WriterCommand {
         reply: async_channel::Sender<Result<ExactSqlRows, ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
-    Vacuum {
-        reply: async_channel::Sender<Result<(), ExactSqlError>>,
-        authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
-    },
 }
 
 /// Pause between busy-begin attempts so the acquire deadline is the real bound.
@@ -68,8 +64,8 @@ const EXACT_SQL_WRITE_LOCK_ACQUIRE_LIMIT: Duration = Duration::from_millis(64);
 /// Takes SQLite's write lock on the worker thread, retrying while it is busy.
 ///
 /// This is measured separately from the caller-side begin it serves. The two
-/// run on different threads — the caller waits on a channel while this waits on
-/// the lock — so reporting both under one label sums a queue wait and a lock
+/// run on different threads. The caller waits on a channel while this waits on
+/// the lock, so reporting both under one label sums a queue wait and a lock
 /// wait into a single population whose mean and p95 describe neither. Keep the
 /// names distinct: the split is what says whether a slow begin was blocked by
 /// SQLite or merely by the worker being busy with something else.
@@ -285,7 +281,7 @@ pub(crate) fn run_writer_command(
                     // The whole writer-thread hold of one interactive
                     // transaction, caller think-time included. Every queued
                     // write and command behind it waits inside this span, so
-                    // it — not SQLite execution — is what explains begin
+                    // it, not SQLite execution, is what explains begin
                     // latency elsewhere while an interactive lease is open.
                     Ok(transaction) if reply.try_send(Ok(())).is_ok() => {
                         Some(hotpath::measure_block!(
@@ -362,62 +358,6 @@ pub(crate) fn run_writer_command(
             });
             let _ = reply.try_send(result);
         }
-        WriterCommand::Vacuum { reply, authority } => {
-            let Some(authority) = authority else {
-                let _ = reply.try_send(Err(ExactSqlError::AuthorityDenied(
-                    "exclusive-maintenance vacuum requires attached write authority".to_owned(),
-                )));
-                return;
-            };
-            if let Err(error) =
-                verify_write_authority(Some(authority.as_ref()), ExactSqlWriteIntent::Vacuum)
-            {
-                let _ = reply.try_send(Err(error));
-                return;
-            }
-            let previous_attachment_limit =
-                match connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1) {
-                    Ok(previous) => previous,
-                    Err(error) => {
-                        let _ = reply.try_send(Err(sqlite_error(
-                            "open exclusive-maintenance vacuum attachment slot",
-                            error,
-                        )));
-                        return;
-                    }
-                };
-            let mut result = hotpath::measure_block!("rusqlite.exact_sql.vacuum", {
-                with_exact_sql_guard(
-                    connection,
-                    false,
-                    true,
-                    Some(Arc::clone(shutdown_requested)),
-                    None,
-                    true,
-                    Some((Arc::clone(&authority), ExactSqlWriteIntent::Vacuum)),
-                    crate::connection::authorize_writer,
-                    true,
-                    Some(AuthorizedDatabaseOperation::Vacuum),
-                    None,
-                    || {
-                        execute_batch(connection, "PRAGMA auto_vacuum = INCREMENTAL; VACUUM")
-                            .map(|_| ())
-                    },
-                )
-            });
-            if let Err(error) =
-                connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, previous_attachment_limit)
-            {
-                shutdown_requested.store(true, Ordering::Release);
-                if result.is_ok() {
-                    result = Err(sqlite_error(
-                        "restore exclusive-maintenance vacuum attachment limit",
-                        error,
-                    ));
-                }
-            }
-            let _ = reply.try_send(result);
-        }
     }
 }
 
@@ -432,9 +372,6 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
         WriterCommand::CheckpointWalTruncate { reply, .. } => {
             let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
-        WriterCommand::Vacuum { reply, .. } => {
-            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
-        }
     }
 }
 
@@ -444,8 +381,8 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
 /// `sqlite3_interrupt` on a write statement inside an explicit transaction
 /// rolls that whole transaction back itself and returns the connection to
 /// autocommit. A `ROLLBACK` issued afterwards fails with "cannot rollback - no
-/// transaction is active", which is not a durability problem — the work is
-/// already discarded — so the autocommit state is what decides here rather
+/// transaction is active", which is not a durability problem. The work is
+/// already discarded, so the autocommit state is what decides here rather
 /// than a second statement.
 fn discard_transaction(
     mut transaction: Transaction<'_>,
@@ -467,8 +404,8 @@ fn discard_transaction(
 /// Releases the writer-owned transaction and publishes the receipt for it.
 ///
 /// Every path that ends a transaction without a caller-issued terminal comes
-/// through here, so the rollback is always durable — and its outcome always
-/// readable — before the command channel is dropped and the writer released.
+/// through here, so the rollback is always durable, and its outcome always
+/// readable, before the command channel is dropped and the writer released.
 fn release_rolled_back(
     transaction: Transaction<'_>,
     before: u64,
@@ -746,7 +683,7 @@ fn run_transaction(
                 // completed round trip renews it. A statement that ran to its
                 // own execution deadline and then failed kept the writer busy
                 // for that whole span; charging it to idleness released the
-                // transaction before the caller — still holding the error —
+                // transaction before the caller, still holding the error,
                 // could roll it back.
                 idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
                 // A long-lease transaction earns its next lease by committing
@@ -910,8 +847,8 @@ pub(crate) mod lease_clock {
 
     /// Freezes this thread's lease clock `by` past its current reading.
     ///
-    /// Only code already running on the writer thread — in practice an
-    /// [`super::ExactSqlWriteAuthority`] verification — can move the clock
+    /// Only code already running on the writer thread, in practice an
+    /// [`super::ExactSqlWriteAuthority`] verification, can move the clock
     /// the transaction loop reads.
     pub(crate) fn advance(by: Duration) {
         let advanced = lease_now() + by;

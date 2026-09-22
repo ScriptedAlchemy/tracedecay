@@ -811,7 +811,7 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
                 );",
         )
         .unwrap();
-        // Generate the hostile value inside SQLite — never as a Rust String/Vec.
+        // Generate the hostile value inside SQLite, never as a Rust String/Vec.
         let hostile_bytes = MAX_HERMES_VALUE_BYTES.saturating_add(1);
         conn.execute(
             &format!(
@@ -1687,4 +1687,60 @@ async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
         crate::runtime::shared::TranscriptIngestStats::default()
     );
     assert!(admission.observations().is_empty());
+}
+
+/// A deterministic admission refusal is permanent: the same row fails the same
+/// way on every sweep. Without a durable skip the source cursor never clears
+/// it, so the whole profile `state.db` is abandoned every pass forever, which
+/// is what produced an endless "skipping projectless Hermes transcript source"
+/// WARN on a live daemon. Cover past it, exactly as the shared JSONL path
+/// does, so the source converges.
+mod deterministic_refusal_recovery {
+    use super::*;
+
+    async fn admit_one_refused_row(reason: &'static str) -> MemoryHostAdmission {
+        let admission = MemoryHostAdmission::default();
+        admission.refuse_captures_deterministically(reason);
+        let stats = admit_rows_with_admission_and_cancellation(
+            &admission,
+            &[fixture(1)],
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            1,
+            1,
+            |_| Some(fixture_projection()),
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("a permanently refused row must not abandon the whole source");
+        assert_eq!(stats.messages_upserted, 0);
+        admission
+    }
+
+    #[tokio::test]
+    async fn refused_row_is_covered_past_instead_of_skipping_the_source() {
+        let admission = admit_one_refused_row("privacy_boundary_failed").await;
+
+        let advances = admission.non_durable_advances();
+        assert_eq!(
+            advances.len(),
+            1,
+            "the refused row must be covered exactly once"
+        );
+        assert_eq!(
+            advances[0].reason(),
+            ObservationCoverageReason::AdmissionRefused
+        );
+        assert_eq!(advances[0].next_cursor().position(), 1);
+    }
+
+    #[tokio::test]
+    async fn identity_collision_keeps_its_own_coverage_reason() {
+        let admission = admit_one_refused_row("observation_identity_collision").await;
+
+        assert_eq!(
+            admission.non_durable_advances()[0].reason(),
+            ObservationCoverageReason::ObservationIdentityCollision
+        );
+    }
 }

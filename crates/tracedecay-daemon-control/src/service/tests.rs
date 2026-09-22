@@ -1,4 +1,3 @@
-use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -23,40 +22,7 @@ use tracedecay_runtime_core::config::{
 
 const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(previous) = self.previous.take() {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
+use super::isolated_profile::EnvVarGuard;
 
 #[cfg(target_os = "linux")]
 fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {
@@ -693,6 +659,45 @@ fn daemon_reachable_requires_an_initialize_answer() {
 
 #[cfg(unix)]
 #[test]
+fn daemon_socket_connectable_separates_a_slow_daemon_from_no_daemon() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = TempDir::new().expect("profile temp dir");
+
+    let missing = profile.path().join("missing.sock");
+    let missing_guard = EnvVarGuard::set(SOCKET_ENV, &missing);
+    assert!(
+        !super::daemon_socket_connectable(),
+        "a missing socket has no listener to broker through"
+    );
+    drop(missing_guard);
+
+    let stale = profile.path().join("stale.sock");
+    drop(UnixListener::bind(&stale).expect("bind stale socket"));
+    let stale_guard = EnvVarGuard::set(SOCKET_ENV, &stale);
+    assert!(
+        !super::daemon_socket_connectable(),
+        "a socket file whose listener is gone has no listener to broker through"
+    );
+    drop(stale_guard);
+
+    // The cold-start case: a daemon is accepting but has not answered
+    // initialize inside the one-second reachability probe.
+    let silent = profile.path().join("silent.sock");
+    let _listener = UnixListener::bind(&silent).expect("bind silent socket");
+    let silent_guard = EnvVarGuard::set(SOCKET_ENV, &silent);
+    assert!(
+        !super::daemon_reachable(),
+        "the identity proof is still absent while the daemon is starting"
+    );
+    assert!(
+        super::daemon_socket_connectable(),
+        "a daemon that has not answered initialize yet is still a running daemon"
+    );
+    drop(silent_guard);
+}
+
+#[cfg(unix)]
+#[test]
 fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = TempDir::new().expect("profile temp dir");
@@ -849,6 +854,37 @@ fn systemd_unit_quotes_exec_start_paths_that_systemd_would_misparse() {
             "ExecStart=\"/opt/trace decay/bin/tracedecay\" daemon run --socket \"/run/user/1000/trace decay%%50.sock\""
         ),
         "paths with whitespace or specifier characters must be quoted and escaped, got:\n{unit}"
+    );
+}
+
+/// The daemon indexes on a worker pool sized to the machine. Capping glibc's
+/// malloc arenas in the unit made every allocation on every worker contend
+/// for two locks (60% of daemon CPU in the arena futex on a 20-worker host)
+/// without bounding RSS, so the unit leaves the allocator alone.
+#[test]
+fn systemd_unit_does_not_cap_malloc_arenas() {
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
+        socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
+        data_dir_override: None,
+        remote_tls: None,
+    };
+
+    let unit = spec.render_systemd_user_unit().expect("systemd unit");
+
+    let environment: Vec<&str> = unit
+        .lines()
+        .filter_map(|line| line.strip_prefix("Environment="))
+        .collect();
+    assert_eq!(
+        environment.len(),
+        1,
+        "the daemon's environment is PATH and nothing else; a malloc arena cap serialized the index workers, got:\n{unit}"
+    );
+    assert!(
+        environment[0].starts_with("\"PATH=") && environment[0].contains("/usr/local/bin"),
+        "the one environment entry is a PATH that reaches the daemon binary, got: {}",
+        environment[0]
     );
 }
 

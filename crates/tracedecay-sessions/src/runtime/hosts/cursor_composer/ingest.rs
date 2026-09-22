@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_capture::cursor_composer::composer_todos_have_admittable_items;
 use tracedecay_domain::{
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
     ObservationSourceIdentityV1, ProjectId, ProviderId, SessionId,
@@ -736,7 +735,7 @@ impl CursorComposerSource {
             "sessions.hosts.cursor_composer.state_scope_blocking",
             run_blocking_transcript_section(|| context.scope_matcher())
         );
-        // Indexed prefix scan of keys + byte lengths only — never SELECT full
+        // Indexed prefix scan of keys + byte lengths only, never SELECT full
         // envelope text here. Point-fetch materializes only when the UTF-8 byte
         // length fits both ceilings. Keyset pagination over the `cursorDiskKV`
         // primary key reproduces the original index-ordered streaming scan
@@ -1138,8 +1137,7 @@ impl CursorComposerSource {
                 let generation = state_generation;
                 let mut session_accepted = false;
                 let mut composer_unresolved = false;
-                if composer_todos_have_admittable_items(&envelope)
-                    && let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
+                if let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
                     && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
                 {
                     let envelope_expected_cursor = match context

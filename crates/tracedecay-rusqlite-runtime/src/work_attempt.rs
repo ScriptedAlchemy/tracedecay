@@ -16,8 +16,8 @@ use tracedecay_domain::{
 
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
-    WorkSqliteStorage, authority_params_owned, exact_sql_integer, exact_sql_statement,
-    exact_sql_text, registered_work_query,
+    RegisteredWorkQuery, WorkSqliteStorage, authority_params_owned, exact_sql_integer,
+    exact_sql_statement, exact_sql_text, registered_work_query,
 };
 
 mod rooted_evidence;
@@ -41,26 +41,8 @@ fn insert_attempt(
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let outcome = insert_attempt_in_transaction(&transaction, authority, attempt, concurrency);
-        match outcome {
-            Ok(WorkAttemptInsertOutcome::Inserted) => {
-                transaction
-                    .commit()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkAttemptInsertOutcome::Inserted)
-            }
-            Ok(WorkAttemptInsertOutcome::Replayed(attempt)) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkAttemptInsertOutcome::Replayed(attempt))
-            }
-            Err(error) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Err(error)
-            }
-        }
+        let commit = matches!(outcome, Ok(WorkAttemptInsertOutcome::Inserted));
+        finish_immediate(transaction, outcome, commit)
     })
 }
 
@@ -76,10 +58,9 @@ pub(crate) fn insert_attempt_in_transaction(
         synthesis: None,
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    if let Some(existing) = load_payload(transaction, authority, attempt.identity())? {
+    if let Some(existing) = load_attempt_payload(transaction, authority, attempt.identity())? {
         return if existing == payload {
-            let record: StoredWorkAttemptV1 = serde_json::from_str(&existing)
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            let record = decode_stored(&existing)?;
             Ok(WorkAttemptInsertOutcome::Replayed(Box::new(record.attempt)))
         } else {
             Err(WorkAttemptStorageError::AttemptConflict)
@@ -96,32 +77,7 @@ pub(crate) fn insert_attempt_in_transaction(
         )?;
     }
     hotpath::measure_block!("rusqlite.work_attempt.cas.insert", {
-        transaction
-            .execute(
-                exact_sql_statement(
-                    "INSERT INTO work_attempts_v1 (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, run_id, attempt_id, state, lease_id, fence_epoch,
-                    terminal, attempt_payload, evidence_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
-                    authority_params_owned(authority)
-                        .into_iter()
-                        .chain(identity_params(attempt.identity()))
-                        .chain([
-                            ExactSqlValue::Text(state_text(attempt.state())),
-                            ExactSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
-                            ExactSqlValue::Integer(
-                                i64::try_from(attempt.lease().epoch().get())
-                                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-                            ),
-                            ExactSqlValue::Integer(i64::from(attempt.is_terminal())),
-                            ExactSqlValue::Text(payload),
-                        ])
-                        .collect(),
-                )
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-            )
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        insert_attempt_row(transaction, authority, attempt, payload)?;
         Ok(WorkAttemptInsertOutcome::Inserted)
     })
 }
@@ -201,26 +157,9 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptV1, WorkAttemptStorageError> {
-        let rows = registered_work_query(
-            self.handle(),
-            "SELECT attempt_payload FROM work_attempts_v1
-             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-               AND actor_id = ?4 AND policy_digest = ?5
-               AND task_id = ?6 AND run_id = ?7 AND attempt_id = ?8",
-            authority_params_owned(authority)
-                .into_iter()
-                .chain(identity_params(identity))
-                .collect(),
-        )
-        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        let payload = rows
-            .rows
-            .first()
-            .and_then(|row| exact_sql_text(&row.values, 0))
+        let payload = load_attempt_payload(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str::<StoredWorkAttemptV1>(payload)
-            .map(|record| record.attempt)
-            .map_err(|_| WorkAttemptStorageError::Unavailable)
+        Ok(decode_stored(&payload)?.attempt)
     }
 
     fn load_admission_kind(
@@ -228,10 +167,9 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkAttemptAdmissionKind, WorkAttemptStorageError> {
-        let payload = load_payload_from_handle(self.handle(), authority, identity)?
+        let payload = load_attempt_payload(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        let record: StoredWorkAttemptV1 =
-            serde_json::from_str(&payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        let record = decode_stored(&payload)?;
         Ok(if record.synthesis.is_some() {
             WorkAttemptAdmissionKind::Synthesis
         } else {
@@ -256,10 +194,9 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
                 .handle()
                 .begin_immediate()
                 .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-            let existing = load_payload(&transaction, authority, next.identity())?
+            let existing = load_attempt_payload(&transaction, authority, next.identity())?
                 .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-            let mut record: StoredWorkAttemptV1 = serde_json::from_str(&existing)
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+            let mut record = decode_stored(&existing)?;
             record.attempt = next.clone();
             let payload =
                 serde_json::to_string(&record).map_err(|_| WorkAttemptStorageError::Unavailable)?;
@@ -338,16 +275,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
         );
         let rows = registered_work_query(self.handle(), &sql, authority_params_owned(authority))
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-        rows.rows
-            .into_iter()
-            .map(|row| {
-                let payload =
-                    exact_sql_text(&row.values, 0).ok_or(WorkAttemptStorageError::Unavailable)?;
-                serde_json::from_str::<StoredWorkAttemptV1>(payload)
-                    .map(|record| record.attempt)
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)
-            })
-            .collect()
+        rows.rows.into_iter().map(attempt_from_row).collect()
     }
 
     fn has_open_attempts_in_exact_scope(
@@ -433,13 +361,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
             let attempts = rows
                 .rows
                 .into_iter()
-                .map(|row| {
-                    let payload = exact_sql_text(&row.values, 0)
-                        .ok_or(WorkAttemptStorageError::Unavailable)?;
-                    serde_json::from_str::<StoredWorkAttemptV1>(payload)
-                        .map(|record| record.attempt)
-                        .map_err(|_| WorkAttemptStorageError::Unavailable)
-                })
+                .map(attempt_from_row)
                 .collect::<Result<Vec<WorkAttemptV1>, _>>()?;
             Ok(WorkAttemptListPageV1 {
                 attempts,
@@ -461,26 +383,8 @@ fn insert_synthesis_record(
             .begin_immediate()
             .map_err(|_| WorkAttemptStorageError::Unavailable)?;
         let outcome = insert_synthesis_in_transaction(&transaction, authority, record, concurrency);
-        match outcome {
-            Ok(WorkSynthesisInsertOutcome::Inserted) => {
-                transaction
-                    .commit()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkSynthesisInsertOutcome::Inserted)
-            }
-            Ok(WorkSynthesisInsertOutcome::Replayed(result)) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Ok(WorkSynthesisInsertOutcome::Replayed(result))
-            }
-            Err(error) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-                Err(error)
-            }
-        }
+        let commit = matches!(outcome, Ok(WorkSynthesisInsertOutcome::Inserted));
+        finish_immediate(transaction, outcome, commit)
     })
 }
 
@@ -497,9 +401,8 @@ pub(crate) fn insert_synthesis_in_transaction(
         synthesis: Some(record.clone()),
     })
     .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    if let Some(existing) = load_payload(transaction, authority, attempt.identity())? {
-        let existing: StoredWorkAttemptV1 =
-            serde_json::from_str(&existing).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    if let Some(existing) = load_attempt_payload(transaction, authority, attempt.identity())? {
+        let existing = decode_stored(&existing)?;
         return match existing.synthesis {
             Some(existing) if existing.request_digest == record.request_digest => Ok(
                 WorkSynthesisInsertOutcome::Replayed(Box::new(existing.result)),
@@ -518,32 +421,7 @@ pub(crate) fn insert_synthesis_in_transaction(
         )?;
     }
     hotpath::measure_block!("rusqlite.work_attempt.cas.synthesis", {
-        transaction
-            .execute(
-                exact_sql_statement(
-                    "INSERT INTO work_attempts_v1 (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, run_id, attempt_id, state, lease_id, fence_epoch,
-                    terminal, attempt_payload, evidence_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
-                    authority_params_owned(authority)
-                        .into_iter()
-                        .chain(identity_params(attempt.identity()))
-                        .chain([
-                            ExactSqlValue::Text(state_text(attempt.state())),
-                            ExactSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
-                            ExactSqlValue::Integer(
-                                i64::try_from(attempt.lease().epoch().get())
-                                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-                            ),
-                            ExactSqlValue::Integer(i64::from(attempt.is_terminal())),
-                            ExactSqlValue::Text(payload),
-                        ])
-                        .collect(),
-                )
-                .map_err(|_| WorkAttemptStorageError::Unavailable)?,
-            )
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        insert_attempt_row(transaction, authority, attempt, payload)?;
         Ok(WorkSynthesisInsertOutcome::Inserted)
     })
 }
@@ -571,10 +449,9 @@ impl WorkSynthesisAdmissionStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         identity: &WorkAttemptIdentityV1,
     ) -> Result<WorkSynthesisAdmissionRecordV1, WorkAttemptStorageError> {
-        let payload = load_payload_from_handle(self.handle(), authority, identity)?
+        let payload = load_attempt_payload(self.handle(), authority, identity)?
             .ok_or(WorkAttemptStorageError::NotFoundOrNotAuthorized)?;
-        serde_json::from_str::<StoredWorkAttemptV1>(&payload)
-            .map_err(|_| WorkAttemptStorageError::Unavailable)?
+        decode_stored(&payload)?
             .synthesis
             .ok_or(WorkAttemptStorageError::AttemptConflict)
     }
@@ -641,9 +518,7 @@ impl WorkAttemptEvidenceReadPort for WorkSqliteStorage {
                 .map(|row| {
                     let payload = exact_sql_text(&row.values, 0)
                         .ok_or(WorkAttemptStorageError::Unavailable)?;
-                    let attempt = serde_json::from_str::<StoredWorkAttemptV1>(payload)
-                        .map_err(|_| WorkAttemptStorageError::Unavailable)?
-                        .attempt;
+                    let attempt = decode_stored(payload)?.attempt;
                     let evidence = match exact_sql_text(&row.values, 1) {
                         None => None,
                         Some(evidence_payload) => Some(
@@ -663,36 +538,73 @@ impl WorkAttemptEvidenceReadPort for WorkSqliteStorage {
     }
 }
 
-fn load_payload_from_handle(
-    handle: &crate::exact_sql::ExactSqlHandle,
-    authority: &WorkAuthority,
-    identity: &WorkAttemptIdentityV1,
-) -> Result<Option<String>, WorkAttemptStorageError> {
-    let rows = registered_work_query(
-        handle,
-        "SELECT attempt_payload FROM work_attempts_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5
-           AND task_id = ?6 AND run_id = ?7 AND attempt_id = ?8",
-        authority_params_owned(authority)
-            .into_iter()
-            .chain(identity_params(identity))
-            .collect(),
-    )
-    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
-    Ok(rows
-        .rows
-        .first()
-        .and_then(|row| exact_sql_text(&row.values, 0).map(str::to_owned)))
+fn finish_immediate<T>(
+    transaction: crate::exact_sql::ExactSqlTransaction,
+    outcome: Result<T, WorkAttemptStorageError>,
+    commit: bool,
+) -> Result<T, WorkAttemptStorageError> {
+    let settled = if commit {
+        transaction.commit().map(|_| ())
+    } else {
+        transaction.rollback().map(|_| ())
+    };
+    settled.map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    outcome
 }
 
-fn load_payload(
+fn insert_attempt_row(
     transaction: &crate::exact_sql::ExactSqlTransaction,
+    authority: &WorkAuthority,
+    attempt: &WorkAttemptV1,
+    payload: String,
+) -> Result<(), WorkAttemptStorageError> {
+    transaction
+        .execute(
+            exact_sql_statement(
+                "INSERT INTO work_attempts_v1 (
+                    project_id, repository_id, worktree_id, actor_id, policy_digest,
+                    task_id, run_id, attempt_id, state, lease_id, fence_epoch,
+                    terminal, attempt_payload, evidence_payload
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+                authority_params_owned(authority)
+                    .into_iter()
+                    .chain(identity_params(attempt.identity()))
+                    .chain([
+                        ExactSqlValue::Text(state_text(attempt.state())),
+                        ExactSqlValue::Text(attempt.lease().lease_id().as_str().to_owned()),
+                        ExactSqlValue::Integer(
+                            i64::try_from(attempt.lease().epoch().get())
+                                .map_err(|_| WorkAttemptStorageError::Unavailable)?,
+                        ),
+                        ExactSqlValue::Integer(i64::from(attempt.is_terminal())),
+                        ExactSqlValue::Text(payload),
+                    ])
+                    .collect(),
+            )
+            .map_err(|_| WorkAttemptStorageError::Unavailable)?,
+        )
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    Ok(())
+}
+
+fn decode_stored(payload: &str) -> Result<StoredWorkAttemptV1, WorkAttemptStorageError> {
+    serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)
+}
+
+fn attempt_from_row(
+    row: crate::exact_sql::ExactSqlRow,
+) -> Result<WorkAttemptV1, WorkAttemptStorageError> {
+    let payload = exact_sql_text(&row.values, 0).ok_or(WorkAttemptStorageError::Unavailable)?;
+    Ok(decode_stored(payload)?.attempt)
+}
+
+fn load_attempt_payload(
+    source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
     identity: &WorkAttemptIdentityV1,
 ) -> Result<Option<String>, WorkAttemptStorageError> {
     let rows = registered_work_query(
-        transaction,
+        source,
         "SELECT attempt_payload FROM work_attempts_v1
          WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
            AND actor_id = ?4 AND policy_digest = ?5
@@ -743,8 +655,7 @@ fn require_first_run_admission(
     else {
         return Ok(());
     };
-    let first: StoredWorkAttemptV1 =
-        serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    let first = decode_stored(payload)?;
     if first.attempt.execution().deadline() == attempt.execution().deadline()
         && first.attempt.execution().execution_snapshot().topology()
             == attempt.execution().execution_snapshot().topology()

@@ -63,8 +63,8 @@ impl IndexingIdentityV1 {
 
         // HEAD/commit/tree are best-effort: an unborn or detached HEAD is a
         // truthful `None`, never a fabricated placeholder.
-        let repository =
-            gix::open(project_root).map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
+        let repository = tracedecay_runtime_core::git_open::open(project_root)
+            .map_err(|error| IdentityErrorV1::Git(error.to_string()))?;
         let head_ref = repository
             .head()
             .ok()
@@ -118,8 +118,8 @@ impl IndexingIdentityV1 {
     /// resolved to `self`.
     ///
     /// Reuse authorization is **structural only**: the repository and the
-    /// worktree must be the same identity. A different worktree — even one whose
-    /// path or branch label looks identical, or whose blobs are byte-identical —
+    /// worktree must be the same identity. A different worktree, even one whose
+    /// path or branch label looks identical, or whose blobs are byte-identical,
     /// is never authorized to reuse another's generation, occurrence, or lineage
     /// identity. Content-addressed *bytes* may still be physically shared by the
     /// byte pool; this guard governs *identity* reuse, not byte deduplication.
@@ -220,7 +220,7 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 /// content (the target object id). Loose refs are a handful of ~41-byte files,
 /// so this is O(number of loose refs) and independent of repository size.
 ///
-/// Content — not the parent directory's mtime — is the signal: an in-place
+/// Content, not the parent directory's mtime, is the signal: an in-place
 /// loose-ref rewrite (`git update-ref` on an existing branch) rewrites the ref
 /// file's bytes without changing the directory mtime, and often without
 /// changing the file's size (object ids are fixed width) or its mtime beyond
@@ -269,8 +269,24 @@ fn refs_heads_signature(dir: &Path) -> Option<String> {
 /// Resolve the git-dir (worktree-local) and common-dir (repository-shared)
 /// paths, falling back to `<root>/.git` when gix cannot open the checkout so a
 /// non-repository path still yields a stable, if empty, fingerprint.
+///
+/// These two paths are structural, but the fingerprint above is sampled on
+/// every query admission, and re-deriving them through a fresh repository open
+/// dominates its cost, against the retained topology this now asks first. A
+/// checkout that carries `<root>/.git` is one an open at exactly this root
+/// resolves through, which is also where a discovery started at this root
+/// stops, so the retained answer is the same answer. Anything else, a bare
+/// repository's control directory or a path that is not a checkout root, still
+/// opens directly, because discovery would walk past it to an ancestor whose
+/// git metadata does not describe this project.
 fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
-    if let Ok(repository) = gix::open(project_root) {
+    if project_root.join(".git").exists()
+        && let Ok(topology) =
+            tracedecay_runtime_core::git_repository::repository_topology(project_root)
+    {
+        return (topology.git_dir.clone(), topology.common_dir.clone());
+    }
+    if let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) {
         let git_dir = repository.git_dir().to_path_buf();
         let common_dir = {
             let common = repository.common_dir().to_path_buf();
@@ -486,5 +502,27 @@ mod tests {
             after.differs_from(&before),
             "an in-place loose-ref rewrite must be detected by the refs signature"
         );
+    }
+
+    /// Cost of one tier-1 staleness sample, the number this module's contract
+    /// calls fixed and cheap.
+    ///
+    /// Ignored because it reports a duration rather than asserting one; run it
+    /// with `--ignored --nocapture` to re-derive the figure in the module doc.
+    #[test]
+    #[ignore = "timing measurement, not a pass/fail contract"]
+    fn measure_git_metadata_fingerprint_capture() {
+        const ITERATIONS: u32 = 2000;
+
+        let repo = init_repo(&[("src/lib.rs", "pub fn a() {}\n")]);
+        for _ in 0..100 {
+            std::hint::black_box(GitMetadataFingerprintV1::capture(repo.path()));
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            std::hint::black_box(GitMetadataFingerprintV1::capture(repo.path()));
+        }
+        let per_capture = started.elapsed() / ITERATIONS;
+        println!("capture: {:.1}us", per_capture.as_secs_f64() * 1e6);
     }
 }

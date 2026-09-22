@@ -325,7 +325,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Resolve the generation a callable-code query serves.
     ///
     /// An explicit, caller-pinned generation is matched exactly and served
-    /// generation-bound and read-only — the freshness ladder is deliberately
+    /// generation-bound and read-only, the freshness ladder is deliberately
     /// bypassed so a pin is a stable, reproducible read. The reserved unpinned
     /// sentinel instead runs the three-tier freshness ladder and serves the
     /// latest complete compatible generation, so out-of-band changes are
@@ -818,7 +818,7 @@ fn bounded_result<T>(
 }
 
 fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_contracts::CodeQueryScope) -> bool {
-    tracedecay_runtime_core::path_scope::path_matches_scope(path, scope.path_prefix.as_deref())
+    tracedecay_domain::path_matches_scope(path, scope.path_prefix.as_deref())
 }
 
 fn relation_edge_kind_name(kind: RelationEdgeKindV1) -> &'static str {

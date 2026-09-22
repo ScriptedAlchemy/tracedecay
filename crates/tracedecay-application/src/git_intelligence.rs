@@ -7,7 +7,7 @@
 //!
 //! Read-only is enforced structurally:
 //!
-//! - Every spawn goes through [`NativeGitIntelligence::run_git`], which admits
+//! - Every spawn goes through `NativeGitIntelligence::run_git`, which admits
 //!   only a closed list of read subcommands (`status`, `diff`, `log`, `blame`,
 //!   `rev-parse`, `symbolic-ref`, `ls-files`, `ls-tree`, `hash-object`
 //!   without `-w`, `config --get`, `check-attr`) and refuses everything else
@@ -91,7 +91,7 @@ struct RawFileEntry {
 }
 
 /// One parsed hunk with its retained body lines (adapter-internal only;
-/// bodies never leave this module — the domain value carries digests).
+/// bodies never leave this module, the domain value carries digests).
 #[derive(Debug)]
 struct ParsedHunk {
     old_start: u32,
@@ -271,7 +271,7 @@ impl NativeGitIntelligence {
     /// This is the canonical lightweight identity read for feedback, LSP, and
     /// managed-test consumers that do not need worktree status entries. It
     /// reuses the native repository snapshot, so it spawns no subprocess on
-    /// repositories `gix` can open — including linked worktrees, where the
+    /// repositories `gix` can open, including linked worktrees, where the
     /// snapshot resolves the checkout-specific HEAD rather than the common
     /// directory's.
     #[hotpath::measure(label = "usecases.git_intelligence.head")]
@@ -405,7 +405,7 @@ impl NativeGitIntelligence {
     /// index conflict state do not require subprocesses.
     #[hotpath::measure(label = "usecases.git_intelligence.snapshot")]
     fn repository_snapshot(&self) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
-        let Ok(repo) = gix::open(&self.repo_root) else {
+        let Ok(repo) = tracedecay_runtime_core::git_open::open(&self.repo_root) else {
             return self.cli_repository_snapshot();
         };
         if repo.object_hash() != gix::hash::Kind::Sha1 {
@@ -1203,7 +1203,7 @@ impl NativeGitIntelligence {
     }
 
     /// Native content identity or explicit absence of worktree files.
-    /// Present content is hashed by `git hash-object` WITHOUT `-w` — hashing
+    /// Present content is hashed by `git hash-object` WITHOUT `-w`, hashing
     /// only, no object write.
     #[hotpath::measure(label = "usecases.git_intelligence.worktree_blobs")]
     fn worktree_blobs_for_paths(
@@ -1429,8 +1429,8 @@ fn parse_diff_raw(text: &str) -> Result<Vec<RawFileEntry>, GitIntelligenceError>
                 "raw record without ':' prefix: {record:?}"
             )));
         };
-        // A merge in progress emits combined records — one extra leading ':'
-        // per additional parent, with parents+1 modes and blobs — for its
+        // A merge in progress emits combined records, one extra leading ':'
+        // per additional parent, with parents+1 modes and blobs, for its
         // unmerged paths (`git diff --raw` during a conflict).
         let mut parents = 1usize;
         while let Some(rest) = meta.strip_prefix(':') {
@@ -1762,6 +1762,14 @@ mod tests {
                 "user.email=fixture@example.com",
                 "-c",
                 "commit.gpgsign=false",
+                // `git commit` spawns a detached `git maintenance run --auto`
+                // that holds `.git/objects/maintenance.lock` after the commit
+                // returns; the byte-identical snapshot must not see it appear
+                // or vanish between its two walks.
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
             ])
             .args(args)
             .current_dir(self.path())

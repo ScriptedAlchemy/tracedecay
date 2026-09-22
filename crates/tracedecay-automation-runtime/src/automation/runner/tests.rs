@@ -52,7 +52,7 @@ use super::{
     combined_skill_writer_evidence_or_not_combined, split_skill_runtime_failure,
     validate_session_fact_candidates,
 };
-use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
+use tracedecay_lcm::{LcmGrepSort, LcmScope};
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 

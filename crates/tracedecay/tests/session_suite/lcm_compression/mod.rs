@@ -186,7 +186,7 @@ fn with_authoritative_timestamps(mut messages: Vec<Value>) -> Vec<Value> {
 }
 
 /// Ingests host-active messages through the daemon compression path without
-/// creating summary nodes — the production replacement for the retired
+/// creating summary nodes, the production replacement for the retired
 /// ingesting preflight (preflight is a read-only decision surface now).
 async fn ingest_active_messages(
     db: &LcmTestRuntime,

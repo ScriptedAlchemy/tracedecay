@@ -726,3 +726,19 @@ async fn valid_prefix_commits_once_before_invalid_suffix_without_cursor_drift() 
         assert_invalid_suffix_preserves_valid_prefix(session_id, suffix).await;
     }
 }
+
+#[test]
+fn claude_rotation_tail_stops_deferring_after_one_full_walk() {
+    let total = MAX_CLAUDE_SOURCES_PER_PASS + 20;
+    assert_eq!(claude_rotation_deferred(total, 0, false), 20);
+    assert_eq!(
+        claude_rotation_deferred(total, u64::try_from(total).unwrap(), false),
+        0,
+        "a frontier that has already visited every listed source is refresh, not a stall"
+    );
+    assert_eq!(
+        claude_rotation_deferred(total, u64::try_from(total).unwrap(), true),
+        1,
+        "a walk that never listed the rest of the tree is still deferred"
+    );
+}

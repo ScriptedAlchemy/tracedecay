@@ -34,6 +34,17 @@ pub(super) struct PayloadFileIdentity {
     file_id: [u8; 16],
 }
 
+pub(super) fn same_payload_file_identity(
+    actual: &PayloadFileIdentity,
+    expected: &PayloadFileIdentity,
+) -> Result<(), LcmError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(LcmError::InvalidPayloadRef)
+    }
+}
+
 /// Opaque proof that a payload's locator, stable file identity, digest, and
 /// byte/character sizes were observed together.
 ///
@@ -366,18 +377,6 @@ fn payload_file_identity(
     })
 }
 
-#[cfg(unix)]
-pub(super) fn same_payload_file_identity(
-    actual: &PayloadFileIdentity,
-    expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
-}
-
 #[cfg(windows)]
 fn same_file_identity(
     file: &fs::File,
@@ -385,7 +384,7 @@ fn same_file_identity(
     _lstat: &fs::Metadata,
     path: &Path,
 ) -> Result<(), LcmError> {
-    let current = verification_file_options()
+    let current = private_file_options()
         .read(true)
         .open(path)
         .map_err(|err| classify_payload_open_error(path, err))?;
@@ -402,18 +401,6 @@ fn payload_file_identity(
     _metadata: &fs::Metadata,
 ) -> Result<PayloadFileIdentity, LcmError> {
     windows_file_identity(file)
-}
-
-#[cfg(windows)]
-pub(super) fn same_payload_file_identity(
-    actual: &PayloadFileIdentity,
-    expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(LcmError::InvalidPayloadRef)
-    }
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -433,15 +420,6 @@ fn payload_file_identity(
     _metadata: &fs::Metadata,
 ) -> Result<PayloadFileIdentity, LcmError> {
     Ok(PayloadFileIdentity {})
-}
-
-#[cfg(all(not(unix), not(windows)))]
-#[allow(clippy::trivially_copy_pass_by_ref, clippy::unnecessary_wraps)] // Keep the identity API uniform even where the platform identity is opaque.
-pub(super) fn same_payload_file_identity(
-    _actual: &PayloadFileIdentity,
-    _expected: &PayloadFileIdentity,
-) -> Result<(), LcmError> {
-    Ok(())
 }
 
 fn ensure_regular_non_reparse_file(metadata: &fs::Metadata) -> Result<(), LcmError> {
@@ -664,8 +642,8 @@ pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
 
 /// Like `existing_payload_dir`, but a payload directory that was never
 /// created (it is made lazily on first externalization) or has been removed
-/// reports as `None` instead of an I/O error. Invalid configurations —
-/// symlinked dir, wrong file type, dir escaping the storage root — still
+/// reports as `None` instead of an I/O error. Invalid configurations,
+/// symlinked dir, wrong file type, dir escaping the storage root, still
 /// error.
 #[hotpath::measure(label = "sessions.lcm_fs_authority.existing_dir")]
 pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
@@ -964,15 +942,6 @@ fn private_file_options() -> fs::OpenOptions {
 fn private_create_file_options() -> fs::OpenOptions {
     let mut options = private_file_options();
     options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE_ACCESS);
-    options
-}
-
-#[cfg(windows)]
-fn verification_file_options() -> fs::OpenOptions {
-    let mut options = fs::OpenOptions::new();
-    options
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
     options
 }
 

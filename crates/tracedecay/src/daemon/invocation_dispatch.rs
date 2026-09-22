@@ -118,9 +118,11 @@ fn lsp_project_open_wait_response(
 ) -> Option<DaemonInvocationResponse> {
     match outcome {
         ProjectOpenWaitOutcome::Completed | ProjectOpenWaitOutcome::NotTracked => None,
-        ProjectOpenWaitOutcome::Failed(error) => Some(DaemonInvocationResponse::problem(
+        ProjectOpenWaitOutcome::Failed(error) => Some(project_open_refusal_response(
             request_id.to_owned(),
-            project_open_problem(&error, workflow_application, git_operation),
+            &error,
+            workflow_application,
+            git_operation,
         )),
         ProjectOpenWaitOutcome::Cancelled => Some(DaemonInvocationResponse::application_problem(
             request_id.to_owned(),
@@ -176,6 +178,43 @@ fn scope_set_cas_admission(
     Some((request, *observed_at, deadline, cancellation))
 }
 
+struct InvocationCancellation {
+    request_id: String,
+    scope_set_cas_lease: Option<Lease>,
+    lsp_lease: Option<Lease>,
+    lsp_cancellation: Option<CancellationToken>,
+    request_cancellation: Option<CancellationToken>,
+}
+
+fn invocation_cancellation(
+    request: &DaemonInvocationRequest,
+    service: &DaemonInvocationService,
+) -> Option<InvocationCancellation> {
+    let request_id = request.request_id.clone();
+    let request_cancellations = service.request_cancellations();
+    let scope_set_cas_lease = if scope_set_cas_admission(request).is_some() {
+        Some(request_cancellations.register(&request_id)?)
+    } else {
+        None
+    };
+    let lsp_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
+        Some(request_cancellations.register(&request_id)?)
+    } else {
+        None
+    };
+    let lsp_cancellation = lsp_lease.as_ref().map(Lease::token);
+    let request_cancellation = lsp_cancellation
+        .clone()
+        .or_else(|| scope_set_cas_lease.as_ref().map(Lease::token));
+    Some(InvocationCancellation {
+        request_id,
+        scope_set_cas_lease,
+        lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    })
+}
+
 fn selected_root_handshake(handshake: &DaemonHandshake, root: &Path) -> DaemonHandshake {
     DaemonHandshake {
         project_path: Some(root.to_path_buf()),
@@ -228,9 +267,11 @@ async fn open_scope_set_cas_projects<'a>(
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
-                return Err(DaemonInvocationResponse::problem(
+                return Err(project_open_refusal_response(
                     request_id.to_owned(),
-                    project_open_problem(&error, false, false),
+                    &error,
+                    false,
+                    false,
                 ));
             }
             Err(problem) => {
@@ -272,9 +313,11 @@ async fn open_scope_set_cas_projects<'a>(
             Ok(Ok(project_server)) => servers.push(project_server),
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
-                return Err(DaemonInvocationResponse::problem(
+                return Err(project_open_refusal_response(
                     request_id.to_owned(),
-                    project_open_problem(&error, false, false),
+                    &error,
+                    false,
+                    false,
                 ));
             }
             Err(problem) => {
@@ -306,38 +349,21 @@ pub(super) async fn execute_portable_daemon_invocation(
     if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
     }
-    let request_id = request.request_id.clone();
-    let request_cancellations = invocation.service.request_cancellations();
-    let scope_set_cas_cancellation_lease = if scope_set_cas_admission(&request).is_some() {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
+    let InvocationCancellation {
+        request_id,
+        scope_set_cas_lease: _scope_set_cas_lease,
+        lsp_lease: _lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    } = match invocation_cancellation(&request, &invocation.service) {
+        Some(cancellation) => cancellation,
+        None => {
+            return DaemonInvocationResponse::problem(
+                request.request_id.clone(),
+                DaemonInvocationProblem::InvalidRequest,
+            );
         }
-    } else {
-        None
     };
-    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = lsp_cancellation
-        .clone()
-        .or_else(|| scope_set_cas_cancellation_lease.as_ref().map(Lease::token));
     let lsp_project_open_gates = Arc::clone(&project_open_gates);
     #[cfg(test)]
     let lsp_project_open_attempts = project_open_attempts.clone();
@@ -362,9 +388,11 @@ pub(super) async fn execute_portable_daemon_invocation(
         );
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
-            return DaemonInvocationResponse::problem(
+            return project_open_refusal_response(
                 request_id,
-                project_open_problem(&error, workflow_application, git_operation),
+                &error,
+                workflow_application,
+                git_operation,
             );
         }
         let project_route = project_route_for_handshake(handshake);
@@ -400,7 +428,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             // Core publication may have been visible before the dependent LSP
             // owner finished. Re-enter the canonical route lookup after the
             // wait instead of carrying the pre-upgrade root/owner snapshot.
-            let project_server = await_lsp_route_rejoin(
+            let project_server = Box::pin(await_lsp_route_rejoin(
                 deadline,
                 request_cancellation,
                 portable_project_server_for_request(
@@ -414,7 +442,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                     #[cfg(test)]
                     lsp_project_open_attempts,
                 ),
-            )
+            ))
             .await;
             let project_server = match project_server {
                 Ok(project_server) => project_server,
@@ -423,9 +451,11 @@ pub(super) async fn execute_portable_daemon_invocation(
                 }
             };
             if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
+                return project_open_refusal_response(
                     request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
+                    &error,
+                    workflow_application,
+                    git_operation,
                 );
             }
             let Ok((canonical_project_path, _)) = project_route_for_handshake(handshake) else {
@@ -684,38 +714,21 @@ pub(super) async fn execute_daemon_invocation(
     if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
     }
-    let request_id = request.request_id.clone();
-    let request_cancellations = engine.invocation.service.request_cancellations();
-    let scope_set_cas_cancellation_lease = if scope_set_cas_admission(&request).is_some() {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
+    let InvocationCancellation {
+        request_id,
+        scope_set_cas_lease: _scope_set_cas_lease,
+        lsp_lease: _lsp_lease,
+        lsp_cancellation,
+        request_cancellation,
+    } = match invocation_cancellation(&request, &engine.invocation.service) {
+        Some(cancellation) => cancellation,
+        None => {
+            return DaemonInvocationResponse::problem(
+                request.request_id.clone(),
+                DaemonInvocationProblem::InvalidRequest,
+            );
         }
-    } else {
-        None
     };
-    let lsp_cancellation_lease = if request.operation() == DaemonInvocationOperation::LspOpen {
-        match request_cancellations.register(&request_id) {
-            Some(lease) => Some(lease),
-            None => {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::InvalidRequest,
-                );
-            }
-        }
-    } else {
-        None
-    };
-    let lsp_cancellation = lsp_cancellation_lease.as_ref().map(Lease::token);
-    let request_cancellation = lsp_cancellation
-        .clone()
-        .or_else(|| scope_set_cas_cancellation_lease.as_ref().map(Lease::token));
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
     let mut project_path = None;
@@ -728,9 +741,11 @@ pub(super) async fn execute_daemon_invocation(
         );
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
-            return DaemonInvocationResponse::problem(
+            return project_open_refusal_response(
                 request_id,
-                project_open_problem(&error, workflow_application, git_operation),
+                &error,
+                workflow_application,
+                git_operation,
             );
         }
         let project_route = DaemonEngine::project_route(handshake);
@@ -779,9 +794,11 @@ pub(super) async fn execute_daemon_invocation(
                 }
             };
             if let Err(error) = project_server {
-                return DaemonInvocationResponse::problem(
+                return project_open_refusal_response(
                     request_id,
-                    project_open_problem(&error, workflow_application, git_operation),
+                    &error,
+                    workflow_application,
+                    git_operation,
                 );
             }
             let Ok((canonical_project_path, _)) = DaemonEngine::project_route(handshake) else {
@@ -849,6 +866,32 @@ pub(super) async fn execute_daemon_invocation(
     .await
 }
 
+/// A still-opening project is the mounting refusal the typed CLI re-sends
+/// until its deadline.
+///
+/// The 500 ms open bound answers "has this route published yet" and leaves
+/// the open running. Mapping that miss to [`DaemonInvocationProblem::Unavailable`]
+/// republishes `application.surface.unavailable`, which the typed client treats
+/// as the answer, so a cold `storage_status` or configuration write fails the
+/// moment the bound elapses. Terminal open failures stay on that problem.
+fn project_open_refusal_response(
+    request_id: String,
+    error: &tracedecay_domain::errors::TraceDecayError,
+    workflow_application: bool,
+    git_operation: bool,
+) -> DaemonInvocationResponse {
+    if error_is_project_open_retryable(error) {
+        return DaemonInvocationResponse::application_problem(
+            request_id,
+            tracedecay_contracts::ApplicationProblem::runtime_mounting(),
+        );
+    }
+    DaemonInvocationResponse::problem(
+        request_id,
+        project_open_problem(error, workflow_application, git_operation),
+    )
+}
+
 fn project_open_problem(
     error: &tracedecay_domain::errors::TraceDecayError,
     workflow_application: bool,
@@ -859,7 +902,7 @@ fn project_open_problem(
     // this to `authority == "workflow"` sent every other caller down the
     // retryable-unavailable branch below, so a project whose relational shape
     // this binary refuses answered "the application service is unavailable,
-    // retry after 250ms" — and clients dutifully retried it until their whole
+    // retry after 250ms", and clients dutifully retried it until their whole
     // budget was gone, never learning that the only legal action is `reset`.
     if matches!(
         error,
@@ -911,6 +954,24 @@ mod workflow_reset_tests {
         assert_eq!(
             project_open_problem(&warming, false, false),
             DaemonInvocationProblem::Unavailable
+        );
+    }
+
+    #[test]
+    fn warming_project_open_is_a_mounting_refusal_the_client_resends() {
+        let warming = project_warming_error(Path::new("/tmp/surface-fixture"));
+        let response =
+            project_open_refusal_response("request.warming".to_owned(), &warming, false, false);
+        let tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } =
+            response.outcome
+        else {
+            panic!("warming open must be an application problem, got {response:?}");
+        };
+        assert_eq!(
+            problem
+                .diagnostic()
+                .map(|diagnostic| diagnostic.code.as_str()),
+            Some(tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
         );
     }
 

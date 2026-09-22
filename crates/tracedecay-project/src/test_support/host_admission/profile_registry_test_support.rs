@@ -218,36 +218,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn apply_registry_orphan_relink_report(
-        &self,
-        report: &tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkReport,
-    ) -> std::result::Result<
-        tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
-        Vec<String>,
-    > {
-        tracedecay_global_db::registry_maintenance::apply_registry_orphan_relink_report(
-            self.profile_database.as_ref(),
-            report,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn apply_single_registry_orphan_relink_report(
-        &self,
-        report: &tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkReport,
-    ) -> std::result::Result<
-        tracedecay_global_db::registry_maintenance::RegistryOrphanRelinkApplyReport,
-        Vec<String>,
-    > {
-        tracedecay_global_db::registry_maintenance::apply_single_registry_orphan_relink_report(
-            self.profile_database.as_ref(),
-            report,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
     pub async fn upsert_graph_scope(
         &self,
         upsert: tracedecay_global_db::GraphScopeUpsert,

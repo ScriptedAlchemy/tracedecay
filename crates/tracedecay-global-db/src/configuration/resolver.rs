@@ -183,13 +183,7 @@ mod tests {
         ConfigurationValueV1, UserProfileId,
     };
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     #[test]
     fn same_value_in_a_higher_layer_changes_provenance_not_behavior() {

@@ -5,7 +5,7 @@
 //! lexical, and graph production lanes.
 //!
 //! Outputs deterministic checked-in `train` / `validation` candidate records
-//! plus current/10x resource samples and fallback digests. Cancellation is
+//! plus current/10x resource samples and ranking receipts. Cancellation is
 //! proved fail-closed before those records are returned; it is not restamped
 //! as a policy field. Labels are ordinary reviewable fixture data, never a
 //! production authority.
@@ -513,7 +513,7 @@ fn generate_candidate_outputs_sharing_corpora(
     })
 }
 
-/// Direct production call for one query/profile — used by tests to prove the
+/// Direct production call for one query/profile, used by tests to prove the
 /// generator emits identical candidate bytes.
 pub fn retrieve_partition_query_bytes(
     repo_root: &Path,
@@ -593,10 +593,32 @@ fn generate_partition_output(
     let peak_before = peak_rss_bytes();
     for query in &queries {
         let started = Instant::now();
-        // The row and both partition fallback digests share one composition.
+        // The row and both partition receipts share one composition. The
+        // receipt is the ordered ranking, not the generation-scoped fallback
+        // subpayload: that digest moves whenever extractor revisions reseal
+        // the generation every occurrence id names.
         let composed = compose_production_query(published, profile, query)?;
-        let fallback = query_fallback_from_composition(&composed)?;
-        fallback_digests.push((query.query_id.as_str(), fallback.digest.as_str().to_owned()));
+        let ranked = map_ranked_candidates(published, &composed)?;
+        let coverage = query_lane_coverage(&composed);
+        // The subpayload's digest is unfit as a ranking pin; its contract is
+        // not. Constructing it still proves canonical `final_ordinal` order,
+        // per-candidate validity, and query-fallback-only contributions for
+        // every composed query.
+        QueryFallbackSubpayload::new(
+            composed.profile_id.clone(),
+            composed.ranked_candidates.clone(),
+            coverage.clone(),
+            composed.freshness.clone(),
+            None,
+        )
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+        let receipt = ranking_receipt_digest(
+            composed.profile_id.as_str(),
+            query.query_id.as_str(),
+            &coverage,
+            &ranked,
+        )?;
+        fallback_digests.push((query.query_id.as_str(), receipt));
         rows.push(query_row_from_composition(published, query, &composed)?);
         latencies_us.push(started.elapsed().as_micros() as u64);
     }
@@ -609,7 +631,7 @@ fn generate_partition_output(
     );
 
     let fallback_digest = canonical_sha256(&(
-        "tracedecay.search-eval.partition-fallbacks.v1",
+        "tracedecay.search-eval.partition-rankings.v1",
         &fallback_digests,
     ))?;
     let query_digest = fallback_digest.clone();
@@ -839,9 +861,9 @@ fn compose_production_query(
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))
 }
 
-fn query_fallback_from_composition(
+fn query_lane_coverage(
     output: &CompositionOutputV1,
-) -> Result<QueryFallbackSubpayload, CandidateOutputError> {
+) -> BTreeMap<RetrieverKind, PublicRetrieverStatus> {
     let mut coverage = BTreeMap::new();
     for lane in RetrieverKind::QUERY_FALLBACK_LANES {
         coverage.insert(
@@ -853,41 +875,50 @@ fn query_fallback_from_composition(
                 .unwrap_or(PublicRetrieverStatus::Unavailable),
         );
     }
-    let fallback = QueryFallbackSubpayload::new(
-        output.profile_id.clone(),
-        output.ranked_candidates.clone(),
-        coverage,
-        output.freshness.clone(),
-        None,
-    )
-    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    fallback
-        .validate()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    Ok(fallback)
+    coverage
+}
+
+/// Ranking identity the search-eval pins compare.
+///
+/// Production `QueryFallbackSubpayload` digests stay generation-scoped: every
+/// lexical occurrence id is `code-chunk:{generation}:{chunk}`, and the eval
+/// request's freshness digest names that generation, whose fingerprint includes
+/// extractor revisions. Hashing that subpayload made an extractor revision
+/// bump look like a ranking change. This receipt hashes the generation-free
+/// rows the quality report already scores, plus the public lane coverage.
+fn ranking_receipt_digest(
+    profile_id: &str,
+    query_id: &str,
+    lane_coverage: &BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    ranked: &[RankedCandidateRowV1],
+) -> Result<String, CandidateOutputError> {
+    canonical_sha256(&(
+        "tracedecay.search-eval.ranking-receipt.v1",
+        profile_id,
+        query_id,
+        lane_coverage,
+        ranked,
+    ))
 }
 
 fn map_ranked_candidates(
     published: &PublishedCorpus,
     output: &CompositionOutputV1,
 ) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
-    map_ranked_candidate_list(published, &output.ranked_candidates)
+    map_ranked_candidate_list(&published.occurrence_map, &output.ranked_candidates)
 }
 
 fn map_ranked_candidate_list(
-    published: &PublishedCorpus,
+    occurrence_map: &BTreeMap<String, OccurrenceMapEntry>,
     ranked_candidates: &[tracedecay_domain::RankedCandidate],
 ) -> Result<Vec<RankedCandidateRowV1>, CandidateOutputError> {
     let mut rows = Vec::new();
     for ranked in ranked_candidates {
-        let entry = published
-            .occurrence_map
+        let entry = occurrence_map
             .get(ranked.candidate.anchor_id.as_str())
             .or_else(|| {
                 ranked.candidate.occurrences.iter().find_map(|occurrence| {
-                    published
-                        .occurrence_map
-                        .get(occurrence.source_occurrence_id.as_str())
+                    occurrence_map.get(occurrence.source_occurrence_id.as_str())
                 })
             })
             .cloned()
@@ -1539,6 +1570,129 @@ pub(crate) mod tests {
 
     fn workload() -> CandidateWorkloadV1 {
         packaged_fixture().workload().clone()
+    }
+
+    fn ranked_with_generation(generation: &str) -> tracedecay_domain::RankedCandidate {
+        let occurrence = tracedecay_domain::OccurrenceProvenance {
+            source_occurrence_id: id(&format!("code-chunk:{generation}:chunk.stable"))
+                .expect("occurrence id"),
+            file_occurrence_id: Some(id("file.time").expect("file id")),
+            retriever_evidence_anchor: tracedecay_domain::RetrievalAnchorId::new("evidence.stable")
+                .expect("evidence anchor"),
+            source_namespace: id("ns.code.daemon").expect("namespace"),
+            repository_id: None,
+            session_or_thread_id: None,
+            logical_copy_cluster_id: None,
+            logical_copy_evidence_anchor: None,
+            evidence_role: tracedecay_domain::EvidenceRole::Primary,
+            freshness: tracedecay_domain::SourceFreshness {
+                source_namespace: id("ns.code.daemon").expect("freshness namespace"),
+                source_instance: id("instance.code-index.daemon").expect("instance"),
+                source_watermark: Some(1),
+                projection_watermark: Some(1),
+                observed_at: UtcMicros(1_000_000),
+                source_generation: Some(1),
+                generation_lag: Some(0),
+                compatibility: tracedecay_domain::FreshnessCompatibilityV1::Current,
+                policy_revision: id("policy.candidate.v1").expect("policy"),
+            },
+        };
+        tracedecay_domain::RankedCandidate {
+            candidate: tracedecay_domain::FusedCandidate {
+                anchor_id: tracedecay_domain::RetrievalAnchorId::new("code-symbol:symbol.stable")
+                    .expect("anchor"),
+                logical_evidence_id: id("code-symbol:symbol.stable").expect("evidence"),
+                occurrences: vec![occurrence],
+                exact_class: ExactClass::Approximate,
+                utility_micros: 1,
+                contributions: Vec::new(),
+                freshness: Vec::new(),
+                decisions: Vec::new(),
+            },
+            final_ordinal: 0,
+        }
+    }
+
+    /// Extractor revision bumps reseal the generation embedded in every
+    /// `code-chunk:{generation}:{chunk}` occurrence id. The production
+    /// fallback digest binds that id; the ranking receipt must not.
+    #[test]
+    fn ranking_receipt_ignores_generation_scoped_occurrence_ids() {
+        let generation_a = "generation.v1.aaaaaaaa.00000001";
+        let generation_b = "generation.v1.bbbbbbbb.00000002";
+        let mut map = BTreeMap::new();
+        map.insert(
+            "code-symbol:symbol.stable".to_owned(),
+            OccurrenceMapEntry {
+                document_id: "time".to_owned(),
+                scope: "research".to_owned(),
+                display_anchors: vec!["time::UtcMicros".to_owned()],
+            },
+        );
+        let rows_a = map_ranked_candidate_list(&map, &[ranked_with_generation(generation_a)])
+            .expect("map generation a");
+        let rows_b = map_ranked_candidate_list(&map, &[ranked_with_generation(generation_b)])
+            .expect("map generation b");
+        assert_eq!(
+            rows_a, rows_b,
+            "display rows are keyed by the generation-free anchor"
+        );
+
+        let coverage = BTreeMap::from([
+            (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
+            (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
+            (RetrieverKind::Graph, PublicRetrieverStatus::Unavailable),
+        ]);
+        let receipt =
+            |rows: &[RankedCandidateRowV1],
+             lanes: &BTreeMap<RetrieverKind, PublicRetrieverStatus>| {
+                ranking_receipt_digest("profile.query-fallback", "train-001", lanes, rows)
+                    .expect("ranking receipt")
+            };
+        let receipt_a = receipt(&rows_a, &coverage);
+        assert_eq!(receipt_a, receipt(&rows_b, &coverage));
+
+        let mut coverage_changed = coverage.clone();
+        coverage_changed.insert(RetrieverKind::Graph, PublicRetrieverStatus::Complete);
+        assert_ne!(
+            receipt_a,
+            receipt(&rows_a, &coverage_changed),
+            "lane coverage is part of the ranking receipt"
+        );
+        let mut reordered = rows_a;
+        reordered.push(RankedCandidateRowV1 {
+            anchor: "code-chunk:chunk.other".to_owned(),
+            anchors: vec!["watermark::merge_max".to_owned()],
+            scope: "research".to_owned(),
+            document_id: "watermark".to_owned(),
+            tier: "approximate".to_owned(),
+        });
+        assert_ne!(
+            receipt_a,
+            receipt(&reordered, &coverage),
+            "a different ranked set must move the receipt"
+        );
+
+        let production_digest = |generation: &str| {
+            let lanes = RetrieverKind::QUERY_FALLBACK_LANES
+                .into_iter()
+                .map(|lane| (lane, PublicRetrieverStatus::Complete))
+                .collect();
+            tracedecay_domain::QueryFallbackSubpayload::new(
+                id("profile.query-fallback").expect("profile"),
+                vec![ranked_with_generation(generation)],
+                lanes,
+                Vec::new(),
+                None,
+            )
+            .expect("production fallback subpayload")
+            .digest
+        };
+        assert_ne!(
+            production_digest(generation_a).as_str(),
+            production_digest(generation_b).as_str(),
+            "the production fallback digest still moves with the sealed generation"
+        );
     }
 
     #[test]

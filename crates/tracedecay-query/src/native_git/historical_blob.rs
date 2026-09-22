@@ -54,7 +54,7 @@ impl NativeHistoricalBlobReaderV1 {
                 request.path.clone(),
             ));
         }
-        let repo = gix::open(&self.repo_root).map_err(|error| {
+        let repo = tracedecay_runtime_core::git_open::open(&self.repo_root).map_err(|error| {
             GitIntelligenceError::NotARepository(format!("{}: {error}", self.repo_root.display()))
         })?;
         let oid =

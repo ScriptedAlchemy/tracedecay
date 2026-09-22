@@ -115,7 +115,7 @@ pub struct AnalyticsAgentsPayloadV1 {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AnalyticsSubagentLinkV1 {
-    /// The session records no parent — a genuine top of a delegation tree.
+    /// The session records no parent, a genuine top of a delegation tree.
     Root,
     /// The parent named by the session is present in this reading.
     Linked,
@@ -137,7 +137,7 @@ pub struct AnalyticsSubagentNodeV1 {
     /// `agent_id`. `None` is an unlabeled session, not an unnamed agent.
     pub agent: Option<String>,
     pub title: Option<String>,
-    /// Unix SECONDS, as the session store records them — capture parses
+    /// Unix SECONDS, as the session store records them, capture parses
     /// provider stamps with `parse_rfc3339_timestamp`, which yields seconds,
     /// and normalizes millisecond inputs down to seconds before storing. This
     /// is not the microsecond convention the Work contracts use, and reading
@@ -158,8 +158,8 @@ pub struct AnalyticsSubagentNodeV1 {
 
 /// The subagent tree: parent/child session edges, not a per-agent rollup.
 ///
-/// `nodes` is a pre-order flattening — every node appears after its own parent
-/// and before that parent's later siblings — so a reader can draw the tree from
+/// `nodes` is a pre-order flattening, every node appears after its own parent
+/// and before that parent's later siblings, so a reader can draw the tree from
 /// `depth` alone without reassembling edges client-side.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AnalyticsSubagentTreePayloadV1 {
@@ -246,7 +246,7 @@ pub async fn overview(
                     durable_events.as_deref(),
                     Some(&project_id),
                 ),
-                typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
+                usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()),
                 typed_diagnostics_summary(&state, durable_events.as_deref()),
             );
             let usage = match usage {
@@ -360,8 +360,8 @@ pub async fn observatory(
 
 // `observatory_http` / `observatory_export` are deleted with their last caller.
 // They mounted `/api/plugins/analytics/observatory{,/export}`, which served the
-// same application model as `/api/observatory` — the route the Observatory
-// workspace actually reads (`CanonicalObservations.tsx`) — one without the
+// same application model as `/api/observatory`, the route the Observatory
+// workspace actually reads (`CanonicalObservations.tsx`), one without the
 // envelope and one with a download disposition. No dashboard, SDK, CLI, or MCP
 // caller ever bound to either; the only reader was a parity test asserting the
 // aliases agreed with the canonical route, which is a test of the duplication
@@ -456,7 +456,7 @@ fn managed_agent_label_for_session(
         .find_map(|id| managed_agent_label(host_io, id))
 }
 
-/// `GET /api/plugins/analytics/agents` — sessions per managed subagent,
+/// `GET /api/plugins/analytics/agents`, sessions per managed subagent,
 /// straight from the session store. The same summary the overview embeds,
 /// exposed on its own so the Agents workspace can read subagent context
 /// without paying for the full hook-analytics fold.
@@ -517,8 +517,8 @@ fn optional_text(row: &Value, key: &str) -> Option<String> {
 /// Assemble parent/child session edges into a pre-order tree.
 ///
 /// Every input row appears in the output exactly once. Sessions reachable from
-/// a top are emitted under it; sessions that are not reachable from any top —
-/// which can only happen when their parent chain closes on itself — are emitted
+/// a top are emitted under it; sessions that are not reachable from any top,
+/// which can only happen when their parent chain closes on itself, are emitted
 /// afterwards as their own tops, marked `Cycle`, because dropping them would
 /// silently shrink a delegation count the caller is about to read.
 fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNodeV1> {
@@ -744,7 +744,7 @@ async fn subagent_tree_reading(
     })
 }
 
-/// `GET /api/plugins/analytics/subagent-tree` — parent/child session edges for
+/// `GET /api/plugins/analytics/subagent-tree`, parent/child session edges for
 /// this project, as a pre-order tree.
 ///
 /// The sibling `/agents` route answers a different question: how many sessions
@@ -771,8 +771,8 @@ pub async fn subagent_tree(
                 Ok(payload) => {
                     let count = payload.nodes.len() as u64;
                     // A ceiling read has no denominator: the store holds an unknown
-                    // number of further sessions, so `partial` — which asserts a known
-                    // eligible total — would be the wrong claim. Coverage is unknown
+                    // number of further sessions, so `partial`, which asserts a known
+                    // eligible total, would be the wrong claim. Coverage is unknown
                     // with the count actually examined and the reason stated.
                     let coverage = if payload.truncated {
                         let mut coverage = DashboardCoverageV1::unknown();
@@ -858,7 +858,7 @@ pub async fn usage(
     hotpath::future!(
         async move {
             let durable_events = durable_analytics_rows_for_state(&state).await;
-            match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+            match usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
                 Ok(payload) if !payload.available => Json(DashboardEnvelopeV1::unavailable(
                     scope_from_state(&state),
                     Some(payload),
@@ -1052,10 +1052,7 @@ async fn durable_analytics_rows(
 }
 
 pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHintsPayloadV1 {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
-        .iter()
-        .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
+    let mut by_category = zero_hint_counts();
 
     for event in events {
         let category = event.hint_category.as_deref().unwrap_or("");
@@ -1094,41 +1091,25 @@ pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHin
 }
 
 pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
-        .iter()
-        .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
-    for row in counts {
-        by_category.insert(
-            row.category.clone(),
-            HintCounts {
-                emitted: row.emitted,
-                followed: row.followed,
-                ignored: row.ignored,
-                suppressed: row.suppressed,
-            },
-        );
-    }
+    let summary = typed_hint_summary_from_counts(counts);
+    // MCP callers omit `error`. The typed payload keeps it for dashboard
+    // envelopes, including the explicit null when the read succeeded.
     json!({
-        "available": true,
-        "source": "analytics_events",
-        "by_category": by_category.into_iter().map(|(category, counts)| {
-            json!({
-                "category": category,
-                "emitted": counts.emitted,
-                "followed": counts.followed,
-                "ignored": counts.ignored,
-                "suppressed": counts.suppressed,
-            })
-        }).collect::<Vec<_>>(),
+        "available": summary.available,
+        "source": summary.source,
+        "by_category": summary.by_category,
     })
 }
 
-fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
-    let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
+fn zero_hint_counts() -> BTreeMap<String, HintCounts> {
+    HINT_CATEGORIES
         .iter()
         .map(|category| ((*category).to_string(), HintCounts::default()))
-        .collect();
+        .collect()
+}
+
+fn typed_hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHintsPayloadV1 {
+    let mut by_category = zero_hint_counts();
     for row in counts {
         by_category.insert(
             row.category.clone(),
@@ -1356,19 +1337,9 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
         .or_default() += 1;
 }
 
-/// The contract form of the usage summary, shared by `GET .../usage` and the
-/// `usage` member of the overview payload.
+/// Shared by `GET .../usage` and the `usage` member of the overview payload.
 ///
-/// Absent `source` / `event_count` stay `None` on the struct so serde writes
-/// them as explicit nulls. The previous JSON literals omitted those keys and
-/// had to round-trip through this type to keep that distinction.
-async fn typed_usage_summary(
-    db: Option<&RegisteredGlobalDb>,
-    durable_events: Option<&[AnalyticsEventRecord]>,
-) -> Result<AnalyticsUsageSummaryV1, String> {
-    usage_summary(db, durable_events).await
-}
-
+/// Absent `source` / `event_count` stay `None` so serde writes explicit nulls.
 async fn usage_summary(
     db: Option<&RegisteredGlobalDb>,
     durable_events: Option<&[AnalyticsEventRecord]>,
@@ -1595,7 +1566,7 @@ mod tests {
             row("self", Some("self")),
         ]);
 
-        // Every input session is still present — a tree walk that silently lost
+        // Every input session is still present, a tree walk that silently lost
         // them would under-report delegation.
         assert_eq!(nodes.len(), 3);
         assert!(
@@ -1781,8 +1752,8 @@ mod tests {
 
     /// This crate owns the diagnostics summary but not the readiness
     /// aggregation: it reads that through the port the composition root
-    /// installs. With no projection mounted the summary must fail closed —
-    /// naming the blocker and counting rows only — and must never echo an
+    /// installs. With no projection mounted the summary must fail closed,
+    /// naming the blocker and counting rows only, and must never echo an
     /// untrusted row's own values back out.
     ///
     /// The mounted counterpart, which is the only composition that can answer

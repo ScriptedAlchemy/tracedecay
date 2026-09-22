@@ -16,7 +16,7 @@ async fn test_move_symbol_dry_run_reports_impact_and_writes_nothing() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     move_pricing_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/orders.rs")).unwrap();
@@ -101,7 +101,7 @@ async fn test_move_symbol_resolves_qualified_names_like_bare_names() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     move_pricing_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/orders.rs")).unwrap();
@@ -177,7 +177,7 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
         "pub mod common {\n    pub struct same;\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let before_a = fs::read_to_string(project.join("src/a.rs")).unwrap();
     let before_b = fs::read_to_string(project.join("src/b.rs")).unwrap();
@@ -240,7 +240,7 @@ async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     move_pricing_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -314,7 +314,7 @@ async fn test_move_symbol_clean_move_has_empty_impact() {
         "//! b\n\npub fn other() -> u32 {\n    0\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -354,7 +354,7 @@ async fn test_move_symbol_dest_collision_refuses() {
         "//! b\n\npub fn dup() -> u32 {\n    2\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let before_b = fs::read_to_string(project.join("src/b.rs")).unwrap();
     let result = handle_tool_call(
@@ -401,7 +401,7 @@ async fn test_move_symbol_private_dependency_hints() {
         "//! b\n\npub fn other() -> u32 {\n    0\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -471,7 +471,7 @@ async fn test_move_symbol_qualified_caller_hint() {
          }\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -516,8 +516,8 @@ async fn test_move_symbol_first_in_file_docs_travel() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
-    // The doc comment is literally the first line of the file — no module doc,
-    // no leading blank — so attrs_start_line must resolve to line 0.
+    // The doc comment is literally the first line of the file, no module doc,
+    // no leading blank, so attrs_start_line must resolve to line 0.
     fs::write(
         project.join("src/a.rs"),
         "/// The very first thing in the file.\n\
@@ -529,7 +529,7 @@ async fn test_move_symbol_first_in_file_docs_travel() {
         "//! b\n\npub fn other() -> u32 {\n    0\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -577,7 +577,7 @@ async fn test_move_symbol_dot_prefixed_same_file_refuses() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     move_pricing_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let result = handle_tool_call(
@@ -598,7 +598,7 @@ async fn test_move_symbol_dot_prefixed_same_file_refuses() {
         p["message"].as_str().unwrap().contains("symbol's own file"),
         "refusal must be the same-file error: {p}"
     );
-    // The symbol is untouched — no silent deletion.
+    // The symbol is untouched, no silent deletion.
     assert_eq!(
         fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
         before_pricing,
@@ -617,7 +617,7 @@ async fn test_move_symbol_symlink_escape_refuses() {
     move_pricing_fixture(project).await;
     let outside = tempfile::tempdir().unwrap();
     unix_fs::symlink(outside.path(), project.join("src/escape")).unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let before = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let result = handle_tool_call(
@@ -665,7 +665,7 @@ async fn test_move_symbol_aliases_to_source_refuse() {
         } else {
             unix_fs::symlink(&source, &alias).unwrap();
         }
-        let (cg, _env) = init_test_project(project).await;
+        let cg = init_test_project(project).await;
 
         let before = fs::read_to_string(&source).unwrap();
         let result = handle_tool_call(
@@ -703,7 +703,7 @@ async fn test_move_symbol_dot_prefixed_dest_normalizes() {
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
     move_pricing_fixture(project).await;
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -741,7 +741,7 @@ async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
-    // Module doc is contiguous with the first item — no blank line between.
+    // Module doc is contiguous with the first item, no blank line between.
     fs::write(
         project.join("src/a.rs"),
         "//! module a doc\npub fn fact() -> u32 {\n    1\n}\n",
@@ -752,7 +752,7 @@ async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
         "//! b\n\npub fn other() -> u32 {\n    0\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -807,7 +807,7 @@ async fn test_move_symbol_non_utf8_destination_refuses() {
         "//! a\n\npub fn movable() -> u32 {\n    1\n}\n",
     )
     .unwrap();
-    let (cg, _env) = init_test_project(project).await;
+    let cg = init_test_project(project).await;
     let server = cg
         .harness
         .server(&cg.project_root)
@@ -841,7 +841,7 @@ async fn test_move_symbol_non_utf8_destination_refuses() {
             .contains("failed to read destination"),
         "refusal message must name the read failure: {p}"
     );
-    // The destination is untouched — not clobbered with the moved symbol.
+    // The destination is untouched, not clobbered with the moved symbol.
     assert_eq!(
         fs::read(&dest).unwrap(),
         before_dest,

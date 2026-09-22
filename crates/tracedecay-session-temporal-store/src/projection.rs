@@ -9,7 +9,7 @@ use tracedecay_store::{
 };
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use super::query::{PERSIST_OPERATION, storage, storage_message};
+use super::query::{PERSIST_OPERATION, storage};
 use super::refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use super::relations::SessionRelationError;
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb, SessionTemporalWriteTxn};
@@ -28,7 +28,7 @@ pub(super) use materialize::canonical_parent_message_resolver;
 pub(crate) use persist::observation_envelope_from_payload;
 pub(super) use persist::{
     ProjectionProgressBaseline, persist_session_temporal_projection_batch_in_transaction,
-    seed_active_projection_in_transaction, session_temporal_projection_record_count,
+    session_temporal_projection_record_count,
 };
 pub(crate) use receipts::digest_bytes;
 pub use receipts::record_canonical_observation_effect;
@@ -36,8 +36,6 @@ pub(super) use receipts::validate_final_projection_receipt;
 
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";
-const MAX_BASELINE_RELATION_ITEMS: usize = 100_000;
-
 pub struct SessionTemporalRefreshDiscoveryPage {
     requests: Vec<SessionRefreshBeginOrJoinRequestV1>,
     active_scanned_through: Option<SessionId>,
@@ -279,52 +277,23 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 let (scope, relation_store) = self
                     .session_relation_store()
                     .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                match relation_store.load_projection(
+                match relation_store.logical_copy_count(
                     &scope,
                     recovery.session_id(),
                     recovery.frozen_watermarks().active_generation().value(),
-                    MAX_BASELINE_RELATION_ITEMS,
-                    MAX_BASELINE_RELATION_ITEMS,
                     Arc::new(NeverCancelled),
                 ) {
-                    Ok(projection) => u64::try_from(projection.logical_copies.len())
-                        .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
+                    Ok(copies) => copies,
                     Err(SessionRelationError::NotFound) => {
-                        let mut rows = snapshot
-                            .query(
-                                "SELECT COUNT(*)
-                             FROM session_occurrences
-                             WHERE session_id = ?1 AND generation = ?2",
-                                params![
-                                    recovery.session_id().as_str(),
-                                    i64::try_from(
-                                        recovery.frozen_watermarks().active_generation().value()
-                                    )
-                                    .map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
-                                ],
-                            )
-                            .await
-                            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                        let retained: i64 = rows
-                            .next()
-                            .await
-                            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?
-                            .ok_or_else(|| {
-                                storage_message(
-                                    MATERIALIZE_REFRESH,
-                                    "active projection count returned no row",
-                                )
-                            })?
-                            .get(0)
-                            .map_err(|error| storage(MATERIALIZE_REFRESH, error))?;
-                        if retained == 0 {
-                            0
-                        } else {
-                            return Err(storage_message(
-                                MATERIALIZE_REFRESH,
-                                "active native relation projection is unavailable",
-                            ));
-                        }
+                        // No native graph was applied for this generation. Reconstruct
+                        // the copy count from the sealed rows instead of retrying the
+                        // absence as a busy source.
+                        crate::relation_projection::count_canonical_logical_copies(
+                            &snapshot,
+                            recovery.session_id(),
+                            recovery.frozen_watermarks().active_generation(),
+                        )
+                        .await?
                     }
                     Err(error) => return Err(storage(MATERIALIZE_REFRESH, error)),
                 }

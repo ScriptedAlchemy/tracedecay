@@ -90,7 +90,7 @@ pub enum SealedStagingRelease {
 /// available in the case this exists for: at project open the daemon recovers
 /// the memory graph's head and the serving code generation, so every other
 /// sealed code scope has no lease in this process and its rows were retained
-/// forever — the staging container reached 8.6 GB on disk and cost 20+ GB of
+/// forever, the staging container reached 8.6 GB on disk and cost 20+ GB of
 /// heap on every open, entirely for rows nothing reads. The sealed artifact
 /// is the serving authority for those generations: it was built from these
 /// exact rows and reopened under a digest proof against the relational head,
@@ -463,7 +463,7 @@ impl GraphDb {
     /// The native rows the shared staging container currently holds for this
     /// generation. Recovery compares this with the manifest's own counts: a
     /// leftover empty projection commit after a row release is not serving
-    /// state, and neither is a row set that is present but short — an
+    /// state, and neither is a row set that is present but short, an
     /// interrupted release proves nothing about the head it is supposed to
     /// reproduce. Either way remount must adopt the sealed store.
     pub(crate) fn staging_generation_rows(
@@ -1648,7 +1648,7 @@ impl GraphDb {
     /// must reproduce that exact digest before anything is deleted. The
     /// registry hook for it is
     /// `registry::publication::release_sealed_generation_staging_rows`, which
-    /// already reads `relational_head` — passing
+    /// already reads `relational_head`, passing
     /// `Some(relational_head.recovered_digest.as_str())` here binds the
     /// release to the authority's head instead of letting the artifact vouch
     /// for itself.
@@ -1682,7 +1682,7 @@ impl GraphDb {
         // generation forever: the release needs the engine, the engine only
         // opens for work, and the only work waiting was the release. Deleting
         // rows is exactly the work that makes the *next* open cheaper, so it
-        // is worth one open now — and the engine goes straight back to
+        // is worth one open now, and the engine goes straight back to
         // hibernation afterwards, so the sweep never leaves a container
         // resident that was not resident before it ran.
         let hibernated_on_entry = !self.native_engine_open()?;
@@ -1817,7 +1817,7 @@ impl GraphDb {
     /// generation keeps its rows regardless of which authority applies.
     ///
     /// The lease arm is preferred. When no lease is resident, the sealed
-    /// artifact stands in — see
+    /// artifact stands in, see
     /// [`SealedStagingReleaseAuthorityV1::SealedArtifact`]. The caller
     /// resolved this locator from the relational verified head and supplied
     /// a digest that either a seated reader or the on-disk receipt already
@@ -1880,8 +1880,8 @@ impl GraphDb {
     }
 
     /// Drops every resident verified-generation lease while keeping the
-    /// durable ledger — stored rows, sealed-only marks, and installed sealed
-    /// readers — exactly as it stands.
+    /// durable ledger, stored rows, sealed-only marks, and installed sealed
+    /// readers, exactly as it stands.
     ///
     /// This is the state a freshly opened daemon is in for every code scope
     /// it has not activated: the sealed artifact is adopted from disk and the
@@ -1915,7 +1915,7 @@ impl GraphDb {
     }
 
     /// Test surface for
-    /// [`Self::release_sealed_generation_staging_rows_for_relational_head`].
+    /// `Self::release_sealed_generation_staging_rows_for_relational_head`.
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn release_staging_rows_for_relational_head(
         &self,
@@ -1965,8 +1965,8 @@ impl GraphDb {
             // The native rows wait for an engine that is already open, but
             // the sealed artifact needs no engine: the generation is retired
             // and nothing serves it, so its directory leaves the disk now
-            // instead of waiting — possibly forever, on a project that never
-            // publishes again — behind the deferred row delete.
+            // instead of waiting, possibly forever, on a project that never
+            // publishes again, behind the deferred row delete.
             self.retire_sealed_generation_store(locator);
             return Ok(GenerationContentsDeletion::RetentionPending);
         }
@@ -2351,7 +2351,7 @@ impl GraphDb {
     ///
     /// A quarantined locator answers `None` instead of the typed refusal:
     /// the quarantine records that the stored rows failed their last digest
-    /// proof, which is exactly the state a full republication heals — the
+    /// proof, which is exactly the state a full republication heals, the
     /// publish path re-projects the rows, re-proves the recovered digest,
     /// and `remember`/`install` clear the marker with the fresh proof.
     /// Read-side recovery keeps the strict [`Self::verified_generation`]

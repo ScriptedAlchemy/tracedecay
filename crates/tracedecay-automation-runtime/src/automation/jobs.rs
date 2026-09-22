@@ -12,18 +12,21 @@ use super::backend::{
     BackendRetryPolicy, classify_agent_task_error_message, run_agent_task_with_retry_report,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+use super::job_error;
 use super::job_webhook;
 use super::lifecycle::{
     AutomationRunLedgerPublication, AutomationRunSettlementGuard, RetainedAutomationRun,
-    generated_run_id,
+    generated_run_id, publish_ledger_record,
 };
 use super::managed_skills::{ManagedSkillState, load_managed_skill};
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, AutomationRunStatus,
-    AutomationTrigger, append_or_reuse_scheduler_diagnostic, append_run_record,
-    latest_record_by_canonical_completion, load_run_ledger_task_summary,
+    AutomationTrigger, append_or_reuse_scheduler_diagnostic, latest_record_by_canonical_completion,
+    load_run_ledger_task_summary,
 };
-use super::scheduler::{AutomationSchedule, AutomationTaskLock, cron_is_due, parse_schedule};
+use super::scheduler::{
+    AutomationSchedule, AutomationTaskLock, cron_is_due, elapsed_secs, parse_schedule,
+};
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -447,13 +450,6 @@ fn latest_terminal_job_record<'a>(
     }))
 }
 
-fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
-    if now_secs < completed_at {
-        return 0;
-    }
-    (now_secs - completed_at) as u64
-}
-
 /// Executes one user job through the automation backend, delivering its
 /// output and recording the run in the shared ledger under
 /// `user_job:<job_id>`.
@@ -875,7 +871,7 @@ impl JobRunContext<'_> {
     }
 
     /// `effectful_anchor_run_id` must come from the same ledger snapshot that
-    /// minted `self.run_id`'s occurrence identity — never from a summary
+    /// minted `self.run_id`'s occurrence identity, never from a summary
     /// loaded at append time. See
     /// `scheduler_gate::evaluate_and_record_scheduler_skip` for why a fresher
     /// anchor can silently duplicate this diagnostic.
@@ -927,12 +923,7 @@ impl JobRunContext<'_> {
     }
 
     async fn publish_terminal(&self, record: &AutomationRunLedgerRecord) -> Result<()> {
-        match self.ledger_publication {
-            AutomationRunLedgerPublication::Immediate => {
-                append_run_record(self.dashboard_root, record).await
-            }
-            AutomationRunLedgerPublication::DeferredUntilApplicationSettlement => Ok(()),
-        }
+        publish_ledger_record(self.ledger_publication, self.dashboard_root, record).await
     }
 }
 
@@ -1051,12 +1042,6 @@ async fn run_pre_run_command(command: &str, project_root: Option<&Path>) -> Resu
         stdout.trim_end(),
         JOB_COMMAND_OUTPUT_CAP_CHARS,
     ))
-}
-
-fn job_error<T>(message: &str) -> Result<T> {
-    Err(TraceDecayError::Config {
-        message: message.to_string(),
-    })
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use tracedecay_domain::collapse_whitespace;
 use tracedecay_lcm::message_storage_text;
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
@@ -591,7 +592,7 @@ impl ProjectRootMatcherCache {
 /// * **Project** scope keeps a record when its working directory belongs to
 ///   the project being ingested.
 /// * **Profile** (user-global) scope keeps a record when its working directory
-///   belongs to *no* registered project — records with no working directory at
+///   belongs to *no* registered project, records with no working directory at
 ///   all are user-global by definition. That is exactly the complement of the
 ///   project scopes, so each record lands in one store and not both.
 ///
@@ -618,7 +619,7 @@ impl TranscriptScopeMatcher {
     }
 
     /// Profile scope when `registered_roots` is present, project scope
-    /// otherwise — the shape every provider source carries as an
+    /// otherwise, the shape every provider source carries as an
     /// `Option<Vec<PathBuf>>` user scope beside its project root.
     pub fn for_scope(project_root: &Path, registered_roots: Option<&[PathBuf]>) -> Self {
         registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
@@ -665,7 +666,7 @@ impl TranscriptScopeMatcher {
 
     /// Tri-state scope acceptance: `Match`/`NoMatch` mirror [`Self::accepts`],
     /// while `Unknown` reports that a bounded git timeout left the record's
-    /// scope undecided — deferring callers must not persist their cursor.
+    /// scope undecided, deferring callers must not persist their cursor.
     pub fn membership(&self, cwd: Option<&Path>) -> ProjectMembership {
         match self {
             Self::Project(project) => cwd.map_or(ProjectMembership::NoMatch, |cwd| {
@@ -716,7 +717,7 @@ fn normalized_paths_equal(a: &Path, b: &Path) -> bool {
 /// unfinished-run evidence) so a multi-line blob never smears a table, bullet,
 /// or stored column.
 pub fn one_line_truncated(text: &str, max: usize) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     if collapsed.chars().count() <= max {
         return collapsed;
     }
@@ -739,7 +740,7 @@ pub fn preview_truncated(text: &str, max_bytes: usize) -> String {
 /// Collapse whitespace and clip to a short preview suitable for a session title.
 pub fn preview_title(text: &str) -> String {
     const MAX_TITLE_CHARS: usize = 80;
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     if collapsed.chars().count() <= MAX_TITLE_CHARS {
         collapsed
     } else {

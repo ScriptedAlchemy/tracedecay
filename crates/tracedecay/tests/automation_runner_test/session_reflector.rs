@@ -46,7 +46,7 @@ impl AutomationSessionRetrieval for StructuralBudgetRefusalRetrieval {
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "test-transport")]
-use tracedecay_automation_runtime::ports::session_evidence::{LcmGrepSort, LcmScope};
+use tracedecay_lcm::{LcmGrepSort, LcmScope};
 #[cfg(feature = "test-transport")]
 use tracedecay_store::{ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery};
 
@@ -1672,7 +1672,7 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
     .unwrap();
 
     // The backend failure is transient, but this test pins the noop-fallback
-    // record, not retry semantics (covered by backend.rs retry tests) —
+    // record, not retry semantics (covered by backend.rs retry tests),
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
     assert_noop_fallback_record(

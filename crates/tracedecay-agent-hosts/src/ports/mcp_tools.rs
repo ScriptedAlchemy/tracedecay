@@ -9,8 +9,8 @@
 //! composition depends on them.
 //!
 //! That direction matters for correctness, not tidiness. While this was a
-//! `OnceLock<fn>` pair, an unwired process answered with an empty catalog —
-//! a semantically valid tool set — so any installer reached before the root
+//! `OnceLock<fn>` pair, an unwired process answered with an empty catalog,
+//! a semantically valid tool set, so any installer reached before the root
 //! registered wrote an empty permission allowlist and an empty schema file
 //! with no error. `crates/tracedecay/src/runtime_ports.rs` even had a
 //! documented "without the MCP catalog" registration form that produced
@@ -44,8 +44,8 @@ pub struct AdvertisedToolV1 {
 
 /// The tools advertised on this host.
 ///
-/// Errors when the catalog cannot be assembled — the application catalog
-/// snapshot is the one remaining runtime input — so a caller writing host
+/// Errors when the catalog cannot be assembled, the application catalog
+/// snapshot is the one remaining runtime input, so a caller writing host
 /// permissions or schema files fails loudly instead of writing an empty set.
 pub fn advertised_tools() -> Result<Vec<AdvertisedToolV1>> {
     let definitions = tracedecay_mcp_catalog::get_tool_definitions().map_err(|error| {
@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     /// The catalog is read from its owning crate, so a process that never ran
-    /// any composition-root registration still sees the real tool set —
+    /// any composition-root registration still sees the real tool set,
     /// never the empty-but-valid one installers used to write.
     #[test]
     fn the_catalog_is_readable_without_any_registration() {

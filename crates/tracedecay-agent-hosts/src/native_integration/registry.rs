@@ -1,9 +1,9 @@
 //! One retained native-integration transaction authority per daemon-owned
 //! project store.
 //!
-//! The registry composes the four coordinator inputs — the durable store
+//! The registry composes the four coordinator inputs, the durable store
 //! actor, the exact-pair topology resolver, the native Gix mechanics, and the
-//! pinned-policy authorization — completes durable startup recovery, and only
+//! pinned-policy authorization, completes durable startup recovery, and only
 //! then exposes the owner to invocation routing. A project without a mounted
 //! owner keeps answering the typed unavailable result; nothing here guesses
 //! or falls back to local mutation.
@@ -747,9 +747,7 @@ mod tests {
         ManifestDigest::new(format!("sha256:{}", "5".repeat(64))).expect("policy digest")
     }
 
-    fn digest(byte: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn git(root: &Path, arguments: &[&str]) {
         let status = Command::new(try_git_program().expect("resolve the git program"))

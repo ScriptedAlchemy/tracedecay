@@ -127,8 +127,8 @@ impl VerifiedGenerationState {
         self.known
             .insert(lease.locator.clone(), Arc::downgrade(lease));
         // `stored` is the durable-row ledger. A sealed-only generation has
-        // no staging rows — they were released, or it was sealed straight
-        // from its manifest — so remembering its lease must not claim any.
+        // no staging rows, they were released, or it was sealed straight
+        // from its manifest, so remembering its lease must not claim any.
         if !self.sealed_only.contains(&lease.locator) {
             self.stored.insert(
                 lease.locator.clone(),
@@ -421,16 +421,14 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.outgoing_relation_ids(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    max_relations,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relation_ids(
+                &namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
         })
     }
 
@@ -438,7 +436,7 @@ impl VerifiedGraphSnapshot {
     ///
     /// Plan 39 G7b: `VerifiedGraphSnapshot` is the sole production read
     /// boundary, and reverse adjacency (callers, impact, reverse
-    /// reachability) previously had no bulk form here — only
+    /// reachability) previously had no bulk form here, only
     /// [`Self::outgoing_relation_ids`]. Exposing it lets those reads leave
     /// SQL `edges` joins without dropping their budgets.
     #[hotpath::measure(
@@ -452,16 +450,14 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.incoming_relation_ids(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    max_relations,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.incoming_relation_ids(
+                &namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
         })
     }
 
@@ -477,17 +473,15 @@ impl VerifiedGraphSnapshot {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.outgoing_relation_ids_page(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    after,
-                    limit,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relation_ids_page(
+                &namespace,
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                cancellation,
+            )
         })
     }
 
@@ -503,17 +497,15 @@ impl VerifiedGraphSnapshot {
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.incoming_relation_ids_page(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    after,
-                    limit,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.incoming_relation_ids_page(
+                &namespace,
+                starts,
+                relation_kinds,
+                after,
+                limit,
+                cancellation,
+            )
         })
     }
 
@@ -532,16 +524,14 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.outgoing_relations(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    max_relations,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relations(
+                &namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
         })
     }
 
@@ -558,16 +548,14 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.outgoing_relations_truncated(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    max_relations,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relations_truncated(
+                &namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
         })
     }
 
@@ -582,16 +570,14 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<crate::GraphRelationTarget>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.outgoing_relation_targets(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    max_relations,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.outgoing_relation_targets(
+                &namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
         })
     }
 
@@ -602,16 +588,14 @@ impl VerifiedGraphSnapshot {
         cancellation: Arc<dyn GraphCancellation>,
         visitor: &mut dyn FnMut(crate::GraphRelationTarget),
     ) -> Result<usize, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.visit_outgoing_relation_targets(
-                    &self.head.locator.physical_namespace()?,
-                    start,
-                    relation_kinds,
-                    cancellation,
-                    visitor,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.visit_outgoing_relation_targets(
+                &namespace,
+                start,
+                relation_kinds,
+                cancellation,
+                visitor,
+            )
         })
     }
 
@@ -627,16 +611,14 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.incoming_relations(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    max_relations,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.incoming_relations(
+                &namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
         })
     }
 
@@ -653,16 +635,14 @@ impl VerifiedGraphSnapshot {
         max_relations: usize,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
-        self.with_operation(|| {
-            self.with_head_database(|database| {
-                database.incoming_relations_truncated(
-                    &self.head.locator.physical_namespace()?,
-                    starts,
-                    relation_kinds,
-                    max_relations,
-                    cancellation,
-                )
-            })
+        self.head_fanout(|database, namespace| {
+            database.incoming_relations_truncated(
+                &namespace,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
         })
     }
 
@@ -698,6 +678,17 @@ impl VerifiedGraphSnapshot {
             return Err(GraphDbError::conflict("lease.require_head_projection"));
         }
         Ok(())
+    }
+
+    fn head_fanout<T>(
+        &self,
+        operation: impl FnOnce(&crate::GraphDb, GraphNamespace) -> Result<T, GraphDbError>,
+    ) -> Result<T, GraphDbError> {
+        self.with_operation(|| {
+            self.with_head_database(|database| {
+                operation(database, self.head.locator.physical_namespace()?)
+            })
+        })
     }
 
     fn with_operation<T>(

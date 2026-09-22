@@ -1005,13 +1005,25 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
                     .expect("registered daemon ingest response text"),
             )
             .expect("registered daemon ingest payload");
-            if payload["completed"] != false {
+            // `completed: true` with `accepted_for_replay` means the catch-up
+            // sweep has not yet drained this admission. That is not a durable
+            // commit, so keep polling until a terminal that proves the
+            // transcript, or the deadline reports the last payload.
+            if matches!(
+                payload["status"].as_str(),
+                Some("committed" | "exact_duplicate")
+            ) {
                 break output;
             }
-            assert_eq!(
-                payload["admission"]["retryable"], true,
-                "incomplete ingest must carry a retryable admission: {response}"
-            );
+            if payload["completed"] != false && payload["status"] != "accepted_for_replay" {
+                break output;
+            }
+            if payload["completed"] == false {
+                assert_eq!(
+                    payload["admission"]["retryable"], true,
+                    "incomplete ingest must carry a retryable admission: {response}"
+                );
+            }
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             assert!(
@@ -1036,14 +1048,22 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             .expect("registered daemon ingest response text"),
     )
     .expect("registered daemon ingest payload");
-    assert_eq!(
-        payload["status"], "committed",
-        "registered daemon ingest did not commit: {response}"
+    // The daemon's project catch-up sweep drains the whole Cursor projection
+    // queue for this scope, so it can project the observations this ingest
+    // admitted on an earlier deferred pass. Both terminal states below prove
+    // the transcript is durable; only `accepted_for_replay` would not.
+    assert!(
+        matches!(
+            payload["status"].as_str(),
+            Some("committed" | "exact_duplicate")
+        ),
+        "registered daemon ingest did not commit: {response}\ndaemon log:\n{}",
+        std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
     );
 
     // Codex records a turn in its rollout, not in the Stop event, so the
     // project-scoped Stop ingest below has to find a rollout whose `cwd` is
-    // this project — exactly the shape the daemon's project scheduler admits.
+    // this project, exactly the shape the daemon's project scheduler admits.
     let codex_sessions = environment.home().join(".codex/sessions");
     std::fs::create_dir_all(&codex_sessions).unwrap();
     let mut codex_meta: Value = serde_json::from_str(include_str!(
@@ -1080,37 +1100,70 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "format": "json",
     })
     .to_string();
-    let stop_output = common::tracedecay_command_with_home(environment.home())
-        .args([
-            "tool",
-            "--project",
-            project_arg.as_str(),
-            "tracedecay_hook_runtime",
-            "--args",
-            stop_args.as_str(),
-            "--json",
-        ])
-        .current_dir(&project)
-        .output()
-        .expect("invoke registered daemon stop path");
-    assert!(
-        stop_output.status.success(),
-        "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&stop_output.stdout),
-        String::from_utf8_lossy(&stop_output.stderr)
-    );
-    let stop_response: Value =
-        serde_json::from_slice(&stop_output.stdout).expect("registered daemon stop response");
-    let stop_payload: Value = serde_json::from_str(
-        stop_response["content"][0]["text"]
-            .as_str()
-            .expect("registered daemon stop response text"),
-    )
-    .expect("registered daemon stop payload");
-    assert_eq!(
-        stop_payload["status"], "committed",
-        "registered daemon stop ingest did not commit: {stop_response}"
-    );
+    // The project catch-up sweep races this pass for the rollout just written.
+    // Admission is the durable commit. A sweep that admits it first leaves the
+    // hook with nothing new to persist and reports `exact_duplicate`. Both
+    // terminals prove the transcript is durable; `accepted_for_replay` proves
+    // neither. A deferred or still-warming pass is the same typed progress the
+    // Cursor ingest above rides out.
+    let stop_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let stop_output = common::tracedecay_command_with_home(environment.home())
+            .args([
+                "tool",
+                "--project",
+                project_arg.as_str(),
+                "tracedecay_hook_runtime",
+                "--args",
+                stop_args.as_str(),
+                "--json",
+            ])
+            .current_dir(&project)
+            .output()
+            .expect("invoke registered daemon stop path");
+        if stop_output.status.success() {
+            let stop_response: Value = serde_json::from_slice(&stop_output.stdout)
+                .expect("registered daemon stop response");
+            let stop_payload: Value = serde_json::from_str(
+                stop_response["content"][0]["text"]
+                    .as_str()
+                    .expect("registered daemon stop response text"),
+            )
+            .expect("registered daemon stop payload");
+            if stop_payload["completed"] != false {
+                assert!(
+                    matches!(
+                        stop_payload["status"].as_str(),
+                        Some("committed" | "exact_duplicate")
+                    ),
+                    "registered daemon stop ingest proved neither a commit nor a duplicate: {stop_response}\ndaemon log:\n{}",
+                    std::fs::read_to_string(&daemon_log)
+                        .expect("read isolated advisory daemon log"),
+                );
+                break;
+            }
+            assert_eq!(
+                stop_payload["admission"]["retryable"], true,
+                "incomplete stop ingest must carry a retryable admission: {stop_response}"
+            );
+        } else {
+            let stderr = String::from_utf8_lossy(&stop_output.stderr).into_owned();
+            assert!(
+                stderr.contains("is warming in the background"),
+                "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{stderr}\ndaemon log:\n{}",
+                String::from_utf8_lossy(&stop_output.stdout),
+                std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
+            );
+        }
+        assert!(
+            std::time::Instant::now() < stop_deadline,
+            "registered daemon stop ingest did not complete before its deadline\nstdout:\n{}\nstderr:\n{}\ndaemon log:\n{}",
+            String::from_utf8_lossy(&stop_output.stdout),
+            String::from_utf8_lossy(&stop_output.stderr),
+            std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 
     let advisory_args = json!({
         // Serialized as a file URL rather than concatenated: a Windows native
@@ -1340,9 +1393,9 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
 // provider_branch_review/`, the same captures the decoder tests above consume)
 // through the shipped decoders, sanitizer, and canonical anchor authorities.
 // Only immutable *identity* (head commit, reviewed path and lines) is
-// retargeted onto this test's real repository — the same retargeting
+// retargeted onto this test's real repository, the same retargeting
 // `ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph`
-// already performs — so the recorded protocol shape, bodies, digests, and
+// already performs, so the recorded protocol shape, bodies, digests, and
 // lifecycle flags stay exactly as captured.
 // ---------------------------------------------------------------------------
 
@@ -2236,7 +2289,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         FeedbackFindingLifecycleV1::Active
     );
     // `Clean` is reserved for a covered cycle that found nothing, so a positive
-    // four-pillar cycle terminates `Blocked` — findings present, coverage
+    // four-pillar cycle terminates `Blocked`, findings present, coverage
     // complete. The point of pinning it is that it is neither `Clean` (which
     // would mean the pillars produced nothing) nor any degraded terminal.
     assert_eq!(

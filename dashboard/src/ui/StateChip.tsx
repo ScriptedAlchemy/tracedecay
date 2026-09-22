@@ -19,15 +19,15 @@ import {
 } from 'lucide-react';
 import { cn } from './cn';
 
-/** The nineteen-state domain taxonomy. Token + icon + label — never color
+/** The nineteen-state domain taxonomy. Token + icon + label, never color
  * alone. */
 export type DomainStateKind =
   | 'loading'
   | 'complete_zero_findings'
   | 'ready'
   | 'partial'
-  /** A provider quota bounded this read. The near neighbour of `partial` —
-   * both mean what is shown is real and less than what exists — sharing its
+  /** A provider quota bounded this read. The near neighbour of `partial`,
+   * both mean what is shown is real and less than what exists, sharing its
    * hue the way `unavailable` shares `offline`'s: told apart by icon and
    * label, so a quota pause never reads as a source that answered short. */
   | 'rate_limited'
@@ -96,7 +96,7 @@ const STATE: Record<
 
 /** The lamp bar down the chip's leading edge. Spelled out per state (rather
  * than derived from `tokenClass`) because Tailwind resolves utilities by
- * scanning literal source text — a computed class name would never be built.
+ * scanning literal source text, a computed class name would never be built.
  * Exported so the status strip's workspace registers light their swatch from
  * the same rule as the chip, and the two can never disagree about a state. */
 export const STATE_LAMP: Record<DomainStateKind, string> = {

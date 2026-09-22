@@ -15,10 +15,9 @@ doctest = false
 # `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
 # feature exists only for the `cfg(feature = "hotpath")` sites in this crate
 # that change compiled behaviour under profiling. It forwards nowhere else.
-# Type-coupled: `git_index_transactions::ProfiledFile` names the on-mode
-# `hotpath::io::InstrumentedIo` (hotpath 0.24 has no mode-agnostic `wrap`
-# alias for I/O), so any build that selects the backend with this crate in
-# its graph must select this feature too.
+# No type in this crate names hotpath's on-mode `InstrumentedIo`: `io!` results
+# stay in local `let` bindings whose type is inferred, so selecting the backend
+# without this feature still compiles.
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 lite = ["tracedecay-code-extraction/lite", "tracedecay-code-index/lite"]
@@ -36,7 +35,7 @@ test-helpers = [
 
 [dependencies]
 futures-util = "0.3.33"
-gix = { version = "=0.86.0", default-features = false, features = [
+gix = { version = "=0.87.1", default-features = false, features = [
     "revision",
     "blob-diff",
     "parallel",
@@ -84,7 +83,6 @@ notify = "6"
 [dev-dependencies]
 filetime = "0.2"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
-tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = [

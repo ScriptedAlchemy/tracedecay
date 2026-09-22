@@ -55,10 +55,6 @@ static OPERATION_EVENT_PROBLEM_CONTRACT: LazyLock<ResultContractRef> = LazyLock:
     .unwrap_or_else(|_| panic!("the operation-event problem contract is static"))
 });
 
-fn current_micros_for_cancellation() -> UtcMicros {
-    now_micros()
-}
-
 /// Stable operation identity. The originating authorized request owns the
 /// identity; paths, labels, and client-selected payloads never participate.
 #[derive(
@@ -273,47 +269,31 @@ impl OperationEventError {
                 retry: RetryDirective::AfterRevalidate,
                 legal_actions: vec![LegalAction::Refresh],
             },
-            Self::InvalidFrontier => ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic::new(
-                    "operation_event.invalid_frontier",
-                    "The requested operation-event frontier is invalid",
-                )?,
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            },
+            Self::InvalidFrontier => ApplicationProblem::conflict(
+                "operation_event.invalid_frontier",
+                "The requested operation-event frontier is invalid",
+            ),
             Self::RequestNotAdmitted => ApplicationProblem::timed_out_before_admission(),
-            Self::Saturated => ApplicationProblem::Saturated {
-                diagnostic: SafeDiagnostic::new(
-                    "operation_event.saturated",
-                    "Operation-event capacity is temporarily saturated",
-                )?,
-                retry: RetryDirective::AfterDelay,
-                legal_actions: vec![LegalAction::Retry],
-            },
+            Self::Saturated => ApplicationProblem::saturated(
+                "operation_event.saturated",
+                "Operation-event capacity is temporarily saturated",
+            ),
             // Permanently invalid input: the same request can never succeed, so
             // the client must correct it rather than retry.
             Self::InvalidContext(_)
             | Self::InvalidProgress
             | Self::InvalidTerminal(_)
-            | Self::InvalidTestRunEvent => ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic::new(
-                    "operation_event.invalid_request",
-                    "The operation-event request is invalid",
-                )?,
-                retry: RetryDirective::Never,
-                legal_actions: vec![LegalAction::CorrectRequest],
-            },
+            | Self::InvalidTestRunEvent => ApplicationProblem::invalid_request(
+                "operation_event.invalid_request",
+                "The operation-event request is invalid",
+            ),
             // Idempotency facts: the identity or terminal receipt is already
             // published, so the client re-reads current state instead of
             // retrying the same publish.
-            Self::AlreadyBound | Self::TerminalAlreadyPublished => ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic::new(
-                    "operation_event.already_published",
-                    "The operation-event identity is already published",
-                )?,
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            },
+            Self::AlreadyBound | Self::TerminalAlreadyPublished => ApplicationProblem::conflict(
+                "operation_event.already_published",
+                "The operation-event identity is already published",
+            ),
             // A misconfigured authority is a deterministic, process-lifetime
             // failure. It is not the caller's request that is wrong and no
             // amount of retrying will change the outcome.
@@ -1085,9 +1065,7 @@ impl OperationEventAuthority {
         }
         let already_requested = record.cancellation.borrow().is_some();
         if !already_requested {
-            record
-                .cancellation
-                .send_replace(Some(current_micros_for_cancellation()));
+            record.cancellation.send_replace(Some(now_micros()));
         }
         Ok(if already_requested {
             OperationCancelOutcome::AlreadyRequested

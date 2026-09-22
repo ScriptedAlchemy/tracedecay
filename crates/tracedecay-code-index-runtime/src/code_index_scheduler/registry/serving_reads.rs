@@ -141,7 +141,7 @@ impl CodeIndexSchedulerRegistryV1 {
 
     /// Resolve one sealed generation's replay binding without joining the
     /// scheduler mutex. A background reconcile owns that mutex for its whole
-    /// pass — sealing a production-scale corpus holds it for minutes — and
+    /// pass, sealing a production-scale corpus holds it for minutes, and
     /// the binding is an immutable publication read the retained historical
     /// owner answers directly, so blocking here parked the caller (and its
     /// runtime worker thread) behind work the read never needed.
@@ -202,8 +202,8 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
         let project_root = project_root.canonicalize().ok()?;
         // Read the O(1) serving slot instead of the scheduler mutex. This used
-        // to take `scheduler.lock()` — a blocking std mutex held by any
-        // in-flight reconcile — while still holding the `mounted` async mutex,
+        // to take `scheduler.lock()`, a blocking std mutex held by any
+        // in-flight reconcile, while still holding the `mounted` async mutex,
         // so one warmup/dashboard call during a rebuild parked a runtime worker
         // for the reconcile's whole duration AND serialized every code-index
         // query behind it: a silent, daemon-wide code-index outage.
@@ -277,6 +277,7 @@ impl CodeIndexSchedulerRegistryV1 {
             generation_recovery,
             build_progress,
             hints,
+            pending_wake,
             source_freshness,
             graph_activation_enabled,
         ) = {
@@ -294,12 +295,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.generation_recovery),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.hints),
+                Arc::clone(&worktree.pending_wake),
                 worktree.source_freshness.clone(),
                 worktree.graph_activation.policy().is_enabled(),
             )
         };
         tokio::task::spawn_blocking(move || {
-            let progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
+            let mut progress = hotpath::measure_block!("daemon.code_index.dashboard.progress", {
                 let progress = build_progress
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -316,17 +318,29 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 progress
             });
-            // `Verifying` / `Refreshing` name an executing source proof or
-            // rebuild pass. A bare pending wake is only a scheduled follow-up;
-            // counting it here flipped Fresh→Verifying between consecutive
-            // status reads after a settled seat (registry publication feeds).
-            // The pass guard (`reconcile_in_progress`) is the durable signal.
-            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0;
+            let refresh_in_flight = reconcile_in_progress.load(Ordering::Acquire) != 0
+                || pending_wake
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .micros
+                    != 0;
             let source_change_pending = source_freshness.source_change_pending();
             let parked = convergence_park
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
+            // The park is the authority on why this worktree cannot converge;
+            // the progress slot only describes the generation whose build
+            // published last. A text-artifact commit that lands after the park
+            // republishes a fresh snapshot and erases the reason the worker
+            // wrote there, so status reported a blocked index as `ready` with
+            // no reason. Project the park's reason instead of racing for it.
+            if let Some(reason) = parked.as_ref().and_then(|parked| parked.blocked_reason)
+                && let Some(progress) = progress.as_mut()
+            {
+                progress.blocked_reason = Some(reason);
+            }
             let generation_recovery = generation_recovery
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -561,24 +575,22 @@ impl CodeIndexSchedulerRegistryV1 {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    // A still-current proof needs no follow-up. If it expired
-                    // after this pass began, leave one coalesced wake so the
-                    // worker re-observes source after releasing its ownership.
-                    if serving.is_some()
-                        && !source_freshness.ready_without_stat(&freshness_root, &shutting_down)
-                    {
-                        Self::note_wake_if_idle(
-                            &pending_wake,
-                            &wake,
-                            CodeIndexCadenceTriggerV1::BusyFollowUp,
-                        );
-                    }
+                    // The holder of the scheduler is already the source
+                    // observation. A follow-up posted from this read is taken
+                    // by that pass, the slot goes empty, and the next poll
+                    // finds the lock still held with the proof not yet
+                    // renewed and posts another. Dashboard freshness reads
+                    // that slot as `refresh_in_flight` and stays `Verifying`
+                    // for the whole chain. The pass renews the proof before
+                    // it releases the lock; a proof that is still expired
+                    // afterwards is requested by the next read that acquires
+                    // the scheduler.
                     return serving;
                 }
             };
             // Serve-old-first, continued: winning the scheduler lock must not
             // mean paying for the rebuild. `ensure_fresh_for_query` reconciles
-            // inline, and that reconcile is O(store) with no bound of its own —
+            // inline, and that reconcile is O(store) with no bound of its own,
             // a live `tracedecay_context` call sat on this exact line for 900
             // seconds while the daemon ground a failing publish loop, and only
             // the client's own timeout ended it. The ladder's checks
@@ -828,7 +840,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// remains fully decoded and current. When a background reconcile owns the
     /// scheduler mutex, the recorded exact-source witness answers for the
     /// seated generation instead of refusing for the whole pass (see
-    /// [`MountedCodeIndexWorktreeV1::serving_source_witness`]).
+    /// `MountedCodeIndexWorktreeV1::serving_source_witness`).
     pub async fn latest_complete_ready_decoded_for_scope(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -1235,7 +1247,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// sealed source. Once that proof expires, the immutable owner remains
     /// available as stale while one coalesced wake asks the retained worker to
     /// run the exact stat/content proof. The read never performs that work or
-    /// waits for the scheduler mutex — the pass counter is read only to
+    /// waits for the scheduler mutex, the pass counter is read only to
     /// attribute the wake, never to decide currency.
     pub async fn latest_text_serving_freshness_for_scope(
         &self,
@@ -1431,14 +1443,14 @@ impl CodeIndexSchedulerRegistryV1 {
     /// This never reconciles inline and never parks: it checks only the bounded
     /// source proof and hands exact verification or rebuild to the worker. It
     /// exists because the search path had no remedy at
-    /// all — the freshness ladder lives in `latest_complete_fresh`, which search
+    /// all, the freshness ladder lives in `latest_complete_fresh`, which search
     /// deliberately does not call, so a search that resolved to nothing returned
     /// its typed failure forever without ever asking anyone to rebuild.
     ///
     /// A quiet repository must not turn every read into a wake, so two
     /// suppressions apply. First, an already-pending, unclaimed wake *is* the
     /// remedy this admission would ask for, so it is reused rather than
-    /// duplicated — that is what keeps a rebuild window's worth of failing
+    /// duplicated, that is what keeps a rebuild window's worth of failing
     /// searches from becoming a wake storm and from each fabricating its own
     /// cadence arrival. Second, when a generation's immutable text owners are
     /// ready, the shared source fence suppresses a wake while its proof is
@@ -1449,7 +1461,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// observed the checkout when it started, which may predate the state this
     /// admission found unservable, so declining here strands the remedy until
     /// an unrelated hint arrives. The claim above already coalesces the only
-    /// duplicate worth suppressing — a wake nobody has dequeued yet.
+    /// duplicate worth suppressing, a wake nobody has dequeued yet.
     pub async fn request_query_background_reconcile(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
@@ -1541,8 +1553,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 .overflow();
         }
         // `claim` only proves the slot was free at that instant. `note_wake`
-        // coalesces a foreign arrival into a live claim — it keeps the claimed
-        // `micros` and takes the owner — so a hook hint, overflow, or watcher
+        // coalesces a foreign arrival into a live claim, it keeps the claimed
+        // `micros` and takes the owner, so a hook hint, overflow, or watcher
         // probe can land in the window between the claim and here. That
         // arrival is the remedy this admission would ask for, and stamping
         // `QueryAdmission` over it is exactly the fabricated cadence arrival

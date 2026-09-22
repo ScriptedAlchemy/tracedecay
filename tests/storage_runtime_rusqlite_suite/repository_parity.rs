@@ -42,6 +42,15 @@ impl RuntimeRequestProbeV1 for Probe {
     }
 }
 
+fn family_binding(shard_id: StoreShardIdV1) -> StoreRuntimeBindingV1 {
+    serde_json::from_value(serde_json::json!({
+        "shard_id": shard_id,
+        "incarnation": 1,
+        "authority_epoch": 1
+    }))
+    .unwrap()
+}
+
 fn health_request(binding: StoreRuntimeBindingV1) -> (RuntimeReadRequestV1, Probe) {
     let cancellation = RuntimeCancellationIdentityV1 {
         cancellation_id: RuntimeCancellationIdV1::new("cancel.repository-family-health").unwrap(),
@@ -107,48 +116,33 @@ fn profile_project_and_session_production_mounts_serve_health_data_ports() {
     let families = [
         (
             "profile",
-            serde_json::from_value(serde_json::json!({
-                "shard_id": StoreShardIdV1::profile(
-                    id::<BrainId>("brain.repository-profile"),
-                    id::<UserProfileId>("profile.repository"),
-                ),
-                "incarnation": 1,
-                "authority_epoch": 1
-            }))
-            .unwrap(),
+            StoreShardIdV1::profile(
+                id::<BrainId>("brain.repository-profile"),
+                id::<UserProfileId>("profile.repository"),
+            ),
         ),
         (
             "project",
-            serde_json::from_value(serde_json::json!({
-                "shard_id": StoreShardIdV1::project(
-                    id::<BrainId>("brain.repository-project"),
-                    id::<UserProfileId>("profile.repository"),
-                    id::<ProjectId>("project.repository"),
-                ),
-                "incarnation": 1,
-                "authority_epoch": 1
-            }))
-            .unwrap(),
+            StoreShardIdV1::project(
+                id::<BrainId>("brain.repository-project"),
+                id::<UserProfileId>("profile.repository"),
+                id::<ProjectId>("project.repository"),
+            ),
         ),
         (
             "sessions",
-            serde_json::from_value(serde_json::json!({
-                "shard_id": StoreShardIdV1::project_sessions(
-                    id::<BrainId>("brain.repository-sessions"),
-                    id::<UserProfileId>("profile.repository"),
-                    id::<ProjectId>("project.repository"),
-                ),
-                "incarnation": 1,
-                "authority_epoch": 1
-            }))
-            .unwrap(),
+            StoreShardIdV1::project_sessions(
+                id::<BrainId>("brain.repository-sessions"),
+                id::<UserProfileId>("profile.repository"),
+                id::<ProjectId>("project.repository"),
+            ),
         ),
     ];
 
-    for (family, binding) in families {
+    for (family, shard_id) in families {
         let path = directory.path().join(format!("{family}.db"));
         Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
-        assert_family_mount(binding, &path);
+        assert_family_mount(family_binding(shard_id), &path);
     }
 }

@@ -190,9 +190,12 @@ pub(crate) async fn activate_manual_branch_head_with_lifecycle(
 }
 
 #[hotpath::measure(label = "daemon.pr_autotrack.activate_manual_branch", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Activation holds the lifecycle lease across resolve-checkout-index so a lease change aborts before any durable branch state is published."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Activation holds the lifecycle lease across resolve-checkout-index so a lease change aborts before any durable branch state is published."
+    )
 )]
 async fn activate_manual_branch_with_administration(
     repo_root: &Path,
@@ -534,9 +537,12 @@ pub(crate) async fn retire_worktree_mount(
 }
 
 #[hotpath::measure(label = "daemon.pr_autotrack.reconcile", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Closed-PR removals run only on a complete discovery; a partial listing never untracks still-open PRs."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Closed-PR removals run only on a complete discovery; a partial listing never untracks still-open PRs."
+    )
 )]
 async fn reconcile_project_with_administration(
     repo_root: &Path,
@@ -559,7 +565,7 @@ async fn reconcile_project_with_administration(
         .map(|pr| (pr_label(pr.number), pr))
         .collect();
 
-    // Removals first (cheap, unblocks disk) — managed entries no longer open.
+    // Removals first (cheap, unblocks disk), managed entries no longer open.
     // Suppress them entirely when the discovery is `partial`: an incomplete
     // listing must never be read as "these PRs closed", or a truncated `gh`
     // page (or gh↔ls-remote flapping) would churn-untrack still-open PRs.
@@ -630,7 +636,7 @@ async fn reconcile_project_with_administration(
         if is_new && added >= cap {
             // The cap bounds only *new* tracks. `continue` (not `break`) so a
             // later entry that is already managed but has a changed head_sha
-            // still gets its refresh — otherwise a burst of new PRs would starve
+            // still gets its refresh, otherwise a burst of new PRs would starve
             // head updates for existing managed PRs, serving stale graphs.
             report.capped = true;
             continue;

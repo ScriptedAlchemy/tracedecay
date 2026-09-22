@@ -103,6 +103,15 @@ pub type RankedResult = Result<Vec<RankedCandidate>, RankingError>;
 
 const TIER_SPAN: u64 = 1_000_000;
 
+/// Exclusive upper bound of [`RankedCandidate::normalized_score_micros`].
+///
+/// `encode_score` packs the rank tier into the high decade, so a ranked
+/// temporal score is `tier * TIER_SPAN + within_tier` over tiers `1..=3`, and
+/// only a corroborating occurrence exports zero. A consumer that calibrates
+/// this score domain must span the whole range; a calibration capped at
+/// `TIER_SPAN` saturates every ranked anchor to the same calibrated feature.
+pub const NORMALIZED_SCORE_CEILING_MICROS: u64 = 4 * TIER_SPAN;
+
 /// Partition key for raw-score normalization. Absent sources stay singleton
 /// partitions without colliding with a concrete `source` string value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -271,18 +280,10 @@ fn prepare_candidates(
                         stable_id: candidate.stable_id.clone(),
                     });
                 }
-                if existing.logical_message.is_none() {
-                    existing.logical_message = candidate.logical_message.as_deref();
-                }
-                if existing.turn.is_none() {
-                    existing.turn = candidate.turn.as_deref();
-                }
-                if existing.session.is_none() {
-                    existing.session = candidate.session.as_deref();
-                }
-                if existing.evidence_role.is_none() {
-                    existing.evidence_role = candidate.evidence_role.as_deref();
-                }
+                fill_absent(&mut existing.logical_message, &candidate.logical_message);
+                fill_absent(&mut existing.turn, &candidate.turn);
+                fill_absent(&mut existing.session, &candidate.session);
+                fill_absent(&mut existing.evidence_role, &candidate.evidence_role);
             }
             None => {
                 metadata_by_id.insert(
@@ -361,6 +362,12 @@ fn prepare_candidates(
     Ok(prepared)
 }
 
+fn fill_absent<'a>(slot: &mut Option<&'a str>, value: &'a Option<String>) {
+    if slot.is_none() {
+        *slot = value.as_deref();
+    }
+}
+
 fn merged_metadata_conflicts(existing: &MergedMetadata<'_>, candidate: &RankingCandidate) -> bool {
     existing.first.anchor_id != candidate.anchor_id
         || existing.first.knowledge_at_micros != candidate.knowledge_at_micros
@@ -420,45 +427,41 @@ const fn rank_tier(channel: CandidateChannel) -> RankTier {
 }
 
 fn encode_score(tier: RankTier, within_tier: u64) -> u64 {
-    let capped = if within_tier < TIER_SPAN {
-        within_tier
-    } else {
-        TIER_SPAN - 1
-    };
     (tier as u64)
         .saturating_mul(TIER_SPAN)
-        .saturating_add(capped)
+        .saturating_add(within_tier.min(TIER_SPAN - 1))
 }
 
 fn apply_diversity(ranked: Vec<RankedCandidate>, limits: DiversityLimits) -> Vec<RankedCandidate> {
-    let mut logical_messages = BTreeMap::new();
-    let mut turns = BTreeMap::new();
-    let mut sessions = BTreeMap::new();
-    let mut sources = BTreeMap::new();
-    let mut evidence_roles = BTreeMap::new();
+    let mut counts = [(); 5].map(|_| BTreeMap::new());
     ranked
         .into_iter()
         .filter(|candidate| {
-            if at_limit(
-                &logical_messages,
+            let keys = [
                 candidate.logical_message.as_deref(),
+                candidate.turn.as_deref(),
+                candidate.session.as_deref(),
+                candidate.source.as_deref(),
+                candidate.evidence_role.as_deref(),
+            ];
+            let caps = [
                 limits.per_logical_message,
-            ) || at_limit(&turns, candidate.turn.as_deref(), limits.per_turn)
-                || at_limit(&sessions, candidate.session.as_deref(), limits.per_session)
-                || at_limit(&sources, candidate.source.as_deref(), limits.per_source)
-                || at_limit(
-                    &evidence_roles,
-                    candidate.evidence_role.as_deref(),
-                    limits.per_evidence_role,
-                )
+                limits.per_turn,
+                limits.per_session,
+                limits.per_source,
+                limits.per_evidence_role,
+            ];
+            if keys
+                .iter()
+                .zip(caps)
+                .enumerate()
+                .any(|(index, (key, cap))| at_limit(&counts[index], *key, cap))
             {
                 return false;
             }
-            increment(&mut logical_messages, candidate.logical_message.as_deref());
-            increment(&mut turns, candidate.turn.as_deref());
-            increment(&mut sessions, candidate.session.as_deref());
-            increment(&mut sources, candidate.source.as_deref());
-            increment(&mut evidence_roles, candidate.evidence_role.as_deref());
+            for (index, key) in keys.into_iter().enumerate() {
+                increment(&mut counts[index], key);
+            }
             true
         })
         .collect()
@@ -769,11 +772,9 @@ mod tests {
         assert!((TIER_SPAN..(2 * TIER_SPAN)).contains(&score("approx")));
         assert!(((2 * TIER_SPAN)..(3 * TIER_SPAN)).contains(&score("phrase")));
         assert!(((3 * TIER_SPAN)..(4 * TIER_SPAN)).contains(&score("message")));
-        assert!(
-            ranked
-                .iter()
-                .all(|candidate| { candidate.normalized_score_micros < 4 * TIER_SPAN })
-        );
+        assert!(ranked.iter().all(|candidate| {
+            candidate.normalized_score_micros < NORMALIZED_SCORE_CEILING_MICROS
+        }));
     }
 
     #[test]

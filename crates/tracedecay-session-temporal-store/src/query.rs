@@ -57,6 +57,14 @@ pub(super) fn frontier_i64(frontier: u64, operation: &'static str) -> SessionSto
     i64::try_from(frontier).map_err(|error| storage(operation, error))
 }
 
+pub(super) fn decode_generation_i64(
+    value: i64,
+    operation: &'static str,
+) -> SessionStoreResult<SessionProjectionGenerationV1> {
+    let value = u64::try_from(value).map_err(|error| storage(operation, error))?;
+    SessionProjectionGenerationV1::new(value).map_err(SessionStoreError::from)
+}
+
 pub(super) fn encode_watermarks(
     watermarks: &SessionFrozenWatermarksV1,
     operation: &'static str,
@@ -128,10 +136,7 @@ pub(super) async fn read_active_generation(
         return Ok(None);
     };
     let value: i64 = row.get(0).map_err(|error| storage(operation, error))?;
-    let value = u64::try_from(value).map_err(|error| storage(operation, error))?;
-    SessionProjectionGenerationV1::new(value)
-        .map(Some)
-        .map_err(SessionStoreError::from)
+    decode_generation_i64(value, operation).map(Some)
 }
 
 pub(super) async fn require_active_generation(
@@ -185,9 +190,10 @@ pub(super) async fn read_observation(
     Ok((sequence, observation))
 }
 
-/// The largest `observation_id IN (...)` batch one observation prefetch binds,
-/// kept clear of `SQLite`'s default variable ceiling.
-const OBSERVATION_READ_BATCH: usize = 500;
+/// First prefetch width. A batch of full `observation_json` bodies is bounded
+/// by the exact-SQL materialization ceiling (64 MiB), not by SQLite's variable
+/// limit, so this starts small and splits when a page still does not fit.
+const OBSERVATION_READ_BATCH: usize = 32;
 
 /// Prefetches the observations a projection pass is about to decode.
 ///
@@ -211,7 +217,20 @@ pub(super) async fn read_observations(
     if unique.is_empty() {
         return Ok(observations);
     }
-    for chunk in unique.chunks(OBSERVATION_READ_BATCH) {
+    let mut pending = Vec::new();
+    let mut offset = 0usize;
+    while offset < unique.len() {
+        let end = offset
+            .saturating_add(OBSERVATION_READ_BATCH)
+            .min(unique.len());
+        pending.push((offset, end));
+        offset = end;
+    }
+    while let Some((start, end)) = pending.pop() {
+        if start >= end {
+            continue;
+        }
+        let chunk = &unique[start..end];
         let placeholders = (1..=chunk.len())
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
@@ -221,10 +240,26 @@ pub(super) async fn read_observations(
              FROM observations
              WHERE observation_id IN ({placeholders})"
         );
-        let mut rows = conn
+        let mut rows = match conn
             .query(&sql, params_from_iter(chunk.iter().copied()))
             .await
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                let error = storage(PERSIST_OPERATION, error);
+                // One materialized page of bodies exceeded the exact-SQL
+                // ceiling. Split until a single observation remains; that
+                // observation is then a typed storage failure, not a retry
+                // that looks like a busy source.
+                if observation_prefetch_exceeded_materialization_limit(&error) && chunk.len() > 1 {
+                    let mid = start + chunk.len() / 2;
+                    pending.push((mid, end));
+                    pending.push((start, mid));
+                    continue;
+                }
+                return Err(error);
+            }
+        };
         while let Some(row) = rows
             .next()
             .await
@@ -249,6 +284,15 @@ pub(super) async fn read_observations(
     Ok(observations)
 }
 
+fn observation_prefetch_exceeded_materialization_limit(error: &SessionStoreError) -> bool {
+    match error {
+        SessionStoreError::Storage { source, .. } => source
+            .to_string()
+            .contains("materialization exceeded its limit"),
+        _ => false,
+    }
+}
+
 /// The error `read_observation` raises for an id the store does not hold, reused
 /// by callers that resolve prefetched observations out of a batch map.
 pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> SessionStoreError {
@@ -256,4 +300,27 @@ pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> 
         PERSIST_OPERATION,
         format!("source observation {} is missing", observation_id.as_str()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PERSIST_OPERATION, observation_prefetch_exceeded_materialization_limit, storage};
+
+    #[test]
+    fn materialization_limit_is_the_prefetch_split_signal() {
+        let exceeded = storage(
+            PERSIST_OPERATION,
+            std::io::Error::other("exact SQL query materialization exceeded its limit"),
+        );
+        let locked = storage(
+            PERSIST_OPERATION,
+            std::io::Error::other("database is locked"),
+        );
+        assert!(observation_prefetch_exceeded_materialization_limit(
+            &exceeded
+        ));
+        assert!(!observation_prefetch_exceeded_materialization_limit(
+            &locked
+        ));
+    }
 }

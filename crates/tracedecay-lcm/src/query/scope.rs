@@ -11,9 +11,9 @@ use tracedecay_runtime_core::db::engine::Value;
 /// each read on the `(provider, session_id, …)` indexes.
 ///
 /// The unbounded `all` scope renders no predicate at all (instead of a
-/// constant-true one), which keeps SQLite's bare `COUNT(*)` optimization —
+/// constant-true one), which keeps SQLite's bare `COUNT(*)` optimization,
 /// counting via the table b-tree instead of walking every index entry under a
-/// tautology — available to the census queries.
+/// tautology, available to the census queries.
 ///
 /// Column names come from call-site literals; scope values are always bound.
 pub(super) struct LcmScopeSql {

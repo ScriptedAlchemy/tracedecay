@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use tokio::sync::Notify;
 use tokio::sync::futures::OwnedNotified;
@@ -82,8 +82,8 @@ fn lock_codex_meta_cache() -> MutexGuard<'static, CodexMetaCache> {
 ///
 /// The fill runs on its own task, so the request that elected it may stop
 /// waiting without orphaning the claim: the owner still settles the parse,
-/// publishes or fails, and only then drops. Dropping — after publication, on a
-/// terminal failure, or when the fill task itself is torn down — removes
+/// publishes or fails, and only then drops. Dropping, after publication, on a
+/// terminal failure, or when the fill task itself is torn down, removes
 /// exactly this claim and wakes every waiter, which re-checks the cache and
 /// elects a new fill when nothing was published.
 struct CodexMetaFillClaim {
@@ -193,7 +193,7 @@ fn lookup_codex_meta(key: &CodexMetaCacheKey) -> TranscriptIngestResult<CodexMet
 ///
 /// The memory reservation travels inside the blocking closure: dropping this
 /// task's `JoinHandle` does not stop started blocking work, so the charge is
-/// released only when the parse itself settles — shrunk into the cache entry
+/// released only when the parse itself settles, shrunk into the cache entry
 /// on success, or dropped with the worker's result otherwise.
 async fn fill_codex_session_meta(
     claim: CodexMetaFillClaim,
@@ -233,6 +233,12 @@ pub struct CodexJsonlAdmissionProgress {
     pub frames_rejected_before_decode: u64,
     pub frames_refused: u64,
     pub frames_persisted: u64,
+    /// This pass resumed from a durable source cursor instead of opening the
+    /// rollout for the first time. With `frames_persisted == 0` it is the only
+    /// evidence that separates an already-admitted rollout from an empty one,
+    /// so a caller can report the replay as a duplicate rather than as a pass
+    /// that captured nothing.
+    pub resumed: bool,
 }
 
 /// Admit a Codex rollout for one exact project identity.
@@ -651,6 +657,44 @@ async fn shared_session_meta_with_provenance(
     }
 }
 
+/// Serializes the read-cursor-then-admit window for one rollout in one scope.
+///
+/// The MCP hook route (`admit_codex_project_rollouts`) and the daemon's project
+/// catch-up sweep (`ingest::project_provider::run_codex`) both reach
+/// [`try_admit_codex_jsonl_observations`] for the same rollout under the same
+/// scope, and both read the source cursor before they write. Interleaved, the
+/// loser reads a cursor the winner has not published yet, re-reads frames the
+/// winner has already committed, and re-submits the same observation ids with
+/// its own independently captured repository provenance. The store's replay
+/// verification refuses that second provenance as `observation repository
+/// provenance collision`, which reaches the host as a retryable
+/// `authority_write_failed` infrastructure error rather than the duplicate it
+/// is. Serialized, the loser reads the advanced cursor, persists nothing, and
+/// reports the `resumed` replay its caller renders as an exact duplicate.
+///
+/// The gate is per process. Cross-process writers still meet at the store's
+/// own transaction, which is what the replay verification is there for.
+type CodexAdmissionGate = Arc<tokio::sync::Mutex<()>>;
+type CodexAdmissionGates =
+    Mutex<HashMap<(ObservationScopeV1, PathBuf), Weak<tokio::sync::Mutex<()>>>>;
+
+static CODEX_ADMISSION_GATES: OnceLock<CodexAdmissionGates> = OnceLock::new();
+
+/// ponytail: linear sweep of live gates per acquisition; keyed eviction if a
+/// scope ever admits enough rollouts at once for the sweep to show up.
+fn codex_admission_gate(scope: &ObservationScopeV1, path: &Path) -> CodexAdmissionGate {
+    let gates = CODEX_ADMISSION_GATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gates = gates.lock().unwrap_or_else(PoisonError::into_inner);
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    let key = (scope.clone(), path.to_path_buf());
+    if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
+        return gate;
+    }
+    let gate = CodexAdmissionGate::new(tokio::sync::Mutex::new(()));
+    gates.insert(key, Arc::downgrade(&gate));
+    gate
+}
+
 async fn try_admit_codex_jsonl_observations(
     path: &Path,
     admission_scope: CodexObservationAdmission<'_>,
@@ -686,6 +730,11 @@ async fn try_admit_codex_jsonl_observations(
         cancellation,
     };
     let scope = admission_scope.scope();
+    // Held across the cursor read and the admit below: both are one pass over
+    // this rollout, and a peer that interleaves between them re-submits what
+    // this pass is about to commit.
+    let gate = codex_admission_gate(&scope, path);
+    let _admitting = gate.lock().await;
     if let Some(target) = admission
         .get_source_cursor(&ordinary_source, &scope)
         .await
@@ -895,6 +944,7 @@ async fn admit_codex_jsonl_page(
         frames_rejected_before_decode: progress.frames_rejected_before_decode,
         frames_refused: progress.frames_refused,
         frames_persisted: progress.frames_persisted,
+        resumed: progress.resumed,
     })
 }
 

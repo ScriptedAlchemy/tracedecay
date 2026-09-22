@@ -200,8 +200,8 @@ fn daemon_project_route_rejects_the_user_profile_root() {
 }
 
 /// Enrolls `project_root` on disk exactly as a previously-initialized project
-/// is enrolled — a `.git/` repository identity marker plus a materialized
-/// profile store — without touching the profile registry. This is the on-disk
+/// is enrolled, a `.git/` repository identity marker plus a materialized
+/// profile store, without touching the profile registry. This is the on-disk
 /// shape retained while the derived registry is rebuilt: every project's
 /// durable enrollment survives, and nothing lives in the working tree.
 #[cfg(unix)]
@@ -324,7 +324,7 @@ async fn identity_marker_without_a_store_is_still_rejected() {
 /// on disk. Identity resolution answers through the durable marker (so
 /// first-touch never runs). Recovery must re-adopt: admit the route, resolve
 /// the enrollment roots under exactly the identity the durable marker names
-/// (never a freshly minted alias), and leave the store's data untouched —
+/// (never a freshly minted alias), and leave the store's data untouched,
 /// without creating anything in the working tree.
 #[cfg(unix)]
 #[tokio::test]
@@ -642,7 +642,7 @@ async fn ambient_first_touch_never_adopts_a_moved_nongit_store() {
 }
 
 /// Two moved non-git stores can claim a brand-new root. A confirmed adoption
-/// (`--yes`) must refuse instead of picking a winner — and the stale stores
+/// (`--yes`) must refuse instead of picking a winner, and the stale stores
 /// must not brick a fresh init: opting out of adoption mints a new identity.
 #[cfg(unix)]
 #[tokio::test]
@@ -835,8 +835,8 @@ async fn moved_nongit_adoption_refuses_conflicting_registered_root() {
 /// A remap interrupted between the store-side evidence write and the registry
 /// commit leaves the shard manifest naming the new root while the registry
 /// still names the gone previous root. That manifest is the journal record:
-/// the next explicit init resumes the remap without flags — positive linkage
-/// written under the earlier explicit adoption — and commits the registry.
+/// the next explicit init resumes the remap without flags, positive linkage
+/// written under the earlier explicit adoption, and commits the registry.
 #[cfg(unix)]
 #[tokio::test]
 async fn interrupted_moved_nongit_remap_resumes_on_next_explicit_init() {
@@ -1828,7 +1828,7 @@ async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
 
     engine.shutdown_all().await;
 
-    // Post-fence admission is a truthful typed unavailable state — not a
+    // Post-fence admission is a truthful typed unavailable state, not a
     // hang, a transport error, or an empty success.
     assert!(matches!(
         registry.for_repository_root(&repository).await,
@@ -2249,10 +2249,9 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "registered missing-db init retry");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    // Each request arms its publication bound on its first poll, before route
-    // enrollment resolves. Opening and migrating the profile database on that
-    // path would spend the whole bound before either request subscribes to the
-    // open below, so the runtime is warmed the way daemon bootstrap warms it.
+    // Profile open sits before the publication bound (the bound starts when
+    // the open is claimed). Warm it so the 150 ms join window below is spent
+    // on the controlled open, not on the first profile migration.
     prewarm_test_profile_runtime(&engine.store_administration).await;
     let ordinary_handshake = DaemonHandshake {
         project_path: Some(project.clone()),
@@ -2264,13 +2263,10 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         allow_init: true,
         ..ordinary_handshake.clone()
     };
-    // The bound also covers everything a request does *before* it can join an
-    // open — route enrollment, git discovery, the registered layout — so a
-    // first-touch request can spend the whole bound before it ever subscribes
-    // to the open below and would then mint its own. One ordinary request
-    // ahead of the fixture resolves that path for this exact route, and its
-    // refusal is the same missing-index failure the joined waiter classifies
-    // later.
+    // One ordinary request ahead of the fixture resolves this exact route,
+    // and its refusal is the same missing-index failure the joined waiter
+    // classifies later. The publication bound no longer includes that
+    // enrollment, so the request can subscribe before the bound is spent.
     // It is retried the way a client retries the warming hint, so the route is
     // left with no open of its own before the fixture takes it over.
     let warmup_give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -2446,8 +2442,8 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
 /// The journey above only reaches this guard where the route is still
 /// `Opening`, so the replacement it exists for is asserted directly here: a
 /// warming hint claims the route is still opening, and exactly the routes
-/// that recorded a terminal failure may contradict it. Everything else —
-/// `Ready`, a refusal that is not the warming hint, a published owner — is
+/// that recorded a terminal failure may contradict it. Everything else,
+/// `Ready`, a refusal that is not the warming hint, a published owner, is
 /// already the caller's answer and must pass through untouched.
 #[test]
 fn a_recorded_open_failure_replaces_only_the_warming_hint() {
@@ -2608,7 +2604,7 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
 /// A task that ignores its cancellation token but still suspends at an await
 /// point is reachable by abort, so shutdown forces it at the backstop instead
 /// of leaking a tracked route past daemon shutdown. Work that abort cannot
-/// reach — a synchronous body that never yields — is the retained case, and
+/// reach, a synchronous body that never yields, is the retained case, and
 /// `project_open_shutdown_retains_synchronous_work_after_deadline` owns it.
 #[tokio::test]
 async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {

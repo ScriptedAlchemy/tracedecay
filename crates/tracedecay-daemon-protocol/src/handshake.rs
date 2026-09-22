@@ -78,7 +78,7 @@ pub const DAEMON_HANDSHAKE_REFUSAL_PROTOCOL: &str = "tracedecay.daemon.handshake
 #[serde(rename_all = "snake_case")]
 pub enum DaemonHandshakeRefusalReason {
     /// The handshake line was valid JSON but not this daemon's handshake
-    /// shape — the signature of wire drift between build revisions.
+    /// shape, the signature of wire drift between build revisions.
     UnsupportedRevision,
     /// The handshake line was not even JSON.
     InvalidHandshake,
@@ -146,10 +146,39 @@ impl DaemonHandshakeRefusal {
 /// Old clients send no version (empty string); that is indistinguishable from
 /// "same version before this field existed", so it never counts as skew.
 pub fn client_version_skew(client_version: &str, daemon_version: &str) -> Option<String> {
-    if client_version.is_empty() || client_version == daemon_version {
+    if client_version.is_empty() || versions_name_same_build(client_version, daemon_version) {
         return None;
     }
     Some(client_version.to_string())
+}
+
+/// Whether two reported versions name the same binary, the one comparison
+/// every version identity check in the product runs.
+///
+/// A version is `"{release}"` or `"{release}+{full sha}[.dirty]"`, and `SemVer`
+/// requires build metadata to be ignored for precedence. A side that reports
+/// only the release is therefore **less specific**, not different: the release
+/// tag `v0.1.0-beta.47` and the binary that names itself
+/// `0.1.0-beta.47+<sha>` are one identity, and treating them as a mismatch is
+/// what failed `tracedecay update`'s own readiness wait against the daemon it
+/// had just installed.
+///
+/// When both sides do name a commit they must name the same one, which keeps
+/// the skew this comparison was added to catch (367a44ad00): two checkout
+/// builds of one release differ only by commit, and a daemon left running from
+/// the previous build is exactly that case.
+#[must_use]
+pub fn versions_name_same_build(left: &str, right: &str) -> bool {
+    let (Some(left_release), Some(right_release)) = (release_version(left), release_version(right))
+    else {
+        // Neither side is a version this comparison understands, so refuse to
+        // guess and fall back to the literal texts.
+        return left == right;
+    };
+    left_release.cmp_precedence(&right_release) == std::cmp::Ordering::Equal
+        && (left_release.build == right_release.build
+            || left_release.build.is_empty()
+            || right_release.build.is_empty())
 }
 
 fn release_version(version: &str) -> Option<semver::Version> {
@@ -225,6 +254,52 @@ mod handshake_refusal_tests {
             Some(refusal),
             "the auth refusal frame must round-trip through its one wire line"
         );
+    }
+
+    /// The observed `tracedecay update` failure: the release path reports the
+    /// bare release it installed while the daemon that binary starts names its
+    /// own commit, so readiness compared `0.1.0-beta.47` against
+    /// `0.1.0-beta.47+<sha>` and refused the daemon it had just installed.
+    #[test]
+    fn a_bare_release_and_its_own_build_are_one_identity() {
+        let build = "0.1.0-beta.47+84598a0b9c841b914565f46b20bb6c765706e8e5";
+        assert!(versions_name_same_build("0.1.0-beta.47", build));
+        assert!(versions_name_same_build(build, "0.1.0-beta.47"));
+        assert!(
+            versions_name_same_build("v0.1.0-beta.47", build),
+            "the GitHub release tag names the same identity as the binary it ships"
+        );
+        assert_eq!(client_version_skew("0.1.0-beta.47", build), None);
+        assert_eq!(client_version_skew(build, "0.1.0-beta.47"), None);
+    }
+
+    /// Build metadata still separates two builds of one release, the skew this
+    /// comparison exists to catch.
+    #[test]
+    fn two_commits_of_one_release_stay_distinguishable() {
+        let older = "0.1.0-beta.47+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let newer = "0.1.0-beta.47+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        assert!(!versions_name_same_build(older, newer));
+        assert_eq!(client_version_skew(older, newer), Some(older.to_owned()));
+        assert!(!versions_name_same_build(
+            "0.1.0-beta.46",
+            "0.1.0-beta.47+aaaa"
+        ));
+        assert!(
+            !versions_name_same_build(
+                older,
+                "0.1.0-beta.47+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dirty"
+            ),
+            "a dirty worktree is not the commit it was built from"
+        );
+    }
+
+    /// Nothing that fails to parse may be declared a match by accident.
+    #[test]
+    fn unparseable_versions_compare_literally() {
+        assert!(versions_name_same_build("not-a-version", "not-a-version"));
+        assert!(!versions_name_same_build("not-a-version", "0.1.0-beta.47"));
+        assert!(!versions_name_same_build("", "0.1.0-beta.47"));
     }
 
     #[test]

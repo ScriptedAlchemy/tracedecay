@@ -14,20 +14,27 @@
 //! the daemon mount and the dashboard mount, before and after a physical
 //! daemon restart.
 //!
-//! Two honest boundaries are recorded rather than papered over:
+//! TaskSession hydration is owned by the query authority the project runtime
+//! mounts (`DaemonWorkFederatedQueryAuthorityV1::authority_for`), and that
+//! mount is asynchronous: the core policy seats only once a code generation
+//! has sealed. Both sides of that race are real production states a dashboard
+//! user can land on, so both are graded rather than one being assumed. Before
+//! the mount the relation is the typed `unavailable` omission, carrying no
+//! TaskSession source and no continuation. After it the relation is the
+//! provider-qualified session itself, whose slice may legitimately be empty
+//! and must then say so through its own typed coverage instead of vanishing.
+//! Neither state may fabricate a session identity, drop the relation
+//! silently, hydrate an anchor it never ranked, or mint a continuation it
+//! cannot honour.
 //!
-//! * TaskSession *hydration* is owned by the activated evaluated federated
-//!   query authority (`DaemonWorkFederatedQueryAuthorityV1::authority_for`).
-//!   This fixture activates no evaluated profile, so hydration is legitimately
-//!   absent — and the point of grading it here is that absence stays a typed
-//!   `unavailable` omission on both mounts rather than a fabricated empty
-//!   session. The hydrated path, its exact continuation, and the rank-final
-//!   `stale` revocation verdict are proven where that authority is real, in
-//!   `tests/daemon_suite/advanced_workflow_journey/task_session.rs`.
-//! * Because the same authority gate runs before the participant-epoch check,
-//!   a continuation carrying a foreign epoch is refused here as `unavailable`,
-//!   not as `stale`. That ordering is asserted explicitly so a future change
-//!   that leaks a fabricated hydration past the gate fails loudly.
+//! The same ordering decides the foreign-epoch continuation. While the lane is
+//! unmounted the authority gate refuses it as `unavailable`; once mounted the
+//! participant-epoch check reaches it and revokes it as the rank-final
+//! retryable `stale`. Both verdicts are typed and both are asserted, so a
+//! change that leaked a fabricated hydration past either gate fails loudly.
+//! The fully hydrated page, its exact continuation, and the ranked provenance
+//! are proven against a seated authority in
+//! `tests/daemon_suite/advanced_workflow_journey/task_session.rs`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -67,7 +74,7 @@ const POLL_BUDGET: Duration = Duration::from_secs(180);
 ///
 /// `verified_version` is the graph identity the parent journey observed after
 /// creating the task; every mutation below advances it, so the caller's pin is
-/// deliberately *not* reused for the reads — a read that still answered under
+/// deliberately *not* reused for the reads, a read that still answered under
 /// the stale pin would be the bug.
 pub(super) fn assert_provider_qualified_task_session_evidence(
     agent: &ureq::Agent,
@@ -105,7 +112,7 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     // -- The task root itself, through the prepared-mutation handoff. --------
     // Created under the profile-owned no-Git selection, which is how a profile
     // owner's work actually begins: no repository relation is named until an
-    // authority that can only act under one — attempt admission, below —
+    // authority that can only act under one, attempt admission, below.
     // appends beside it. That sequence is what the no-Git coverage assertion
     // after settlement grades.
     let mut create_draft = super::product_task_create_draft();
@@ -266,8 +273,8 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     // -- Grade the read on both mounts, in every temporal mode. --------------
     // `tracedecay dashboard` is a launcher, not a server: it asks the daemon to
     // host the dashboard, prints the bound URL, and exits. The server therefore
-    // lives inside the daemon, so it is started here — against the daemon that
-    // is actually serving — rather than at test start against a predecessor
+    // lives inside the daemon, so it is started here, against the daemon that
+    // is actually serving, rather than at test start against a predecessor
     // whose in-process server died with it.
     let selection = repository_selection(fixture);
     let dashboard = DashboardProcess::start(fixture);
@@ -316,7 +323,7 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
 /// had to be created under the repository selection because a settled provider
 /// attempt publishes repository-scoped events onto the same owner journal, and
 /// the no-Git selection then refused *every* read of it. `work/views` answered
-/// `200` before start-attempt and a permanent `404` after — work the caller was
+/// `200` before start-attempt and a permanent `404` after, work the caller was
 /// plainly authorized for became unreachable because of an event admitted
 /// beside it.
 ///
@@ -325,8 +332,8 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
 /// * the read succeeds over the slice the selection covers, and
 /// * it carries a truthful typed disclosure that scoped events exist outside
 ///   that slice, so the caller can never mistake the slice for the whole, and
-/// * a mutation is still refused — a prepared change pins the head it read, and
-///   a covered slice's head is not the journal's — but now by a refusal that
+/// * a mutation is still refused, a prepared change pins the head it read, and
+///   a covered slice's head is not the journal's, but now by a refusal that
 ///   names the cause and the selection remedy instead of concealing it as an
 ///   absence.
 fn assert_no_git_selection_reads_its_covered_slice(
@@ -372,7 +379,7 @@ fn assert_no_git_selection_reads_its_covered_slice(
 
     // The slice is answered as itself: the no-Git create's own version, folded
     // from covered events alone. The accepted-attempt relation lives in a
-    // repository-scoped event, so it must NOT appear here — that would be the
+    // repository-scoped event, so it must NOT appear here, that would be the
     // partial fold this contract exists to prevent.
     assert_eq!(
         graph["snapshot"]["verified_version"]["graph_version"].as_u64(),
@@ -592,13 +599,16 @@ fn assert_both_mounts(
             PROVIDER_SESSION_ID,
             "{phase} {mode} must name the exact provider session the CLI announced: {payload}"
         );
-        assert_task_session_unavailable(&payload, &format!("{phase} {mode} rooted"));
+        assert_task_session_relation_is_typed(
+            &payload,
+            identity,
+            &format!("{phase} {mode} rooted"),
+        );
 
         // 2. The exact TaskSession expansion the dashboard evidence panel
-        //    issues. Hydration is owned by an authority this fixture has not
-        //    activated, so the only truthful answer is the same typed
-        //    omission — never a fabricated empty session, and never a
-        //    silently dropped relation.
+        //    issues. Whether the authority has seated yet or not, the answer
+        //    is graded to the same standard as the rooted read: never a
+        //    fabricated session, never a silently dropped relation.
         let expanded = evidence_request(
             selection.clone(),
             verified_version,
@@ -613,26 +623,18 @@ fn assert_both_mounts(
             &expanded,
             &format!("{phase} {mode} expanded"),
         );
-        assert_task_session_unavailable(&payload, &format!("{phase} {mode} expanded"));
-        assert!(
-            payload["sources"].as_array().is_some_and(|sources| !sources
-                .iter()
-                .any(|source| source["kind"] == "task_session")),
-            "{phase} {mode} must not publish a TaskSession source without its authority: {payload}"
-        );
-        assert!(
-            payload["continuations"]
-                .as_array()
-                .is_some_and(|continuations| continuations.is_empty()),
-            "{phase} {mode} must not mint a continuation it cannot honour: {payload}"
+        assert_task_session_relation_is_typed(
+            &payload,
+            identity,
+            &format!("{phase} {mode} expanded"),
         );
 
         // 3. A continuation carrying an epoch no participant manifest ever
-        //    produced. The authority gate runs before the epoch check, so the
-        //    verdict here is `unavailable`, not the rank-final `stale`
-        //    revocation. Asserting the exact reason pins that ordering: a
-        //    change that reached the epoch comparison without an authority
-        //    would have hydrated something it was never entitled to read.
+        //    produced. The authority gate runs before the epoch check, so an
+        //    unseated lane refuses it as `unavailable` while a seated one
+        //    reaches the comparison and revokes it as the rank-final `stale`.
+        //    Both verdicts are pinned, because the failure this guards is a
+        //    third one: hydrating a foreign epoch as though it matched.
         let revoked = evidence_request(
             selection.clone(),
             verified_version,
@@ -654,20 +656,49 @@ fn assert_both_mounts(
                 },
             })),
         );
-        let payload = both_mounts(
-            agent,
-            fixture,
-            dashboard,
-            &revoked,
-            &format!("{phase} {mode} foreign epoch"),
-        );
-        assert_task_session_unavailable(&payload, &format!("{phase} {mode} foreign epoch"));
+        let label = format!("{phase} {mode} foreign epoch");
+        let answer = both_mounts_answer(agent, fixture, dashboard, &revoked, &label);
+        match answer["outcome"]["outcome"].as_str() {
+            Some("evidence") => assert_task_session_relation_is_typed(
+                &answer["outcome"]["value"]["payload"],
+                identity,
+                &label,
+            ),
+            _ => {
+                assert_eq!(
+                    answer["problem"]["kind"], "stale",
+                    "{label} must revoke a foreign participant epoch as stale: {answer}"
+                );
+                assert_eq!(
+                    answer["problem"]["retryable"], true,
+                    "{label} must tell the dashboard to restart its read: {answer}"
+                );
+            }
+        }
     }
 }
 
-/// Posts one request to both published mounts and returns the payload they
-/// must agree on exactly. A drift on either side fails with a named side.
+/// Posts one request to both published mounts and returns the evidence payload
+/// they must agree on exactly.
 fn both_mounts(
+    agent: &ureq::Agent,
+    fixture: &ProductionDaemon,
+    dashboard: Option<&DashboardProcess>,
+    request: &Value,
+    label: &str,
+) -> Value {
+    let answer = both_mounts_answer(agent, fixture, dashboard, request, label);
+    assert_eq!(
+        answer["outcome"]["outcome"], "evidence",
+        "{label}: {answer}"
+    );
+    answer["outcome"]["value"]["payload"].clone()
+}
+
+/// Posts one request to both published mounts and returns the answer they must
+/// agree on exactly, verdict included. A drift on either side fails with a
+/// named side.
+fn both_mounts_answer(
     agent: &ureq::Agent,
     fixture: &ProductionDaemon,
     dashboard: Option<&DashboardProcess>,
@@ -688,14 +719,10 @@ fn both_mounts(
         )
     });
     assert_canonical_envelope(&daemon_label, status, &body);
-    assert_eq!(
-        body["value"]["outcome"]["outcome"], "evidence",
-        "{daemon_label}: {body}"
-    );
-    let daemon_payload = body["value"]["outcome"]["value"]["payload"].clone();
+    let daemon_answer = body["value"].clone();
 
     let Some(dashboard) = dashboard else {
-        return daemon_payload;
+        return daemon_answer;
     };
     let dashboard_label = format!("dashboard api/work/retrieve-evidence ({label})");
     let (status, body) = post_dashboard_envelope(
@@ -704,29 +731,136 @@ fn both_mounts(
         request,
     );
     assert_canonical_envelope(&dashboard_label, status, &body);
-    assert_eq!(
-        body["value"]["outcome"]["outcome"], "evidence",
-        "{dashboard_label}: {body}"
-    );
-    let dashboard_payload = body["value"]["outcome"]["value"]["payload"].clone();
+    let dashboard_answer = body["value"].clone();
 
+    // Only the verdict has to agree. The envelope around it, and the problem's
+    // own echo of it, carry per-request identity and timing that are expected
+    // to differ between two mounts.
+    let verdict = |answer: &Value| {
+        json!([
+            answer["outcome"]["outcome"],
+            answer["outcome"]["value"]["payload"],
+            answer["problem"]["kind"],
+            answer["problem"]["code"],
+            answer["problem"]["legal_actions"],
+        ])
+    };
     assert_eq!(
-        daemon_payload, dashboard_payload,
-        "both published mounts must answer the same Work payload for {label}"
+        verdict(&daemon_answer),
+        verdict(&dashboard_answer),
+        "both published mounts must answer the same Work verdict for {label}"
     );
-    daemon_payload
+    daemon_answer
 }
 
-/// The typed absence of the evaluated federated query authority.
-fn assert_task_session_unavailable(payload: &Value, label: &str) {
-    let omissions = payload["omissions"]
+/// Grades the TaskSession relation against the only two typed states the
+/// asynchronous authority mount can produce.
+///
+/// An unmounted lane is the typed `unavailable` omission and publishes nothing
+/// else. A mounted lane publishes the session the accepted attempt's receipt
+/// names, and every quantity it reports about that session must agree with
+/// what it actually returned. A payload that is neither, or that is one of
+/// them only partly, fails here.
+fn assert_task_session_relation_is_typed(payload: &Value, identity: &Value, label: &str) {
+    let omitted = payload["omissions"]
         .as_array()
-        .unwrap_or_else(|| panic!("{label} must carry its omission list: {payload}"));
+        .unwrap_or_else(|| panic!("{label} must carry its omission list: {payload}"))
+        .iter()
+        .filter(|omission| omission["relation"] == "task_session")
+        .collect::<Vec<_>>();
+    let source = payload["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} must carry its source list: {payload}"))
+        .iter()
+        .find(|source| source["kind"] == "task_session");
+
+    let Some(source) = source else {
+        assert_eq!(
+            omitted.len(),
+            1,
+            "{label} dropped the TaskSession relation without typing its absence: {payload}"
+        );
+        assert_eq!(
+            omitted[0]["reason"], "unavailable",
+            "{label} must keep an unmounted query authority typed as unavailable: {payload}"
+        );
+        assert!(
+            payload["continuations"]
+                .as_array()
+                .is_some_and(|continuations| continuations.is_empty()),
+            "{label} must not mint a continuation it cannot honour: {payload}"
+        );
+        return;
+    };
+
     assert!(
-        omissions.iter().any(|omission| {
-            omission["relation"] == "task_session" && omission["reason"] == "unavailable"
-        }),
-        "{label} must keep a missing evaluated query authority typed: {payload}"
+        omitted.is_empty(),
+        "{label} both served and omitted the TaskSession relation: {payload}"
+    );
+    assert_eq!(
+        source["attempt"], *identity,
+        "{label} must bind the served session to the accepted attempt: {payload}"
+    );
+    let evidence = &source["evidence"];
+    // Decoded through the canonical identity for the same reason the receipt
+    // is: `provider` is elided on the wire exactly when it is the built-in
+    // default. A served relation naming any other session would be a
+    // fabrication, so it is compared against the session the provider
+    // announced rather than against whatever the payload repeats back.
+    let served: tracedecay_domain::ObservationSourceIdentityV1 =
+        serde_json::from_value(evidence["source"].clone()).unwrap_or_else(|error| {
+            panic!("{label} served session must decode: {error}; {payload}")
+        });
+    assert_eq!(
+        served.provider().as_str(),
+        PROVIDER_PROVIDER_ID,
+        "{payload}"
+    );
+    assert_eq!(
+        served.session_id().as_str(),
+        PROVIDER_SESSION_ID,
+        "{payload}"
+    );
+
+    let ranked = evidence["ranked_anchors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} served session must rank explicitly: {payload}"));
+    let hydrated = evidence["hydrated"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} served session must list its hydration: {payload}"));
+    for entry in hydrated {
+        assert!(
+            ranked.iter().any(|anchor| {
+                anchor["anchor_id"] == entry["anchor_id"]
+                    && anchor["final_ordinal"] == entry["rank"]
+            }),
+            "{label} hydrated an anchor at a rank it never ranked: {payload}"
+        );
+    }
+    for anchor in ranked {
+        assert!(
+            anchor["contributions"]
+                .as_array()
+                .is_some_and(|lanes| lanes.iter().any(|lane| lane["retriever"] == "task_session")),
+            "{label} ranked an anchor without its TaskSession provenance: {payload}"
+        );
+    }
+
+    // Coverage is the served relation's own claim about whether the slice is
+    // whole. An empty slice is a legal answer, but only while the counts and
+    // the continuation agree that nothing was withheld.
+    let counts = &evidence["coverage_counts"];
+    let withheld = ["hidden", "unknown", "redacted"]
+        .iter()
+        .any(|key| counts[key].as_u64() != Some(0));
+    let expected = if withheld || !evidence["continuation"].is_null() {
+        "partial"
+    } else {
+        "complete"
+    };
+    assert_eq!(
+        evidence["coverage"], expected,
+        "{label} served session must not claim coverage its own counts deny: {payload}"
     );
 }
 
@@ -1024,7 +1158,7 @@ fn accepted_attempts(graph: &Value, identity: &Value) -> bool {
 /// scope, so it publishes repository-scoped Work events onto the same owner
 /// journal the no-Git create started. This selection names those scopes, and a
 /// `relations` selection also covers the scope-free events beside them, so it
-/// is the one selection that reads this journey's journal whole — which is
+/// is the one selection that reads this journey's journal whole, which is
 /// exactly the remedy the coverage disclosure points a no-Git caller at.
 fn repository_selection(fixture: &ProductionDaemon) -> Value {
     let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&fixture.project)

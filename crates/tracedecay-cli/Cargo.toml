@@ -51,7 +51,7 @@ default = ["production"]
 # owners whose compiled behaviour changes, and cargo's feature unification
 # lights every other crate's hotpath macros from `hotpath/hotpath` alone.
 # `tracedecay-sdk` mirrors the selected backend onto its build-script (host)
-# context — see its manifest. `dep:regex` backs the `HOTPATH_FOCUS` validation
+# context, see its manifest. `dep:regex` backs the `HOTPATH_FOCUS` validation
 # in `main.rs`.
 hotpath = [
     "dep:regex",
@@ -74,10 +74,9 @@ hotpath-cpu = [
     "hotpath/hotpath-cpu",
 ]
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
-production = ["tracedecay/production"]
+production = ["tracedecay/production", "alloc-mimalloc"]
 # Opt-in tiered graph storage; not part of `production`.
 graph-disk-tier = ["tracedecay/graph-disk-tier"]
-graph-tiered-storage = ["tracedecay/graph-tiered-storage"]
 token-counting = ["tracedecay/token-counting"]
 lite = ["tracedecay/lite"]
 medium = ["tracedecay/medium"]
@@ -120,10 +119,18 @@ lang-fsharp = ["tracedecay/lang-fsharp"]
 lang-quint = ["tracedecay/lang-quint"]
 lang-toml = ["tracedecay/lang-toml"]
 lang-lean = ["tracedecay/lang-lean"]
-# Opt-in global allocators for the shipped binary (daemon included). The
-# default stays glibc malloc; selecting an allocator is a deploy decision.
-# When several allocator features are enabled at once (e.g. `--all-features`),
-# main.rs resolves them by fixed precedence instead of failing the build:
+# Global allocators for the shipped binary (daemon included). `production`
+# ships mimalloc: glibc malloc has no setting that fits a daemon indexing on
+# dozens of worker threads. Measured on beta.41 on a 96-core host warming 12
+# projects: with MALLOC_ARENA_MAX=2, 60% of daemon CPU was the two arena
+# locks; with the cap removed, 747 arenas held 14 GB of freed-but-retained
+# heap out of 18 GB RSS, and because admission trusts measured RSS the graph
+# could never activate again after one peak. mimalloc has per-thread heaps
+# without the lock and purges freed segments, so RSS follows live data (peak
+# unchanged, ~18 GB during the warm; back to 8-13 GB between phases) and the
+# resident-memory refusal clears on its own. When several allocator features
+# are enabled at once (e.g. `--all-features`), main.rs resolves them by fixed
+# precedence instead of failing the build:
 # hotpath-alloc (measurement) > alloc-jemalloc > alloc-mimalloc > system.
 #
 # alloc-jemalloc turns jemalloc background purge threads on by default:
@@ -172,6 +179,7 @@ tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
 tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
+tracedecay-hotpath-guard = { path = "../tracedecay-hotpath-guard", version = "0.1.0" }
 tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
 tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
@@ -200,7 +208,6 @@ libc = "0.2"
 [dev-dependencies]
 axum = "0.8"
 dirs = "6"
-fs2 = "0.4"
 regex = "1.12.3"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
@@ -213,20 +220,12 @@ tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", fe
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
-ureq = { version = "3", features = ["json"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 xattr = "1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
-
-# `fs2` is consumed only by `../tracedecay/tests/common/fixture.rs`, which
-# this crate's integration test binaries pull in through relative `#[path]`
-# attributes. Cargo-shear's per-crate scan cannot see files outside this
-# crate's directory tree, so it reports a false positive.
-[package.metadata.cargo-shear]
-ignored = ["fs2"]
 
 [build-dependencies]
 serde_json = "1"

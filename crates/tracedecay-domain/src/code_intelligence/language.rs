@@ -1,7 +1,7 @@
 //! Versioned language descriptor contracts. One versioned
 //! `LanguageDescriptorV1` per language is shared by extraction, structural
 //! search, outline, rewrite, analyzer routing, and host LSP projection.
-//! Descriptors — not extractors — select grammars and capabilities.
+//! Descriptors, not extractors, select grammars and capabilities.
 //!
 //! These are pure values: no parser acquisition, no host `ast-grep` binary,
 //! no configuration-owned executable commands or settings.
@@ -155,13 +155,7 @@ impl EdgeAuthorityV1 {
 mod tests {
     use super::*;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use crate::test_fixtures::id;
 
     fn descriptor() -> LanguageDescriptorV1 {
         LanguageDescriptorV1 {

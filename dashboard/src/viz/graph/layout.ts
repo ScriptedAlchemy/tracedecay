@@ -7,8 +7,8 @@ import type { FieldExtent, GraphCanvasEdge, GraphCanvasNode } from './types.ts';
  * into a graphology graph with coordinates, body sizes and dendrite geometry.
  *
  * Deliberately free of both the DOM and Sigma. Everything the arithmetic needs
- * about the medium — the canvas box it has to fit into, and which side of the
- * substrate the kind hues are lit against — arrives as a plain value, so the
+ * about the medium, the canvas box it has to fit into, and which side of the
+ * substrate the kind hues are lit against, arrives as a plain value, so the
  * whole of this file can be exercised without a renderer or a document.
  */
 
@@ -163,7 +163,7 @@ export function prepareField({
  * Runs on final coordinates, so it is the last thing layout preparation does.
  *
  * @param edgeCount the caller's own relation count, which is the budget this
- * is measured against — not the graph's edge count, which has already dropped
+ * is measured against, not the graph's edge count, which has already dropped
  * relations whose endpoints were not drawn.
  */
 export function buildDendrites(graph: Graph, edgeCount: number): Strand[] {

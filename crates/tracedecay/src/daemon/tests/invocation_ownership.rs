@@ -1,9 +1,7 @@
 #![cfg(unix)]
 
 use std::future::Future;
-use std::path::Path;
 use std::pin::Pin;
-use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{MemoryStatusRequestV1, RetainedSurfaceRequestV1};
@@ -29,16 +27,6 @@ use tracedecay_daemon_protocol::WorkApplicationInvocationV1;
 use tracedecay_daemon_service::{
     DaemonInvocationProblem, ProjectRuntimePublicationStateV1, RegisteredRetainedRuntime,
 };
-
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?}");
-}
 
 async fn committed_fixture(
     label: &str,
@@ -74,14 +62,14 @@ async fn unopened_committed_fixture(
         .expect("committed invocation source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    git(&project, &["init", "--quiet"]);
-    git(&project, &["config", "user.name", "TraceDecay Test"]);
-    git(
+    super::git(&project, &["init", "--quiet"]);
+    super::git(&project, &["config", "user.name", "TraceDecay Test"]);
+    super::git(
         &project,
         &["config", "user.email", "tracedecay@example.invalid"],
     );
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "--quiet", "-m", "base"]);
+    super::git(&project, &["add", "."]);
+    super::git(&project, &["commit", "--quiet", "-m", "base"]);
     let project_alias = temp.path().join("project-alias");
     std::os::unix::fs::symlink(&project, &project_alias).expect("committed project alias");
     let handshake = DaemonHandshake {
@@ -188,7 +176,7 @@ fn assert_work_routes_mounted<'a>(
         // verified version identity requires a real event sequence, so there
         // is no representable empty current graph to answer with: the mounted
         // owner answers the authorized absence as a concealed
-        // not-found-or-not-authorized. That still proves routing — an
+        // not-found-or-not-authorized. That still proves routing, an
         // unmounted owner never reaches the Work application and answers
         // `Problem::Unavailable` instead, exactly as the unregistered-project
         // test below asserts.
@@ -354,9 +342,9 @@ fn memory_status_request(request_id: &str) -> DaemonInvocationRequest {
 }
 
 /// The core route is admitted before the full server's owner phase registers
-/// the retained runtime. Hold that phase open — the configuration registration
+/// the retained runtime. Hold that phase open, the configuration registration
 /// pause sits in the same owner phase, just ahead of the retained registration
-/// — and prove that a retained request landing in the window reads as the
+///, and prove that a retained request landing in the window reads as the
 /// owner still mounting, retryable, and never as a scope that has no retained
 /// runtime. Once the phase completes the same request is answered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -421,7 +409,10 @@ async fn retained_invocation_while_owners_mount_is_retryable_not_unmounted() {
     let diagnostic = problem
         .diagnostic()
         .expect("a mounting retained owner carries a diagnostic");
-    assert_eq!(diagnostic.code, "application.surface.unavailable");
+    assert_eq!(
+        diagnostic.code,
+        tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+    );
     assert!(
         !diagnostic
             .message

@@ -62,12 +62,8 @@ impl<'s> ExtractionState<'s> {
         }
     }
 
-    fn node_str(&self, node: TsNode<'_>) -> &'s str {
-        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
-    }
-
     fn node_text(&self, node: TsNode<'_>) -> &'s str {
-        self.node_str(node)
+        node.utf8_text(self.source).unwrap_or("<invalid utf8>")
     }
 }
 
@@ -96,7 +92,7 @@ impl TokenWalker {
         // The `.` operator extends an import path; everything else
         // is a terminator handled below.
         let extends_import =
-            matches!(kind, "identifier") || (kind == "operator" && state.node_str(child) == ".");
+            matches!(kind, "identifier") || (kind == "operator" && state.node_text(child) == ".");
         if !extends_import && let Some((parts, line)) = self.import_collect.take() {
             QuintExtractor::commit_import(state, &parts, line);
         }
@@ -125,7 +121,7 @@ impl TokenWalker {
                 }
             }
             "keyword" => {
-                let text = state.node_str(child);
+                let text = state.node_text(child);
                 if text == "module" {
                     self.pending = Some(PendingKind::Module);
                 } else if text == "import" {
@@ -136,7 +132,7 @@ impl TokenWalker {
             "storage_modifier" => {
                 // `pure` prefixes `def`/`val`; we just keep updating `pending`
                 // until the meaningful storage modifier arrives.
-                if let Some(kind) = quint_storage_kind(state.node_str(child)) {
+                if let Some(kind) = quint_storage_kind(state.node_text(child)) {
                     self.pending = Some(kind);
                 }
             }
@@ -261,7 +257,7 @@ impl QuintExtractor {
 
     /// Joins the collected dotted-path parts and emits a `Uses` edge from
     /// the current scope to a synthetic file node for the imported module.
-    /// `parts` may be empty (e.g. `import` with nothing after it) — in
+    /// `parts` may be empty (e.g. `import` with nothing after it). In
     /// that case nothing is emitted.
     fn commit_import(state: &mut ExtractionState, parts: &[String], line: u32) {
         if parts.is_empty() {

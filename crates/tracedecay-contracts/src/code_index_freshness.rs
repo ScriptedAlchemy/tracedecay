@@ -213,6 +213,8 @@ pub struct CodeCloneIndexCoverageV1 {
     pub hot_posting_rows_skipped: Option<u64>,
     /// Bodies excluded because they are below the automatic-discovery minimum.
     pub excluded_too_small_bodies: Option<u64>,
+    /// Bodies excluded because they exceed the automatic-discovery token maximum.
+    pub excluded_too_large_bodies: Option<u64>,
     /// Bodies excluded because conservative tokenization was incomplete.
     pub excluded_incomplete_tokenization_bodies: Option<u64>,
     /// Eligible bodies whose rename normalization is partial.
@@ -300,7 +302,7 @@ impl Default for CodeCloneIndexStatusV1 {
 /// Closed staleness ladder for one mounted worktree.
 ///
 /// The scheduler publishes one of these tokens. MCP, the dashboard, and the
-/// CLI must match the variant — not a hand-copied string — so a new ladder
+/// CLI must match the variant, not a hand-copied string, so a new ladder
 /// state cannot appear at one caller and be missed at the others.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -561,7 +563,7 @@ const UNAVAILABLE_NOTE: &str =
 impl CodeIndexFreshnessPayloadV1 {
     /// Payload after the daemon scheduler registry answered for this project.
     ///
-    /// The `note` is owned here — MCP dispatch and the HTTP freshness route
+    /// The `note` is owned here. MCP dispatch and the HTTP freshness route
     /// must not spell it a second time.
     pub fn from_scheduler_observation(
         worktrees: impl IntoIterator<Item = CodeIndexWorktreeFreshnessV1>,

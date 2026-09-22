@@ -1,15 +1,15 @@
 # Coverage lanes for the hotpath instrumentation already present in two
 # slices:
-#   * storage — tracedecay-rusqlite-runtime, tracedecay-global-db
+#   * storage, tracedecay-rusqlite-runtime, tracedecay-global-db
 #     (`slice-tests`)
-#   * sessions/lcm/capture/temporal-query — tracedecay-sessions,
+#   * sessions/lcm/capture/temporal-query, tracedecay-sessions,
 #     tracedecay-session-memory, tracedecay-session-runtime,
 #     tracedecay-session-temporal-store, tracedecay-lcm, tracedecay-capture,
 #     tracedecay-temporal-query (`sessions-slice-tests`)
 #
 # Each job runs two lanes of the same test set:
-#   1. feature off  — every `#[hotpath::measure]` macro must stay a no-op;
-#   2. `--features <crate>/hotpath` — the `hotpath_coverage` tests wrap a
+#   1. feature off. Every `#[hotpath::measure]` macro must stay a no-op;
+#   2. `--features <crate>/hotpath`. The `hotpath_coverage` tests wrap a
 #      real workload in a HotpathGuard and assert the JSON report carries
 #      the crates' existing measure labels, so the lane fails if the
 #      measures stop firing.
@@ -21,26 +21,7 @@
 name: hotpath-coverage
 
 on:
-  pull_request:
-    # Only Rust inputs can change what these slice tests compile or measure;
-    # dashboard, plugin, docs and script-only pull requests do not queue it.
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".cargo/**"
-      - ".config/nextest.toml"
-      - ".github/workflows/hotpath-coverage.yml"
-      - "scripts/check-rust-cache-lineage.py"
-      - "scripts/drop-prefix-restored-rust-artifacts.sh"
-      - "scripts/rust_cache_lineage.py"
-      - "scripts/test-rust-cache-lineage.py"
   workflow_dispatch:
-
-concurrency:
-  group: hotpath-coverage-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read

@@ -8,6 +8,9 @@
 //! Windows test-group assignments per module.
 
 #![allow(clippy::too_many_lines)]
+// Handler fixtures thread one request's full argument set through a single
+// builder call; splitting them would hide which inputs a case actually binds.
+#![allow(clippy::too_many_arguments)]
 // Deeply nested async fixture bodies exceed rustc's default layout query
 // depth under the perf profile; match the workspace-standard limit used by
 // the tracedecay lib and CLI crate roots.
@@ -17,9 +20,15 @@
 mod common;
 
 mod analytics_test;
+#[cfg(feature = "test-transport")]
+mod changelog_behavior_test;
 mod context_relevance_eval_test;
+mod diagnostics_read_test;
 mod fixture;
 mod git_correlation_test;
+mod health_read_behavior;
+#[cfg(feature = "test-transport")]
+mod insert_at_symbol_behavior_test;
 mod mcp_cli_parity_test;
 mod mcp_cli_serve_test;
 mod mcp_dashboard_tool_test;
@@ -28,7 +37,9 @@ mod mcp_rendering_test;
 #[cfg(feature = "test-transport")]
 mod mcp_server_test;
 mod multi_mcp_coordination_test;
+mod read_behavior_test;
 mod serve_harness;
 mod serve_template_path_test;
+mod status_behavior_test;
 mod support;
 mod workflow_query_test;

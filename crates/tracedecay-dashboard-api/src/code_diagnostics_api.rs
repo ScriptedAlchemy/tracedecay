@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
-use super::util::{JsonError, http_detail, internal_error};
+use super::util::{JsonError, http_detail, internal_error, json_error};
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
@@ -70,7 +70,10 @@ pub async fn patch_settings(
     Json(patch): Json<Value>,
 ) -> ApiResult {
     let patch = serde_json::from_value::<SettingsPatch>(patch).map_err(|error| {
-        bad_request(&format!("invalid code diagnostics settings patch: {error}"))
+        json_error(
+            StatusCode::BAD_REQUEST,
+            format!("invalid code diagnostics settings patch: {error}"),
+        )
     })?;
     let request = diagnostics_request(&control)?;
     let snapshot = authority(&state)?
@@ -181,19 +184,12 @@ where
     })
 }
 
-fn bad_request(error: &impl ToString) -> JsonError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": error.to_string(),
-        })),
-    )
-}
-
 fn authority_error(error: DashboardDiagnosticsErrorV1) -> JsonError {
     match &error {
         DashboardDiagnosticsErrorV1::AdapterUnavailable { .. }
-        | DashboardDiagnosticsErrorV1::LanguageDisabled { .. } => bad_request(&error),
+        | DashboardDiagnosticsErrorV1::LanguageDisabled { .. } => {
+            json_error(StatusCode::BAD_REQUEST, error.to_string())
+        }
         DashboardDiagnosticsErrorV1::RevisionConflict { expected, actual } => (
             StatusCode::CONFLICT,
             Json(json!({

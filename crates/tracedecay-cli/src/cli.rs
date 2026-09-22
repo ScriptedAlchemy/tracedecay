@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::PossibleValuesParser};
+use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
 mod automation;
 pub mod dispatch;
@@ -156,7 +157,7 @@ pub enum HostBundleAction {
 #[derive(Parser)]
 #[command(
     name = "tracedecay",
-    about = "Code intelligence for 34 languages — semantic graph queries instead of file reads",
+    about = "Code intelligence for 34 languages, semantic graph queries instead of file reads",
     after_help = TOP_LEVEL_AFTER_HELP,
     version = crate::product_runtime::PRODUCT_BUILD_VERSION
 )]
@@ -176,7 +177,7 @@ pub struct Cli {
     /// other commands.
     #[arg(long, global = true)]
     pub yes: bool,
-    /// Additionally confirm taking ownership of an existing file that no
+    /// Confirm taking ownership of an existing file that no
     /// TraceDecay receipt records. Required alongside `--yes` for
     /// `reinstall --component`; the previous bytes are always backed up first,
     /// and a file another owner claims is refused regardless of this flag.
@@ -197,7 +198,7 @@ pub enum Commands {
         /// Project path, as an explicit flag. Equivalent to the positional
         /// PATH argument above; accepted for consistency with `-p`/`--path`
         /// on other project-scoped commands (e.g. `dashboard`, `gitignore`,
-        /// `bench`). Conflicts with the positional PATH — pass one or the
+        /// `bench`). Conflicts with the positional PATH, pass one or the
         /// other, not both.
         #[arg(
             short = 'p',
@@ -262,7 +263,7 @@ pub enum Commands {
         #[arg(short, long)]
         short: bool,
         /// Capture a runtime telemetry snapshot (PID, RSS, CPU%, DB / WAL
-        /// sizes) — useful when reporting unexpected resource use (#80).
+        /// sizes), useful when reporting unexpected resource use (#80).
         #[arg(long)]
         runtime: bool,
     },
@@ -364,10 +365,10 @@ pub enum Commands {
     /// Refresh generated plugin code/assets for detected installs without
     /// touching agent config files.
     ///
-    /// Rewrites only tracedecay-generated artifacts — the Hermes plugin
+    /// Rewrites only tracedecay-generated artifacts, the Hermes plugin
     /// (.py files, schemas.json, dashboard page) for the user integration,
     /// the Cursor plugin bundle, the Codex plugin bundle/cache, and the Kiro
-    /// managed agent — re-baking the current binary path and version. Config
+    /// managed agent, re-baking the current binary path and version. Config
     /// files (Hermes config.yaml, mcp.json, settings,
     /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
     /// to refresh those.
@@ -543,7 +544,7 @@ pub enum Commands {
     /// Downloads and installs the newest release. When a new binary was
     /// installed, also refreshes generated plugins, configured agent
     /// integrations, and the daemon service. When already up to date it stops
-    /// there — use `tracedecay update` to refresh regardless.
+    /// there, use `tracedecay update` to refresh regardless.
     #[command(after_help = UPGRADE_AFTER_HELP)]
     Upgrade {
         /// Skip refreshing already-configured agent integrations
@@ -554,7 +555,7 @@ pub enum Commands {
     ///
     /// Upgrades the binary first when a newer release exists, then always
     /// refreshes generated plugins, configured agent integrations, and the
-    /// daemon service — even when the binary was already current.
+    /// daemon service, even when the binary was already current.
     #[command(after_help = UPDATE_AFTER_HELP)]
     Update {
         /// Skip refreshing already-configured agent integrations
@@ -1104,10 +1105,18 @@ pub(crate) struct SessionsSearchArgs {
     #[arg(long)]
     pub(crate) provider: Option<String>,
     /// Relationship scope: all, parents_only, or subagents_only
-    #[arg(long, default_value = "all", value_parser = ["all", "parents_only", "subagents_only"])]
+    #[arg(
+        long,
+        default_value = "all",
+        value_parser = PossibleValuesParser::new(MessageRelationshipScopeV1::WIRE)
+    )]
     pub(crate) scope: String,
     /// Semantic message type: all, direct_user, or tool_result
-    #[arg(long, default_value = "all", value_parser = ["all", "direct_user", "tool_result"])]
+    #[arg(
+        long,
+        default_value = "all",
+        value_parser = PossibleValuesParser::new(MessageTypeFilterV1::WIRE)
+    )]
     pub(crate) message_type: String,
     /// Only child sessions belonging to this parent session
     #[arg(long)]

@@ -16,7 +16,7 @@ use crate::storage::{BRANCH_META_FILENAME, PrivateStoreIo};
 pub struct BranchEntry {
     /// Relative path to the database serving this branch. Branches tracked on
     /// the single project graph store reference the canonical main database
-    /// (`tracedecay.db`) — the same shape the default branch has always used.
+    /// (`tracedecay.db`), the same shape the default branch has always used.
     /// Legacy private branch copies reference `branches/<stem>.db`; those
     /// files are retained only for garbage collection and never serve.
     pub db_file: String,
@@ -342,7 +342,7 @@ fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result
 /// Parses `branch-meta.json` content into [`BranchMeta`].
 ///
 /// This is the canonical definition of "corrupt branch metadata": anything
-/// this rejects — invalid JSON *or* valid JSON with the wrong schema — makes
+/// this rejects, invalid JSON *or* valid JSON with the wrong schema, makes
 /// the runtime fall back to single-DB mode. Every reader must go through this
 /// one predicate so invalid metadata is never treated as authority.
 pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
@@ -363,7 +363,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => {
             eprintln!(
-                "warning: could not inspect branch metadata at '{}': {error} — falling back to single-DB mode",
+                "warning: could not inspect branch metadata at '{}': {error}, falling back to single-DB mode",
                 path.display()
             );
             return None;
@@ -371,7 +371,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
     };
     if !metadata.file_type().is_file() {
         eprintln!(
-            "warning: corrupt branch metadata at '{}': path is not a regular file — falling back to single-DB mode",
+            "warning: corrupt branch metadata at '{}': path is not a regular file, falling back to single-DB mode",
             path.display()
         );
         return None;
@@ -380,7 +380,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
         Ok(content) => content,
         Err(error) => {
             eprintln!(
-                "warning: could not read branch metadata at '{}': {error} — falling back to single-DB mode",
+                "warning: could not read branch metadata at '{}': {error}, falling back to single-DB mode",
                 path.display()
             );
             return None;
@@ -390,7 +390,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
         Ok(meta) => Some(meta),
         Err(e) => {
             eprintln!(
-                "warning: corrupt branch metadata at '{}': {e} — falling back to single-DB mode",
+                "warning: corrupt branch metadata at '{}': {e}, falling back to single-DB mode",
                 path.display()
             );
             None
@@ -433,7 +433,7 @@ pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<(
 /// reflects real sync activity (previously `last_synced_at` only moved at
 /// branch-add finalize, making the list misleading). It silently no-ops when
 /// there is no branch metadata (single-DB mode / pre-branch projects) or when
-/// `branch` is untracked — a sync of an untracked branch has no entry to touch.
+/// `branch` is untracked, a sync of an untracked branch has no entry to touch.
 /// The shared branch lock serializes this load-modify-save sequence with branch
 /// add, removal, GC, and pending deletion recovery.
 pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
@@ -554,11 +554,7 @@ fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock:
 }
 
 fn now_unix_str() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{secs}")
+    crate::tracedecay::unix_secs().to_string()
 }
 
 /// Formats a UNIX timestamp string as a human-readable relative time.
@@ -566,10 +562,7 @@ pub fn format_timestamp(ts: &str) -> String {
     let Ok(secs) = ts.parse::<u64>() else {
         return ts.to_string();
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::tracedecay::unix_secs();
     let age = now.saturating_sub(secs);
     if age < 60 {
         "just now".to_string()

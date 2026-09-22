@@ -100,23 +100,6 @@ pub struct ResolvedOccurrence {
     pub supporting_anchor_ids: BTreeSet<RetrievalAnchorId>,
 }
 
-impl ResolvedOccurrence {
-    #[hotpath::skip]
-    pub const fn certainty(&self) -> ResolutionCertainty {
-        if self.uncertain {
-            ResolutionCertainty::AuthorizedUnknown
-        } else {
-            ResolutionCertainty::Known
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResolutionCertainty {
-    Known,
-    AuthorizedUnknown,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResolutionLineageEdgeKind {
     Correction,

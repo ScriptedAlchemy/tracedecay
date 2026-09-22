@@ -190,7 +190,7 @@ const TEXT_ARTIFACT_MAXIMUM_CLONE_WARMUP_ADVANCES_V1: usize = 1;
 const TEXT_ARTIFACT_FINALIZATION_ROWS_PER_OPERATION_V1: usize = 4 * 1024;
 
 /// Outcome of the one-slice clone-fingerprint warmup on a similar/redundancy
-/// request. `Pending` means the retained worker owns remaining backfill —
+/// request. `Pending` means the retained worker owns remaining backfill,
 /// never collapse that into a hard `GenerationUnavailable` miss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloneSimilarityWarmupForRequestV1 {
@@ -825,7 +825,7 @@ enum CloneSuccessorSourcePositionV1 {
 /// The slot is the generation-owned partial-state authority; the condvar
 /// wakes arrivals parked behind a `HeadOpening` claim. A corpus-sized
 /// verified open (the published-head reopen or the publication tail's
-/// reopen — two full SHA-256 passes plus `SQLite` verification each) runs
+/// reopen, two full SHA-256 passes plus `SQLite` verification each) runs
 /// with the slot lock released, so a concurrent wake parks with typed
 /// cancellation instead of blocking on the mutex for the whole open. This
 /// stays a plain `std::sync::Mutex` rather than `hotpath::mutex!` because
@@ -880,7 +880,7 @@ impl CodeTextProjectionStateV1 {
 /// One wake's exclusive claim on a corpus-sized verified head open.
 ///
 /// Restores the slot to `Idle` and wakes every parked arrival on all exit
-/// paths — success, typed failure, and unwind — so a failed open can never
+/// paths, success, typed failure, and unwind, so a failed open can never
 /// strand concurrent wakes behind a stale `HeadOpening` marker.
 struct TextHeadOpenClaimV1<'a> {
     state: &'a CodeTextProjectionStateV1,
@@ -950,8 +950,17 @@ fn map_text_artifact_error(error: CodeLexicalArtifactErrorV1) -> RetrievalPortEr
         CodeLexicalArtifactErrorV1::Incompatible(_) => RetrievalPortError::IncompatibleProjection,
         CodeLexicalArtifactErrorV1::Contract(detail) => RetrievalPortError::Contract(detail),
         CodeLexicalArtifactErrorV1::Corrupt(detail) => RetrievalPortError::Contract(detail),
-        CodeLexicalArtifactErrorV1::Unreserved(_)
-        | CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => RetrievalPortError::BudgetExceeded,
+        CodeLexicalArtifactErrorV1::Unreserved(detail) => RetrievalPortError::AuthorityUnavailable(
+            format!("lexical artifact reservation is unavailable: {detail}"),
+        ),
+        error @ CodeLexicalArtifactErrorV1::BatchTooLarge { .. } => {
+            // The builder has already tightened the source to one record
+            // before this mapping. The same record and fixed budget reproduce
+            // this refusal forever; calling it a request budget timeout made
+            // the background worker retry it as transient work and discarded
+            // the required/maximum evidence.
+            RetrievalPortError::Contract(error.to_string())
+        }
         CodeLexicalArtifactErrorV1::Io(detail) | CodeLexicalArtifactErrorV1::Missing(detail) => {
             RetrievalPortError::AuthorityUnavailable(detail)
         }
@@ -978,6 +987,35 @@ pub(super) fn map_sealed_page_source_error(
 
 fn text_artifact_unavailable(error: impl std::fmt::Display) -> RetrievalPortError {
     RetrievalPortError::AuthorityUnavailable(error.to_string())
+}
+
+/// Name a held publication charge as the reader and shrink it to the reader
+/// budget. The bytes never leave the ledger, so the handoff is not a new
+/// admission and measured RSS cannot refuse a charge that was already held.
+fn reader_charge_from_held_reservation(
+    mut held: ResidentMemoryReservationV1,
+) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
+    let reader_budget =
+        u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1).map_err(|_| {
+            RetrievalPortError::Contract("text-artifact reader budget exceeds u64".to_owned())
+        })?;
+    if held.reserved_bytes() < reader_budget {
+        return Err(RetrievalPortError::Contract(format!(
+            "text-artifact publication charge {} is below the reader budget {reader_budget}",
+            held.reserved_bytes()
+        )));
+    }
+    let component = ResidentMemoryComponentIdV1::new("code-text-artifact-reader")
+        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+    held.transfer_component(component, reader_budget)
+        .map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact reader charge could not take over its held reservation: reserved \
+                 {} measured {}",
+                error.reserved_bytes, error.measured_bytes
+            ))
+        })?;
+    Ok(held)
 }
 
 /// Durable text-artifact store bound to one worktree's generation store root.
@@ -1026,6 +1064,34 @@ pub(super) fn text_artifact_resident_memory_charges(
     Ok((accounted, retained))
 }
 
+pub(super) fn text_artifact_admitted_build_budget(
+    preferred_bytes: u64,
+    minimum_bytes: u64,
+    limit_bytes: u64,
+    used_bytes: u64,
+    observed_bytes: u64,
+    watermark_headroom: u64,
+) -> Result<u64, RetrievalPortError> {
+    if minimum_bytes == 0 || preferred_bytes < minimum_bytes {
+        return Err(RetrievalPortError::Contract(
+            "text-artifact build budget bounds are invalid".to_owned(),
+        ));
+    }
+    let unmodeled_live_bytes = observed_bytes.saturating_sub(used_bytes);
+    let available_for_growth = limit_bytes
+        .saturating_sub(used_bytes)
+        .saturating_sub(unmodeled_live_bytes)
+        .saturating_sub(watermark_headroom);
+    let admitted_bytes = preferred_bytes.min(available_for_growth);
+    if admitted_bytes < minimum_bytes {
+        return Err(RetrievalPortError::AuthorityUnavailable(format!(
+            "text-artifact build needs at least {minimum_bytes} bytes; \
+             {available_for_growth} bytes are available below the resident-memory watermark"
+        )));
+    }
+    Ok(admitted_bytes)
+}
+
 impl DaemonCodeTextArtifactStoreV1 {
     pub(super) fn bind(
         store_root: &Path,
@@ -1058,14 +1124,33 @@ impl DaemonCodeTextArtifactStoreV1 {
         component: &'static str,
         bytes: usize,
     ) -> Result<ResidentMemoryReservationV1, RetrievalPortError> {
+        self.reserve_resident_memory_up_to(generation_id, component, bytes, bytes)
+            .map(|(reservation, _)| reservation)
+    }
+
+    fn reserve_resident_memory_up_to(
+        &self,
+        generation_id: &CodeGenerationId,
+        component: &'static str,
+        preferred_bytes: usize,
+        minimum_bytes: usize,
+    ) -> Result<(ResidentMemoryReservationV1, usize), RetrievalPortError> {
         let component = ResidentMemoryComponentIdV1::new(component)
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let requested = u64::try_from(bytes)
+        let preferred = u64::try_from(preferred_bytes)
             .ok()
             .and_then(std::num::NonZeroU64::new)
             .ok_or_else(|| {
                 RetrievalPortError::Contract(
                     "text-artifact resident-memory reservation must be nonzero".to_owned(),
+                )
+            })?;
+        let minimum = u64::try_from(minimum_bytes)
+            .ok()
+            .and_then(std::num::NonZeroU64::new)
+            .ok_or_else(|| {
+                RetrievalPortError::Contract(
+                    "text-artifact minimum resident-memory reservation must be nonzero".to_owned(),
                 )
             })?;
         let snapshot = self.resident_memory.snapshot();
@@ -1083,8 +1168,21 @@ impl DaemonCodeTextArtifactStoreV1 {
             .high_watermark_bytes()
             .min(snapshot.limit_bytes);
         let watermark_headroom = snapshot.limit_bytes.saturating_sub(admission_watermark);
+        let admitted_bytes = text_artifact_admitted_build_budget(
+            preferred.get(),
+            minimum.get(),
+            snapshot.limit_bytes,
+            snapshot.used_bytes,
+            observed_bytes,
+            watermark_headroom,
+        )?;
+        let admitted = NonZeroU64::new(admitted_bytes).ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "text-artifact admitted resident-memory reservation must be nonzero".to_owned(),
+            )
+        })?;
         let (accounted, retained) = text_artifact_resident_memory_charges(
-            requested,
+            admitted,
             unmodeled_live_bytes,
             watermark_headroom,
         )?;
@@ -1093,7 +1191,9 @@ impl DaemonCodeTextArtifactStoreV1 {
         hotpath::gauge!("query.artifact.admission.unmodeled_live_bytes")
             .set(unmodeled_live_bytes as f64);
         hotpath::gauge!("query.artifact.admission.requested_growth_bytes")
-            .set(requested.get() as f64);
+            .set(preferred.get() as f64);
+        hotpath::gauge!("query.artifact.admission.admitted_growth_bytes")
+            .set(admitted.get() as f64);
         hotpath::gauge!("query.artifact.admission.accounted_bytes").set(accounted.get() as f64);
         hotpath::gauge!("query.artifact.admission.retained_bytes").set(retained.get() as f64);
         let mut reservation = self
@@ -1107,13 +1207,22 @@ impl DaemonCodeTextArtifactStoreV1 {
                 },
                 accounted,
             )
-            .map_err(|_| RetrievalPortError::BudgetExceeded)?;
+            .map_err(|error| {
+                RetrievalPortError::AuthorityUnavailable(format!(
+                    "text-artifact resident-memory admission was refused: {error}"
+                ))
+            })?;
         reservation.shrink_to(retained.get()).map_err(|error| {
             RetrievalPortError::Contract(format!(
                 "text-artifact resident-memory headroom release failed: {error}"
             ))
         })?;
-        Ok(reservation)
+        let admitted = usize::try_from(admitted.get()).map_err(|error| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact admitted reservation exceeds the platform limit: {error}"
+            ))
+        })?;
+        Ok((reservation, admitted))
     }
 
     fn acquire_store_write_lock(&self) -> Result<CodeGenerationStoreLockV1, RetrievalPortError> {
@@ -1232,15 +1341,29 @@ impl DaemonCodeTextArtifactStoreV1 {
         }
         let _lock = self.acquire_store_write_lock()?;
         checkpoint_text_artifact_control(control)?;
-        let metadata = staging_path
-            .symlink_metadata()
-            .map_err(text_artifact_unavailable)?;
-        if !metadata.file_type().is_file() {
-            return Err(RetrievalPortError::Contract(
-                "incompatible text-artifact staging path is not a regular file".to_owned(),
-            ));
+        match staging_path.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                retire_text_artifact_staging_family(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Ok(_) => {
+                return Err(RetrievalPortError::Contract(
+                    "incompatible text-artifact staging path is not a regular file".to_owned(),
+                ));
+            }
+            // A concurrent build may retire this staging file first. Discard
+            // wants it gone, so finding it already gone is the end state, not
+            // an unavailable authority: reporting one aborts the caller's
+            // reopen and the clone lane answers a non-retryable failure for a
+            // state that has already resolved. Sidecars can outlive the
+            // database after a crash, so sweep them the way
+            // `prepare_absent_text_artifact_staging` does.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                clear_text_artifact_staging_sidecars(staging_path)
+                    .map_err(text_artifact_unavailable)?;
+            }
+            Err(error) => return Err(text_artifact_unavailable(error)),
         }
-        retire_text_artifact_staging_family(staging_path).map_err(text_artifact_unavailable)?;
         DaemonCodeIndexPublicationStoreV1::sync_directory(&artifacts_root)
             .map_err(text_artifact_unavailable)
     }
@@ -1520,7 +1643,7 @@ impl LatestCompleteCodeIndexV1 {
     ///
     /// Built at most once per generation and shared by every clone of this
     /// handle (and therefore by every concurrent query), the same way
-    /// [`Self::production_query_owners`] shares its lane owners. Serving a
+    /// `Self::production_query_owners` shares its lane owners. Serving a
     /// query never rebuilds the indices; only loading a new generation does.
     pub fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
         self.record_index
@@ -1589,8 +1712,8 @@ impl LatestCodeTextGenerationV1 {
     ///
     /// This is the sole readiness predicate for a publication's graph seat
     /// gate and for admitting a full sealed-generation graph replay. Clone
-    /// fingerprint backfill may still be unfinished when this returns true —
-    /// that remaining work is [`Self::text_projection_needs_work`], not a
+    /// fingerprint backfill may still be unfinished when this returns true,
+    /// that remaining work is `Self::text_projection_needs_work`, not a
     /// seat or replay precondition.
     pub fn query_owners_are_ready(&self) -> bool {
         matches!(
@@ -1657,6 +1780,15 @@ impl LatestCodeTextGenerationV1 {
                 };
             }
         };
+        let successor = match self.clone_successor_progress() {
+            CloneSuccessorProgressReadV1::Idle => None,
+            CloneSuccessorProgressReadV1::Backfilling(progress) => Some(progress),
+            CloneSuccessorProgressReadV1::Busy => {
+                return CodeCloneIndexStatusV1::Unavailable {
+                    reason: "clone-index status is being updated".to_owned(),
+                };
+            }
+        };
         let artifact = match owners.clone_index_artifact() {
             Ok(artifact) => artifact,
             Err(error) => {
@@ -1665,7 +1797,6 @@ impl LatestCodeTextGenerationV1 {
                 };
             }
         };
-        let successor = self.clone_successor_progress();
         let (completed_source_pages, total_source_pages, bytes_on_disk) = successor.map_or(
             (
                 artifact.source_pages,
@@ -1709,16 +1840,24 @@ impl LatestCodeTextGenerationV1 {
         }
     }
 
-    fn clone_successor_progress(&self) -> Option<CloneSuccessorProgressV1> {
-        let slot = self.text_projection_build.lock_slot();
+    fn clone_successor_progress(&self) -> CloneSuccessorProgressReadV1 {
+        let slot = match self.text_projection_build.slot.try_lock() {
+            Ok(slot) => slot,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return CloneSuccessorProgressReadV1::Busy;
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
         match &*slot {
             CodeTextProjectionSlotV1::CloneSuccessorPending => {
                 let owners = match self.query_owner_readiness() {
                     CodeTextQueryOwnerReadinessV1::Ready(owners) => owners,
                     CodeTextQueryOwnerReadinessV1::Pending
-                    | CodeTextQueryOwnerReadinessV1::Invalid => return None,
+                    | CodeTextQueryOwnerReadinessV1::Invalid => {
+                        return CloneSuccessorProgressReadV1::Idle;
+                    }
                 };
-                Some(CloneSuccessorProgressV1 {
+                CloneSuccessorProgressReadV1::Backfilling(CloneSuccessorProgressV1 {
                     completed_source_pages: 0,
                     total_source_pages: owners.hydration.verified_artifact().page_count(),
                     bytes_on_disk: None,
@@ -1730,7 +1869,7 @@ impl LatestCodeTextGenerationV1 {
                     .as_ref()
                     .and_then(|builder| builder.next_cursor().ok().flatten())
                     .map_or(0, |cursor| cursor.next_page_ordinal());
-                Some(CloneSuccessorProgressV1 {
+                CloneSuccessorProgressReadV1::Backfilling(CloneSuccessorProgressV1 {
                     completed_source_pages,
                     total_source_pages: build.prior.page_count(),
                     bytes_on_disk: build
@@ -1742,7 +1881,7 @@ impl LatestCodeTextGenerationV1 {
             }
             CodeTextProjectionSlotV1::Idle
             | CodeTextProjectionSlotV1::HeadOpening
-            | CodeTextProjectionSlotV1::Building(_) => None,
+            | CodeTextProjectionSlotV1::Building(_) => CloneSuccessorProgressReadV1::Idle,
         }
     }
 
@@ -1760,6 +1899,12 @@ struct CloneSuccessorProgressV1 {
     completed_source_pages: u64,
     total_source_pages: u64,
     bytes_on_disk: Option<u64>,
+}
+
+enum CloneSuccessorProgressReadV1 {
+    Idle,
+    Backfilling(CloneSuccessorProgressV1),
+    Busy,
 }
 
 fn clone_index_observation(
@@ -1816,6 +1961,7 @@ fn clone_index_observation(
                 .then(|| census.map(|census| census.hot_posting_rows))
                 .flatten(),
             excluded_too_small_bodies: census.map(|census| census.excluded_too_small_bodies),
+            excluded_too_large_bodies: census.map(|census| census.excluded_too_large_bodies),
             excluded_incomplete_tokenization_bodies: census
                 .map(|census| census.excluded_incomplete_tokenization_bodies),
             rename_partial_bodies: census.map(|census| census.rename_partial_bodies),
@@ -1888,16 +2034,6 @@ impl LatestCompleteCodeIndexV1 {
     pub fn lexical(&self) -> &[Arc<tracedecay_domain::CodeSearchChunkV1>] {
         self.generation.chunks().chunks()
     }
-
-    #[cfg(test)]
-    pub fn graph_edges(&self) -> &[tracedecay_domain::CanonicalRelationEdgeV1] {
-        self.generation.edges()
-    }
-
-    #[cfg(test)]
-    pub fn graph_abstentions(&self) -> &[crate::code_index::chunks::CodeIndexEdgeAbstentionV1] {
-        self.generation.edge_abstentions()
-    }
 }
 
 impl LatestCodeTextGenerationV1 {
@@ -1943,7 +2079,7 @@ impl LatestCodeTextGenerationV1 {
     /// Lexical owners can be Ready while clone backfill is still background
     /// work. `tracedecay_similar` needs those postings; ordinary search does not
     /// wait here. Drive at most one bounded slice inline and leave the rest to
-    /// the retained worker wake the caller must have requested — owning the
+    /// the retained worker wake the caller must have requested, owning the
     /// whole successor on the request thread was the #1339 S1 regression.
     pub(crate) fn finish_clone_similarity_warmup_for_request(
         &self,
@@ -2183,7 +2319,7 @@ impl LatestCodeTextGenerationV1 {
             // cursor sits one file rollover beyond the last durably accepted
             // page whenever that page filled exactly at a file's last record.
             // The completion receipt is the accepted-source authority from
-            // here on — the same one the builder seals the artifact against —
+            // here on, the same one the builder seals the artifact against,
             // and it binds the source state digest, the page count, every
             // emitted counter, and both digest chains.
             Some(receipt) => receipt
@@ -2542,10 +2678,17 @@ impl LatestCodeTextGenerationV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<Box<CodeTextCloneSuccessorBuildV1>, RetrievalPortError> {
         let generation_id = &self.metadata.manifest().generation_id;
+        // The successor's working set stays at
+        // `CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1`. The charge is at least
+        // the reader budget so publication can transfer it onto the reader
+        // component. A fresh reader admission at that boundary is refused
+        // when graph replay is already on the RSS watermark.
+        let publication_charge = CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1
+            .max(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1);
         let reservation = self.text_artifact_store.reserve_resident_memory(
             generation_id,
             "code-text-clone-successor",
-            CLONE_SUCCESSOR_MEMORY_BUDGET_BYTES_V1,
+            publication_charge,
         )?;
         let artifacts_root = code_text_artifacts_root(self.text_artifact_store.store_root());
         ensure_private_text_artifacts_root(&artifacts_root)?;
@@ -2652,11 +2795,36 @@ impl LatestCodeTextGenerationV1 {
                 self.install_artifact_owners(reader, reader_reservation)?;
                 self.publish_text_progress_snapshot(ready_progress);
                 if needs_clone_successor {
-                    self.text_projection_build.retain_clone_successor_retry()?;
-                    return self
-                        .begin_clone_successor(descriptor, prior, sealed_identity, source, control)
-                        .map(TextHeadOpenOutcomeV1::BuildCloneSuccessor)
-                        .map(Some);
+                    // `begin_clone_successor` copies the whole prior lexical
+                    // artifact with the slot lock released, so this wake's
+                    // head-open claim has to span it. Parking
+                    // `CloneSuccessorPending` before the copy published a
+                    // takeable state mid-claim: `advance_artifact_text_serving`
+                    // leaves its park loop on that state, so a concurrent wake
+                    // took a second `HeadOpening` on top of this open and both
+                    // drove the same staging database. Whichever open resolved
+                    // second then found the slot already reset and failed the
+                    // clone lane closed. A successful begin resolves the claim
+                    // to `BuildingCloneSuccessor` anyway, so only a failed one
+                    // needs the retry marker: the owners installed above would
+                    // otherwise let the next wake short-circuit on a plain
+                    // `Idle` and never owe the successor again.
+                    return match self.begin_clone_successor(
+                        descriptor,
+                        prior,
+                        sealed_identity,
+                        source,
+                        control,
+                    ) {
+                        Ok(build) => Ok(Some(TextHeadOpenOutcomeV1::BuildCloneSuccessor(build))),
+                        Err(error) => {
+                            // The claim still owns `HeadOpening`, so this only
+                            // parks the marker; the begin failure is the one
+                            // worth reporting.
+                            let _ = self.text_projection_build.retain_clone_successor_retry();
+                            Err(error)
+                        }
+                    };
                 }
                 drop(source);
                 Ok(Some(TextHeadOpenOutcomeV1::Served))
@@ -2691,14 +2859,9 @@ impl LatestCodeTextGenerationV1 {
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<TextHeadOpenOutcomeV1, RetrievalPortError> {
         let store = &self.text_artifact_store;
-        let build_memory_budget = code_lexical_artifact_build_memory_budget_for(
+        let preferred_build_memory_budget = code_lexical_artifact_build_memory_budget_for(
             store.resident_memory.snapshot().limit_bytes,
         );
-        let (source_batch_pages, source_batch_bytes, _) =
-            text_artifact_source_batch_limits(build_memory_budget);
-        hotpath::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget);
-        hotpath::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages);
-        hotpath::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes);
         let generation_id = self.metadata.manifest().generation_id.clone();
         if let Some(descriptor) = store.published_descriptor(&generation_id)?
             && let Some(outcome) =
@@ -2707,12 +2870,24 @@ impl LatestCodeTextGenerationV1 {
             return Ok(outcome);
         }
         // The builder's advertised memory ceiling is reserved through the
-        // process resident-memory authority before the build allocates.
-        let build_reservation = store.reserve_resident_memory(
+        // process resident-memory authority before the build allocates. The
+        // host-scaled figure is a preferred ceiling, not a minimum: under a
+        // large stale serving graph, admit any supported budget down to the
+        // builder's established 1.5 GiB floor so the replacement can finish
+        // and release that graph.
+        let (build_reservation, build_memory_budget) = store.reserve_resident_memory_up_to(
             &generation_id,
             "code-text-artifact-build",
-            build_memory_budget,
+            preferred_build_memory_budget,
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
         )?;
+        let (source_batch_pages, source_batch_bytes, _) =
+            text_artifact_source_batch_limits(build_memory_budget);
+        hotpath::gauge!("query.artifact.preferred_build_memory_budget_bytes")
+            .set(preferred_build_memory_budget);
+        hotpath::gauge!("query.artifact.build_memory_budget_bytes").set(build_memory_budget);
+        hotpath::gauge!("query.artifact.source_batch_pages_max").set(source_batch_pages);
+        hotpath::gauge!("query.artifact.source_batch_bytes_max").set(source_batch_bytes);
         let sealed_identity = store.sealed_identity(&generation_id)?;
         let sealed_hex = sha256_hex_suffix(sealed_identity.digest.as_str()).ok_or_else(|| {
             RetrievalPortError::Contract(
@@ -3149,7 +3324,7 @@ impl LatestCodeTextGenerationV1 {
             false,
         )?;
         // The publication tail content-addresses the finalized staging file
-        // and reopens it verified — corpus-sized digest work — so it runs
+        // and reopens it verified, corpus-sized digest work, so it runs
         // under a fresh `HeadOpening` claim with the slot lock released, the
         // same discipline as the durable-head reopen. On failure the claim
         // restores `Idle` and the durable staging file resumes on a later
@@ -3163,7 +3338,7 @@ impl LatestCodeTextGenerationV1 {
             ));
         };
         drop(slot);
-        let mut publish_claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
+        let _publish_claim = TextHeadOpenClaimV1::new(&self.text_projection_build);
         let CodeTextArtifactBuildV1 {
             builder,
             source,
@@ -3182,15 +3357,11 @@ impl LatestCodeTextGenerationV1 {
             &sealed_identity,
             control,
         )?;
-        // The builder and source are gone, so its transient reservation no
-        // longer owns bytes. Release it before sampling the reader admission;
-        // the reader guard then carries the still-live unmodeled baseline.
-        drop(build_reservation);
-        let reader_reservation = store.reserve_resident_memory(
-            &self.metadata.manifest().generation_id,
-            "code-text-artifact-reader",
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        )?;
+        // The reader is a smaller charge of the bytes this build already
+        // holds. Dropping the build reservation and reserving the reader
+        // again is a gap: an overlapping graph replay can sit on the process
+        // RSS watermark, and the new admission is then refused forever.
+        let reader_reservation = reader_charge_from_held_reservation(build_reservation)?;
         let final_path = code_text_artifact_path(store.store_root(), &descriptor)
             .map_err(text_artifact_unavailable)?;
         let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
@@ -3202,7 +3373,6 @@ impl LatestCodeTextGenerationV1 {
         )
         .map_err(map_text_artifact_error)?;
         let needs_clone_successor = !reader.has_clone_fingerprints();
-        let prior = reader.verified_artifact().clone();
         // Match the cold-open path: install owners first, then publish Ready.
         // Publishing Ready before a failed install (admission ceiling / shrink)
         // would leave dashboard/MCP progress claiming a ready generation that
@@ -3210,10 +3380,16 @@ impl LatestCodeTextGenerationV1 {
         self.install_artifact_owners(reader, reader_reservation)?;
         self.publish_text_progress_phase(CodeIndexBuildPhaseV1::Ready, 0, 0);
         if needs_clone_successor {
-            let source = store.open_sealed_source(&sealed_identity, control)?;
-            let build =
-                self.begin_clone_successor(descriptor, prior, sealed_identity, source, control)?;
-            drop(publish_claim.install(TextHeadOpenBuildV1::CloneSuccessor(build)));
+            // `begin_clone_successor` copies the whole prior lexical artifact
+            // before the first page walk. Doing that here kept this advance,
+            // and the publication pass awaiting it, inside `reconcile_in_progress`
+            // for the copy. Exact and lexical serving are already installed;
+            // the copy is not a freshness precondition. Leave the slot pending
+            // so the retained driver starts the successor after the seat,
+            // without the receipt guard. The claim stays armed: its drop
+            // restores only `HeadOpening`, so `CloneSuccessorPending` survives
+            // and parked wakes are notified.
+            self.text_projection_build.retain_clone_successor_retry()?;
             return Ok(false);
         }
         Ok(true)
@@ -3295,7 +3471,11 @@ impl LatestCodeTextGenerationV1 {
             .finish(source_receipt, control)
             .map_err(map_text_artifact_error)?;
         drop(build.builder.take());
-        drop(build.build_reservation.take());
+        let held_reservation = build.build_reservation.take().ok_or_else(|| {
+            RetrievalPortError::Contract(
+                "clone-successor resident-memory charge disappeared before publication".to_owned(),
+            )
+        })?;
         let descriptor = self.text_artifact_store.publish_with_prior(
             &build.staging_path,
             &self.metadata.manifest().generation_id,
@@ -3303,11 +3483,7 @@ impl LatestCodeTextGenerationV1 {
             Some(&build.prior_descriptor),
             control,
         )?;
-        let reader_reservation = self.text_artifact_store.reserve_resident_memory(
-            &self.metadata.manifest().generation_id,
-            "code-text-artifact-reader",
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        )?;
+        let reader_reservation = reader_charge_from_held_reservation(held_reservation)?;
         let final_path =
             code_text_artifact_path(self.text_artifact_store.store_root(), &descriptor)
                 .map_err(text_artifact_unavailable)?;
@@ -3598,8 +3774,8 @@ fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortEr
             // A pre-existing root that fails owner-privacy validation is most
             // often a legacy directory an older binary created under a
             // permissive umask. Ownership is the proof this process may
-            // tighten it in place; a root it does not own — or that is not a
-            // directory at all — stays a typed deterministic contract
+            // tighten it in place; a root it does not own, or that is not a
+            // directory at all, stays a typed deterministic contract
             // violation for the operator instead of an endless silent retry.
             match make_private_directory(path) {
                 Ok(receipt) => {
@@ -3728,7 +3904,12 @@ pub(super) fn text_artifact_builder_budget(
     build_memory_budget
         .checked_sub(source_window_bytes)
         .filter(|remaining| *remaining > 0)
-        .ok_or(RetrievalPortError::BudgetExceeded)
+        .ok_or_else(|| {
+            RetrievalPortError::Contract(format!(
+                "text-artifact source window needs {source_window_bytes} bytes, exhausting its \
+                 {build_memory_budget}-byte build reservation"
+            ))
+        })
 }
 
 #[cfg(test)]

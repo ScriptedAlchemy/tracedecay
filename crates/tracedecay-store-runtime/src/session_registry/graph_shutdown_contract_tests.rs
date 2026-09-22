@@ -5,7 +5,7 @@
 //! regression back to close-before-join (or to closing while the registry
 //! maps still hold their standing owner attachments) fails the close below
 //! with `graph database conflict (operation: close graph runtime for
-//! shutdown)` — the exact receipt detail this contract forbids.
+//! shutdown)`, the exact receipt detail this contract forbids.
 
 use std::path::{Path, PathBuf};
 use std::sync::{

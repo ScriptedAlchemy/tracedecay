@@ -201,14 +201,14 @@ pub(crate) async fn proxy_transport_to_daemon_with_drain_bound(
 /// request it has already been handed.
 ///
 /// This is *not* a timeout invented here: it is the daemon's own published
-/// dispatch ceiling for that exact request — "nothing may run unbounded", per
+/// dispatch ceiling for that exact request, "nothing may run unbounded", per
 /// [`tool_dispatch_ceiling`](tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling)
-/// — plus
+///, plus
 /// [`DAEMON_TOOL_RESPONSE_GRACE`](tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE), the grace
 /// this crate already keeps reading for beyond a request deadline. A daemon
 /// honouring its own contract always answers first, so the bound cannot cut
 /// short correct work, including a slow `tools/call` from a batch client. Only a
-/// daemon that has already blown its own ceiling reaches it — and by then the
+/// daemon that has already blown its own ceiling reaches it, and by then the
 /// client that would have received the answer is gone.
 ///
 /// A line that is not a `tools/call` (initialize, tools/list, resources/*) has
@@ -260,7 +260,7 @@ fn request_tool_name(request: Option<&JsonRpcRequest>) -> Option<String> {
 /// The wait itself is still required: a batch client (`echo request |
 /// tracedecay serve`) closes stdin the instant it finishes writing, and its
 /// response must still be produced. What must not survive is an *ownerless*
-/// `tracedecay serve` waiting forever on a daemon that never answers — that is
+/// `tracedecay serve` waiting forever on a daemon that never answers, that is
 /// how a disconnected session turns into a long-lived orphan holding its fds
 /// and daemon connection.
 #[cfg(unix)]
@@ -452,7 +452,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
     registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> tracedecay_domain::errors::Result<Option<InitializeRouteMetadata>> {
     let roots = crate::mcp::server::initialize_root_paths(params);
-    // One parent discovery budget for the whole initialize request — not N×
+    // One parent discovery budget for the whole initialize request, not N×
     // REPOSITORY_DISCOVERY_DEADLINE across roots / registry then fallback loops.
     let discovery_deadline = repository_discovery_parent_deadline();
     if let Some(registry) = registry {
@@ -504,7 +504,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
             reason,
         ) = &repository_identity
         {
-            // Deferred is uncertainty, not a decided root — never fall through
+            // Deferred is uncertainty, not a decided root, never fall through
             // to discover_project_root / Resolved admission.
             return Err(repository_discovery_deferred(&root, *reason));
         }
@@ -519,7 +519,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 identity,
             ) => {
                 // An initialize route has no retained configuration authority.
-                // Never revive legacy-file fallback here — but a fresh repo with
+                // Never revive legacy-file fallback here, but a fresh repo with
                 // no published snapshot follows the schema default (auto-init
                 // enabled), not fail-closed: treating a missing snapshot as
                 // "disabled" contradicted the config default and left explicit
@@ -569,7 +569,7 @@ pub(super) async fn bounded_repository_identity(
 /// them until the caller's budget expires only hides the actionable error.
 ///
 /// A deferral names when to come back and, when one is still running, that a
-/// resolution is in progress — the difference between "this root is being
+/// resolution is in progress, the difference between "this root is being
 /// resolved" and "this root is unresolved", which is what a client staring at
 /// a repeated deferral cannot otherwise tell.
 pub(super) fn repository_discovery_deferred(
@@ -909,12 +909,12 @@ fn daemon_version_skew_warning_for_request(
     client_version: &str,
 ) -> Option<String> {
     let daemon_version = proxy_initialize_metadata_for_request(request, responses).daemon_version?;
-    if daemon_version == client_version {
+    if tracedecay_daemon_protocol::versions_name_same_build(&daemon_version, client_version) {
         return None;
     }
     let action = version_skew_action(&daemon_version, client_version);
     Some(format!(
-        "TraceDecay daemon is version {daemon_version} but this client is {client_version} — \
+        "TraceDecay daemon is version {daemon_version} but this client is {client_version}, \
          {action}"
     ))
 }
@@ -1048,7 +1048,7 @@ mod tests {
     }
 
     /// The post-disconnect drain must never cut short work the daemon is still
-    /// entitled to be doing — a batch client closes stdin immediately, so every
+    /// entitled to be doing, a batch client closes stdin immediately, so every
     /// one of its requests drains under this bound.
     #[cfg(unix)]
     #[test]
@@ -1083,8 +1083,8 @@ mod tests {
 
         // Unnamed methods resolve the unnamed-tool default
         // (`tool_dispatch_ceiling("")`), not a named catalog tool such as
-        // `tracedecay_context`. The drain must outlive that resolved ceiling —
-        // the longest bound that actually applies to this request — rather
+        // `tracedecay_context`. The drain must outlive that resolved ceiling,
+        // the longest bound that actually applies to this request, rather
         // than a hardcoded catalog value.
         assert_eq!(request_tool_name(non_tool.parsed.as_ref()), None);
         let unnamed_ceiling = tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_ceiling("");

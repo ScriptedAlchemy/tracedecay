@@ -431,7 +431,7 @@ fn run_codex_protocol(
         )?;
 
         // `stdin` stays open for the whole turn. `codex app-server` treats stdin
-        // EOF as a client disconnect and shuts the session down immediately —
+        // EOF as a client disconnect and shuts the session down immediately,
         // measured at 70ms after close, exit status 0, with the in-flight turn
         // cancelled and no `turn/completed` ever emitted. Closing it here to mean
         // "no further requests" therefore killed every automation run before the
@@ -1147,9 +1147,16 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let descendant_pid_path = temp.path().join("descendant.pid");
+        // `>` creates the pid file before the shell writes into it, and a poll
+        // that only checks the path can read it empty. Write to a sibling and
+        // rename so the file appears with its pid already in it.
         let mut command = Command::new("sh");
         command
-            .args(["-c", "sleep 30 & echo $! > \"$1\"; wait", "sh"])
+            .args([
+                "-c",
+                "sleep 30 & echo $! > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; wait",
+                "sh",
+            ])
             .arg(&descendant_pid_path);
         let child = spawn_codex_app_server(&mut command, "sh").expect("spawn child");
         let mut child = ChildGuard {

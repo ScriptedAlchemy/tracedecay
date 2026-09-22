@@ -141,15 +141,22 @@ impl ExistingBatchState {
         entity_locator_keys.retain(|key, _| !entity_keys.contains_key(key));
         let entities = hotpath::measure_block!(
             "graph_db.mutation.existing_state.entity_records",
-            load_requested_entities(database, &batch.namespace, entity_keys, batch)
+            load_requested(entity_keys, batch, |identity| {
+                load_entity(database, &batch.namespace, identity)
+            })
         )?;
         let entity_locators = hotpath::measure_block!(
             "graph_db.mutation.existing_state.endpoint_locators",
-            load_requested_entity_locators(database, &batch.namespace, entity_locator_keys, batch,)
+            load_requested(entity_locator_keys, batch, |identity| {
+                load_entity_locator(database, &batch.namespace, identity)
+            })
         )?;
+        let mut endpoints = EndpointIdentityCache::default();
         let relations = hotpath::measure_block!(
             "graph_db.mutation.existing_state.relation_records",
-            load_requested_relations(database, &batch.namespace, relation_keys, batch)
+            load_requested(relation_keys, batch, |identity| {
+                load_relation_by_key(database, &batch.namespace, identity, &mut endpoints)
+            })
         )?;
         Ok(Self {
             entities,
@@ -215,7 +222,7 @@ pub(crate) struct EndpointIdentityCache {
 
 impl EndpointIdentityCache {
     /// Takes the graph store rather than the database handle so bulk
-    /// enumerations — the recovered-generation proof in particular — can
+    /// enumerations, the recovered-generation proof in particular, can
     /// resolve endpoints from worker threads that share only the store.
     pub(crate) fn identity(
         &mut self,
@@ -356,57 +363,18 @@ pub(crate) fn load_entity(
     }))
 }
 
-fn load_requested_entities(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    requested: HashMap<String, &GraphEntityId>,
+fn load_requested<K, V>(
+    requested: HashMap<String, &K>,
     batch: &GraphWriteBatch,
-) -> Result<BTreeMap<String, StoredEntity>, GraphDbError> {
+    mut load: impl FnMut(&K) -> Result<Option<V>, GraphDbError>,
+) -> Result<BTreeMap<String, V>, GraphDbError> {
     let mut loaded = BTreeMap::new();
     for (index, (key, identity)) in requested.into_iter().enumerate() {
         if index % 256 == 0 && batch.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        if let Some(entity) = load_entity(database, namespace, identity)? {
-            loaded.insert(key, entity);
-        }
-    }
-    Ok(loaded)
-}
-
-fn load_requested_entity_locators(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    requested: HashMap<String, &GraphEntityId>,
-    batch: &GraphWriteBatch,
-) -> Result<BTreeMap<String, EntityLocator>, GraphDbError> {
-    let mut loaded = BTreeMap::new();
-    for (index, (key, identity)) in requested.into_iter().enumerate() {
-        if index % 256 == 0 && batch.cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        if let Some(entity) = load_entity_locator(database, namespace, identity)? {
-            loaded.insert(key, entity);
-        }
-    }
-    Ok(loaded)
-}
-
-fn load_requested_relations(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    requested: HashMap<String, &GraphRelationId>,
-    batch: &GraphWriteBatch,
-) -> Result<BTreeMap<String, StoredRelation>, GraphDbError> {
-    let mut loaded = BTreeMap::new();
-    let mut endpoints = EndpointIdentityCache::default();
-    for (index, (key, identity)) in requested.into_iter().enumerate() {
-        if index % 256 == 0 && batch.cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        if let Some(relation) = load_relation_cached(database, namespace, identity, &mut endpoints)?
-        {
-            loaded.insert(key, relation);
+        if let Some(value) = load(identity)? {
+            loaded.insert(key, value);
         }
     }
     Ok(loaded)
@@ -442,21 +410,12 @@ pub(crate) fn load_relation(
     namespace: &GraphNamespace,
     identity: &GraphRelationId,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
-    load_relation_cached(
+    load_relation_by_key(
         database,
         namespace,
         identity,
         &mut EndpointIdentityCache::default(),
     )
-}
-
-pub(crate) fn load_relation_cached(
-    database: &GrafeoDB,
-    namespace: &GraphNamespace,
-    identity: &GraphRelationId,
-    cache: &mut EndpointIdentityCache,
-) -> Result<Option<StoredRelation>, GraphDbError> {
-    load_relation_by_key(database, namespace, identity, cache)
 }
 
 pub(crate) fn load_relation_by_edge(
@@ -866,7 +825,7 @@ pub(crate) fn retirement_page_record_reads() -> usize {
 /// page, not the projection: it reads owner-label candidates in index order
 /// and stops as soon as the page is full. Filtering every candidate first
 /// (the `labeled_projection_nodes_checked` shape) re-read the whole
-/// projection per page — measured at ~9.5 s per 4,096-row page against a
+/// projection per page, measured at ~9.5 s per 4,096-row page against a
 /// 3.4M-row staging release, an O(rows² / page) sweep that kept the
 /// publishing thread, and the serving seat behind it, busy for hours.
 #[hotpath::measure(label = "graph_db.projection.deletion_page")]

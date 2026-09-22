@@ -31,13 +31,7 @@ mod stack_drift;
 
 const DAY_MICROS: i64 = 86_400_000_000;
 const SCOPE: &str = "project.execution-topology-rollup";
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 fn rollup_context() -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>(SCOPE),

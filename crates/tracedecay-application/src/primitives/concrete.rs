@@ -216,8 +216,8 @@ pub type SymbolGraphCursorSnapshotFuture<'a> =
 pub trait SymbolGraphCursorSnapshotAuthority: Send + Sync {
     /// Reads the identity that is live *now*. Resolving the current generation
     /// is an authority read rather than a cached field, so the returned
-    /// snapshot changes the moment the code index publishes a new generation —
-    /// which is what makes a cursor minted under the old one refuse to verify.
+    /// snapshot changes the moment the code index publishes a new generation.
+    /// Which is what makes a cursor minted under the old one refuse to verify.
     fn snapshot<'a>(
         &'a self,
         context: &'a RequestContext,

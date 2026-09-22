@@ -22,6 +22,11 @@ use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
 
 const MAX_RECEIPT_COPY_ENTITIES: usize = 100_000;
+/// One coverage digest page stays under the exact-SQL materialization ceiling.
+/// `snippet_text` and `index_text` are the row bulk, so this is row-count-small
+/// on purpose. OFFSET is O(n²) row visits on a terminal batch; keyset on the
+/// ORDER BY column is the upgrade if a generation makes this the hot path.
+const COVERAGE_DIGEST_PAGE_ROWS: i64 = 32;
 
 #[hotpath::measure(future = true, label = "session_temporal.projection.validate_receipt")]
 pub async fn validate_final_projection_receipt(
@@ -390,8 +395,8 @@ pub async fn record_canonical_observation_effect(
     // table is insert-only (immutable update/delete triggers plus an authority
     // guard on insert), so reading it back could only echo these very
     // parameters. Only the conflict branch can hide a durable row that
-    // disagrees with this derivation, so the read-back comparison — the actual
-    // provenance contract for replayed observations — is confined to it.
+    // disagrees with this derivation, so the read-back comparison, the actual
+    // provenance contract for replayed observations, is confined to it.
     if inserted == 1 {
         return Ok(());
     }
@@ -642,40 +647,69 @@ pub(super) async fn digest_query_rows(
     batch: &SessionTemporalProjectionBatchV1,
     control: Option<&ExecutionControl>,
 ) -> SessionStoreResult<(usize, String)> {
-    if let Some(control) = control {
-        checkpoint_relation_rebuild_control(control)?;
-    }
-    record_coverage_query_probe();
-    let mut rows = conn
-        .query(
-            sql,
-            params![
-                batch.session_id().as_str(),
-                generation_i64(batch.generation(), PERSIST_OPERATION)?,
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    digest_paged_rows(
+        conn,
+        sql,
+        batch.session_id().as_str(),
+        generation_i64(batch.generation(), PERSIST_OPERATION)?,
+        control,
+    )
+    .await
+}
+
+async fn digest_paged_rows(
+    conn: &impl crate::handle::SessionTemporalExec,
+    sql: &str,
+    session_id: &str,
+    generation: i64,
+    control: Option<&ExecutionControl>,
+) -> SessionStoreResult<(usize, String)> {
+    // SQLite drops ORDER BY inside a subquery unless that subquery has LIMIT.
+    // The inner LIMIT -1 keeps digest order; the outer page is what exact SQL
+    // materializes.
+    let paged = format!("SELECT * FROM ({sql} LIMIT -1) LIMIT ?3 OFFSET ?4");
+    let mut offset = 0_i64;
     let mut digest = Sha256::new();
     let mut count = 0usize;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-    {
+    loop {
         if let Some(control) = control {
             checkpoint_relation_rebuild_control(control)?;
         }
-        let value = row
-            .get::<String>(0)
+        record_coverage_query_probe();
+        let mut rows = conn
+            .query(
+                &paged,
+                params![session_id, generation, COVERAGE_DIGEST_PAGE_ROWS, offset],
+            )
+            .await
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-        record_coverage_row(
-            u64::try_from(value.len()).map_err(|error| storage(PERSIST_OPERATION, error))?,
-        );
-        update_ordered_row_digest(&mut digest, count, value.as_bytes());
-        count = count
-            .checked_add(1)
-            .ok_or_else(|| storage_message(PERSIST_OPERATION, "coverage row count overflow"))?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(PERSIST_OPERATION, error))?
+        {
+            if let Some(control) = control {
+                checkpoint_relation_rebuild_control(control)?;
+            }
+            let value = row
+                .get::<String>(0)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            record_coverage_row(
+                u64::try_from(value.len()).map_err(|error| storage(PERSIST_OPERATION, error))?,
+            );
+            update_ordered_row_digest(&mut digest, count, value.as_bytes());
+            count = count
+                .checked_add(1)
+                .ok_or_else(|| storage_message(PERSIST_OPERATION, "coverage row count overflow"))?;
+            page_rows += 1;
+        }
+        if page_rows < COVERAGE_DIGEST_PAGE_ROWS {
+            break;
+        }
+        offset = offset.checked_add(page_rows).ok_or_else(|| {
+            storage_message(PERSIST_OPERATION, "coverage digest page offset overflow")
+        })?;
     }
     Ok((
         count,
@@ -1027,6 +1061,53 @@ mod digest_tests {
         assert_eq!(
             encode_tagged_lowercase_hex("sha256:", &streaming.finalize()),
             digest_bytes(b"alpha\n\nomega")
+        );
+    }
+
+    #[tokio::test]
+    async fn coverage_digest_reads_every_ordered_row_across_pages() {
+        let dir = tempfile::TempDir::new().expect("digest dir");
+        let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &dir.path().join("digest.db"),
+        );
+        tracedecay_runtime_core::db::engine::Executor::execute_batch(
+            &conn,
+            "CREATE TABLE coverage_rows(session_id TEXT, generation INTEGER, encoded TEXT)",
+        )
+        .await
+        .expect("create coverage rows");
+        let total = COVERAGE_DIGEST_PAGE_ROWS + 8;
+        let mut expected = Sha256::new();
+        for index in 0..total {
+            let encoded = format!("row-{index:04}");
+            update_ordered_row_digest(
+                &mut expected,
+                usize::try_from(index).expect("index"),
+                encoded.as_bytes(),
+            );
+            tracedecay_runtime_core::db::engine::Executor::execute(
+                &conn,
+                "INSERT INTO coverage_rows(session_id, generation, encoded) VALUES ('session', 7, ?1)",
+                params![encoded],
+            )
+            .await
+            .expect("insert coverage row");
+        }
+
+        let (count, digest) = digest_paged_rows(
+            &conn,
+            "SELECT encoded FROM coverage_rows WHERE session_id = ?1 AND generation = ?2 ORDER BY encoded",
+            "session",
+            7,
+            None,
+        )
+        .await
+        .expect("paged digest");
+
+        assert_eq!(count, usize::try_from(total).expect("total"));
+        assert_eq!(
+            digest,
+            encode_tagged_lowercase_hex("sha256:", &expected.finalize())
         );
     }
 }

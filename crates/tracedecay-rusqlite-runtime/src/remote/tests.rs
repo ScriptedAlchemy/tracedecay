@@ -518,6 +518,30 @@ fn runtime_attachment_rejects_same_tables_with_stale_columns() {
 }
 
 #[test]
+fn runtime_attachment_admits_the_registered_runtime_writer_ledger() {
+    let keyring = || {
+        Arc::new(TestKeyring(Arc::new(
+            RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
+        ))) as Arc<dyn RemoteSpoolKeyringV1>
+    };
+    let fixture = fixture();
+    fixture
+        .handle
+        .execute_batch(crate::runtime_ledger::RUNTIME_LEDGER_SCHEMA.to_owned())
+        .unwrap();
+    RemoteSqliteStorageV1::from_retained_exact_sql(retained(&fixture), keyring()).unwrap();
+
+    fixture
+        .handle
+        .execute_batch("DROP TABLE remote_enrollments".to_owned())
+        .unwrap();
+    assert!(matches!(
+        RemoteSqliteStorageV1::from_retained_exact_sql(retained(&fixture), keyring()),
+        Err(RemoteSqliteStorageErrorV1::ResetRequired)
+    ));
+}
+
+#[test]
 fn spool_key_rejects_zero_revision_and_wrong_size() {
     assert!(matches!(
         RemoteSpoolKeyV1::from_secret_bytes(0, vec![7; 32]),

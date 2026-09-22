@@ -5,7 +5,7 @@
 //! characters. Callers add their own byte bound and, more importantly, their
 //! own rejection mapping: some contracts distinguish an empty value from a
 //! merely non-canonical one, others collapse both into a single rejection.
-//! Only the predicate is shared — never the error, so no contract's
+//! Only the predicate is shared, never the error, so no contract's
 //! accept/reject reporting changes by reusing it.
 
 use sha2::{Digest, Sha256};
@@ -91,7 +91,7 @@ pub const fn default_true() -> bool {
 /// Length-prefixed SHA-256 over a domain separator and an ordered list of
 /// parts, encoded as lowercase hex.
 ///
-/// Every frame — the domain tag included — is preceded by its big-endian
+/// Every frame, the domain tag included, is preceded by its big-endian
 /// `u64` byte length, so no two different splits of the same concatenated
 /// bytes can collide. This is an identity primitive: derived ids already
 /// written to disk depend on the exact framing, so the byte layout must never
@@ -101,7 +101,7 @@ pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
     encode_lowercase_hex(&canonical_framed_sha256_bytes(domain, parts))
 }
 
-/// Lowercase-hex SHA-256 of `bytes` — the one digest-to-text encoding every
+/// Lowercase-hex SHA-256 of `bytes`, the one digest-to-text encoding every
 /// surface shares, so no call site re-rolls its own nibble table.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -142,7 +142,7 @@ pub(crate) fn validate_canonical_string(
 
 /// Hex body of a `sha256:`-tagged digest, if the algorithm tag is present.
 ///
-/// This only strips the tag. It does not validate hex length or case — callers
+/// This only strips the tag. It does not validate hex length or case, callers
 /// that already hold a [`crate::ManifestDigest`] still need it, because that
 /// type also accepts `blake3:` and `sha512:`.
 #[must_use]
@@ -150,11 +150,23 @@ pub fn sha256_hex_suffix(value: &str) -> Option<&str> {
     value.strip_prefix("sha256:")
 }
 
+/// First eight bytes of a SHA-256 digest as a non-negative integer.
+///
+/// Lexical artifact row ids and clone fingerprints both need a value that
+/// fits in a signed 64-bit integer, so the high bit is cleared. `digest`
+/// must be at least eight bytes; a full SHA-256 digest is 32.
+#[must_use]
+pub fn nonnegative_sha256_prefix(digest: &[u8]) -> u64 {
+    let mut prefix = [0_u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(prefix) & i64::MAX as u64
+}
+
 /// The hex body of a `sha256:`-tagged digest, without the algorithm tag.
 ///
 /// Identities that embed a digest under their own namespace all need the
 /// encoding alone, and all reject an untagged digest as non-canonical under
-/// their own field name — so only the stripping is shared, not the field.
+/// their own field name, so only the stripping is shared, not the field.
 pub(crate) fn sha256_hex_body<'a>(
     value: &'a str,
     field: &'static str,
@@ -431,6 +443,15 @@ mod tests {
         assert_eq!(
             validate_canonical_identity("", "field"),
             Err(DomainError::NonCanonical { field: "field" })
+        );
+    }
+
+    #[test]
+    fn nonnegative_sha256_prefix_clears_the_high_bit() {
+        assert_eq!(nonnegative_sha256_prefix(&[0xff; 32]), i64::MAX as u64);
+        assert_eq!(
+            nonnegative_sha256_prefix(&[0x01, 0, 0, 0, 0, 0, 0, 2]),
+            0x0100_0000_0000_0002
         );
     }
 

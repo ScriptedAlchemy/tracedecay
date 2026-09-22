@@ -478,6 +478,20 @@ fn execute_cursor_advance(
     Ok(())
 }
 
+fn source_cursor_json(connection: &Connection) -> String {
+    connection
+        .query_row("SELECT cursor_json FROM source_cursors", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+fn restore_source_cursor(connection: &Connection, cursor_json: &str) {
+    connection
+        .execute("UPDATE source_cursors SET cursor_json = ?1", [cursor_json])
+        .unwrap();
+}
+
 #[test]
 fn anchored_write_persists_all_authority_rows_atomically() {
     let mut connection = connection();
@@ -738,10 +752,11 @@ fn identity_collision_fails_without_advancing_the_source_cursor() {
 }
 
 #[test]
-fn source_cursor_advance_replays_exactly_and_reports_ledger_disagreement() {
+fn source_cursor_advance_keeps_the_first_owner_once_the_frontier_is_reached() {
     let mut connection = connection();
     let write = anchored_observation_write("fixture", "receipt.fixture");
     execute(&mut connection, &write).unwrap();
+    let owned_frontier = source_cursor_json(&connection);
     let advance = ObservationCursorAdvance::for_ordering(
         write.observation().source().clone(),
         write.observation().scope().clone(),
@@ -774,9 +789,30 @@ fn source_cursor_advance_replays_exactly_and_reports_ledger_disagreement() {
         ObservationCoverageReason::OutOfScope,
     )
     .unwrap();
+    execute_cursor_advance(&mut connection, &conflicting).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT reason FROM source_cursor_advances", [], |row| {
+                row.get::<_, String>(0)
+            },)
+            .unwrap(),
+        ObservationCoverageReason::BlankFrame.as_str()
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM source_cursor_advances", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+
+    // The disagreement stays a write-time failure: the cursor has not
+    // reached the proposed frontier, so this advance would move it.
+    restore_source_cursor(&connection, &owned_frontier);
     let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
     let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
-        panic!("expected structured immutable ledger disagreement");
+        panic!("expected structured immutable ledger disagreement, got {error:?}");
     };
     assert_eq!(disagreement.source(), write.observation().source());
     assert_eq!(disagreement.scope(), write.observation().scope());
@@ -804,6 +840,7 @@ fn canonical_cursor_advance_receipt_remains_typed_after_authority_lookup() {
     let mut connection = connection();
     let write = anchored_observation_write("fixture", "receipt.fixture");
     execute(&mut connection, &write).unwrap();
+    let observation_cursor = source_cursor_json(&connection);
     let advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
         write.observation().source().clone(),
         write.observation().scope().clone(),
@@ -829,9 +866,26 @@ fn canonical_cursor_advance_receipt_remains_typed_after_authority_lookup() {
     )
     .unwrap();
 
+    execute_cursor_advance(&mut connection, &conflicting).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT reason, receipt_id FROM source_cursor_advances",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+        (
+            ObservationCoverageReason::DuplicateObservation
+                .as_str()
+                .to_owned(),
+            "receipt.fixture".to_owned(),
+        )
+    );
+    restore_source_cursor(&connection, &observation_cursor);
     let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
     let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
-        panic!("expected structured immutable ledger disagreement");
+        panic!("expected structured immutable ledger disagreement, got {error:?}");
     };
     assert!(matches!(
         disagreement.stored().receipt_id(),
@@ -850,6 +904,7 @@ fn corrupt_cursor_advance_ledger_values_are_opaque_and_content_free() {
     let mut connection = connection();
     let write = anchored_observation_write("fixture", "receipt.fixture");
     execute(&mut connection, &write).unwrap();
+    let observation_cursor = source_cursor_json(&connection);
     let advance = ObservationCursorAdvance::for_ordering(
         write.observation().source().clone(),
         write.observation().scope().clone(),
@@ -879,10 +934,11 @@ fn corrupt_cursor_advance_ledger_values_are_opaque_and_content_free() {
         ObservationCoverageReason::OutOfScope,
     )
     .unwrap();
+    restore_source_cursor(&connection, &observation_cursor);
 
     let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
     let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
-        panic!("expected structured immutable ledger disagreement");
+        panic!("expected structured immutable ledger disagreement, got {error:?}");
     };
     assert!(matches!(
         disagreement.stored().reason(),
@@ -912,6 +968,7 @@ fn short_corrupt_ledger_receipt_stays_opaque_across_runtime_boundary() {
     let mut connection = connection();
     let write = anchored_observation_write("fixture", "receipt.fixture");
     execute(&mut connection, &write).unwrap();
+    let observation_cursor = source_cursor_json(&connection);
     let advance = ObservationCursorAdvance::for_ordering(
         write.observation().source().clone(),
         write.observation().scope().clone(),
@@ -942,10 +999,11 @@ fn short_corrupt_ledger_receipt_stays_opaque_across_runtime_boundary() {
         ObservationCoverageReason::OutOfScope,
     )
     .unwrap();
+    restore_source_cursor(&connection, &observation_cursor);
 
     let error = execute_cursor_advance(&mut connection, &conflicting).unwrap_err();
     let StorageOperationError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
-        panic!("expected structured immutable ledger disagreement");
+        panic!("expected structured immutable ledger disagreement, got {error:?}");
     };
     assert!(matches!(
         disagreement.stored().receipt_id(),

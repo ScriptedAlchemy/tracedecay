@@ -7,7 +7,7 @@
 //! **Manual by necessity, not by preference (verified 2026-08-08).** The owner
 //! policy is CLI-first, so this config write needs a justification. Vibe's
 //! `vibe mcp add` is genuinely non-interactive and `vibe mcp remove <name>`
-//! exists — but `add` is **remote-transport only** (`--url`, `--transport`,
+//! exists, but `add` is **remote-transport only** (`--url`, `--transport`,
 //! `--header`, `--api-key-*`). It has no `--command`/`--args`, so a local
 //! stdio server, which is exactly what `tracedecay serve` is, has no
 //! representation on that command line; Mistral's own documentation registers
@@ -46,7 +46,7 @@ fn vibe_config_path(home: &Path) -> PathBuf {
     vibe_home(home).join("config.toml")
 }
 
-fn vibe_prompt_path(home: &Path) -> PathBuf {
+pub(super) fn vibe_prompt_path(home: &Path) -> PathBuf {
     vibe_home(home).join("prompts/cli.md")
 }
 
@@ -95,6 +95,15 @@ impl AgentIntegration for VibeIntegration {
                 &project_home.join("prompts/cli.md"),
             );
         }
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                vibe_prompt_path(&ctx.home),
+                project_home.join("prompts/cli.md"),
+            ],
+            SkillInstallTarget::Agents,
+        );
     }
 
     fn host_component_registration(
@@ -368,11 +377,11 @@ fn doctor_check_registration(dc: &mut DoctorCounters, config: &Path, prompt: &Pa
             dc.pass(&format!("MCP server registered in {}", config.display()))
         }
         HostBundleRegistrationStateV1::Missing => dc.warn(&format!(
-            "{} has no tracedecay MCP server — run `tracedecay install --agent vibe`",
+            "{} has no tracedecay MCP server, run `tracedecay install --agent vibe`",
             config.display()
         )),
         HostBundleRegistrationStateV1::Repairable => dc.fail(&format!(
-            "MCP server in {} is foreign-modified — run `tracedecay repair --agent vibe`",
+            "MCP server in {} is foreign-modified, run `tracedecay repair --agent vibe`",
             config.display()
         )),
         HostBundleRegistrationStateV1::Corrupt => {

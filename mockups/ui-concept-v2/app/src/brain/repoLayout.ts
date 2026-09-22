@@ -20,7 +20,7 @@ export const REPO_DESIGN_ZOOM = 1.75;
 
 const FALLBACK_COLORS = ["#f0b429", "#4fc3f7", "#2dd4bf", "#c084fc"];
 
-/** Real tracedecay checkouts. Amber canonical, cyan siblings — never invented. */
+/** Real tracedecay checkouts. Amber canonical, cyan siblings, never invented. */
 export const CHECKOUT_COLORS: Record<string, string> = {
   redesign: "#f0b429",
   "ui-concept-first-party": "#5ee7ff",

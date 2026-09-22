@@ -7,7 +7,7 @@ use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationP
 /// boundary so a slow CLI invocation can attribute time to client identity
 /// resolution separately from the daemon round-trip itself.
 #[hotpath::measure(label = "cli.daemon.handshake")]
-fn client_handshake(
+pub(crate) fn client_handshake(
     project_path: Option<&std::path::Path>,
 ) -> tracedecay_domain::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
     tracedecay::daemon::handshake_for_current_client(
@@ -326,7 +326,7 @@ mod tests {
         ResolvedScope, ResultContractRef, RetrievalEvidence, RetryDirective, TemporalState,
     };
     use tracedecay_domain::{
-        ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+        ActorId, ComponentVersion, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, SortContractId, UseCaseId};
 
@@ -346,9 +346,7 @@ mod tests {
         .unwrap()
     }
 
-    fn digest(seed: char) -> ManifestDigest {
-        ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::digest;
 
     fn context() -> RequestContext {
         let capability = CapabilityId::new("capability.cli.fixture").unwrap();

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# friction-scan.sh — mine TraceDecay usage logs for friction the self-improving
+# friction-scan.sh. Mine TraceDecay usage logs for friction the self-improving
 # loop should act on: tool error rates, low-adoption tools, dead feedback loops,
 # and the evidence sessions behind them. Maps directly onto this skill's
 # "Opportunity Ranking" table.
@@ -51,7 +51,7 @@ WHERE="event_kind='mcp_tool_call'"
 SCOPE=$([ "$ALL" -eq 1 ] && echo "ALL PROJECTS" || echo "$PROJECT_ID")
 
 echo "================================================================"
-echo " TraceDecay friction scan — $SCOPE"
+echo " TraceDecay friction scan, $SCOPE"
 echo "================================================================"
 [ -f "$GLOBAL_DB" ] || { echo "(global analytics db not found at $GLOBAL_DB)"; }
 
@@ -77,8 +77,8 @@ q "$GLOBAL_DB" "SELECT tool_name, COUNT(*) c, SUM(outcome='error') e
 
 # --- 3. Low-adoption tools: called, but rarely (discovery/trigger gaps). ------
 echo
-echo "## Least-invoked tools (bottom 12 of those ever called) — candidate discovery gaps"
-q "$GLOBAL_DB" "SELECT '  '||tool_name||' — '||COUNT(*)||' call(s)'
+echo "## Least-invoked tools (bottom 12 of those ever called), candidate discovery gaps"
+q "$GLOBAL_DB" "SELECT '  '||tool_name||', '||COUNT(*)||' call(s)'
      FROM analytics_events WHERE $WHERE GROUP BY tool_name ORDER BY COUNT(*) ASC LIMIT 12;"
 echo "  (a tool the agents know exists but almost never call is a trigger-text or discoverability gap)"
 
@@ -101,8 +101,8 @@ fi
 
 # --- 5. Evidence: sessions carrying the most tool errors. --------------------
 echo
-echo "## Evidence — sessions with the most tool errors (cite these)"
-q "$GLOBAL_DB" "SELECT '  '||COALESCE(NULLIF(session_id,''),'(no session)')||' — '||COUNT(*)||' errors, provider='||provider
+echo "## Evidence. Sessions with the most tool errors (cite these)"
+q "$GLOBAL_DB" "SELECT '  '||COALESCE(NULLIF(session_id,''),'(no session)')||', '||COUNT(*)||' errors, provider='||provider
      FROM analytics_events WHERE $WHERE AND outcome='error'
      GROUP BY session_id, provider ORDER BY COUNT(*) DESC LIMIT 8;"
 echo

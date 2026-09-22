@@ -67,7 +67,7 @@ export interface DimensionPresentation {
   /** The one-line honest summary rendered beside the dimension label. */
   summary: string;
   /** Provenance rendered verbatim beneath the summary (server reasons and the
-   * growth coverage sentence — never paraphrased). */
+   * growth coverage sentence, never paraphrased). */
   notes: string[];
   /** The owner setting a value would come from, rendered as a mono token. This
    * is what visually separates `unset` from `unknown`. */
@@ -241,7 +241,7 @@ export function tableGrowthOmissionPresentation(
 }
 
 /** Every role this one store file serves. More than one means the roles share a
- * database — not that a store was reported twice. */
+ * database, not that a store was reported twice. */
 export function storeRolesLabel(roles: string[]): string {
   if (roles.length === 0) return 'role unrecorded';
   return roles.length > 1 ? `${roles.join(' · ')} (shared store file)` : roles.join(' · ');

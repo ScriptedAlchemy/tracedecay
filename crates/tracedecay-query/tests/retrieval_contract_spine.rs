@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, EphemeralSanitizedQueryViewV1, ExactAdmissionProof,
@@ -25,13 +24,7 @@ impl RetrievalExecutionControl for ActiveControl {
     }
 }
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+use tracedecay_domain::test_fixtures::id;
 
 fn request_and_proof() -> (ExactLaneRequest<'static>, ExactAdmissionProof) {
     let scope = RetrievalScope {

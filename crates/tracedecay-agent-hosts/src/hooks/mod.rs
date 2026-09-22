@@ -85,8 +85,8 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
 /// capture path did not, so each capture-only callback fired silently: the
 /// project's `hook_analytics.jsonl` gained no row, `tracedecay analytics`
 /// reported the host as never having invoked a hook, and that is exactly the
-/// signal a broken install gives. Attribution follows the host's own event name
-/// — read the way the Hermes terminal-receipt handler reads it — so a capture
+/// signal a broken install gives. Attribution follows the host's own event name,
+/// read the way the Hermes terminal-receipt handler reads it, so a capture
 /// row is indistinguishable from the response row the same event produces.
 ///
 /// `hook_name` overrides that read for the one surface whose payload carries no
@@ -988,7 +988,7 @@ fn deduped_project_hint_with_id(
     };
     let mut dedupe = tool_hints::ToolHintDedupe::load_or_default(&path);
     let decision = dedupe.decide(&session_id, hint.category);
-    // Every decision — including the suppressed ones — advances the persisted
+    // Every decision, including the suppressed ones, advances the persisted
     // budget, so the save is unconditional.
     let _ = dedupe.save(&path);
 

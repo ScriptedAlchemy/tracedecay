@@ -143,6 +143,15 @@ impl SharedCodeIndexBytePoolV1 {
 /// every unpinned query and must not be evictable by cursor traffic over
 /// superseded generations.
 pub(super) const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
+/// The exact detail a `try_acquire_code_generation_store_lock` refusal carries.
+///
+/// The store lock is a bounded shared resource: a concurrent publication in
+/// the same store root holds it and releases it on its own. Both the producer
+/// below and
+/// [`CodeIndexSchedulerErrorV1::is_transient_capacity_failure`] read this one
+/// token, so the retry classification cannot drift from the refusal it names.
+pub(super) const CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1: &str =
+    "code-generation store has an active owner";
 
 /// Whether one generation resolution may enter the single-flight sealed-decode.
 ///
@@ -173,7 +182,7 @@ enum DecodeSubjectV1 {
 /// Decoded-generation cache state.
 ///
 /// Guarded by [`DecodedGenerationCacheV1::state`]. The lock is only ever held
-/// for pointer-sized bookkeeping — never across a decode.
+/// for pointer-sized bookkeeping, never across a decode.
 #[derive(Default)]
 struct DecodedGenerationStateV1 {
     /// The pinned active generation.
@@ -237,8 +246,8 @@ impl DecodedGenerationStateV1 {
 /// - the decode NEVER runs while the cache lock is held, so a reader that only
 ///   needs an already-decoded generation is not queued behind an unrelated
 ///   decode;
-/// - concurrent callers wanting the SAME generation share one decode — the
-///   first claims a lease, the rest park on the condvar — so a request that
+/// - concurrent callers wanting the SAME generation share one decode, the
+///   first claims a lease, the rest park on the condvar, so a request that
 ///   arrives mid-decode joins the in-flight work instead of duplicating it;
 /// - only success is published. A failed decode leaves no memo, so the next
 ///   caller re-runs the complete check and observes the same error. The
@@ -862,6 +871,33 @@ impl DaemonCodeIndexPublicationStoreV1 {
         CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(error.to_string())
     }
 
+    /// A pointer slot that is not a regular file is a corrupt authority.
+    ///
+    /// `read(2)` and `rename(2)` both report that shape as `EISDIR`. Mapping
+    /// the OS error to `Unavailable` (or letting it surface as a raw I/O
+    /// fault) misclassifies a broken publication pointer. Callers in the
+    /// scheduler publication family must see reset-required corruption.
+    fn corrupt_non_file_pointer() -> CodeIndexPublicationStoreErrorV1 {
+        Self::corruption("active code-generation pointer is not a regular file")
+    }
+
+    fn map_pointer_io(error: std::io::Error) -> CodeIndexPublicationStoreErrorV1 {
+        if error.kind() == std::io::ErrorKind::IsADirectory {
+            Self::corrupt_non_file_pointer()
+        } else {
+            Self::unavailable(error)
+        }
+    }
+
+    fn require_regular_pointer_slot(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        match std::fs::metadata(&self.active_path) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+            Ok(_) => Err(Self::corrupt_non_file_pointer()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Self::map_pointer_io(error)),
+        }
+    }
+
     fn acquire_generation_read_lock(
         &self,
     ) -> Result<CodeGenerationStoreLockV1, CodeIndexPublicationStoreErrorV1> {
@@ -1080,8 +1116,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     .unwrap_or_else(PoisonError::into_inner) = None;
                 return Ok(None);
             }
-            Err(error) => return Err(Self::unavailable(error)),
+            Err(error) => return Err(Self::map_pointer_io(error)),
         };
+        if !metadata.file_type().is_file() {
+            return Err(Self::corrupt_non_file_pointer());
+        }
         if metadata.len() > MAX_DURABLE_PUBLICATION_POINTER_BYTES {
             return Err(Self::corruption(
                 "durable code-generation index exceeds its byte bound",
@@ -1093,7 +1132,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // a fixed-width pointer through another path, and a 1-second mtime
         // filesystem can leave both unchanged while the bytes move. The memo
         // is reused only when the file digest matches.
-        let bytes = std::fs::read(&self.active_path).map_err(Self::unavailable)?;
+        let bytes = std::fs::read(&self.active_path).map_err(Self::map_pointer_io)?;
         let digest = Self::state_digest(&bytes);
         {
             let mut memo = self
@@ -1221,38 +1260,98 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its retention bounds",
             ));
         }
-        *self
+        let mut memo = self
             .pointer_memo
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
-            mtime,
-            size,
-            digest,
-            pointer: pointer.clone(),
-        });
+            .unwrap_or_else(PoisonError::into_inner);
+        // Install only when the file is still the bytes just parsed. A rename
+        // that landed during validation owns the memo.
+        if std::fs::read(&self.active_path).ok().as_deref() == Some(bytes.as_slice()) {
+            *memo = Some(PublicationPointerMemoV1 {
+                mtime,
+                size,
+                digest,
+                pointer: pointer.clone(),
+            });
+        }
         Ok(Some(pointer))
     }
 
     fn remember_publication_pointer(&self, pointer: &DurablePublicationPointerV1, bytes: &[u8]) {
-        let metadata = match std::fs::metadata(&self.active_path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                *self
-                    .pointer_memo
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = None;
-                return;
-            }
-        };
-        *self
+        let mut memo = self
             .pointer_memo
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(PublicationPointerMemoV1 {
-            mtime: metadata.modified().ok(),
-            size: metadata.len(),
-            digest: Self::state_digest(bytes),
-            pointer: pointer.clone(),
-        });
+            .unwrap_or_else(PoisonError::into_inner);
+        // The memo and the file it names are one critical section. A publisher
+        // that observed older bytes must not install them over a newer file.
+        match std::fs::read(&self.active_path) {
+            Ok(current) if current == bytes => {
+                let metadata = std::fs::metadata(&self.active_path).ok();
+                *memo = Some(PublicationPointerMemoV1 {
+                    mtime: metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.modified().ok()),
+                    size: metadata.map_or(0, |metadata| metadata.len()),
+                    digest: Self::state_digest(bytes),
+                    pointer: pointer.clone(),
+                });
+            }
+            Ok(_) => {}
+            Err(_) => *memo = None,
+        }
+    }
+
+    /// Replace the active pointer only when it is still the exact bytes this
+    /// publication observed under the store lock.
+    ///
+    /// `rename(2)` replaces whatever occupies the path, including a truncated
+    /// or rewritten pointer. The observation is the compare-and-swap token:
+    /// a mismatch is a refusal, not a rewrite. `lock` is the witness that
+    /// this critical section is the exclusive owner of the store.
+    pub(super) fn commit_observed_pointer(
+        &self,
+        _lock: &CodeGenerationStoreLockV1,
+        observed: Option<&[u8]>,
+        pointer: &DurablePublicationPointerV1,
+        bytes: &[u8],
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        // Refuse a directory (or any non-file) before the read and the
+        // `rename(2)`. Reading one returns EISDIR, which is not a
+        // publication-family fault.
+        self.require_regular_pointer_slot()?;
+        let current = match std::fs::read(&self.active_path) {
+            Ok(current) => Some(current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(Self::unavailable(error)),
+        };
+        if current.as_deref() != observed {
+            return Err(match current {
+                Some(current)
+                    if serde_json::from_slice::<DurablePublicationPointerV1>(&current).is_err() =>
+                {
+                    Self::corruption("active code-generation pointer is corrupt")
+                }
+                _ => CodeIndexPublicationStoreErrorV1::CompareAndSwap,
+            });
+        }
+        let temporary = self
+            .active_path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        if temporary.exists() {
+            std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
+        }
+        Self::write_durable(&temporary, bytes)?;
+        if let Err(error) = std::fs::rename(&temporary, &self.active_path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(Self::map_pointer_io(error));
+        }
+        Self::sync_directory(
+            self.active_path
+                .parent()
+                .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
+        )?;
+        self.remember_publication_pointer(pointer, bytes);
+        Ok(())
     }
 
     pub(super) fn read_retained_partitioned_segment(
@@ -1618,7 +1717,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// Serve one sealed generation by identity, decoding it at most once.
     ///
     /// The active generation answers from its pinned slot. Any other generation
-    /// is served from the decoded LRU, or decoded exactly once under a lease —
+    /// is served from the decoded LRU, or decoded exactly once under a lease,
     /// concurrent pinned or cursor-paged readers of the same generation join the
     /// in-flight decode instead of each rescanning the store.
     pub(super) fn load_generation(
@@ -1813,7 +1912,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     /// It never claims a decode lease, never parks on the barrier, and never
     /// reads sealed bytes, so a caller that already has something servable can
     /// resolve freshness without being preempted by an in-flight O(store)
-    /// decode. `None` means "not decoded here, yet" — it is an abstention, not
+    /// decode. `None` means "not decoded here, yet", it is an abstention, not
     /// evidence that no generation exists, and callers must never turn it into a
     /// fail-closed verdict on its own.
     pub(super) fn active_already_decoded(
@@ -2133,8 +2232,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 match self.load_active_shared()? {
                     Some(_) => None,
                     // An active pointer whose sealed generation this build
-                    // abstains from decoding — a retired format revision, a
-                    // superseded sanitizer — is still the incumbent this
+                    // abstains from decoding, a retired format revision, a
+                    // superseded sanitizer, is still the incumbent this
                     // publication replaces, and its caller has no decoded
                     // generation id to expect. The compare-and-swap token is
                     // then the pointer identity the abstention observed,
@@ -2150,7 +2249,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         };
         let _store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(Self::unavailable)?
-            .ok_or_else(|| Self::unavailable("code-generation store has an active owner"))?;
+            .ok_or_else(|| Self::unavailable(CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1))?;
         let prior_pointer = if let Some(expected) = undecoded_expectation.as_ref() {
             if expected_active_generation.is_some() {
                 return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
@@ -2164,6 +2263,15 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Some(pointer)
         } else {
             self.read_publication_pointer()?
+        };
+        // The bytes behind `prior_pointer`, captured under the store lock.
+        // The commit below refuses to rename unless the file is still these
+        // exact bytes, so a pointer that changed after this observation is
+        // not overwritten.
+        let prior_bytes = if prior_pointer.is_some() {
+            Some(std::fs::read(&self.active_path).map_err(Self::unavailable)?)
+        } else {
+            None
         };
         if undecoded_expectation.is_none()
             && prior_pointer
@@ -2542,22 +2650,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         } else {
             None
         };
-        let temporary = self
-            .active_path
-            .with_extension(format!("json.{}.tmp", std::process::id()));
-        if temporary.exists() {
-            std::fs::remove_file(&temporary).map_err(Self::unavailable)?;
-        }
         hotpath::measure_block!("code_index.generation.publish.pointer_commit", {
-            Self::write_durable(&temporary, &bytes)?;
-            std::fs::rename(&temporary, &self.active_path).map_err(Self::unavailable)?;
-            Self::sync_directory(
-                self.active_path
-                    .parent()
-                    .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
-            )?;
-            self.remember_publication_pointer(&pointer, &bytes);
-            Ok::<(), CodeIndexPublicationStoreErrorV1>(())
+            self.commit_observed_pointer(&_store_lock, prior_bytes.as_deref(), &pointer, &bytes)
         })?;
         drop(source_fence);
         let mut state = self.cache.lock_state()?;

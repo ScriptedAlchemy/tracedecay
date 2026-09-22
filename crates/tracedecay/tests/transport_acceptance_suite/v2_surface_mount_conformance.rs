@@ -9,9 +9,9 @@
 //!   adapter never registered a route, a tool, or a command. It cannot catch a
 //!   feature that never reached the catalog at all.
 //! * **Reverse** (operation enum -> catalog -> surface): every operation family
-//!   that exists *independently* of the catalog — the Work and Workflow
+//!   that exists *independently* of the catalog, the Work and Workflow
 //!   operation enums, the HTTP application operation enum, the callable-code
-//!   operation set, the activity families, the Work product read model — must
+//!   operation set, the activity families, the Work product read model, must
 //!   be catalog-declared **and** mounted, or listed in
 //!   [`SANCTIONED_UNMOUNTED`] with the plan that sanctions the absence. This is
 //!   the direction that flushes out unmounted surfaces, and it is the reason
@@ -29,7 +29,7 @@
 //!    answers the router's empty-bodied `404`. Route verdicts are therefore
 //!    taken from axum's routing table (a `GET` to a `POST`-only route answers
 //!    `405` when the path is registered and `404` when it is not), which is
-//!    immune to handler semantics — a mounted handler is allowed to conceal a
+//!    immune to handler semantics, a mounted handler is allowed to conceal a
 //!    denial as `404` and must not be scored as unmounted for it.
 //!
 //! Surfaces are driven the way a client drives them: the live daemon's
@@ -39,6 +39,7 @@
 //! product call.
 
 use crate::common;
+use crate::common::run_ok;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -123,7 +124,7 @@ const ABSENT_TAIL: &str = "/application/surface-mount-conformance-absent";
 
 /// A `POST` route the application router registers relative to the outer
 /// project prefix. Reaching it proves the outer dispatch resolved the project,
-/// applied the `{*tail}` rewrite, and handed off to the inner routing table —
+/// applied the `{*tail}` rewrite, and handed off to the inner routing table,
 /// without which every route below would score as missing for the wrong reason.
 const RELATIVE_WITNESS_TAIL: &str = "/application/primitives/storage_status";
 
@@ -259,20 +260,6 @@ fn isolated_command(home: &Path) -> Command {
     command
 }
 
-fn run_ok(command: &mut Command, label: &str) -> Vec<u8> {
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("{label} could not run: {error}"));
-    assert!(
-        output.status.success(),
-        "{label} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
-
 fn wait_for_http_authority(path: &Path) -> Value {
     common::poll_until(
         Instant::now() + Duration::from_secs(90),
@@ -313,8 +300,8 @@ fn http_route_is_mounted(agent: &ureq::Agent, fixture: &MountFixture, route_path
     let status = response.status().as_u16();
     assert!(
         status == 404 || status == 405,
-        "the method-mismatch probe for {route_path} answered {status} — neither \
-         404 nor 405 — so it no longer discriminates a mounted path. A binding \
+        "the method-mismatch probe for {route_path} answered {status}, neither \
+         404 nor 405, so it no longer discriminates a mounted path. A binding \
          served on GET as well as POST would do this; give such a binding a \
          probe method it does not serve rather than relaxing this check."
     );
@@ -372,8 +359,8 @@ fn assert_external_surface_discriminates(agent: &ureq::Agent, fixture: &MountFix
 
 /// The tool names the real `tracedecay tool` command publishes.
 ///
-/// This is the CLI's own listing — the same one an operator reads before
-/// calling `tracedecay tool <name>` — so a catalog binding missing from it is
+/// This is the CLI's own listing, the same one an operator reads before
+/// calling `tracedecay tool <name>`, so a catalog binding missing from it is
 /// a binding no CLI user can reach.
 fn cli_tool_listing(fixture: &MountFixture) -> BTreeSet<String> {
     let stdout = run_ok(
@@ -481,7 +468,7 @@ const NEGOTIATED_PROTOCOL_REVISION: u32 = 1;
 ///
 /// Default-profile surfaces are probed exactly as their adapters probe them.
 /// A binding the default probe cannot see is then probed under each profile
-/// that declares it with exactly its declared required features — the shape
+/// that declares it with exactly its declared required features, the shape
 /// of an initialize-time negotiation (today: the LSP context family). A
 /// catalog entry that no profile includes, whose features can never be
 /// negotiated, or whose revision range excludes the production protocol still
@@ -730,7 +717,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     }
 
     // -- Workflow operations. -----------------------------------------------
-    // Graded on BOTH declared external surfaces, not just HTTP. Checking only
+    // Graded on both declared external surfaces. Checking only
     // HTTP here is how the entire sixteen-operation family came to be mounted
     // on CLI and HTTP while carrying no MCP tool at all: every row passed, and
     // the absence was invisible because nothing ever asked the question. A
@@ -837,7 +824,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // the maintenance device: a new family fails to compile until it is
     // classified as produced or sanctioned, so it cannot be added and
     // silently never emitted. A family classified as produced must not also
-    // appear in the sanctioned table — that would hide a real regression
+    // appear in the sanctioned table, that would hide a real regression
     // behind a stale exemption.
     for family in ActivityFamilyV1::ALL {
         graded += 1;
@@ -881,7 +868,7 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
              listed in SANCTIONED_UNMOUNTED; drop the stale exemption"
         )),
         (false, None) => failures.push(format!(
-            "{subject}: the Work product projection bundle reaches no client — \
+            "{subject}: the Work product projection bundle reaches no client, \
              it is absent from the dashboard wire contract and has no \
              application route"
         )),

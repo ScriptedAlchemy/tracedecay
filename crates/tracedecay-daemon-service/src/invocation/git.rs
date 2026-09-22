@@ -1068,14 +1068,10 @@ pub(super) fn stable_digest(
 }
 
 fn invalid_git_request() -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: "git_index.invalid_request".to_owned(),
-            message: "The Git index request is invalid".to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: Vec::new(),
-    }
+    ApplicationProblem::invalid_request_without_action(
+        "git_index.invalid_request",
+        "The Git index request is invalid",
+    )
 }
 
 fn map_git_error(error: GitIndexTransactionApplicationError) -> ApplicationProblem {

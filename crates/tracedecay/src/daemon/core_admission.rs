@@ -15,7 +15,7 @@ use super::{
     binary_version, classify_mcp_method, parse_daemon_invocation_request,
     read_line_handling_wire_oversized, write_json_rpc_response,
 };
-use tracedecay_contracts::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+use tracedecay_contracts::ApplicationProblem;
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -95,8 +95,8 @@ pub(crate) enum DaemonClientAdmissionClass {
 ///
 /// Live defect this exists for: the 60 general admission slots were held by
 /// requests *parked* on warm-up, on the writer gate, or on a generation decode
-/// while the reader pool sat completely idle. Every arriving request — including
-/// tools that need no generation at all — was then shed with the retryable
+/// while the reader pool sat completely idle. Every arriving request, including
+/// tools that need no generation at all, was then shed with the retryable
 /// `bulk_capacity_reached`. Admission must bound concurrent *work*, and a
 /// request asleep on a barrier is not work.
 ///
@@ -142,8 +142,8 @@ impl ParkableConnectionAdmission {
     /// Re-take a slot after the park ended.
     ///
     /// The wait is fair and unbounded on purpose. It cannot deadlock: no park in
-    /// this daemon completes by way of another *admitted* request — project opens
-    /// and generation rebuilds run on their own background tasks — so the permits
+    /// this daemon completes by way of another *admitted* request, project opens
+    /// and generation rebuilds run on their own background tasks, so the permits
     /// this caller waits on are held only by requests that are actively finishing.
     /// Tokio hands a released permit to a queued waiter before any newly arriving
     /// `try_acquire`, so a request resuming from a park is served ahead of a fresh
@@ -188,7 +188,7 @@ where
 /// Wrap the wait, never the work. The grace, release, and reacquire live in
 /// [`tracedecay_code_index_runtime::park_admission`], which reads the runtime
 /// task-local [`with_dual_connection_admission_scope`] installs beside this
-/// module's lease. Nesting is safe — the innermost park that still finds a
+/// module's lease. Nesting is safe, the innermost park that still finds a
 /// held permit releases and re-acquires it.
 ///
 /// Outside a connection scope (tests, background tasks, reserved-control
@@ -206,7 +206,7 @@ where
 /// A task-local does not cross that spawn, so the adapter captures the lease
 /// while it is still constructed on the connection task and re-enters the scope
 /// per request with [`in_connection_admission`]. Without that, every MCP
-/// `tools/call` — the daemon's main serving path — would park on a generation
+/// `tools/call`, the daemon's main serving path, would park on a generation
 /// decode while still holding its admission slot.
 pub(crate) fn current_connection_admission() -> Option<Arc<ParkableConnectionAdmission>> {
     CONNECTION_ADMISSION.try_with(Arc::clone).ok()
@@ -459,14 +459,7 @@ fn invocation_saturation_response(
     };
     Some(super::DaemonInvocationResponse::application_problem(
         request.request_id,
-        ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic {
-                code: code.to_owned(),
-                message: "The owning TraceDecay daemon has no request capacity".to_owned(),
-            },
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        ApplicationProblem::saturated(code, "The owning TraceDecay daemon has no request capacity"),
     ))
 }
 
@@ -615,7 +608,7 @@ async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result
         // Saturation is not a reason to hide wire skew. Propagating the parse
         // failure here dropped the socket with the client's pipelined request
         // still unread, which the kernel reports as `Connection reset by peer`
-        // — indistinguishable from a daemon crash. Answer with the same typed
+        //, indistinguishable from a daemon crash. Answer with the same typed
         // refusal frame the served path uses (#753).
         super::connection_serving::refuse_unparseable_handshake(
             transport,

@@ -13,7 +13,7 @@
 //! lazily by one bounded, cancellable scan of the projection and cached on the
 //! owning [`CodeGraphProjectionStore`]. The catalog is derived from the
 //! verified snapshot and shares its lifetime, so it is a cache of the
-//! projection authority — not a second authority. Per-seed adjacency reads go
+//! projection authority, not a second authority. Per-seed adjacency reads go
 //! straight to the snapshot's kind-filtered relation fan-outs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -628,8 +628,8 @@ impl CodeGraphInteractiveReader {
     /// twice per read. `max_symbols_examined` bounds the scan itself, not just
     /// the output: reaching it returns `complete: false` rather than silently
     /// ranking a prefix as if it were the graph. Ordering is total and
-    /// deterministic — total degree descending, then qualified name, then
-    /// occurrence — so equal-degree symbols do not reshuffle between reads.
+    /// deterministic, total degree descending, then qualified name, then
+    /// occurrence, so equal-degree symbols do not reshuffle between reads.
     pub fn degree_ranking(
         &self,
         top: usize,
@@ -711,15 +711,22 @@ impl CodeGraphInteractiveReader {
 
     /// Semantic edges induced among a symbol set: edges whose endpoints are
     /// both members. `max_relations` bounds the batch-wide fan-out examined.
+    ///
+    /// Every caller reads the edge alone, so the walk stops at the edge
+    /// payload instead of hydrating a summary for each far endpoint the way
+    /// `semantic_neighbors` does for callers, callees and impact. The edge
+    /// entities come back decoded with the traversal that found them, so a
+    /// whole-repo census pays no per-edge point read either.
     pub fn edges_among(
         &self,
         occurrences: &[SymbolOccurrenceId],
         kinds: &[RelationEdgeKindV1],
         max_relations: usize,
         request_cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<CodeGraphSemanticEdgeV1>, CodeGraphProjectionError> {
+    ) -> Result<Vec<CanonicalRelationEdgeV1>, CodeGraphProjectionError> {
         let cancellation = self.read_cancellation(request_cancellation)?;
-        let members: BTreeSet<_> = occurrences.iter().cloned().collect();
+        let members: BTreeSet<&SymbolOccurrenceId> = occurrences.iter().collect();
+        let admitted: BTreeSet<RelationEdgeKindV1> = kinds.iter().copied().collect();
         // Seeds are chunked because the store bounds one batch traversal's
         // starts (`MAX_BATCH_TRAVERSAL_STARTS`, 100k). A whole-repo census -
         // dead code, unused symbols - legitimately has more seeds than that,
@@ -727,24 +734,41 @@ impl CodeGraphInteractiveReader {
         // The bound exists to cap one call's working set, which chunking
         // preserves: each traversal still costs at most one chunk, and the
         // per-seed relation budget is unchanged.
-        let mut edges: Vec<CodeGraphSemanticEdgeV1> = Vec::new();
+        let mut edges: Vec<CanonicalRelationEdgeV1> = Vec::new();
         for chunk in occurrences.chunks(SEMANTIC_NEIGHBOR_SEED_CHUNK) {
-            let per_seed = self.semantic_neighbors(
-                chunk,
-                kinds,
-                AdjacencyDirection::Outgoing,
+            let starts = entity_ids(chunk)?;
+            let per_seed = self.snapshot.outgoing_relation_targets(
+                &starts,
+                &source_relation_kinds()?,
                 max_relations,
                 Arc::clone(&cancellation),
-                RelationFanoutOverflow::Refuse,
             )?;
-            edges.extend(
-                per_seed
-                    .into_iter()
-                    .flatten()
-                    .filter(|edge| members.contains(&edge.edge.to_occurrence)),
-            );
+            if per_seed.len() != chunk.len() {
+                return Err(CodeGraphProjectionError::Corrupt(
+                    "code graph adjacency batch shape does not match its seeds".to_owned(),
+                ));
+            }
+            for (seed, targets) in chunk.iter().zip(per_seed) {
+                for target in targets {
+                    if cancellation.is_cancelled() {
+                        return Err(CodeGraphProjectionError::Cancelled);
+                    }
+                    let edge = load_edge_record(&target.target)?;
+                    if edge.from_occurrence != *seed {
+                        return Err(CodeGraphProjectionError::Corrupt(
+                            "code graph edge endpoint does not match its adjacency seed".to_owned(),
+                        ));
+                    }
+                    if !admitted.is_empty() && !admitted.contains(&edge.kind) {
+                        continue;
+                    }
+                    if members.contains(&edge.to_occurrence) {
+                        edges.push(edge);
+                    }
+                }
+            }
         }
-        edges.sort_by(|left, right| compare_edges(&left.edge, &right.edge));
+        edges.sort_by(compare_edges);
         edges.dedup();
         Ok(edges)
     }
@@ -1043,7 +1067,7 @@ impl CodeGraphInteractiveReader {
     /// Hydration is staged so excluded work is never paid: each adjacency row
     /// loads its relation and edge payload first, edges outside the admitted
     /// kinds stop there without touching their far endpoint, and each unique
-    /// far endpoint that survives the filter is hydrated once per batch —
+    /// far endpoint that survives the filter is hydrated once per batch,
     /// impact frontiers and shared callees converge on the same neighbors, so
     /// per-edge endpoint reads repeated the same snapshot lookups.
     fn semantic_neighbors(
@@ -1146,7 +1170,7 @@ impl CodeGraphInteractiveReader {
     }
 
     /// Loads one adjacency row up to its validated edge payload: the relation,
-    /// the edge entity, and the seed-endpoint check — no far-endpoint read.
+    /// the edge entity, and the seed-endpoint check, no far-endpoint read.
     fn hydrate_edge_record(
         &self,
         seed: &SymbolOccurrenceId,

@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::thread;
@@ -303,7 +303,13 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
         .json(&json!({"grant": grant, "admission": admission}))
         .send()
         .unwrap();
-    assert_eq!(provisioned.status(), reqwest::StatusCode::NO_CONTENT);
+    let provision_status = provisioned.status();
+    let provision_body = provisioned.text().unwrap_or_default();
+    assert_eq!(
+        provision_status,
+        reqwest::StatusCode::NO_CONTENT,
+        "{provision_body}"
+    );
 
     let request = enrollment_request(&grant);
     let untrusted_authority = EnrolledRemoteClient::new_with_root_certificate(
@@ -405,7 +411,7 @@ fn stop_daemon(daemon: &mut Daemon) {
     // The daemon's own shutdown contract is DAEMON_SHUTDOWN_DEADLINE (45s):
     // every owner phase gets a typed deadline and the process exits with a
     // receipt even when an owner times out. The assertion here is that
-    // shutdown COMPLETES within that contract — a tighter local SLA turned
+    // shutdown COMPLETES within that contract, a tighter local SLA turned
     // loaded CI runners into false failures.
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
@@ -572,34 +578,8 @@ fn assert_workflow_get_definition_route_conceals_missing_definition(client: &Cli
     );
 }
 
-fn production_binary() -> PathBuf {
-    let path = std::env::var_os("TRACEDECAY_TEST_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../../target/debug/tracedecay"));
-    fs::canonicalize(&path)
-        .unwrap_or_else(|error| panic!("missing production daemon {}: {error}", path.display()))
-}
-
-fn isolated(command: &mut Command, home: &Path, profile: &Path) {
-    command
-        .env("HOME", home)
-        .env("USERPROFILE", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("TRACEDECAY_DATA_DIR", profile)
-        .env("TRACEDECAY_GLOBAL_DB", profile.join("global.db"))
-        .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
-}
-
-fn run(command: &mut Command) -> Vec<u8> {
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "command failed: {}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
+use crate::isolated_profile::apply_isolated_profile_env as isolated;
+use crate::{production_binary, run};
 
 fn wait_for_authority(child: &mut Child, path: &Path) -> Value {
     wait_for_authority_record(child, path, false)

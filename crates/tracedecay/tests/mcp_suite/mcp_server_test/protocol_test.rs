@@ -1,18 +1,17 @@
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay::mcp::McpServer;
 use tracedecay::project::current_timestamp;
 use tracedecay_mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
-
-mod initialize_routing;
-
-// ---------------------------------------------------------------------------
-// 1. test_initialize
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_initialize() {
@@ -38,17 +37,13 @@ async fn test_initialize() {
 
 #[tokio::test]
 async fn initialize_roots_route_registered_reader_tools_without_explicit_selector() {
-    initialize_routing::assert_registered_reader_uses_initialize_root().await;
+    assert_registered_reader_uses_initialize_root().await;
 }
 
 #[tokio::test]
 async fn initialize_root_route_rejects_caller_project_path_spoof() {
-    initialize_routing::assert_legacy_selectors_cannot_spoof_initialize_root().await;
+    assert_legacy_selectors_cannot_spoof_initialize_root().await;
 }
-
-// ---------------------------------------------------------------------------
-// 2. notifications
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_any_notification_without_id_produces_no_response() {
@@ -120,10 +115,6 @@ async fn test_tools_call_explicit_null_id_is_still_a_request() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 5. test_tools_list
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_tools_list() {
     let (server, _dir) = setup_server().await;
@@ -152,10 +143,6 @@ async fn test_tools_list() {
         "should have tracedecay_context"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 6. test_tools_call_search
-// ---------------------------------------------------------------------------
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
@@ -280,10 +267,6 @@ async fn test_tools_call_plain_text_failure_sets_is_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 6b. test_tools_call_timings_flag
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_tools_call_timings_enabled_by_default() {
     let (server, _dir) = setup_server().await;
@@ -332,7 +315,7 @@ async fn test_tools_call_timings_can_be_disabled() {
     );
     assert!(
         resp["result"]["_meta"]["duration_us"].is_null(),
-        "duration_us must NOT be present when timings are disabled — got {}",
+        "duration_us must NOT be present when timings are disabled, got {}",
         resp["result"]["_meta"]
     );
 }
@@ -625,10 +608,6 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
     fixture.harness.shutdown().await;
 }
 
-// ---------------------------------------------------------------------------
-// 7. test_tools_call_status
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_tools_call_status() {
     let (server, _dir) = setup_server().await;
@@ -669,10 +648,6 @@ async fn test_tools_call_status() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 8. test_tools_call_missing_params
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_tools_call_missing_params() {
     let (server, _dir) = setup_server().await;
@@ -706,10 +681,6 @@ async fn test_tools_call_missing_params() {
         "error message should mention missing params"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 9. test_tools_call_missing_name
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_tools_call_missing_name() {
@@ -881,10 +852,6 @@ async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_interna
     );
 }
 
-// ---------------------------------------------------------------------------
-// 10. test_unknown_method
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_unknown_method() {
     let (server, _dir) = setup_server().await;
@@ -903,10 +870,6 @@ async fn test_unknown_method() {
         "should be MethodNotFound error"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 11. test_malformed_json
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_malformed_json() {
@@ -950,10 +913,6 @@ async fn test_malformed_json() {
         "ping after malformed JSON should succeed"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 11b. test_foreign_protocol_version_is_rejected_before_dispatch
-// ---------------------------------------------------------------------------
 
 /// The envelope rule is enforced once at the transport boundary: a frame
 /// whose `jsonrpc` is not exactly `"2.0"` is answered with `InvalidRequest`
@@ -1008,10 +967,6 @@ async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
         "{stats}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 12. test_blank_lines_skipped
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_blank_lines_skipped() {
@@ -1303,10 +1258,6 @@ async fn test_server_stats_after_run() {
     assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.25);
 }
 
-// ---------------------------------------------------------------------------
-// 16. test_error_tracking
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_error_tracking() {
     let (server, _dir) = setup_server().await;
@@ -1362,10 +1313,6 @@ async fn test_error_tracking() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 17. test_initialize_has_resources_capability
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_initialize_has_resources_capability() {
     let (server, _dir) = setup_server().await;
@@ -1381,10 +1328,6 @@ async fn test_initialize_has_resources_capability() {
         "initialize should advertise resources capability"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 19. test_resources_list
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_resources_list() {
@@ -1438,10 +1381,6 @@ async fn test_resources_list() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 20. test_resources_read_status
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_status() {
     let (server, _dir) = setup_server().await;
@@ -1483,10 +1422,6 @@ async fn test_resources_read_status() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 21. test_resources_read_files
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_files() {
     let (server, _dir) = setup_server().await;
@@ -1525,10 +1460,6 @@ async fn test_resources_read_files() {
         "status: unavailable\nreason: verified_generation_file_inventory_not_admitted"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 22. test_resources_read_overview
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_resources_read_overview() {
@@ -1575,10 +1506,6 @@ async fn test_resources_read_overview() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 23. test_resources_read_unknown_uri
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_unknown_uri() {
     let (server, _dir) = setup_server().await;
@@ -1609,10 +1536,6 @@ async fn test_resources_read_unknown_uri() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 24. test_resources_read_missing_uri
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_resources_read_missing_uri() {
     let (server, _dir) = setup_server().await;
@@ -1636,10 +1559,6 @@ async fn test_resources_read_missing_uri() {
         "should be InvalidParams error"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Regression: logging/setLevel must be handled (not return MethodNotFound)
-// ---------------------------------------------------------------------------
 
 /// The MCP client sends `logging/setLevel` immediately after initialisation
 /// whenever the server advertises the `logging` capability. Before the fix the
@@ -1755,15 +1674,11 @@ async fn test_run_returns_transport_read_errors() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// search_call_writes_savings_ledger_row
-// ---------------------------------------------------------------------------
-
 // Repeated serve-mode LCM calls must keep working while the project session
 // DB schema is ensured at most once per process: after the first write-path
 // call creates the store and runs the migrations, later write-path calls
 // (even from a fresh `McpServer` in the same process) take the
-// version-gate fast path and never re-run the LCM migrations — observable
+// version-gate fast path and never re-run the LCM migrations, observable
 // via the migration row's `applied_at`, which only a migration run rewrites.
 //
 // Pure-read tools (lcm_status) no longer create the store, so each session
@@ -1921,5 +1836,180 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
         "repeated serve-mode LCM calls must not re-run the LCM migrations\n  \
          {seeded_stat}\n  {}",
         stat_sessions_db("after-second-serve"),
+    );
+}
+
+fn initialize_protocol_fixture(project: &Path, module: &str) {
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/lib.rs"), format!("pub mod {module};\n")).unwrap();
+    fs::write(
+        project.join(format!("src/{module}.rs")),
+        format!("pub fn {module}_marker() {{}}\n"),
+    )
+    .unwrap();
+    for args in [
+        &["init", "--quiet"][..],
+        &["add", "."][..],
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(project)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+async fn fixture() -> (
+    TempDir,
+    ProductionProjectCompositionHarnessV1,
+    Arc<McpServer>,
+    PathBuf,
+) {
+    let isolation = TempDir::new().unwrap();
+    let active_project = isolation.path().join("active-project");
+    let target_project = isolation.path().join("target-project");
+    initialize_protocol_fixture(&active_project, "active");
+    initialize_protocol_fixture(&target_project, "target");
+    let harness = ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        [active_project.clone(), target_project.clone()],
+    )
+    .await
+    .unwrap();
+    let server = harness.server(&active_project).unwrap();
+    (isolation, harness, server, target_project)
+}
+
+fn initialize_request(target_project: &Path) -> String {
+    let target_root_uri = url::Url::from_file_path(target_project)
+        .expect("target project has a portable file URI")
+        .to_string();
+    jsonrpc_request(
+        json!(1),
+        "initialize",
+        json!({
+            "clientInfo": {"name": "codex", "version": "test"},
+            "roots": [{"uri": target_root_uri, "name": "target-project"}]
+        }),
+    )
+}
+
+fn files_request(id: u64, arguments: Value) -> String {
+    jsonrpc_request(
+        json!(id),
+        "tools/call",
+        json!({
+            "name": "tracedecay_files",
+            "arguments": arguments,
+        }),
+    )
+}
+
+async fn assert_registered_reader_uses_initialize_root() {
+    let (_isolation, _harness, server, target_project) = fixture().await;
+    let responses = run_server_with_messages(
+        server,
+        vec![
+            initialize_request(&target_project),
+            files_request(2, json!({"layout": "flat"})),
+        ],
+    )
+    .await;
+
+    let files_response = response_with_id(&responses, json!(2));
+    let text = files_response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("files response text");
+    assert!(
+        text.contains("src/target.rs"),
+        "initialize root should route reader tools to target project, got {text}"
+    );
+    assert!(
+        !text.contains("src/active.rs"),
+        "implicit initialize-root routing should not read the active project: {text}"
+    );
+}
+
+async fn assert_legacy_selectors_cannot_spoof_initialize_root() {
+    let (_isolation, _harness, server, target_project) = fixture().await;
+    let active_graph = server.cg().await;
+    let active_root = active_graph.project_root().to_string_lossy().into_owned();
+    let active_project_id = active_graph
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("active project has a registered identity");
+
+    let spoof_cases = [
+        (
+            "top-level project_path",
+            json!({"layout": "flat", "project_path": active_root.clone()}),
+        ),
+        (
+            "top-level project_root",
+            json!({"layout": "flat", "project_root": active_root.clone()}),
+        ),
+        (
+            "nested selector path",
+            json!({"layout": "flat", "project_selector": {"path": active_root.clone()}}),
+        ),
+        (
+            "nested selector project_path",
+            json!({"layout": "flat", "project_selector": {"project_path": active_root}}),
+        ),
+        (
+            "top-level project_id alias",
+            json!({"layout": "flat", "project_id": active_project_id}),
+        ),
+    ];
+    let mut messages = vec![initialize_request(&target_project)];
+    for (offset, (_, arguments)) in spoof_cases.iter().enumerate() {
+        messages.push(files_request(10 + offset as u64, arguments.clone()));
+    }
+    messages.push(files_request(100, json!({"layout": "flat"})));
+
+    let responses = run_server_with_messages(server, messages).await;
+    for (offset, (case, _)) in spoof_cases.iter().enumerate() {
+        let response = response_with_id(&responses, json!(10 + offset as u64));
+        assert_eq!(
+            response["error"]["code"], -32602,
+            "{case} must be rejected as invalid parameters instead of overriding the initialize-root route: {response}"
+        );
+        assert!(
+            response["result"].is_null(),
+            "{case} must not return a tool result after invalid-parameter rejection: {response}"
+        );
+        assert!(
+            !response.to_string().contains("src/active.rs"),
+            "{case} must not serve spoof-project data: {response}"
+        );
+    }
+
+    let clean_response = response_with_id(&responses, json!(100));
+    let clean_text = clean_response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("clean files response text: {clean_response}"));
+    assert!(
+        clean_text.contains("src/target.rs") && !clean_text.contains("src/active.rs"),
+        "rejected spoof attempts must not disturb the initialize-root route: {clean_text}"
     );
 }

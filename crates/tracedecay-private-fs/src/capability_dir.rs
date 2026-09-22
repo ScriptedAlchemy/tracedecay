@@ -32,7 +32,7 @@ const CREATE_RACE_LOOKS: usize = 8;
 /// the moment the error arrives. `O_CREAT|O_EXCL`, opens of an existing entry,
 /// and absolute-path `open` are all correct, which is why the std-based
 /// sidecar locks never see it and only the capability-relative lock and
-/// ledger opens do — and those are exactly the files many writers create at
+/// ledger opens do, and those are exactly the files many writers create at
 /// once.
 ///
 /// A `NotFound` answer is therefore looked at again a bounded number of

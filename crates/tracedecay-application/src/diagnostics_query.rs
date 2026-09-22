@@ -1,8 +1,8 @@
 //! Typed diagnostic query core over [`DiagnosticsStore`].
 //!
 //! This module is a pure read path: no writes, no repair, no schema changes.
-//! Every lane returns domain records with explicit coverage — `Complete`,
-//! `Truncated`, or `StoreUnavailable` — so a partial or failed read is never
+//! Every lane returns domain records with explicit coverage. `Complete`,
+//! `Truncated`, or `StoreUnavailable`, so a partial or failed read is never
 //! presented as a clean result. All list lanes are bounded by a limit
 //! plus an opaque cursor and are deterministic: records page in ascending
 //! anchor order, chains page in chain order.
@@ -41,7 +41,7 @@ const CURSOR_PREFIX: &str = "dq1:";
 
 /// Explicit coverage for every diagnostic query lane. A read is either
 /// complete, deterministically truncated with a resumption cursor, or
-/// unavailable because the store could not answer — never silently partial.
+/// unavailable because the store could not answer, never silently partial.
 /// Engine status and dropped updates remain visible through typed status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiagnosticQueryCoverage {
@@ -218,7 +218,7 @@ impl MergedDiagnosticView {
 }
 
 /// Caller-side query errors. Store failures are never reported through this
-/// type — they surface as [`DiagnosticQueryCoverage::StoreUnavailable`].
+/// type, they surface as [`DiagnosticQueryCoverage::StoreUnavailable`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiagnosticQueryError {
     /// The cursor is malformed or does not name a record on the chain lane
@@ -474,7 +474,7 @@ impl<'a> DiagnosticsQuery<'a> {
 
     /// Backward supersession navigation from `anchor`: the chain starts at
     /// the named record and walks toward older records, newest-first, by
-    /// inverting the store's forward edges — one step back is the unique
+    /// inverting the store's forward edges, one step back is the unique
     /// same-key record whose `Superseded { successor_generation }` names the
     /// current record's generation. The walk stops deterministically when
     /// there is no unique predecessor.
@@ -910,17 +910,9 @@ mod tests {
     };
     use tracedecay_runtime_core::db::engine::TestConnection;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("valid fixture identity")
-    }
+    use tracedecay_domain::test_fixtures::id;
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn fixture_record(generation: &str, anchor: &str) -> GenerationDiagnosticV1 {
         let mut record = GenerationDiagnosticV1 {

@@ -31,7 +31,7 @@ function useMeasuredViewport(): [RefObject<HTMLDivElement | null>, FieldViewport
 }
 
 /**
- * The Delivery field at outcome zoom — projects as hubs, admitted pull
+ * The Delivery field at outcome zoom, projects as hubs, admitted pull
  * requests in orbit, umbrella outcomes at the centroid of the PRs they
  * correlate, each edge stroked in its grade's dash grammar.
  *

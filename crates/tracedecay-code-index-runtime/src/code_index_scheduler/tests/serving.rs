@@ -52,7 +52,7 @@ use tracedecay_runtime_core::resident_memory::{
 use super::{
     ALPHA_LIB_V1, CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
     application_context, build_progress_snapshot, caller_star_sources, callers_page_meta,
-    core_search_request, decode_hex, git, install_verified_graph_store,
+    core_search_request, decode_hex, drain_clone_backfill, git, install_verified_graph_store,
     install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
     mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit,
     moved_reference_scope, progress_snapshot_for_generation, published, query_authority,
@@ -178,7 +178,7 @@ fn foreground_query_owner_read_stays_warming_until_background_projection_finishe
 /// The production text-serving journey with a durable store: build the `SQLite`
 /// lexical artifact in bounded page windows, publish it durably (pointer names
 /// the content-addressed artifact file), then reopen the durable head after a
-/// simulated restart in a single bounded pass — no rebuild — and serve exact
+/// simulated restart in a single bounded pass, no rebuild, and serve exact
 /// and lexical queries from it.
 #[test]
 fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
@@ -853,6 +853,177 @@ fn clone_successor_keeps_lexical_owners_ready_and_cas_replaces_v14() {
     assert_eq!(v16_revision, 16);
 }
 
+/// Exact and lexical readiness is not the clone-successor copy.
+///
+/// The publication advance that installs those owners used to call
+/// `begin_clone_successor` before returning, and that call copies the whole
+/// prior lexical artifact. The freshness receipt awaits that advance, so
+/// status stayed non-current for the copy. The successor must still be
+/// reported as backfill, and the next advance is what writes its staging file.
+#[test]
+fn lexical_readiness_leaves_the_clone_successor_uncopied() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance V14 build");
+    }
+    let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Backfilling {
+        observation,
+    } = latest.clone_index_status(false, None)
+    else {
+        panic!(
+            "a generation without clone fingerprints must report backfill once lexical owners serve, got {:?}",
+            latest.clone_index_status(false, None)
+        );
+    };
+    assert_eq!(observation.coverage.completed_source_pages, 0);
+    assert!(
+        observation.coverage.total_source_pages > 0,
+        "the pending successor must name the sealed page count it has not visited"
+    );
+    // Status falls back to the published artifact's bytes when the successor
+    // has not created a staging file, so the bytes field cannot prove the
+    // copy stayed off this advance. The slot and the artifacts directory can.
+    assert!(
+        matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "owner readiness must leave the successor pending"
+    );
+    let staging_names = |root: &std::path::Path| {
+        std::fs::read_dir(code_text_artifacts_root(root))
+            .expect("artifacts root")
+            .map(|entry| entry.expect("artifact entry").file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".staging"))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        staging_names(store.path()).is_empty(),
+        "owner readiness copied the prior lexical artifact: {:?}",
+        staging_names(store.path())
+    );
+
+    latest
+        .advance_text_serving(1)
+        .expect("the retained successor advance copies the prior artifact");
+    assert!(latest.query_owners_are_ready());
+    assert!(
+        !matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "the next advance must take the pending successor"
+    );
+
+    while latest.text_projection_needs_work() {
+        latest
+            .advance_text_serving(16)
+            .expect("finish clone successor");
+    }
+    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+        .expect("open finished artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read finished revision");
+    assert_eq!(revision, 16);
+}
+
+/// Only one wake at a time may own a head-open claim.
+///
+/// `open_published_text_artifact` used to park `CloneSuccessorPending`
+/// before `begin_clone_successor` copied the whole prior artifact, and
+/// `advance_artifact_text_serving` leaves its park loop on that state. A
+/// concurrent wake took a second `HeadOpening` on top of the first open,
+/// both drove the same staging database, and whichever open resolved second
+/// found the slot already reset and refused with `clone-successor retry
+/// requires an active head-open claim`. The clone lanes report that refusal
+/// as a non-retryable `search_failed`.
+#[test]
+fn concurrent_wakes_never_overlap_the_clone_successor_head_open() {
+    let sources = (0..24)
+        .map(|index| {
+            (
+                format!("src/module_{index}.rs"),
+                format!(
+                    "pub fn alpha_{index}() {{ one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }}\npub fn beta_{index}() {{ one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }}\n"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let files = sources
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish generation"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    while !latest.query_owners_are_ready() {
+        latest
+            .advance_text_serving(1)
+            .expect("advance lexical build");
+    }
+    assert!(
+        matches!(
+            &*latest.text_projection_build.lock_slot(),
+            super::super::CodeTextProjectionSlotV1::CloneSuccessorPending
+        ),
+        "the successor must still be owed when the wakes start"
+    );
+
+    let workers = (0..4)
+        .map(|_| {
+            let latest = latest.clone();
+            thread::spawn(move || {
+                let mut advances = 0_usize;
+                while latest.text_projection_needs_work() && advances < 400 {
+                    latest.advance_text_serving(1)?;
+                    advances += 1;
+                }
+                Ok(())
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker
+            .join()
+            .expect("wake thread joins")
+            .unwrap_or_else(|error: RetrievalPortError| {
+                panic!("a concurrent wake failed the text projection: {error}")
+            });
+    }
+
+    assert!(!latest.text_projection_needs_work());
+    let revision: i64 = rusqlite::Connection::open(active_text_artifact_path(store.path()))
+        .expect("open finished artifact")
+        .query_row(
+            "SELECT format_revision FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read finished revision");
+    assert_eq!(revision, 16, "the clone successor must have sealed");
+}
+
 #[test]
 fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     let fixture = GitFixture::new(&[(
@@ -912,8 +1083,54 @@ fn clone_status_distinguishes_unavailable_backfill_partial_ready_and_stale() {
     ));
 }
 
+// Holding the clone-successor slot across the await is the scenario, not an
+// oversight: the read under test must answer without joining the backfill that
+// owns the slot. The guard is released before shutdown.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn query_admission_serves_v14_while_clone_successor_is_pending() {
+async fn dashboard_freshness_does_not_join_a_clone_backfill_slice() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount worktree");
+    let latest = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    while !latest.query_owners_are_ready() {
+        latest.advance_text_serving(1).expect("advance text build");
+    }
+
+    let held_slot = latest.text_projection_build.lock_slot();
+    let freshness = tokio::time::timeout(
+        Duration::from_millis(100),
+        registry.dashboard_freshness(fixture.path()),
+    )
+    .await
+    .expect("dashboard freshness must not wait for the clone backfill slice")
+    .expect("mounted dashboard freshness");
+    assert!(matches!(
+        freshness.clone_index,
+        Some(
+            tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Unavailable {
+                reason
+            }
+        ) if reason == "clone-index status is being updated"
+    ));
+
+    drop(held_slot);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_proven_seat_serves_v14_without_asking_for_the_pending_clone_successor() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
         "pub fn alpha() { one(); two(); three(); four(); five(); six(); seven(); eight(); nine(); ten(); }\n",
@@ -937,13 +1154,26 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
     let registry_store = TempDir::new().expect("registry store root");
     let (registry, scope) =
         mounted_core_query_worktree_with_one_permit(&fixture, &registry_store).await;
+    // The registry's own owner owes a clone successor too, and the worker
+    // keeps a continuation queued for it. Settle that first so the slot this
+    // test reads belongs to the query alone.
+    drain_clone_backfill(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    registry.clear_pending_wake_for_scope(&scope).await;
     {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        // Generation identity binds the capture instant (`captured_at` is in
+        // the intake digest), so the crafted owner and the registry's own
+        // capture of the same checkout never share an id. Seat the crafted
+        // owner too: a text owner that is not the seated generation is a state
+        // the daemon never produces, and the worker's clone-backfill gate
+        // (`serving_matches_text`) refuses to drive it.
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
@@ -966,6 +1196,32 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
         );
     }
 
+    // Bind the seat's source proof, the state a settled mount reaches. The
+    // read below then has nothing left to verify.
+    let source_freshness = registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source fence");
+    let witness = source_freshness
+        .source_currency_witness_for(
+            &latest.metadata().manifest().generation_id,
+            &latest.metadata().snapshot().content_identity,
+        )
+        .expect("the seated owner's snapshot is the one the fence proved");
+    *registry
+        .serving_source_witness_for_root(fixture.path())
+        .await
+        .expect("mounted serving witness")
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(witness);
+    // Not cleared: the slot is the only place an outstanding worker tail is
+    // visible, and wiping it here would hide the very state this test reads.
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "the fixture must reach the search with nothing outstanding"
+    );
+
     let executed = registry
         .execute_query_search(&scope, core_search_request("alpha"))
         .await
@@ -974,12 +1230,12 @@ async fn query_admission_serves_v14_while_clone_successor_is_pending() {
         ranks_symbol(&ranked_symbol_names(&executed, &latest), "alpha"),
         "the query must return the V14 alpha symbol"
     );
-    assert!(
-        registry
-            .pending_wake_micros_for_scope(&scope)
-            .await
-            .is_some_and(|pending| pending != 0),
-        "pending clone work must request a background reconcile"
+    assert_eq!(
+        registry.pending_wake_micros_for_scope(&scope).await,
+        Some(0),
+        "a search whose owners are ready under a current proof must ask the \
+         worker for nothing: the pending-wake slot is what the freshness \
+         ladder reports as `verifying`"
     );
 
     drop(admission);
@@ -1018,6 +1274,13 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
         let worktree = mounted
             .get(&fixture.path().canonicalize().expect("canonical root"))
             .expect("mounted worktree");
+        // Seat the crafted owner alongside its text handle: the worker's
+        // clone-backfill gate only drives a text owner that is the seated
+        // generation, and a daemon never holds one that is not.
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
         *worktree
             .text_generation
             .write()
@@ -1119,9 +1382,11 @@ fn transient_clone_successor_reservation_refusal_retries_without_cooling_v14_own
     );
     scheduler.bind_resident_memory(Arc::clone(&resident_memory));
     let latest = scheduler.latest_complete().expect("restored generation");
-    assert_eq!(
-        latest.advance_text_serving(1),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+    assert!(
+        matches!(
+            latest.advance_text_serving(1),
+            Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+        ),
         "the competing reservation must deny the first successor admission"
     );
     latest
@@ -1733,7 +1998,7 @@ fn cold_owner_warmup_seats_query_owners_before_clone_backfill() {
 }
 
 /// `query_owners_are_ready` is the sole exact/lexical bit for the published
-/// seat gate and the full graph-replay skip — both directions.
+/// seat gate and the full graph-replay skip, both directions.
 ///
 /// Owners-ready with clone backfill still unfinished must admit seat/replay;
 /// lexical-incomplete (owners absent) must refuse both. Clone completeness is
@@ -1988,7 +2253,7 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
 /// normalizes the exhausted file position, so its live cursor sits one file
 /// rollover past the last durably accepted page exactly when that page filled
 /// on a file boundary. Holding the builder's durable progress against that
-/// normalized cursor — instead of against the completion receipt — reports a
+/// normalized cursor, instead of against the completion receipt, reports a
 /// deterministic contract violation, which parks the text projection as
 /// unconvergeable and leaves the complete serving seat permanently empty.
 #[test]
@@ -2292,9 +2557,11 @@ fn reader_reservation_refusal_precedes_missing_artifact_access() {
         std::num::NonZeroU64::new(1024 * 1024).expect("tight memory limit"),
     )));
     let latest = scheduler.latest_complete().expect("restored generation");
-    assert_eq!(
-        latest.advance_text_serving(1),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
+    assert!(
+        matches!(
+            latest.advance_text_serving(1),
+            Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+        ),
         "the reservation gate must win before the missing path is inspected"
     );
     assert!(
@@ -2348,6 +2615,48 @@ fn overlapping_text_builds_share_one_admission_watermark_headroom() {
     }
 }
 
+#[test]
+fn text_build_budget_shrinks_to_available_headroom_without_dropping_below_its_floor() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    let limit = 26 * GIB;
+    let preferred = limit / 8;
+    let minimum = 1536 * MIB;
+    let watermark_headroom = limit - (limit * 900 / 1000);
+    let observed = 21 * GIB;
+    let available = limit - observed - watermark_headroom;
+
+    assert_eq!(
+        super::super::text_artifact_admitted_build_budget(
+            preferred,
+            minimum,
+            limit,
+            0,
+            observed,
+            watermark_headroom,
+        ),
+        Ok(available),
+        "a replacement build must use the supported smaller budget instead of deadlocking behind the stale graph"
+    );
+    assert_eq!(
+        super::super::text_artifact_admitted_build_budget(
+            preferred,
+            minimum,
+            limit,
+            0,
+            22 * GIB,
+            watermark_headroom,
+        ),
+        Err(
+            tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(format!(
+                "text-artifact build needs at least {minimum} bytes; {} bytes are available below the resident-memory watermark",
+                limit - 22 * GIB - watermark_headroom
+            ))
+        ),
+        "less than the builder's supported floor must remain a typed capacity refusal"
+    );
+}
+
 /// The artifact build and reader ceilings must reserve through the process
 /// resident-memory authority: an authority too small for the advertised
 /// build ceiling refuses the build as a typed unavailability, and a serving
@@ -2374,9 +2683,9 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         assert!(
             matches!(
                 denied,
-                Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded)
+                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
             ),
-            "an unreservable build ceiling must refuse as a typed budget state: {denied:?}"
+            "an unreservable build ceiling must refuse as typed availability: {denied:?}"
         );
         assert_eq!(
             tight.snapshot().used_bytes,
@@ -2405,10 +2714,12 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
         let latest = scheduler
             .latest_complete()
             .expect("measured latest generation");
-        assert_eq!(
-            latest.advance_text_serving(1),
-            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
-            "fresh RSS plus the requested build ceiling exceeds the process authority"
+        assert!(
+            matches!(
+                latest.advance_text_serving(1),
+                Err(tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_))
+            ),
+            "fresh RSS plus the minimum build ceiling exceeds the process authority"
         );
         assert_eq!(
             measured.snapshot().used_bytes,
@@ -2439,11 +2750,15 @@ fn text_artifact_ceilings_reserve_through_process_resident_memory() {
             .expect("advance artifact build under an adequate authority")
         {}
         let snapshot = adequate.snapshot();
+        let reader_budget = u64::try_from(CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1)
+            .expect("reader budget fits u64");
         assert!(
             snapshot.charges.iter().any(|charge| {
-                charge.key.component.as_str() == "code-text-artifact-reader" && charge.bytes > 0
+                charge.key.component.as_str() == "code-text-artifact-reader"
+                    && charge.bytes == reader_budget
             }),
-            "serving artifact owners must hold the measured reader charge: {snapshot:?}"
+            "serving artifact owners hold exactly the reader budget, not the larger publication \
+             charge they take over: {snapshot:?}"
         );
         assert!(
             !snapshot
@@ -2708,7 +3023,11 @@ fn text_artifact_subdivision_yields_without_advancing_and_stops_at_one_chunk() {
                     Err(tracedecay_query::retrieval::RetrievalPortError::Cancelled)
                 );
             }
-            Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded) => break,
+            Err(tracedecay_query::retrieval::RetrievalPortError::Contract(detail))
+                if detail.contains("page batch exceeds") =>
+            {
+                break;
+            }
             other => panic!("unexpected projection outcome: {other:?}"),
         }
         let slot = latest.text_projection_build.lock_slot();
@@ -2741,8 +3060,13 @@ fn source_window_and_builder_share_one_memory_reservation() {
     );
     assert_eq!(
         super::super::text_artifact_builder_budget(ceiling, ceiling),
-        Err(tracedecay_query::retrieval::RetrievalPortError::BudgetExceeded),
-        "a source consuming the reservation must refuse before builder path access"
+        Err(tracedecay_query::retrieval::RetrievalPortError::Contract(
+            format!(
+                "text-artifact source window needs {ceiling} bytes, exhausting its \
+                 {ceiling}-byte build reservation"
+            )
+        )),
+        "a source consuming the reservation must refuse with the reproducible sizing evidence"
     );
 }
 
@@ -3719,9 +4043,9 @@ async fn query_authority_lookup_preserves_real_mount_identity_isolation() {
 /// The defect this covers: during any generation rebuild search used to
 /// collapse into `GenerationUnavailable` for the whole window while
 /// callers/grep/context kept serving. Holding the scheduler mutex reproduces
-/// exactly that window — the background worker owns the scheduler — while the
+/// exactly that window, the background worker owns the scheduler, while the
 /// last complete generation stays in `serving_generation`. A seat whose
-/// currency witness still re-proves against the unchanged checkout serves as
+/// currency witness still re-proves against the unchanged checkout is
 /// current; once the checkout drifts under the held mutex the witness
 /// disproves and the fallback serves the same complete generation reported
 /// stale.
@@ -3729,7 +4053,7 @@ async fn query_authority_lookup_preserves_real_mount_identity_isolation() {
 /// The ready gate itself no longer abstains for this window. Decoupling
 /// freshness from publication work moved readiness onto the per-worktree
 /// source-freshness state, so the gate reads it without the scheduler and an
-/// unchanged checkout stays ready while a rebuild owns the mutex — which is
+/// unchanged checkout stays ready while a rebuild owns the mutex, which is
 /// the point of the decoupling, and what the witnessed assertion below
 /// already required of the query path.
 // Holding the scheduler guard across the awaits is the scenario, not an
@@ -3790,7 +4114,7 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
         .expect("search keeps serving through the rebuild instead of failing");
     assert!(
         !witnessed.served_stale,
-        "a seat re-proven current against the unchanged checkout serves as current"
+        "a seat re-proven current against the unchanged checkout is current"
     );
 
     // Drift the checkout while the rebuild still owns the scheduler: the
@@ -3854,7 +4178,7 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
 /// graph enrichment must neither block nor mark that text owner stale.
 ///
 /// This occupies the decode barrier exactly as activation of a new generation
-/// does — pinned slot empty, one decode in flight — and deliberately leaves the
+/// does, pinned slot empty, one decode in flight, and deliberately leaves the
 /// scheduler mutex FREE, so the ready gate is admitted and would park inside it.
 #[tokio::test]
 async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable() {
@@ -3932,8 +4256,8 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
 
 /// The cold-restore window: a sealed active generation is on disk and the
 /// freshness fences pass, but the serving slot is empty because activation has
-/// not seated anything yet. The typed refusal is already determined — the
-/// activation gate can only ever admit the seated slot — so search resolution
+/// not seated anything yet. The typed refusal is already determined, the
+/// activation gate can only ever admit the seated slot, so search resolution
 /// must deliver that verdict without joining (or starting) the single-flight
 /// O(store) decode. Before the reorder, a cold `search` against a rebuilding
 /// generation parked on that decode for 76 s before returning the refusal the
@@ -4028,6 +4352,30 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .hold_active_decode();
 
+    // `waiter_count` counts every task parked on this store's active decode,
+    // not this call's. The owner's settle pass decodes the active generation
+    // inside graph prepare and drops its reconcile-pass guard before it gets
+    // there, so no admission or quiescence helper can fence it out of the
+    // hold, and against a bare `== 0` its park reads as a readiness park.
+    //
+    // Park the owner first and take its count as the floor instead. A park
+    // cannot end while the hold is up and the owner is blocked in the step it
+    // parked in, so every later rise is a readiness call joining the flight.
+    registry.request_complete_generation(fixture.path()).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let parked_owner = loop {
+        let parked = held_decode.waiter_count();
+        if parked > 0 {
+            break parked;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the owner's settle pass never reached the held decode, so its park \
+             cannot be sequenced ahead of the readiness calls"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    };
+
     let ready = tokio::time::timeout(
         Duration::from_secs(30),
         registry.latest_complete_ready_decoded_for_root_scope(fixture.path(), &scope),
@@ -4042,7 +4390,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
     assert_eq!(
         held_decode.waiter_count(),
-        0,
+        parked_owner,
         "root graph readiness must not join the publication decode flight"
     );
 
@@ -4060,7 +4408,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
     );
     assert_eq!(
         held_decode.waiter_count(),
-        0,
+        parked_owner,
         "scope query readiness must not join the publication decode flight"
     );
 
@@ -4150,9 +4498,9 @@ async fn search_fails_fast_when_no_complete_generation_exists() {
     registry.shutdown().await;
 }
 
-/// The live outage this covers: a scope's branch label moves — a restored
+/// The live outage this covers: a scope's branch label moves, a restored
 /// generation was sealed before a `git switch`, or a retained route scope
-/// pinned the label that was live at project open — while the worktree the
+/// pinned the label that was live at project open, while the worktree the
 /// daemon is serving stays byte-identical. The label is not checkout
 /// identity: the ready ladder has already verified the generation against
 /// the live worktree, so the exact worktree's own graph must keep serving as
@@ -4227,8 +4575,8 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
         .expect("the callable-code ladder also serves through a moved reference");
     assert_eq!(ladder.generation.manifest().generation_id, fresh_generation);
 
-    // The root-scope ready gate behind graph reads and the runtime census —
-    // the arms with no stale fallback — must not be orphaned either. Seating
+    // The root-scope ready gate behind graph reads and the runtime census,
+    // the arms with no stale fallback, must not be orphaned either. Seating
     // races the publication event, so the gate is polled bounded.
     let decoded = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -4253,7 +4601,7 @@ async fn moved_reference_label_still_serves_the_exact_worktree_as_current() {
 
 /// The second half of the outage: search resolves its generation without ever
 /// running the freshness ladder, so when both arms came up empty nothing
-/// requested the reconcile that would remedy it — the typed failure repeated
+/// requested the reconcile that would remedy it, the typed failure repeated
 /// forever. Search must now ask for its own remedy, exactly once per due
 /// window, and must still never reconcile inline or park.
 // Holding the scheduler guard across the awaits is the scenario: it is how this
@@ -4631,8 +4979,11 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .symbols
         .iter()
         .find(|record| {
+            // Trait-impl methods are owned by `<Type as Trait>`, so a
+            // `contains("Processor")` probe also matches every impl of the
+            // trait. Only the declaration itself is owned by the trait.
             record.simple_name == "process"
-                && record.qualified_name.contains("Processor")
+                && record.qualified_name.ends_with("::Processor::process")
                 && record.kind == "method"
         })
         .expect("trait method symbol")
@@ -5947,7 +6298,7 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
 
     // The unpinned query's ladder checks inline and hands the rebuild to the
     // background worker. Join the text-owner receipt that exact resolution
-    // actually serves — not the later graph-bearing serving swap.
+    // actually serves, not the later graph-bearing serving swap.
     let _ = registry.latest_text_fresh_for_scope(&resolved).await;
     let next = wait_for_queryable_text_generation_change(&registry, fixture.path(), &initial).await;
     let expected = next.metadata().manifest().generation_id.clone();

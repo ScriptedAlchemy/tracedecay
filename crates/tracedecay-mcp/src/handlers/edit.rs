@@ -622,13 +622,13 @@ fn move_result_md(result: &tracedecay_contracts::source_edit::MoveResult) -> Str
     }
     out.push_str("\n### Impact\n");
     if result.impact.is_empty() {
-        out.push_str("Clean move — no references, dependencies, or module concerns detected.\n");
+        out.push_str("Clean move. No references, dependencies, or module concerns detected.\n");
     } else {
         for hint in &result.impact {
             let loc = hint
                 .line
                 .map_or_else(|| hint.file.clone(), |l| format!("{}:{}", hint.file, l));
-            let _ = writeln!(out, "- **{}** ({}) — {}", hint.kind, loc, hint.detail);
+            let _ = writeln!(out, "- **{}** ({}), {}", hint.kind, loc, hint.detail);
             if let Some(sug) = &hint.suggestion {
                 let _ = writeln!(out, "  - suggestion: {sug}");
             }
@@ -682,8 +682,7 @@ mod tests {
     };
     use tracedecay_contracts::{
         ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
-        ApplicationProblem, ApplicationResponse, InvocationError, LegalAction, RetryDirective,
-        SafeDiagnostic,
+        ApplicationProblem, ApplicationResponse, InvocationError, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_daemon_protocol::{
         DaemonInvocationError, DaemonInvocationExecutorFuture, DaemonInvocationPayload,
@@ -985,7 +984,7 @@ mod tests {
         let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
             problem: ApplicationProblem::unavailable(
                 SafeDiagnostic::new(
-                    "application.surface.unavailable",
+                    tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE,
                     "The project runtime for this operation is still mounting",
                 )
                 .unwrap(),
@@ -995,7 +994,10 @@ mod tests {
         let (reason_code, retryable, _) = error
             .project_route_context()
             .expect("warming must stay a typed project-route error");
-        assert_eq!(reason_code, "application.surface.unavailable");
+        assert_eq!(
+            reason_code,
+            tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+        );
         assert!(retryable);
     }
 
@@ -1022,15 +1024,10 @@ mod tests {
     #[tokio::test]
     async fn kernel_conflict_reaches_mcp_with_reason_code_and_retryability() {
         let error = source_edit_refusal(DaemonInvocationOutcome::ApplicationProblem {
-            problem: ApplicationProblem::Conflict {
-                diagnostic: SafeDiagnostic::new(
-                    "source_edit.idempotency_conflict",
-                    "source edit idempotency key conflicts with a prior input",
-                )
-                .unwrap(),
-                retry: RetryDirective::AfterRevalidate,
-                legal_actions: vec![LegalAction::Refresh],
-            },
+            problem: ApplicationProblem::conflict(
+                "source_edit.idempotency_conflict",
+                "source edit idempotency key conflicts with a prior input",
+            ),
         })
         .await;
         let (reason_code, retryable, _) = error

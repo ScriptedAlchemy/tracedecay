@@ -244,40 +244,57 @@ pub fn run_cursor_parse_batch_workload()
 }
 
 fn compose_cursor_batch(records: &[Vec<u8>]) -> std::io::Result<(u64, Option<String>)> {
-    let mut offset = 0_u64;
-    let mut digests = Sha256::new();
-    let mut bytes = 0_u64;
-    for record in records {
-        let end = offset.saturating_add(record.len() as u64);
-        let range = ObservationSourceRangeV1::new(offset, end).map_err(|error| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-        })?;
-        let parsed = parse_normalized_observation_record_v1(
-            record,
-            range,
-            ObservationOrderingDomainV1::FileBytes,
-            |native| {
-                let record_id =
-                    cursor::observation_native_record_id("cursor", "cursor-eval-session", &native)?;
-                cursor::normalize_cursor_observation(
-                    &native,
-                    "cursor-eval-session",
-                    record_id,
-                    range,
-                    None,
-                    None,
-                )
-            },
-        )
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
-        digests.update(parsed.raw_digest());
-        bytes = bytes.saturating_add(record.len() as u64);
-        offset = end;
-    }
-    Ok((bytes, Some(hex::encode(digests.finalize()))))
+    digest_normalized_records(
+        records,
+        ObservationOrderingDomainV1::FileBytes,
+        |_index, range, native| {
+            let record_id = cursor::observation_native_record_id("cursor-eval-session", &native)?;
+            cursor::normalize_cursor_observation(
+                &native,
+                "cursor-eval-session",
+                record_id,
+                range,
+                None,
+                None,
+            )
+        },
+    )
 }
 
 fn compose_composer_batch(records: &[Vec<u8>]) -> std::io::Result<(u64, Option<String>)> {
+    digest_normalized_records(
+        records,
+        ObservationOrderingDomainV1::SnapshotOrder,
+        |index, range, native| {
+            let position = index as u64 + 1;
+            let record_id = cursor_composer::cursor_composer_native_record_id(
+                "comp-eval",
+                &format!("b-{position}"),
+            )
+            .map_err(|_| tracedecay_capture::ObservationRecordParseErrorV1::NormalizationFailed)?;
+            cursor_composer::normalize_cursor_composer_observation(
+                &native,
+                "comp-eval",
+                record_id,
+                range,
+                position,
+            )
+        },
+    )
+}
+
+fn digest_normalized_records(
+    records: &[Vec<u8>],
+    ordering: ObservationOrderingDomainV1,
+    mut normalize: impl FnMut(
+        usize,
+        ObservationSourceRangeV1,
+        serde_json::Value,
+    ) -> Result<
+        tracedecay_domain::CanonicalObservationEnvelopeV1,
+        tracedecay_capture::ObservationRecordParseErrorV1,
+    >,
+) -> std::io::Result<(u64, Option<String>)> {
     let mut offset = 0_u64;
     let mut digests = Sha256::new();
     let mut bytes = 0_u64;
@@ -286,28 +303,9 @@ fn compose_composer_batch(records: &[Vec<u8>]) -> std::io::Result<(u64, Option<S
         let range = ObservationSourceRangeV1::new(offset, end).map_err(|error| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
         })?;
-        let position = index as u64 + 1;
-        let parsed = parse_normalized_observation_record_v1(
-            record,
-            range,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            |native| {
-                let record_id = cursor_composer::cursor_composer_native_record_id(
-                    "comp-eval",
-                    &format!("b-{position}"),
-                )
-                .map_err(|_| {
-                    tracedecay_capture::ObservationRecordParseErrorV1::NormalizationFailed
-                })?;
-                cursor_composer::normalize_cursor_composer_observation(
-                    &native,
-                    "comp-eval",
-                    record_id,
-                    range,
-                    position,
-                )
-            },
-        )
+        let parsed = parse_normalized_observation_record_v1(record, range, ordering, |native| {
+            normalize(index, range, native)
+        })
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
         digests.update(parsed.raw_digest());
         bytes = bytes.saturating_add(record.len() as u64);

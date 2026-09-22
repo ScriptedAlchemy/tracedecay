@@ -19,7 +19,7 @@ pub use evidence::{
 pub use problem::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
     ApplicationUnavailableClassV1, LegalAction, ProblemOwningLayer, ProblemTerminality,
-    RetryDirective, RetryScope, SafeDiagnostic,
+    RUNTIME_MOUNTING_REASON_CODE, RetryDirective, RetryScope, SafeDiagnostic,
 };
 pub use receipt::{
     CancellationObservation, CancellationStage, EffectId, EffectReceipt, EffectResult,

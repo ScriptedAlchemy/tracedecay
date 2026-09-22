@@ -2,25 +2,16 @@ use std::collections::BTreeSet;
 
 use tracedecay_domain::{
     AutomaticWorktreeGcV1, ConfigurationRevisionId, ConfigurationSnapshotId, CredentialReferenceId,
-    CrossMergeModeV1, ManifestDigest, ProviderId, TopologyNotificationLevelV1, UtcMicros,
-    WorkApprovalPolicy, WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
-    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRuntimeContractError, WorkSandboxPolicy, WorktreeCleanlinessRequirementV1,
-    safe_work_topology_policy_v1,
+    CrossMergeModeV1, ProviderId, TopologyNotificationLevelV1, UtcMicros, WorkApprovalPolicy,
+    WorkEgressPolicy, WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy, WorkProviderBackendV1,
+    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRuntimeContractError,
+    WorkSandboxPolicy, WorktreeCleanlinessRequirementV1, safe_work_topology_policy_v1,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn route(provider: &str, route: &str) -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(id::<ProviderId>(provider), id::<WorkProviderRouteId>(route)).unwrap()

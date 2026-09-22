@@ -218,7 +218,7 @@ const authoredCores: Array<{path:string; lines:number; x:number; indexedTo?:numb
 
     // The absence beat: banded to 331 and no further.
     { path: 'crates/tracedecay-hooks/src/session/vendor_bridge.rs', lines: 612, x: 1200,
-      indexedTo: 331, why: 'extractor bailed at line 331 — unbalanced cfg block', symbols: [
+      indexedTo: 331, why: 'extractor bailed at line 331, unbalanced cfg block', symbols: [
       ['VendorBridge', 'struct', 26, 64, 1], ['attach', 'method', 72, 142, 6],
       ['forward_event', 'method', 148, 268, 10], ['drain', 'method', 274, 330, 4],
     ], internal: [[1, 2, 3]] },

@@ -9,7 +9,7 @@
 //!   commands and never merges that file itself: the host owns the registry,
 //!   and emulating its writes is exactly what the host-capability doctrine
 //!   forbids. The `copilot` binary is therefore a **hard requirement** for this
-//!   half of the lifecycle, with no config-editing fallback — a half-emulated
+//!   half of the lifecycle, with no config-editing fallback, a half-emulated
 //!   registration is indistinguishable on disk from a corrupt one.
 //! * **VS Code's `settings.json`** (`mcp.servers.tracedecay`, plus the
 //!   Insiders profile) has **no host CLI at all**. VS Code exposes no
@@ -19,7 +19,7 @@
 //!   for it is not an option that exists; this module must not invent one.
 //!
 //! The launch arguments both spellings use live in one place
-//! ([`MCP_SERVER_ARGS`]) so the CLI-driven registration and the
+//! (`MCP_SERVER_ARGS`) so the CLI-driven registration and the
 //! TraceDecay-owned readback cannot drift apart.
 
 use std::path::{Path, PathBuf};
@@ -68,7 +68,7 @@ impl AgentIntegration for CopilotIntegration {
     /// `~/.copilot/mcp-config.json` (written by `copilot mcp add`) and the
     /// VS Code user `settings.json`. There is no project-local surface the
     /// host reads, so offering a local install would mean hand-writing files
-    /// the adopted CLI lifecycle exists to eliminate — same ruling as Gemini.
+    /// the adopted CLI lifecycle exists to eliminate, same ruling as Gemini.
     fn supports_local_install(&self) -> bool {
         false
     }
@@ -82,6 +82,18 @@ impl AgentIntegration for CopilotIntegration {
             "VS Code Insiders",
         );
         doctor_check_cli_settings(dc, &ctx.home);
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                super::vscode_data_dir(&ctx.home).join("User/prompts/copilot-instructions.md"),
+                super::vscode_insiders_data_dir(&ctx.home)
+                    .join("User/prompts/copilot-instructions.md"),
+                super::copilot_cli_dir(&ctx.home).join("copilot-instructions.md"),
+                ctx.project_path.join(".github/copilot-instructions.md"),
+            ],
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Agents,
+        );
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -112,7 +124,7 @@ impl AgentIntegration for CopilotIntegration {
     /// is `copilot mcp`, not TraceDecay. Naming that file (and its staged
     /// backup) here is what gives the component-set transaction rollback
     /// authority over the host command's effect; without it the observation
-    /// recorded in [`run_mcp_registry_step`] would have nothing to restore.
+    /// recorded in `run_mcp_registry_step` would have nothing to restore.
     /// Any other component set keeps the default inventory, which is the
     /// TraceDecay-written VS Code settings file.
     fn host_component_registration_paths(
@@ -242,7 +254,7 @@ fn vscode_mcp_servers_has_tracedecay(settings_path: &Path) -> bool {
 // Registration paths
 // ---------------------------------------------------------------------------
 
-/// VS Code user settings — the TraceDecay-written half. No host CLI writes
+/// VS Code user settings, the TraceDecay-written half. No host CLI writes
 /// this file; see the module documentation.
 fn vscode_settings_path(home: &Path) -> PathBuf {
     super::vscode_data_dir(home).join("User/settings.json")
@@ -448,7 +460,7 @@ fn doctor_check_vscode_settings(dc: &mut DoctorCounters, vscode_dir: &Path, labe
                 .and_then(|servers| servers.get("tracedecay"))
         },
         &format!(
-            "{} not found — run `tracedecay install --agent copilot` if you use GitHub Copilot in {label}",
+            "{} not found, run `tracedecay install --agent copilot` if you use GitHub Copilot in {label}",
             settings_path.display()
         ),
     );
@@ -467,7 +479,7 @@ fn doctor_check_cli_settings(dc: &mut DoctorCounters, home: &Path) {
                 .and_then(|servers| servers.get("tracedecay"))
         },
         &format!(
-            "{} not found — run `tracedecay install --agent copilot` if you use Copilot CLI",
+            "{} not found, run `tracedecay install --agent copilot` if you use Copilot CLI",
             settings_path.display()
         ),
     );
@@ -488,7 +500,7 @@ fn doctor_check_mcp_document(
     let settings = load(settings_path);
     let Some(server) = lookup(&settings).and_then(serde_json::Value::as_object) else {
         dc.fail(&format!(
-            "MCP server NOT registered in {} — run `tracedecay install --agent copilot`",
+            "MCP server NOT registered in {}, run `tracedecay install --agent copilot`",
             settings_path.display()
         ));
         return;
@@ -501,7 +513,7 @@ fn doctor_check_mcp_document(
     if server_args_are_current(server) {
         dc.pass("MCP server args include \"serve\"");
     } else {
-        dc.fail("MCP server args missing \"serve\" — run `tracedecay install --agent copilot`");
+        dc.fail("MCP server args missing \"serve\", run `tracedecay install --agent copilot`");
     }
 }
 

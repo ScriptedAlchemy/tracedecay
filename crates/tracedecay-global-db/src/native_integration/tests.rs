@@ -1,11 +1,11 @@
 use tracedecay_domain::{
     ActorId, CapabilityId, CodeGenerationId, ContentDigest, FrozenIndependentBranchSelectionV1,
-    GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, ManifestDigest,
-    MechanicalIntegrationModeV1, NativeIntegrationAnalysisCoverageV1,
-    NativeIntegrationAnalysisLaneV1, NativeIntegrationAnalysisReportV1,
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationGenerationBindingV1,
-    NativeIntegrationPhaseV1, NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
-    NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationRepositorySnapshotV1,
+    GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, MechanicalIntegrationModeV1,
+    NativeIntegrationAnalysisCoverageV1, NativeIntegrationAnalysisLaneV1,
+    NativeIntegrationAnalysisReportV1, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationGenerationBindingV1, NativeIntegrationPhaseV1,
+    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationReceiptV1, NativeIntegrationRepositorySnapshotV1,
     NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
     NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
     RepositoryId, UtcMicros, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
@@ -17,9 +17,7 @@ use tracedecay_store::{
 use super::store::GlobalDbNativeIntegrationStore;
 use crate::{RegisteredGlobalDb, tests::harness::RegisteredGlobalDbHarness};
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("fixture digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn oid(byte: char) -> GitOidV1 {
     GitOidV1::new(byte.to_string().repeat(40)).expect("fixture object id")

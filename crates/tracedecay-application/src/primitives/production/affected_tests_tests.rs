@@ -79,9 +79,7 @@ fn generation(value: &str) -> CodeGenerationId {
     CodeGenerationId::new(value).expect("generation")
 }
 
-fn digest(value: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", value.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn content(value: char) -> ContentDigest {
     ContentDigest::new(format!("sha256:{}", value.to_string().repeat(64))).expect("content")
@@ -529,7 +527,7 @@ async fn a_cursor_minted_before_a_publication_does_not_resume_after_it() {
 
     // A re-index of the same commit republishes under the same generation
     // sequence with different content. The rows behind the cursor are still
-    // gone, so the cursor must still be refused — the sequence is not the
+    // gone, so the cursor must still be refused, the sequence is not the
     // whole identity.
     code_index.publish("generation.symbol-graph.code.11", '9');
     assert!(

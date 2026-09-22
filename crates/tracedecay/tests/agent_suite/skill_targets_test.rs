@@ -10,9 +10,11 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 use tracedecay_automation_runtime::automation::skill_targets::{
     SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,
     install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
+    stale_prompt_index_ids,
 };
+use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_at;
 
-/// The production host I/O bundle prompt-index writes go through — the same
+/// The production host I/O bundle prompt-index writes go through the same
 /// value the host installers hand `skill_targets`.
 fn host_io() -> tracedecay_automation_runtime::automation::host_io::HostIo {
     tracedecay_agent_hosts::host_io()
@@ -971,5 +973,64 @@ async fn hermes_target_uses_native_plugin_overlay() {
         plugin_root
             .join("skills/agent-managed/repo-hygiene/SKILL.md")
             .is_file()
+    );
+}
+
+/// A lifecycle pass must converge a host prompt index against the store.
+///
+/// Reconciling only the materialized `SKILL.md` files left the index writing
+/// solely as a side effect of a successful store mutation, so a store that
+/// emptied without one kept every host advertising skills that no longer exist.
+#[test]
+fn lifecycle_deploy_clears_a_prompt_index_whose_store_emptied() {
+    let home = tempdir();
+    let home_path = home.path();
+    let profile_root = home_path.join(".tracedecay");
+    std::fs::create_dir_all(profile_root.join("agent_managed").join("skills")).unwrap();
+
+    // Claude reads as integrated once its marketplace manifest is deployed.
+    let manifest =
+        home_path.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json");
+    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    std::fs::write(&manifest, "{}").unwrap();
+
+    let claude_md = home_path.join(".claude").join("CLAUDE.md");
+    std::fs::write(
+        &claude_md,
+        "# Working preferences\n\n\
+         <!-- TRACEDECAY MANAGED SKILLS START claude -->\n\
+         ## TraceDecay managed skills\n\n\
+         This Claude index lists approved profile-managed skills.\n\n\
+         - `retired-skill`: Retired Skill. Summary: no longer in the store.\n\
+         <!-- TRACEDECAY MANAGED SKILLS END claude -->\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        stale_prompt_index_ids(&profile_root, &claude_md, SkillInstallTarget::Claude).unwrap(),
+        vec!["retired-skill".to_string()],
+        "an empty store must make every advertised id stale"
+    );
+
+    let receipt = deploy_managed_skills_at(&host_io(), home_path, &profile_root, home_path);
+    assert!(
+        receipt.errors.is_empty(),
+        "lifecycle deploy reported errors: {:?}",
+        receipt.errors
+    );
+
+    let updated = std::fs::read_to_string(&claude_md).unwrap();
+    assert!(
+        !updated.contains("retired-skill"),
+        "lifecycle deploy left the stale index in place:\n{updated}"
+    );
+    assert!(
+        updated.contains("# Working preferences"),
+        "lifecycle deploy must keep user-authored text:\n{updated}"
+    );
+    assert!(
+        stale_prompt_index_ids(&profile_root, &claude_md, SkillInstallTarget::Claude)
+            .unwrap()
+            .is_empty()
     );
 }

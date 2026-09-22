@@ -661,21 +661,17 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     };
     assert_eq!(
         problem,
-        tracedecay_contracts::ApplicationProblem::InvalidRequest {
-            diagnostic: tracedecay_contracts::SafeDiagnostic {
-                code: "work.invalid_graph_operation".to_owned(),
-                message: "The Work graph request is invalid".to_owned(),
-            },
-            retry: tracedecay_contracts::RetryDirective::Never,
-            legal_actions: vec![tracedecay_contracts::LegalAction::CorrectRequest],
-        },
+        tracedecay_contracts::ApplicationProblem::invalid_request(
+            "work.invalid_graph_operation",
+            "The Work graph request is invalid"
+        ),
         "an unroutable admission is a request to correct, not an authority to retry"
     );
 }
 
 /// The Task-family activity producer behind the dashboard's `task_activity`
 /// stream. A committed Work mutation must raise exactly one Task pulse against
-/// the registered project, and a projection read must raise none — the
+/// the registered project, and a projection read must raise none, the
 /// dispatcher's read arms never reach the effect path that publishes.
 #[tokio::test]
 async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {

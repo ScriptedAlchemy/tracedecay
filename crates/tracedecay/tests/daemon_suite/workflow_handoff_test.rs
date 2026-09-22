@@ -2,8 +2,8 @@
 //!
 //! Definitions, activations, and single-use handoff tokens share the registered Work SQLite channel
 //! (`RegisteredGlobalDb::workflow_storage`). This drops the whole
-//! `HostAdmissionTestRuntimeV1` — the daemon's admitted composition root, not
-//! just the exact-SQL handle — and reopens it at the same profile/project
+//! `HostAdmissionTestRuntimeV1`, the daemon's admitted composition root, not
+//! just the exact-SQL handle, and reopens it at the same profile/project
 //! paths, so a real physical restart (not a logical replay) is what proves
 //! durability here.
 
@@ -19,13 +19,7 @@ use tracedecay_domain::{
     WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 /// A distinct, valid `sha256:`-tagged digest per input byte.
 ///
@@ -97,8 +91,8 @@ fn frontier() -> WorkHandoffFrontierV1 {
 
 /// Opens the admitted daemon composition root at `profile_root`/`project_root`.
 ///
-/// Calling this twice at the same paths — dropping the first runtime before
-/// opening the second — is the direct restart journey: the second call re-enters
+/// Calling this twice at the same paths, dropping the first runtime before
+/// opening the second, is the direct restart journey: the second call re-enters
 /// the daemon database scope and remounts the registered store from disk with
 /// no in-process state carried over.
 async fn open_daemon_runtime(
@@ -143,7 +137,7 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
         TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
 
         // Consume the handoff token before the restart, so the restart proves
-        // the single-use "consumed" fact durably survives, not just the grant.
+        // the single-use "consumed" fact durably survives after restart.
         // The consumption answers the recorded frontier byte-for-byte: the
         // redeemer receives checkpoint evidence, never lease authority.
         assert_eq!(
@@ -159,8 +153,8 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
             }
         );
 
-        // The runtime — and with it the daemon database scope and every open
-        // connection — is dropped at the end of this block, before the next
+        // The runtime, and with it the daemon database scope and every open
+        // connection, is dropped at the end of this block, before the next
         // admission reopens from disk.
     }
 

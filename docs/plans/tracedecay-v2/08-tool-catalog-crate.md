@@ -79,34 +79,34 @@ duplicating business logic.
 
 ## Required behavior
 
-- **Foundation — definitions:** create compact immutable catalog records and stable
+- **Foundation, definitions:** create compact immutable catalog records and stable
   IDs for application use cases in the foundation delivery scope. Every entry points
   to a real typed application handler.
-- **Foundation — canonical operations:** structural search, source outline, source
+- **Foundation, canonical operations:** structural search, source outline, source
   rewrite, exact/symbol edit, temporal retrieval, configuration, health, and
   every other tool bind stable typed application operations. A surface name or
   alias has zero business logic.
-- **Foundation — Git index capability:** catalog the daemon-owned
+- **Foundation, Git index capability:** catalog the daemon-owned
   `GitIndexTransaction` operations `stage_hunks`, `unstage_hunks`, and
   `commit_index` as typed application handlers with distinct effect classes,
   immutable preview/CAS requirements, idempotency keys, and receipt contracts.
   Do not catalog generic Git execution or autonomous merge, rebase,
   cherry-pick, branch/tag/ref mutation, or history rewriting.
-- **Foundation — configuration boundary:** code/config-file inspection is a scoped
+- **Foundation, configuration boundary:** code/config-file inspection is a scoped
   source operation; product settings use the typed configuration authority.
   Similar presentation does not merge their authorization or effects.
-- **Foundation — contributions:** register catalog records beside their owning application feature, then assemble one immutable snapshot at composition. No central file duplicates every request/response definition.
-- **Foundation — validation:** reject duplicate IDs/bindings, missing handlers,
+- **Foundation, contributions:** register catalog records beside their owning application feature, then assemble one immutable snapshot at composition. No central file duplicates every request/response definition.
+- **Foundation, validation:** reject duplicate IDs/bindings, missing handlers,
   incompatible schema references, invalid scope/effect combinations, profile
   overflow, and dependency cycles.
-- **Foundation — agent-facing contracts:** treat names, descriptions, and examples as
+- **Foundation, agent-facing contracts:** treat names, descriptions, and examples as
   versioned routing contract fields. Validate same-profile discriminability
   with positive, negative, ambiguous, and insufficient-capability fixtures;
   no paper-derived fixed 10/20/30-tool ceiling becomes product policy.
-- **Foundation — policy:** expose read-only capability metadata to policy routing. Availability and effect metadata inform a decision but never execute it.
-- **Foundation — daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
-- **Foundation — profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
-- **Foundation — compatibility:** retain a deprecated name as a `SurfaceBinding`
+- **Foundation, policy:** expose read-only capability metadata to policy routing. Availability and effect metadata inform a decision but never execute it.
+- **Foundation, daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
+- **Foundation, profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
+- **Foundation, compatibility:** retain a deprecated name as a `SurfaceBinding`
   only when actual independent public release evidence proves a supported
   caller; a direct compatibility test alone is not release evidence. Pure
   source-only names are replaced in place, as are branch-era V2 callable names.
@@ -115,16 +115,16 @@ duplicating business logic.
   never a generic unknown-operation response. After retirement it behaves as
   an ordinary unknown name; authorized callers may use ordinary discovery
   guidance. No retired-name tombstone registry or compatibility ledger exists.
-- **Bindings — bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
+- **Bindings, bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
   methods to the same CapabilityId and typed application handler where the
   protocol exposes a callable product operation. Dashboard binding, dashboard
   actions, and dashboard parity remain owned by the dashboard delivery; the
   surface-binding delivery does not ship dashboard adapters.
-- **Dashboard — dashboard binding:** map dashboard actions to the same CapabilityId
+- **Dashboard, dashboard binding:** map dashboard actions to the same CapabilityId
   and typed application handler as CLI, MCP, HTTP, and LSP. Dashboard parity
   tests submit equivalent typed requests through dashboard and non-dashboard
   adapters and compare semantic results before rendering.
-- **Bindings — LSP bindings:** map each supported standard navigation or diagnostic
+- **Bindings, LSP bindings:** map each supported standard navigation or diagnostic
   method to an existing typed code or diagnostic capability and handler.
   Lifecycle, framing, and document notifications remain protocol mechanics,
   not callable catalog capabilities. `prepareRename` and `rename` bind only to
@@ -136,7 +136,7 @@ duplicating business logic.
   typed candidate-consumption operation, effect classification, canonical
   preview/`EditTransaction` route, and direct acceptance behavior ship
   together.
-- **Bindings — LSP extensions:** require every vendor extension to have an explicit
+- **Bindings, LSP extensions:** require every vendor extension to have an explicit
   typed catalog entry, bounded schema, effect classification, and tested
   handler. Ship the versioned TraceDecay context extension only through
   standard LSP/JSON-RPC framing and explicit experimental capability
@@ -148,24 +148,24 @@ duplicating business logic.
   point admits a contribution only when its typed handler is callable, so
   advisory feedback can add GitHub review, CI localization, and proximity without changing
   the reader transport. Never expose arbitrary method or payload forwarding.
-- **Bindings — feedback reads:** bind canonical diagnostics, impact, affected-test,
+- **Bindings, feedback reads:** bind canonical diagnostics, impact, affected-test,
   test-result, feedback get/list, and exact expansion handlers as real callable
   reads on their supported CLI, MCP, HTTP, and negotiated LSP surfaces. No
   placeholder handler or advertised-but-unavailable binding may stand in for
   a bound surface operation. Advisory feedback adds GitHub/CI/proximity producers and catalog
   contributions to these readers; it does not replace or fork their transport.
-- **Bindings — schemas:** surface adapters use reviewed typed schemas or schema references from the owning contract. The catalog does not generate domain types from prose or source parsing.
-- **Bindings — Git bindings:** expose exactly `git_preview` and `git_apply` to CLI
+- **Bindings, schemas:** surface adapters use reviewed typed schemas or schema references from the owning contract. The catalog does not generate domain types from prose or source parsing.
+- **Bindings, Git bindings:** expose exactly `git_preview` and `git_apply` to CLI
   and MCP. Both surfaces share one request/result schema: preview returns the
   immutable transaction plan and digest; apply accepts that identity plus CAS
   evidence and returns the canonical receipt or typed stale/conflict state.
   Internal `stage_hunks`, `unstage_hunks`, and `commit_index` remain application
   operations, not additional public tools.
-- **Bindings — discovery:** return bounded capability metadata filtered by surface, profile, availability, scope, and authorization. Never expose secrets, config bodies, private paths, or unavailable administrative details.
-- **Bindings — output:** all surfaces consume the same typed application result before rendering. Markdown is the human/agent default where appropriate; structured JSON remains explicit.
-- **Bindings — drift:** direct tests enumerate compiled bindings and assert each references a valid catalog entry and handler. This is runtime contract validation, not source extraction.
-- **Advisory feedback — hooks:** hook adapters use cataloged host capabilities only through application/daemon responses; hooks do not resolve or execute catalog entries locally.
-- **Work capabilities — work graph:** catalog explicit initiative/work-item/version,
+- **Bindings, discovery:** return bounded capability metadata filtered by surface, profile, availability, scope, and authorization. Never expose secrets, config bodies, private paths, or unavailable administrative details.
+- **Bindings, output:** all surfaces consume the same typed application result before rendering. Markdown is the human/agent default where appropriate; structured JSON remains explicit.
+- **Bindings, drift:** direct tests enumerate compiled bindings and assert each references a valid catalog entry and handler. This is runtime contract validation, not source extraction.
+- **Advisory feedback, hooks:** hook adapters use cataloged host capabilities only through application/daemon responses; hooks do not resolve or execute catalog entries locally.
+- **Work capabilities, work graph:** catalog explicit initiative/work-item/version,
   dependency, evidence/history, saved-projection, assignment/review, runtime
   admission/control, task-shape assessment, decomposition review,
   routing-recommendation, resize/re-route proposal, independent-review grade,
@@ -176,7 +176,7 @@ duplicating business logic.
   work-capability catalog IDs do not prematurely freeze public SDK method names.
   There is no generic status setter, invoke-anything task tool, board-local
   command, local model scorer, or route that bypasses Plan 32 effect authority.
-- **Work capabilities — auxiliary providers:** catalog native Claude Code CLI, Codex
+- **Work capabilities, auxiliary providers:** catalog native Claude Code CLI, Codex
   app-server, and policy-eligible Codex CLI fallback as distinct provider
   adapter capabilities backed by Plan 32. Descriptors name executable and
   protocol version constraints, supported models/reasoning/capabilities,
@@ -186,14 +186,14 @@ duplicating business logic.
   CLI descriptor, and fallback eligibility never means automatic fallback.
   Catalog IDs are internal work-capability identity and do not freeze
   public SDK operation names.
-- **Work capabilities — TaskId retrieval:** keep distinct typed capabilities for TaskId
+- **Work capabilities, TaskId retrieval:** keep distinct typed capabilities for TaskId
   lookup, compact context, current/as-of/evolution/forensic history,
   thread/attempt traversal, impact and affected tests, handoff, proposal
   review, escalation, governed experience recall, and runtime control. Read,
   proposal-decision, and runtime-effect grants remain separate; no generic
   task query DSL, invoke-anything operation, task-local scheduler, or hidden
   alias is admitted.
-- **SDK — SDK bindings:** add Rust and TypeScript SDK BindingIds only
+- **SDK, SDK bindings:** add Rust and TypeScript SDK BindingIds only
   with shipped typed methods and behavioral/lifecycle conformance fixtures.
   Every supported public operation, including operations accepted before
   the work-capability delivery, must receive bindings in both SDKs; absence from a generated list
@@ -377,8 +377,8 @@ same behavior is covered directly.
   app-server-versus-CLI fallback eligibility, native Claude Code selection,
   deterministic lookup, and rejection of shell-string, recursive-dispatch, or
   graph/runtime-mutation capabilities.
-- SDK parity tests require every supported public operation—not only
-  task/runtime additions—to resolve through shipped Rust and TypeScript
+- SDK parity tests require every supported public operation, not only
+  task/runtime additions, to resolve through shipped Rust and TypeScript
   methods to the canonical application handler, with matching
   authorization, paging/streaming, problems/retry directives, cancellation,
   receipts, reconnect/resume, and unavailable/partial lifecycle semantics.

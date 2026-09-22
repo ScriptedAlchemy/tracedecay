@@ -855,7 +855,7 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
 
 /// The `idempotency_key` observation shape never shipped in a published
 /// release, so admission must refuse it with the typed `ResetRequired` state
-/// naming the observation authority — never migrate it in place.
+/// naming the observation authority, never migrate it in place.
 #[tokio::test]
 async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_required() {
     let tmp = TempDir::new().unwrap();
@@ -1344,7 +1344,7 @@ async fn canonical_payload_revision_compatibility_separates_revisions_from_unshi
         //   normalizer never adopts a candidate's `evidence.range`, so the
         //   record is an unshipped difference and stays fail-closed with the
         //   terminal `ObservationCollision`. The refusal still records
-        //   coverage — the cursor advances past the refused range so ingest
+        //   coverage, the cursor advances past the refused range so ingest
         //   does not re-read the refused record forever.
         // * At the frontier with a moved range, Cursor: the Cursor normalizer
         //   deliberately replaces `evidence.range` with the candidate's
@@ -1476,12 +1476,20 @@ async fn cursor_only_progress_persists_non_payload_receipt_and_retries_idempoten
 }
 
 #[tokio::test]
-async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
+/// A second owner replaying the same range with a different coverage reason
+/// finds the durable cursor already at its `next_cursor`: the coverage it
+/// wanted to record is applied, so the replay is a duplicate, not a
+/// collision that blocks ingest (#1842). The committed reason stays.
+async fn cursor_already_owned_keeps_the_first_reason_for_a_later_owner() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
 
     store
         .advance_source_cursor(cursor_advance(
@@ -1493,7 +1501,7 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
         .await
         .unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         store
             .advance_source_cursor(cursor_advance(
                 None,
@@ -1501,17 +1509,32 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_reason() {
                 10,
                 NonDurableFrameReason::OutOfScope,
             ))
-            .await,
-        Err(ObservationStoreError::CursorAdvanceCollision)
-    ));
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
     assert_eq!(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
     );
+    let conn = rusqlite::Connection::open(&database_path).unwrap();
+    let reason: String = conn
+        .query_row("SELECT reason FROM source_cursor_advances", (), |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(reason, "blank_frame");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM source_cursor_advances", (), |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
+async fn cursor_already_past_a_narrower_range_keeps_the_owned_frontier() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
@@ -1528,7 +1551,7 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
         .await
         .unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         store
             .advance_source_cursor(cursor_advance(
                 Some(cursor(5)),
@@ -1536,9 +1559,10 @@ async fn cursor_only_retry_rejects_same_cursor_with_different_coverage() {
                 10,
                 NonDurableFrameReason::BlankFrame,
             ))
-            .await,
-        Err(ObservationStoreError::CursorAdvanceCollision)
-    ));
+            .await
+            .unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate
+    );
     assert_eq!(
         store.get_source_cursor(&source(), &scope()).await.unwrap(),
         Some(cursor(10))
@@ -1812,8 +1836,8 @@ async fn cursor_only_progress_survives_restart() {
 /// *covered* replay: the durable source cursor already stands past the
 /// candidate's range, so the store cannot tell a genuine content collision
 /// from a stale reader that lost a cursor race. The typed verdict is therefore
-/// the retryable [`ObservationStoreError::CursorConflict`] — never a terminal
-/// [`ObservationStoreError::ObservationCollision`] — and no ledger, cursor, or
+/// the retryable [`ObservationStoreError::CursorConflict`], never a terminal
+/// [`ObservationStoreError::ObservationCollision`], and no ledger, cursor, or
 /// row may move.
 #[tokio::test]
 async fn covered_identity_collision_is_retryable_and_leaves_all_authoritative_state_unchanged() {
@@ -2028,8 +2052,8 @@ async fn every_observation_statement_failure_rolls_back_the_authoritative_transa
 /// queued or in flight attaches to that leader and settles the leader's
 /// `Committed` outcome, while one that arrives after the commit reads the
 /// retained row and reports `ExactDuplicate`. Both carry the same receipt, so
-/// the invariant under test is "one sequence, one row set, identical receipts"
-/// — never a second commit.
+/// the invariant under test is "one sequence, one row set, identical receipts",
+/// never a second commit.
 #[tokio::test]
 async fn concurrent_exact_retry_commits_one_sequence_and_settles_one_receipt() {
     let tmp = TempDir::new().unwrap();

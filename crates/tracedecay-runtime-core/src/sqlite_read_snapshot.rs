@@ -11,7 +11,6 @@ use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use std::cell::RefCell;
 
-use fs2::FileExt;
 use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -89,7 +88,7 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
 /// swap that directory themselves.
 ///
 /// A WAL family whose transient `-shm` is absent is copied as an offline
-/// unlocked family and folded in staging — opening it as a reader would
+/// unlocked family and folded in staging, opening it as a reader would
 /// reconstruct SHM in the source directory.
 fn backup_live_sqlite_database_sync(source: &Path, destination: &Path) -> io::Result<()> {
     backup_live_sqlite_database_with(source, destination, || Ok(()))
@@ -385,7 +384,7 @@ pub struct SnapshotDatabase {
     source_state: Vec<FileState>,
     /// The `file:...` URI used to ATTACH this snapshot. Percent-encoded and
     /// carrying `mode=ro`/`immutable=1`, so it is never a valid filesystem
-    /// path — use `identity_path` for anything that touches the filesystem.
+    /// path, use `identity_path` for anything that touches the filesystem.
     path: PathBuf,
     /// The real on-disk file this snapshot reads: the untouched source in
     /// direct-immutable mode, or the scratch copy in copy mode.
@@ -995,7 +994,7 @@ async fn finish_one(
     }
     control.checkpoint()?;
     // `identity_path` is the real file on disk; `attach_path` is the URI used
-    // to ATTACH it. They are never interchangeable — the URI is percent-encoded
+    // to ATTACH it. They are never interchangeable, the URI is percent-encoded
     // and carries query parameters, so passing it to the filesystem fails.
     let (open_path, attach_path, identity_path, flags, scratch) =
         if matches!(prepared.mode, SnapshotMode::DirectImmutable) {
@@ -1102,7 +1101,7 @@ fn create_scratch_directory(
 ) -> io::Result<ScratchDirectory> {
     ensure_private_root(root, expected_uid)?;
     let cleanup_lock = open_private_lock(&root.join(".cleanup.lock"), true)?;
-    cleanup_lock.lock_exclusive()?;
+    cleanup_lock.lock()?;
     cleanup_stale_directories(root)?;
     for _ in 0..100 {
         let id = NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed);
@@ -1110,8 +1109,8 @@ fn create_scratch_directory(
         match create_private_directory(&path) {
             Ok(()) => {
                 let owner_lock = open_private_lock(&path.join(".owner.lock"), true)?;
-                owner_lock.lock_exclusive()?;
-                FileExt::unlock(&cleanup_lock)?;
+                owner_lock.lock()?;
+                cleanup_lock.unlock()?;
                 return Ok(ScratchDirectory {
                     path,
                     owner_lock: Some(owner_lock),
@@ -1314,16 +1313,26 @@ fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
             continue;
         }
         let path = entry.path();
-        if !fs::symlink_metadata(&path)?.is_dir() {
-            continue;
+        // An owner releases its directory without the cleanup lock, so an
+        // entry listed above can be gone by now. Gone is the state this
+        // sweep wants; only a failure to reach a present entry is an error.
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         }
         let removable = match open_private_lock(&path.join(".owner.lock"), false) {
-            Ok(lock) => lock.try_lock_exclusive().is_ok(),
+            Ok(lock) => lock.try_lock().map_err(std::io::Error::from).is_ok(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => true,
             Err(error) => return Err(error),
         };
         if removable {
-            fs::remove_dir_all(path)?;
+            match fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(())
@@ -1508,6 +1517,37 @@ mod tests {
 
         fs::write(with_suffix(&path, "-wal"), b"live").unwrap();
         assert!(checkpointed_database_has_any_rows(&path, &["durable"]).is_err());
+    }
+
+    /// A snapshot owner removes its own `read-*` directory without the
+    /// cleanup lock, so a cleanup that listed that directory can find it gone
+    /// by the time it inspects or removes it. That is the state cleanup
+    /// wants; it must not fail the open that ran it.
+    #[test]
+    fn stale_directory_cleanup_survives_a_concurrent_owner_release() {
+        for _ in 0..40 {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path().to_path_buf();
+            let dirs: Vec<PathBuf> = (0..200)
+                .map(|index| root.join(format!("read-owner-{index}")))
+                .collect();
+            for dir in &dirs {
+                fs::create_dir(dir).unwrap();
+            }
+            let releasing = dirs.clone();
+            let owner = std::thread::spawn(move || {
+                for dir in releasing {
+                    let _ = fs::remove_dir_all(dir);
+                }
+            });
+            let cleaned = cleanup_stale_directories(&root);
+            owner.join().unwrap();
+            cleaned.expect("cleanup tolerates directories released under it");
+            assert!(
+                fs::read_dir(&root).unwrap().next().is_none(),
+                "every stale directory is gone afterwards"
+            );
+        }
     }
 
     #[tokio::test]

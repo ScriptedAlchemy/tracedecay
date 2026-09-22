@@ -11,10 +11,10 @@
 //! encode / tool-call / decode on the MCP path; `sdk.http.execute` covers the
 //! typed HTTP execute (encode, admission, request, contract checks). Nested
 //! `sdk.http.headers` / `sdk.http.body_decode` remain the send vs decode split.
-//! Span names are static — never a URL, tool name, operation id, or payload.
+//! Span names are static, never a URL, tool name, operation id, or payload.
 //!
 //! Error class is the typed [`ClientError`] / [`RemoteClientError`] variant,
-//! or a closed [`ApplicationProblemKind`] name — never an unbounded message.
+//! or a closed [`ApplicationProblemKind`] name, never an unbounded message.
 
 use crate::client::ClientError;
 use crate::remote_client::RemoteClientError;

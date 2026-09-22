@@ -204,6 +204,7 @@ function ratio(
 function coverageExclusionSummary(coverage: CodeCloneIndexCoverageV1): string {
   const values = [
     ['too small', coverage.excluded_too_small_bodies],
+    ['too large', coverage.excluded_too_large_bodies],
     ['tokenization', coverage.excluded_incomplete_tokenization_bodies],
   ] as const;
   return values.map(([label, value]) => `${figure(value)} ${label}`).join(' · ');

@@ -306,7 +306,7 @@ impl DoctorReportV1 {
     /// True only when every family was consulted with complete coverage and
     /// every finding is [`DoctorEvidenceStateV1::HealthyCompleteCoverage`]. Any
     /// unavailable family, partial coverage, or non-healthy finding makes this
-    /// false — unknown or partial truth never collapses into a healthy report.
+    /// false. Unknown or partial truth never collapses into a healthy report.
     #[must_use]
     pub fn is_healthy_complete(&self) -> bool {
         matches!(
@@ -404,7 +404,7 @@ impl<'de> Deserialize<'de> for DoctorReportV1 {
 ///
 /// Each source port is optional. A family whose port is absent (or whose source
 /// reports an unavailable read) is carried with a truthful evidence state and an
-/// explicit coverage entry — never silently omitted. Build the composer with the
+/// explicit coverage entry, never silently omitted. Build the composer with the
 /// `with_*` methods, then call [`Self::compose`].
 #[derive(Default)]
 pub struct DoctorReportComposerV1<'a> {
@@ -911,16 +911,7 @@ fn storage_unavailable(
 /// statement: control characters folded to spaces, trimmed, and bounded so the
 /// composed statement stays inside the statement contract.
 fn sanitized_detail(detail: &str) -> Option<String> {
-    let folded: String = detail
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
+    let folded = tracedecay_domain::fold_control_characters(detail);
     let bounded = truncate_at_char_boundary(folded.trim(), PLACEHOLDER_DETAIL_MAX_BYTES);
     let bounded = bounded.trim();
     if bounded.is_empty() {

@@ -211,14 +211,6 @@ impl tracedecay_automation::AutomationRunRecord for AutomationRunLedgerRecord {
     fn accepted_count(&self) -> usize {
         self.accepted_count
     }
-
-    fn validation_report(&self) -> Option<&Value> {
-        self.validation_report.as_ref()
-    }
-
-    fn applied_ops(&self) -> Option<&Value> {
-        self.applied_ops.as_ref()
-    }
 }
 
 pub fn run_ledger_path(dashboard_root: &Path) -> PathBuf {
@@ -403,7 +395,7 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
             }
             Ok(())
         })();
-        let unlock_result = fs2::FileExt::unlock(&lock);
+        let unlock_result = lock.unlock();
         write_result?;
         unlock_result?;
         Ok(())
@@ -553,7 +545,12 @@ pub fn canonical_record_completion_micros(record: &AutomationRunLedgerRecord) ->
     .map(|(_, completed_at_micros)| completed_at_micros)
 }
 
-pub(super) fn canonical_record_started_at_seconds(
+/// Schema-aware start instant in Unix seconds.
+///
+/// Schema v1 rows store RFC3339. Schema v2 rows store nonnegative Unix
+/// seconds. Callers that window the ledger, including analytics, must use
+/// this instead of assuming one textual form.
+pub fn canonical_record_started_at_seconds(
     record: &AutomationRunLedgerRecord,
     label: &str,
 ) -> Result<i64> {
@@ -848,13 +845,6 @@ impl AutomationRunLedgerTaskSummary {
         self.latest_session_evidence_budget_exhausted
             .map(|index| &self.records[index])
     }
-
-    pub fn latest_scheduler_effectful_user_job_terminal(
-        &self,
-    ) -> Option<&AutomationRunLedgerRecord> {
-        self.latest_scheduler_effectful()
-            .filter(|record| record.task == AgentTaskKind::UserJob)
-    }
 }
 
 #[hotpath::measure(label = "automation_runtime.run_ledger.load_page", future = true)]
@@ -972,8 +962,8 @@ fn validate_requested_task_key(task_key: &str) -> Result<()> {
 /// A read must not mint the dashboard directory: acquiring the lock creates
 /// it, and a root that does not exist has no ledger. Absence is therefore
 /// answered from `absent` alone. Running `read` there would open whatever a
-/// first writer created in the meantime — outside the lock and outside
-/// `ensure_no_exact_append_intent` — and expose a row whose publication has
+/// first writer created in the meantime, outside the lock and outside
+/// `ensure_no_exact_append_intent`, and expose a row whose publication has
 /// not settled; the directory's absence at the time of check says nothing
 /// about the ledger at the time of use.
 ///
@@ -1007,7 +997,7 @@ fn with_run_ledger_read_lock<T>(
         })?;
         hotpath::measure_block!("automation.run_ledger.read_lock.body", read())
     })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
+    let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
 }
 

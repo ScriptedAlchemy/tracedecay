@@ -34,7 +34,6 @@ pub(super) struct InsertTracker {
 pub(super) enum AuthorizedDatabaseOperation {
     Attach,
     Detach(String),
-    Vacuum,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -184,7 +183,7 @@ where
 /// lives in the connection's own `temp` schema, cannot alias or mutate
 /// anything in `main`, and disappears with the connection. Denying them while
 /// permitting durable DDL inverted the blast radius, and it left derived
-/// per-connection scratch — the projection output-state cache — unable to
+/// per-connection scratch, the projection output-state cache, unable to
 /// exist at all.
 ///
 /// Temporary **triggers and views** stay denied. A temp trigger can fire on a
@@ -202,7 +201,7 @@ fn authorize_exact_sql_writer(
         AuthAction::Attach { .. }
             if matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
+                Some(AuthorizedDatabaseOperation::Attach)
             ) =>
         {
             return Authorization::Allow;
@@ -216,7 +215,7 @@ fn authorize_exact_sql_writer(
         } if code == rusqlite::ffi::SQLITE_ATTACH
             && matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
+                Some(AuthorizedDatabaseOperation::Attach)
             ) =>
         {
             return Authorization::Allow;
@@ -226,9 +225,6 @@ fn authorize_exact_sql_writer(
                 database_operation,
                 Some(AuthorizedDatabaseOperation::Detach(expected))
                     if database_name.eq_ignore_ascii_case(expected)
-            ) || matches!(
-                database_operation,
-                Some(AuthorizedDatabaseOperation::Vacuum)
             ) =>
         {
             return Authorization::Allow;

@@ -39,7 +39,7 @@ pub type SymbolGraphCursorFuture<'a, T> =
 /// A read's exclusive hold on one graph generation.
 ///
 /// The claim carries the snapshot identity that was live when the read began,
-/// so every page the read serves — and every continuation it mints — is
+/// so every page the read serves, and every continuation it mints, is
 /// answered under that one generation or refused as stale. A page may never be
 /// served under a generation other than the one its claim was minted against.
 #[derive(Debug)]
@@ -1094,9 +1094,10 @@ fn in_scope_parts(binding: Option<&CodeGraphSymbolBindingV1>, scope: &SymbolGrap
     let Some(file) = binding.and_then(|binding| binding.logical_path.as_deref()) else {
         return false;
     };
-    scope.path_prefix.as_deref().is_none_or(|path_prefix| {
-        tracedecay_runtime_core::path_scope::path_matches_scope(file, Some(path_prefix))
-    })
+    scope
+        .path_prefix
+        .as_deref()
+        .is_none_or(|path_prefix| tracedecay_domain::path_matches_scope(file, Some(path_prefix)))
 }
 
 fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
@@ -1227,8 +1228,8 @@ fn failed<T>(
     )
 }
 
-/// Surfaces a typed cursor failure — notably the stale answer a superseded
-/// generation produces — without flattening it into the generic unavailable
+/// Surfaces a typed cursor failure, notably the stale answer a superseded
+/// generation produces, without flattening it into the generic unavailable
 /// reason [`failed`] carries.
 fn failed_with<T>(
     context: SymbolGraphPortContext<'_>,

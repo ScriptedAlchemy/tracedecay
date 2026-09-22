@@ -1,7 +1,7 @@
 //! Two-pass verified payload streaming.
 //!
-//! A payload file is proven — stable identity, byte count, SHA-256, and UTF-8
-//! scalar count — through one open handle before any byte leaves this module,
+//! A payload file is proven, stable identity, byte count, SHA-256, and UTF-8
+//! scalar count, through one open handle before any byte leaves this module,
 //! then re-read through that same handle in caller-sized windows. Peak
 //! transient memory is one window, never the payload. The proven identity is
 //! re-checked against the path before the first window and after the last,
@@ -42,7 +42,7 @@ impl<E> From<LcmError> for PayloadStreamError<E> {
 
 /// A payload file whose content proof was taken through the handle it holds.
 ///
-/// Constructed only by [`VerifiedPayloadStream::open`], which runs the proof,
+/// Constructed only by `VerifiedPayloadStream::open`, which runs the proof,
 /// so holding a value is evidence that the handle's bytes matched the expected
 /// hash, byte count, and character count at open time. [`Self::emit`] consumes
 /// the stream: one proof authorizes one emission.

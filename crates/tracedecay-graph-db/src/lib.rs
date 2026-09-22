@@ -33,7 +33,10 @@ pub use bundle::{
     SealedReadBundleWriterV1, load_sealed_read_bundle_artifact, retire_sealed_read_bundle,
     sweep_aborted_sealed_read_bundle_temporaries,
 };
-pub use error::{GraphBudgetKind, GraphConflictContextV1, GraphDbError};
+pub use error::{
+    GraphBudgetKind, GraphConflictContextV1, GraphDbError, GraphStoreFailureClass,
+    classify_graph_store_error,
+};
 pub use generation::{
     GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
     GraphGenerationManifestIdentity, GraphGenerationManifestProvider, GraphGenerationRelation,
@@ -96,6 +99,7 @@ pub use registry::{
     GraphPublicationPreparationV1, ProvenGraphPublicationV1,
 };
 pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
+pub use schema::graph_stable_identity;
 pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
 /// What hydration decoded on **this thread** since the last take.

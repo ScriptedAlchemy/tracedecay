@@ -5,17 +5,38 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
-use super::memory_fact_assertions::assert_fact_list;
+fn assert_fact_list(payload: &Value, included: &str, excluded: &str, context: &str) {
+    let facts = payload["facts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{context} must return canonical facts: {payload}"));
+    assert_eq!(facts.len(), 1, "{context}: {payload}");
+    let contents: Vec<&str> = facts
+        .iter()
+        .map(|projection| {
+            assert_eq!(projection["kind"], "available", "{context}: {payload}");
+            projection["fact"]["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{context} fact content: {payload}"))
+        })
+        .collect();
+    assert!(
+        contents.iter().any(|content| content.contains(included)),
+        "{context}: {payload}"
+    );
+    assert!(
+        contents.iter().all(|content| !content.contains(excluded)),
+        "{context}: {payload}"
+    );
+}
 
 /// The fact-store surfaces are daemon-owned application operations. Keep these
 /// tests on the production composition so they cannot accidentally exercise
 /// the removed direct broad-action handler.
 pub(super) struct FactStoreMcpFixture {
     production: ProductionCompositionFixture,
-    server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) server: Arc<tracedecay::mcp::McpServer>,
 }
 
 async fn fact_store_mcp_fixture() -> FactStoreMcpFixture {
@@ -31,9 +52,28 @@ pub(super) async fn setup_project() -> FactStoreMcpFixture {
     fact_store_mcp_fixture().await
 }
 
+pub(super) async fn active_project_id(fixture: &FactStoreMcpFixture) -> String {
+    fixture
+        .production
+        .harness
+        .project_id(&fixture.production.project_root)
+        .await
+        .expect("registered project id")
+}
+
+/// JSON-RPC `tools/call` response, including protocol errors that the payload
+/// helper collapses into `Err`.
+pub(super) async fn invoke_production_tool_response(
+    fixture: &FactStoreMcpFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
+    handle_real_server_tool_call_raw(&fixture.server, tool_name, arguments).await
+}
+
 /// Invoke an exact MCP operation through the production daemon executor and
 /// project its typed operation payload for focused behavioral assertions.
-async fn invoke_exact_tool(
+pub(super) async fn invoke_exact_tool(
     server: &tracedecay::mcp::McpServer,
     tool_name: &str,
     arguments: Value,
@@ -88,6 +128,10 @@ pub(super) async fn invoke_production_tool(
     invoke_exact_tool(&fixture.server, tool_name, arguments).await
 }
 
+pub(super) fn fact_store_server(fixture: &FactStoreMcpFixture) -> &tracedecay::mcp::McpServer {
+    &fixture.server
+}
+
 pub(super) async fn close_test_graph(fixture: FactStoreMcpFixture) {
     fixture.production.harness.shutdown().await;
 }
@@ -108,46 +152,27 @@ fn committed_add_result(payload: &Value) -> &Value {
     result
 }
 
-struct FactStoreCrossProjectFixture {
-    harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+pub(super) struct FactStoreCrossProjectFixture {
+    pub(super) harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
     target_root: std::path::PathBuf,
-    active_server: Arc<tracedecay::mcp::McpServer>,
-    target_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) active_server: Arc<tracedecay::mcp::McpServer>,
+    pub(super) target_server: Arc<tracedecay::mcp::McpServer>,
     _isolation: TestTempDir,
+}
+
+impl FactStoreCrossProjectFixture {
+    pub(super) async fn shutdown(self) {
+        self.harness.shutdown().await;
+    }
 }
 
 fn initialize_production_fact_project(root: &Path) {
     fs::create_dir_all(root).expect("cross-project fact fixture root");
     crate::fixture::write_indexed_fixture_sources(root);
-    let init = Command::new(crate::common::git_program())
-        .args(["init", "-q"])
-        .current_dir(root)
-        .status()
-        .expect("initialize cross-project fact fixture");
-    assert!(init.success(), "git init should succeed");
-    let add = Command::new(crate::common::git_program())
-        .args(["add", "."])
-        .current_dir(root)
-        .status()
-        .expect("stage cross-project fact fixture");
-    assert!(add.success(), "git add should succeed");
-    let commit = Command::new(crate::common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production fact-store fixture",
-        ])
-        .current_dir(root)
-        .status()
-        .expect("commit cross-project fact fixture");
-    assert!(commit.success(), "git commit should succeed");
+    commit_worktree(root, "production fact-store fixture");
 }
 
-async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
+pub(super) async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectFixture {
     let isolation = test_temp_dir();
     let active_root = isolation.path().join("active");
     let target_root = isolation.path().join("target");
@@ -290,7 +315,7 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
         Some(first_results.len() as i64 + rare_results.len() as i64)
     );
     // Every fact the two searches returned must be counted exactly once, so
-    // the distinct-fact tally is the size of the returned id set — not the
+    // the distinct-fact tally is the size of the returned id set, not the
     // number of stored facts, which would also assert how many weak matches
     // the ranker chooses to return.
     let retrieved_ids: BTreeSet<String> = first_results
@@ -1080,20 +1105,6 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
             .as_u64()
             .is_some_and(|capacity| capacity > 0)
     );
-    close_test_graph(cg).await;
-}
-
-#[tokio::test]
-async fn fact_store_reason_requires_an_entity_selection() {
-    let cg = setup_project().await;
-
-    for args in [json!({}), json!({"entities": ["same", "same"]})] {
-        let result = invoke_production_tool(&cg, "tracedecay_fact_store_reason", args).await;
-        assert!(
-            result.is_err(),
-            "the exact reason route must reject empty or duplicate entity selections"
-        );
-    }
     close_test_graph(cg).await;
 }
 

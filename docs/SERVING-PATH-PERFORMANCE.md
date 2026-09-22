@@ -14,21 +14,21 @@ or killing requests.
 
 ## Operating assumption: continuous churn
 
-Agents edit the codebase continuously — commits, branch switches, and
+Agents edit the codebase continuously, commits, branch switches, and
 transient worktrees arrive at all times. There is no quiescent window to
 finish indexing in. Three consequences are load-bearing:
 
 - **Serving never couples to indexing recency.** Reads always serve the last
   complete generation (stale-while-revalidate); a new generation swaps in
   atomically when ready. Blocking a query on an in-progress rebuild is
-  disqualifying — under continuous churn that read would block forever.
+  disqualifying, under continuous churn that read would block forever.
 - **Reindexing is incremental at file granularity.** A commit touching three
   files costs three files, not a generation rebuild. Full rebuilds can never
   keep up with continuous edits; they are reserved for bootstrap and
   corruption recovery.
 - **Edits coalesce.** Bursts of commits collapse into batched reindex windows
   (debounced), and transient agent worktrees are indexed lazily on first
-  query — never eagerly on registration — and deregistered on deletion.
+  query, never eagerly on registration, and deregistered on deletion.
 
 ### Retrieval lanes degrade independently
 
@@ -47,7 +47,7 @@ otherwise indistinguishable from a thorough one.
 
 This applies to generation resolution too. MCP search resolves through
 `CodeIndexSchedulerRegistryV1::latest_complete_ready_for_scope`, which admits
-only an *already-current* generation — `latest_complete_ready_for_query`
+only an *already-current* generation, `latest_complete_ready_for_query`
 abstains whenever freshness is unknown, git metadata moved, or the staleness
 threshold elapsed. Every other callable code query resolves through
 `latest_complete_fresh_for_scope`, which serves the last complete generation.
@@ -58,7 +58,7 @@ generation within seconds.
 `execute_query_search` now closes that gap: when the ready gate abstains it
 serves `latest_complete_serving_for_scope` and marks the exact/lexical/graph
 lanes `stale` against the generation that answered. The fallback is O(1) and
-never blocks — the last complete generation is already held in the per-worktree
+never blocks, the last complete generation is already held in the per-worktree
 `serving_generation` `RwLock`, seeded at mount and rewritten by every
 publication, so it needs no re-read, no gix status, and no scheduler lock.
 Fail-closed behavior is unchanged in both directions: the fallback still
@@ -70,8 +70,8 @@ so a warm response is byte-identical.
 ### Await-new never preempts serve-old
 
 Having a fallback is not enough; the **order** in which resolution reaches it
-is itself load-bearing. Asking the ready gate first — as the original fallback
-did — meant a query entered the single-flight sealed-generation decode
+is itself load-bearing. Asking the ready gate first, as the original fallback
+did, meant a query entered the single-flight sealed-generation decode
 (`DecodedGenerationCacheV1`) before it could discover it already had a servable
 generation. Whenever a new generation was being decoded/activated, every query
 parked on that O(store) sweep and the fallback was unreachable for its whole
@@ -80,7 +80,7 @@ blocked 45s+ during the next full rebuild.
 
 Resolution therefore checks the O(1) `serving_generation` **first**. When it
 holds a complete generation, freshness is decided by
-`latest_complete_ready_decoded_for_scope` — the same ready gate under
+`latest_complete_ready_decoded_for_scope`, the same ready gate under
 `GenerationDecodeAdmissionV1::AlreadyDecoded`, which serves the active
 generation only if it is already decoded and *abstains* rather than claiming a
 lease or parking. Abstention means stale, not failure, so the query answers
@@ -92,14 +92,14 @@ The same rule governs `latest_complete_fresh` (the grep/context/callers ladder):
 a reconcile installs the generation it publishes directly, so the decode-free
 read normally hits; when it abstains the path serves the retained generation and
 awaits the decode only when nothing is servable. Activation still owns the
-decode — queries simply stop queuing on it while something can answer.
+decode, queries simply stop queuing on it while something can answer.
 
 ## The invariant
 
 **A serving-path operation performs O(result) work, never O(store).**
 
-Any O(store) computation — integrity hashing, index construction, dedup
-analysis, projection rebuilds — happens at write/publish/load time, exactly
+Any O(store) computation, integrity hashing, index construction, dedup
+analysis, projection rebuilds, happens at write/publish/load time, exactly
 once per store change, and is amortized across every read that follows.
 
 ## Principles
@@ -126,7 +126,7 @@ Interactive requests never queue behind background CPU. The mechanism is a
 
 Maintenance splits into two kinds of work, and they get opposite treatment:
 
-**Batch work with a finish line** — a full index, a worktree reconcile — runs
+**Batch work with a finish line**, a full index, a worktree reconcile, runs
 through one barrier-free pool and finishes, but its default width is bounded
 by parser memory as well as CPU. Machine-width extraction multiplied source,
 syntax-tree, extraction-row, chunk, and graph-artifact state across 90 workers
@@ -134,8 +134,8 @@ on a 96-core host, exhausted the daemon's memory budget, and stretched the
 interference window through swap. So:
 
 - One process-wide indexing pool is sized to
-  `min(total_cores - max(2, cores/16), 8)` (8 of 96 by default), and every per-file stage —
-  read, sanitize, tree-sitter extract, chunk, digest — fans out across it
+  `min(total_cores - max(2, cores/16), 8)` (8 of 96 by default), and every per-file stage,
+  read, sanitize, tree-sitter extract, chunk, digest, fans out across it
   with **no batch barrier**. Barriers are the hidden throttle: re-joining
   every N files means the slowest file in each group gates the group, and
   the pipeline never reaches its nominal width.
@@ -156,7 +156,7 @@ interference window through swap. So:
   therefore 2 (enough to overlap one worktree's git/store/publication I/O
   with another's extraction), not "half the cores".
 
-**Open-ended sweeps** — retention and projection refresh —
+**Open-ended sweeps**, retention and projection refresh,
 have no finish line, so they stay paced:
 
 - Bounded work per tick (a work budget plus a fairness cursor; the retention
@@ -181,7 +181,7 @@ is an explicit verification request.
 ### 4. Derived values are cached derivations
 
 URL/host normalization (idna), canonical keys, and similar per-record
-derivations are computed once per source record — memoized or persisted —
+derivations are computed once per source record, memoized or persisted,
 not re-derived inside per-record loops.
 
 ### 5. Reads are paged and ranked in bounded space
@@ -204,7 +204,7 @@ rather than by serving stale data.
 Per-group wraps are not enough on their own, because a group can simply have no
 wrap. `dispatch_deadline_horizon_micros` returns `None` for anything that is
 neither an application-surface operation nor a controlled read, so every graph,
-info, analysis, health, and session tool — `tracedecay_context` included —
+info, analysis, health, and session tool, `tracedecay_context` included,
 reached its handler carrying no deadline at all. A live Codex `context` call
 hung for **900 seconds** against a daemon grinding a failing semantic publish
 loop, and the client's own timeout, not the daemon, ended it.
@@ -216,7 +216,7 @@ the carried admission deadline when one is present and shorter, otherwise
 and no handler can opt out. The ceiling also clamps a carried deadline longer
 than itself, so carrying a distant deadline is not an escape hatch. The few
 tools whose requested work *is* a long job (running a test suite, an admin
-index) carry `LONG_RUNNING_TOOL_DISPATCH_CEILING` instead — still bounded, and
+index) carry `LONG_RUNNING_TOOL_DISPATCH_CEILING` instead, still bounded, and
 still far below the 900 seconds that motivated this.
 
 That ceiling is only the backstop. The hold it catches was real work on the
@@ -228,7 +228,7 @@ ladder's cheap checks inline and hands the rebuild to the background worker,
 answering from the retained generation exactly as the busy path always did. The
 git authority is still proven inline with an O(1) probe, so a vanished `.git`
 still fails closed rather than serving bytes under an identity nothing can
-confirm, and a cold open with nothing servable still reconciles inline — the one
+confirm, and a cold open with nothing servable still reconciles inline, the one
 sanctioned slow path. The visible contract change is that an out-of-band commit
 lands on the next background pass instead of being forced onto the first query
 to notice it, which is what "serving never couples to indexing recency"
@@ -243,10 +243,10 @@ violated it and are now closed:
   that "a background refresh or a generation rebuild can hold this gate for
   minutes", and a git-watch sync held it across a full `cg.sync()`. The first
   request for an *unrelated* project parked behind it with no deadline. The gate
-  is now per store (`daemon/store_writer_gate.rs`) with three classes —
+  is now per store (`daemon/store_writer_gate.rs`) with three classes,
   `Destructive` (branch-store GC, totally exclusive on its store), `Owner`
   (project open, owner rekey, scheduler transitions) and `Content` (index sync,
-  background refresh) — under a daemon-wide `RwLock` that store-scoped writers
+  background refresh), under a daemon-wide `RwLock` that store-scoped writers
   hold shared and all-store sweeps hold exclusively. Exclusivity is preserved
   exactly: two writers of the same class on one store still contend, and
   `Destructive` still excludes everything on its store, which is what lets
@@ -262,7 +262,7 @@ violated it and are now closed:
   snapshot.
 - **Branch-drift reopen ran inline.** The request that noticed a checkout
   performed the full DB open plus sealed restore, then awaited the daemon owner
-  reconcile — through the writer gate — inside a live `tools/call`; the
+  reconcile, through the writer gate, inside a live `tools/call`; the
   branch-tracking-added path was worse still, blocking every caller on the
   reopen mutex. The reopen is now detached and single-flighted, the owner
   reconcile runs behind the swap, and every caller (the one that noticed the
@@ -288,10 +288,19 @@ violated it and are now closed:
 | CI perf gate (self-index + 6-worker load, budget verdicts) | merged |
 
 First post-wave measurement (2026-08-01, release build, 96-core host): index
-149,226 nodes in 76.7s; 724 calls / 0 errors at 6 workers; warm p50 — search
+149,226 nodes in 76.7s; 724 calls / 0 errors at 6 workers; warm p50, search
 151ms, callers 65ms, context 197ms, grep 195ms (baseline before the wave: one
 search took 6+ minutes at 670% daemon CPU). Open tails: grep p95 4.6s / max
 25s; daemon peak RSS 4.4GB.
+
+Those index seconds came from a `tracedecay init` that built the index inside
+the CLI process. Indexing has been daemon-owned since 1caf016e57, so
+`scripts/perf-gate.sh` now starts its private daemon before it indexes and
+times init through to the daemon's own terminal signal,
+`code_index_freshness.status = current` with
+`worktree.code_graph_serving.state = ready`. The number still means the time to
+a queryable index and stays comparable with 76.7s, but it is now measured along
+the serving path rather than an in-process build.
 
 Reservation measurement (2026-08-02, release build, 96-core host,
 `PERF_REINDEX_WORKTREES=2`, 6 workers × 120s, 149,737 nodes). Interactive p95
@@ -309,7 +318,7 @@ A full index saturating the machine is within run-to-run noise of an idle
 box: the reserved slice, not a slower indexer, is what holds the line.
 `search` p95 sits above 1s in BOTH columns, so that tail is a search-path
 cost, not indexing interference. Peak daemon RSS on this host is ~13.6GB with
-no indexing at all, well over the 6GB gate budget — a live, separate breach
+no indexing at all, well over the 6GB gate budget, a live, separate breach
 of Principle 5 that this measurement did not introduce.
 
 ## Open breach: historical transcript ingest violates Principle 2
@@ -349,7 +358,7 @@ in-poll execution by labelled future (excludes every .await):
 
 `total_poll_duration_ns` is wall time strictly inside `Future::poll`, so an
 `.await` cannot contribute to it. One label therefore accounts for 89.68s of
-the pool's 91.92s of busy time — **97.6% of everything the request runtime's
+the pool's 91.92s of busy time, **97.6% of everything the request runtime's
 async workers did was synchronous execution belonging to
 `session_temporal_refresh.history`**, at 2.5ms per poll and a worst-worker
 occupancy of 8.9ms per poll. A 325-second run of the same scenario shows the
@@ -361,7 +370,7 @@ stay in single digits.
 
 The concentration is not a scheduling defect and it is not fixed by changing
 `async_worker_threads()`. `session_history_refresh` runs as exactly two
-long-lived tasks — one project-scoped ingestor and one profile-scoped one — so
+long-lived tasks, one project-scoped ingestor and one profile-scoped one, so
 runnable async concurrency is 2, not 16. Work-stealing has nothing to steal
 (14 steals in 60s), and no pool width redistributes a slice that a worker is
 already inside: a poll is not preemptible until it returns.
@@ -377,7 +386,7 @@ watch is microseconds per poll, not busy share.
 
 The cost is CPU placement, not balance: this work belongs off the request
 runtime, in the same sense the indexing pool already is. Fixing it means
-restructuring the ingest pass, not adding a yield — the pass is an async
+restructuring the ingest pass, not adding a yield, the pass is an async
 pipeline whose synchronous slices sit *between* store awaits, so a yield point
 redistributes the slices across workers without moving a single cycle off the
 serving pool, and `spawn_blocking` cannot wrap the pass as a whole because it
@@ -390,7 +399,7 @@ it: Tokio names async worker threads and blocking-pool threads with the same
 combined thread-name family the largest single product symbol during ingest is
 `privacy::rules::contains_ignore_ascii_case` (5.16% of whole-process cycles,
 ~7.4% for the privacy-detector family), which is a plausible in-poll leaf
-because redaction is pure CPU over transcript text — but the SQLite parser
+because redaction is pure CPU over transcript text, but the SQLite parser
 symbols in the same family belong to `ReadSnapshot::query`, which already uses
 `spawn_blocking` and is correctly placed. Naming the exact leaf needs a
 `#[hotpath::measure]` inside the pass or `HOTPATH_FOCUS`, not a thread filter.
@@ -415,8 +424,8 @@ longer clones the prepared batch to satisfy a retryable closure, and
 publish/activate/deactivate mutate the published state in place instead of
 cloning it.
 
-Nothing about identity moved. Every digest — `output_digest`, the generation
-manifest digest, batch publication digests — is derived by the projector from
+Nothing about identity moved. Every digest, `output_digest`, the generation
+manifest digest, batch publication digests, is derived by the projector from
 domain values, never from the store's encoding, and
 `ProjectedChunkVectorV1::validate` re-derives `output_digest` from the hydrated
 floats on every load, so a mis-bound payload fails closed rather than serving.
@@ -427,7 +436,7 @@ in-place blob rewrite left on the open path.
 Measured A/B on identical code with only the encoding differing (2,000 chunks ×
 768 dimensions, debug build): peak process RSS 227MB inline versus 125MB
 row-per-vector, for the *same* published generation digest. Above the ~66MB
-process floor that is 161MB versus 59MB — a 6MB float corpus was costing 155MB
+process floor that is 161MB versus 59MB, a 6MB float corpus was costing 155MB
 to persist.
 
 ### The metadata split
@@ -453,7 +462,7 @@ a staged collection and the published one it becomes hash alike, so the swap
 writes no new slices.
 
 `ExternalV1` serializes *transparently*, so a digest over a value containing one
-is byte-identical to a digest over the bare collection — the build-identity
+is byte-identical to a digest over the bare collection, the build-identity
 digest still hashes the full expected chunk list. Only the state-document
 adapters elide. `DerefMut` clears the address, so a stale address is not
 representable. Fresh stores are created at this shape; the forward-migration
@@ -473,8 +482,8 @@ a whole-corpus pass would have given it; the tensor shape never changes, so
 vector bytes, every `output_digest`, and the generation manifest digest built
 from them are byte-identical. The plan is decided from the whole request before
 any batch runs, so the generation's watermark and expected membership stay the
-corpus's. Only execution lineage differs — one receipt per batch rather than one
-for the corpus — which generation identity deliberately ignores.
+corpus's. Only execution lineage differs, one receipt per batch rather than one
+for the corpus, which generation identity deliberately ignores.
 
 Resume reads the staged checkpoint once, before any encoder work. The build
 identity is a digest of the plan, so reopening the same plan re-adopts the same
@@ -498,23 +507,23 @@ at eight, which is the digest-equality proof that splitting moves no identity.
 ### Closed: the whole-corpus publication transaction
 
 *Superseded.* At 150,000 chunks every batch committed and the publication then
-failed with `SQLite execute failed: interrupted` — not the document ceiling (the
+failed with `SQLite execute failed: interrupted`, not the document ceiling (the
 document is still ~3KB) but the publication transaction running past a runtime
 guard: `EXACT_SQL_EXECUTION_LIMIT` bounds one guarded execution at 30
 seconds, and the batch progress handler also trips on a repeated authority
 check.
 
-The dominant writer that pushed publication past that bound — the inline-vector
+The dominant writer that pushed publication past that bound, the inline-vector
 payload migration, which rewrote the whole corpus inside the same guarded
-transaction — no longer exists: stores are born row-per-vector and the migration
+transaction, no longer exists: stores are born row-per-vector and the migration
 was removed with the rest of the branch's migration machinery. The guard itself
 (`EXACT_SQL_EXECUTION_LIMIT`) is unchanged, so a large enough single
 publication could still trip it; the two mitigations below were never landed and
 are recorded as options, not as pending work.
 
 Publication is where the remaining O(store) SQL lives: it seals and writes two
-collections built fresh at that moment — the concatenated per-chunk receipts and
-the physical-byte bindings — and runs reclamation over every payload address.
+collections built fresh at that moment, the concatenated per-chunk receipts and
+the physical-byte bindings, and runs reclamation over every payload address.
 Two things are worth trying, in order:
 
 - `physical_vector_bindings` is fully derived from the generation's vectors and

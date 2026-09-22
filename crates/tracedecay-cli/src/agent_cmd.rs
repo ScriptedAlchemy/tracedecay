@@ -7,6 +7,9 @@ use tracedecay_session_memory::user_config::UserConfig;
 mod automation;
 #[cfg(test)]
 mod host_cli_fixture;
+#[cfg(test)]
+#[path = "../../../tests/support/isolated_profile.rs"]
+mod isolated_profile;
 pub(crate) use automation::CodexAutomationInstall;
 #[cfg(test)]
 use automation::broker_codex_daemon_automation_project;
@@ -767,7 +770,7 @@ fn apply_canonical_component_set(
         )?;
     // Recover this host's own outstanding journal before previewing, exactly as
     // `HostComponentSetTransactionV1::execute` does. Without this the residue of
-    // any earlier failure — including one that has since been fixed — makes
+    // any earlier failure, including one that has since been fixed, makes
     // every later run refuse with `RecoveryRequired` until somebody runs
     // `host-bundle recover` by hand, so a transient fault becomes permanent.
     transaction
@@ -1232,7 +1235,6 @@ pub(crate) async fn handle_install_command(
     let mut user_cfg = load_host_lifecycle_user_config()?;
 
     let mut installed_names: Vec<String> = Vec::new();
-    let mut removed_names: Vec<String> = Vec::new();
     // Ids this pass actually (re)installed at the current binary version. The
     // tail uses this to decide whether the pass covered every tracked agent
     // and may disarm the startup silent reinstall.
@@ -1277,25 +1279,24 @@ pub(crate) async fn handle_install_command(
                 message: format!("failed to save user config: {err}"),
             })?;
     } else {
-        let (to_install, to_uninstall) =
-            tracedecay_agent_hosts::agents::select_detected_integrations(
-                &home,
-                &user_cfg.installed_agents,
-            )?;
+        // Nothing to configure is an ordinary first-run state, not a failure:
+        // this is the command a user runs before any agent exists. An explicit
+        // `--agent` that cannot be satisfied still fails, above.
+        let Some(to_install) = tracedecay_agent_hosts::agents::select_detected_integrations(
+            &home,
+            &user_cfg.installed_agents,
+        ) else {
+            eprintln!();
+            eprintln!(
+                "{}",
+                tracedecay_agent_hosts::agents::no_detected_integrations_notice(&home)
+            );
+            if git_hook {
+                install_requested_git_hook()?;
+            }
+            return Ok(());
+        };
 
-        for id in &to_uninstall {
-            let ag = tracedecay_agent_hosts::agents::get_integration(id)?;
-            apply_default_canonical_component_set(
-                id,
-                HostBundleCliOperation::Uninstall,
-                &home,
-                true,
-                false,
-            )?;
-            removed_names.push(ag.name().to_string());
-            user_cfg.installed_agents.retain(|a| a != id);
-            user_cfg.agent_dashboard_enabled.remove(id);
-        }
         for id in &to_install {
             let ag = tracedecay_agent_hosts::agents::get_integration(id)?;
             let context = tracedecay_agent_hosts::agents::InstallContext {
@@ -1330,14 +1331,11 @@ pub(crate) async fn handle_install_command(
     }
 
     eprintln!();
-    if installed_names.is_empty() && removed_names.is_empty() {
+    if installed_names.is_empty() {
         eprintln!("No changes.");
     } else {
         for name in &installed_names {
             eprintln!("\x1b[32m+\x1b[0m {name}");
-        }
-        for name in &removed_names {
-            eprintln!("\x1b[31m-\x1b[0m {name}");
         }
     }
 
@@ -1359,6 +1357,11 @@ pub(crate) async fn handle_install_command(
                 message: format!("failed to save user config: {err}"),
             })?;
     }
+
+    // An install pass is a lifecycle pass: converge the managed-skill exports
+    // (prompt indexes and materialized files) against the store, so a host is
+    // never left advertising a skill the store no longer holds.
+    crate::update_cmd::deploy_managed_skills_after_lifecycle();
 
     if git_hook {
         install_requested_git_hook()?;
@@ -1422,7 +1425,7 @@ pub(crate) async fn handle_reinstall_command(adopt: bool) -> tracedecay_domain::
         )
         .await;
         // Reporting lives in `partition_reinstall_results`, which every
-        // reinstall pass shares. Keep the reason with the name — a bare id list
+        // reinstall pass shares. Keep the reason with the name, a bare id list
         // left "failed for: claude, cursor, hermes, kimi" undiagnosable.
         match crate::update_cmd::partition_reinstall_results(results) {
             crate::update_cmd::ReinstallOutcome::AllOk => {
@@ -1814,7 +1817,6 @@ pub(crate) async fn handle_uninstall_command(
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
     use std::sync::{
         Arc,
@@ -1879,7 +1881,7 @@ mod tests {
 "#;
     /// [`PinnedUserDataDir`] gives each test its own profile root (and its own
     /// `HOME`) for the duration of the guard, and holds the crate-wide
-    /// user-data-dir lock while the override is installed — the same lock every
+    /// user-data-dir lock while the override is installed, the same lock every
     /// other profile-mutating test takes, so the mutation cannot be observed
     /// half-applied. Hold it for as long as any `home` fixture is alive.
     ///
@@ -2012,8 +2014,8 @@ mod tests {
     }
 
     /// An explicit component repair that would claim an unrecorded file with
-    /// no recognizable legacy provenance is refused without `--adopt` — even
-    /// at preview time, which stays read-only — and the refusal names the
+    /// no recognizable legacy provenance is refused without `--adopt`, even
+    /// at preview time, which stays read-only, and the refusal names the
     /// contested path plus the explicit adoption remedy.
     #[tokio::test]
     async fn explicit_component_repair_refuses_adoption_without_the_adopt_flag() {
@@ -2341,7 +2343,7 @@ mod tests {
 
     /// Forwards the whole lifecycle to the real authority but always fails
     /// `verify`, which interrupts the transaction after its artifacts are on
-    /// disk — the state that leaves a recovery journal behind.
+    /// disk, the state that leaves a recovery journal behind.
     struct AlwaysFailVerifyRegistration {
         inner: CatalogHostComponentRegistrationAuthority,
     }
@@ -2432,27 +2434,7 @@ mod tests {
         }
     }
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(previous) => unsafe { std::env::set_var(self.key, previous) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
+    use super::isolated_profile::EnvVarGuard;
 
     /// Keep Kiro lifecycle tests on the native `kiro-cli` route. The compiled
     /// fixture is a real executable so Windows runners do not rename a shell
@@ -2477,6 +2459,21 @@ mod tests {
     ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
         super::host_cli_fixture::install_compiled_host_cli_fixture(dir, "codex");
         tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
+    }
+
+    /// The installed fixture has to resolve to the executable itself. A link
+    /// to a path that does not exist is created without error on Unix, and
+    /// host program resolution then reads it as no host CLI at all.
+    #[test]
+    fn installing_the_host_cli_fixture_resolves_to_an_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed =
+            super::host_cli_fixture::install_compiled_host_cli_fixture(dir.path(), "kiro-cli");
+        assert!(
+            installed.is_file(),
+            "installed host-CLI fixture at {} resolves to nothing",
+            installed.display()
+        );
     }
 
     fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -2918,22 +2915,27 @@ mod tests {
         )
         .unwrap();
 
+        // Global install is MCP-only, so both leftovers are retired by
+        // definition and the install sweeps them. Refreshing the steering block
+        // instead left doctor advising a remedy no install could satisfy.
         assert!(
-            !std::fs::read_to_string(&legacy_steering)
-                .unwrap()
-                .contains("old rules"),
-            "global install must converge leftover legacy steering"
+            !legacy_steering.exists()
+                || !std::fs::read_to_string(&legacy_steering)
+                    .unwrap()
+                    .contains("old rules"),
+            "global install must not leave a retired steering block behind"
         );
         assert!(
-            std::fs::read_to_string(&legacy_steering)
-                .unwrap()
-                .contains("<!-- tracedecay:kiro:start -->"),
-            "converged steering must carry the current ownership sentinel"
+            !legacy_agent.exists(),
+            "global install must sweep the retired managed agent"
         );
+        let registered: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(home.path().join(".kiro/settings/mcp.json")).unwrap(),
+        )
+        .unwrap();
         assert!(
-            std::fs::read_to_string(&legacy_agent)
-                .unwrap()
-                .contains("timeout_ms")
+            registered["mcpServers"]["tracedecay"].is_object(),
+            "sweeping retired artifacts must not disturb the MCP registration: {registered}"
         );
 
         let mut counters = DoctorCounters::new();
@@ -2945,10 +2947,10 @@ mod tests {
             },
         );
         assert_eq!(counters.issues, 0);
-        // Canonical MCP install leaves retired global leftovers untouched, and
-        // doctor must advise migration for the owned steering block plus the
-        // managed agent fixture rather than reporting a silent green check.
-        assert_eq!(counters.warnings, 2);
+        assert_eq!(
+            counters.warnings, 0,
+            "the install the advisories name must clear every one of them"
+        );
     }
 
     /// A transaction interrupted after it staged registration leaves a journal

@@ -71,7 +71,7 @@ default = ["production"]
 # single `hotpath` / `hotpath-macros` build that cargo unifies across the whole
 # dependency graph: with no profiling feature selected every macro is a no-op,
 # and once a binary selects `hotpath/hotpath` every `#[hotpath::measure]`,
-# `measure_block!`, `gauge!`, `future!`, ... in every crate is live — no
+# `measure_block!`, `gauge!`, `future!`, ... in every crate is live, no
 # per-crate feature is involved. The crates listed below are the runtime owners
 # whose *compiled behaviour* changes under profiling (`cfg(feature = "hotpath")`
 # sites: allocation/lock/IO wrappers, observation sinks, the axum server layer,
@@ -86,7 +86,7 @@ default = ["production"]
 # `hotpath::tokio_runtime!` and the tokio lock wrappers, and `hotpath/ureq-3`
 # by the GitHub client reached from here, so no second HTTP stack is
 # introduced. The axum 0.8 server layer is selected by the crates that mount
-# routers — `tracedecay-daemon-service` and `tracedecay-dashboard-api`.
+# routers, `tracedecay-daemon-service` and `tracedecay-dashboard-api`.
 hotpath = [
     "hotpath/hotpath",
     "hotpath/tokio",
@@ -108,7 +108,6 @@ hotpath = [
     "tracedecay-query/hotpath",
     "tracedecay-rusqlite-runtime/hotpath",
     "tracedecay-sdk/hotpath",
-    "tracedecay-search-eval/hotpath",
     "tracedecay-session-temporal-store/hotpath",
     "tracedecay-sessions/hotpath",
     "tracedecay-store-runtime/hotpath",
@@ -118,17 +117,9 @@ hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "tracedecay-sdk/hotpath-cpu"]
 # Binary-only: the live query server runs in this process, so no library crate
 # needs a passthrough for it.
 hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
-# Opt-in tiered graph storage. Never in `default` or `production`: both give
-# the graph buffer manager a spill directory and a bounded budget, so they are
-# deliberate build choices rather than silent defaults.
-#
-# `graph-disk-tier` is the usable half. `graph-tiered-storage` additionally
-# turns on grafeo-core's `tiered-storage` LPG arena, which is known broken at
-# grafeo 0.5.42 (1 MiB per-epoch record ceiling, then a panic).
-# See `crates/tracedecay-graph-db/Cargo.toml` for the detail.
+# Opt-in spill for graph index buffers. Never in `default` or `production`.
+# See `crates/tracedecay-graph-db/Cargo.toml` for why the live LPG stays in RAM.
 graph-disk-tier = ["tracedecay-graph-db/graph-disk-tier"]
-
-graph-tiered-storage = ["tracedecay-graph-db/graph-tiered-storage"]
 
 production = [
     "token-counting",
@@ -139,15 +130,15 @@ production = [
 # Exact token counting for the Savings & Cost dashboard (tiktoken BPE).
 # Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
 # vocab decoding is lazy (first count pays it, idle servers never do).
-# Disable for a leaner binary — cost estimation falls back to chars/4.
+# Disable for a leaner binary, cost estimation falls back to chars/4.
 token-counting = ["tracedecay-agent-hosts/token-counting", "tracedecay-dashboard-api/token-counting"]
 
-# Lite tier (11 languages) — always compiled, no feature flag needed:
+# Lite tier (11 languages), always compiled, no feature flag needed:
 # Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift.
 # Markdown joins them: documentation is architecture content, every repository
 # has it, and a build that indexes code but not its docs is not a shippable
 # tier. Its grammar lives in the (monolithic) large bundle, so `lite` now links
-# that bundle — the compile-weight cost of making docs unconditional.
+# that bundle, the compile-weight cost of making docs unconditional.
 lite = ["tracedecay-code-index/lite", "tracedecay-code-index-runtime/lite"]
 
 medium = ["tracedecay-code-index/medium"]
@@ -212,6 +203,7 @@ test-helpers = [
     "tracedecay-session-runtime/test-helpers",
     "tracedecay-sessions/test-helpers",
     "tracedecay-store-runtime/test-helpers",
+    "dep:tracedecay-temporal-query",
 ]
 
 test-transport = [
@@ -239,6 +231,14 @@ test-transport = [
     "tracedecay-code-index-runtime/test-helpers",
     "tracedecay-code-index-runtime/test-transport",
 ]
+
+# The evaluator library is the only selector of `tracedecay-query/search-eval`,
+# the eval-only in-memory lexical projection. Cargo rejects optional
+# dev-dependencies, and an unconditional one unifies this feature into every
+# test target, so the transport suites compile that projection. Journeys that
+# compare the CLI receipt to the library enable this feature. `test-transport`
+# and `production` must not.
+search-eval = ["dep:tracedecay-search-eval"]
 
 # The typed RMCP benchmark is the only consumer of the client-side RMCP
 # transport. Keep that surface out of ordinary integration-fixture builds:
@@ -310,15 +310,15 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
 tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime", version = "0.1.0" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+# Only the `test-helpers` session-temporal bench fixture names this crate.
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", optional = true }
 tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
@@ -326,48 +326,41 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 sha2 = "0.11"
-glob = "0.3"
 walkdir = "2"
-ignore = "0.4"
 gix.workspace = true
-dirs = "6"
-hex = "0.4"
-fs2 = "0.4"
-# Raw filesystem watcher for the daemon git-metadata watcher (src/daemon/git_watch.rs).
-# We deliberately use the raw watcher (not notify-debouncer-full) and debounce
-# ourselves so a monorepo's git-ref churn coalesces into a single sync.
-notify = "6"
 zeroize = "1.9.0"
 keyring = { version = "4.1.5", features = ["v1"] }
 tempfile = "3"
 futures-util = "0.3.33"
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+# Opt-in. Cargo rejects optional dev-dependencies, and an unconditional one
+# unifies `tracedecay-query/search-eval` into every test target. Default and
+# `production` builds leave it off, so the shipped CLI does not link it.
+tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0", optional = true }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
-# (tests/daemon_suite). Store-locality detection moved with the locator
-# resolver to tracedecay-store-runtime.
-[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+# (tests/daemon_suite). Store-locality detection lives in tracedecay-store-runtime.
+[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dev-dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tree-sitter = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-sha2 = "0.11"
+glob = "0.3"
 hex = "0.4"
+toml = "1"
 regex = "1.12.3"
 filetime = "0.2"
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
 # test-util enables tokio::test(start_paused = true) so timer-driven unit
 # tests (daemon restart-grace windows) run on virtual time instead of real
 # sleeps.

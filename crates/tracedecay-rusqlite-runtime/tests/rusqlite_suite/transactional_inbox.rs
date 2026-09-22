@@ -6,9 +6,9 @@
 //! `StorageOperationExecutor` trait: it validates nothing itself and simply
 //! forwards the closed `ApplyInbox` payload to `self.execute(..)` inside the
 //! writer's request savepoint (see `operation.rs`). The dispatch that reaches
-//! it — `operation::execute` matching `RepositoryWritePayloadV1::ApplyInbox`
+//! it, `operation::execute` matching `RepositoryWritePayloadV1::ApplyInbox`
 //! and calling `executor.apply_inbox(..)`, itself driven by
-//! `RuntimeWriterPersistence::apply_and_record` from `persistence.rs` — is
+//! `RuntimeWriterPersistence::apply_and_record` from `persistence.rs`, is
 //! `pub(crate)`, so the only way to exercise `apply_inbox` end to end without
 //! reaching into crate-private internals is through the crate's public writer
 //! actor, `PersistentWriter`. That is also the most faithful test: it is
@@ -16,7 +16,7 @@
 //!
 //! These tests submit `RepositoryWritePayloadV1::ApplyInbox` requests through
 //! a `PersistentWriter` backed by a real on-disk SQLite file (via
-//! `ExistingWriterLocator`) and a custom `StorageOperationExecutor` — not a
+//! `ExistingWriterLocator`) and a custom `StorageOperationExecutor`, not a
 //! mock, a small real executor that performs real SQL against the real
 //! savepoint it is handed, following the same pattern as the existing
 //! `MarkerExecutor` test doubles in `tests/runtime_actor/support.rs`.
@@ -60,9 +60,7 @@ impl TestDatabase {
     }
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 /// A real (non-mock) `StorageOperationExecutor`: it performs a genuine SQL
 /// insert against the savepoint `apply_inbox` hands it, keyed by the applied
@@ -146,8 +144,8 @@ fn request(
     // binding: the ledger's inbox bookkeeping (`ledger::inbox::validate_target`
     // in `src/ledger/inbox.rs`, driven from `commit::inbox_receipt` in
     // `src/ledger/commit.rs`) requires `identity.target_watermark` to equal
-    // the writer's `(shard_id, incarnation, authority_epoch)` binding — i.e.
-    // `metadata.shard_id` here — and requires `state == Dispatched` (an
+    // the writer's `(shard_id, incarnation, authority_epoch)` binding, i.e.
+    // `metadata.shard_id` here, and requires `state == Dispatched` (an
     // inbox apply always represents an already-dispatched source effect
     // landing at its target). `source_watermark` must name a *different*
     // shard than the target (see `EffectIdentityV1::validate`), so the

@@ -164,16 +164,16 @@ impl AnchorDispositionStateV1 {
     /// means the anchor has no disposition history yet.
     ///
     /// This is the one canonical disposition state machine. Two SQLite engines
-    /// append to `retrieval_anchor_dispositions` — the root authority in
+    /// append to `retrieval_anchor_dispositions`, the root authority in
     /// `src/db/retrieval_anchor_authority.rs` and the `RetrievalAnchorExecutor`
-    /// in the rusqlite-runtime crate — and an anchor may be written by either
+    /// in the rusqlite-runtime crate, and an anchor may be written by either
     /// during the migration. If the two disagree about a transition, the same
     /// anchor becomes reachable or unreachable depending on which writer it
     /// happened to pass through. Each engine still renders its own refusal
     /// message; only the decision is shared.
     ///
     /// The rules: `Redacted`, `Expired`, and `Deleted` are terminal, so no
-    /// transition leaves them. `Superseded` may only advance to `Deleted` — a
+    /// transition leaves them. `Superseded` may only advance to `Deleted`, a
     /// superseded anchor can be erased but never resurrected. `Active`,
     /// `Quarantined`, `Unavailable`, and a fresh anchor accept any next state,
     /// which is what lets a quarantine or an outage be reversed.

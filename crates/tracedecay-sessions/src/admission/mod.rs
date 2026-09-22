@@ -69,7 +69,7 @@ pub struct HostAdmissionOutcome {
     /// from strings at another layer.
     #[serde(skip)]
     pub recovery: Option<HostAdmissionRecovery>,
-    /// Operator-only storage cause for [`ObservationStoreError::Storage`].
+    /// Operator-only storage cause for `ObservationStoreError::Storage`.
     ///
     /// Host wire output stays reason-code-only. Admission callers that already
     /// carry a detail/message slot (MCP hook JSON-RPC `detail`) may copy this
@@ -924,6 +924,7 @@ pub(crate) mod test_support {
         projection_failure: Arc<Mutex<Option<(HostAdmissionOutcome, ObservationCancellation)>>>,
         cancel_on_discovery_queue_read: Arc<Mutex<Option<ObservationCancellation>>>,
         session_backfill_page_pause: Arc<Mutex<Option<SessionBackfillPagePause>>>,
+        deterministic_capture_refusal: Arc<Mutex<Option<&'static str>>>,
     }
 
     impl MemoryHostAdmission {
@@ -938,6 +939,16 @@ pub(crate) mod test_support {
 
         pub(crate) fn fail_next_capture(&self) {
             self.store.state().capture_failures_remaining = 1;
+        }
+
+        /// Refuse every capture the way a deterministic content refusal does:
+        /// the same record fails identically on every retry, so callers must
+        /// converge past it rather than re-attempt the source forever.
+        pub(crate) fn refuse_captures_deterministically(&self, reason: &'static str) {
+            *self
+                .deterministic_capture_refusal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(reason);
         }
 
         /// Make the next `count` session-message lookups report the store as
@@ -1042,6 +1053,13 @@ pub(crate) mod test_support {
             request: CaptureObservationRequest,
         ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
             Box::pin(async move {
+                if let Some(reason) = *self
+                    .deterministic_capture_refusal
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                {
+                    return Err(HostAdmissionOutcome::deterministic_content_refusal(reason));
+                }
                 {
                     let mut state = self.store.state();
                     state.scalar_capture_calls = state.scalar_capture_calls.saturating_add(1);

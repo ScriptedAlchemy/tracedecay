@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 /// Each `Variant => "wire"` line is the sole authority for that variant: it
 /// emits the enum variant, the `ALL` slot, the `as_str` arm, and the
 /// `from_str` arm, so a spelling cannot drift between them. `as_str` stays a
-/// direct exhaustive `match` — a new variant fails to compile until it is
+/// direct exhaustive `match`, a new variant fails to compile until it is
 /// declared here, and the node-ID hot path never scans the table. Extra
 /// `| "alias"` spellings widen `from_str` only; `ALL` and `as_str` record what
 /// is written. Serde representations come from the derives passed through on
@@ -399,8 +399,8 @@ pub fn generate_node_id(file_path: &str, kind: &NodeKind, name: &str, line: u32)
 ///
 /// Extraction mints [`generate_node_id`] for constructs that begin their line
 /// (only blanks precede them) and this form otherwise. Two constructs of the
-/// same kind and name on one line — `impl A { fn run() {} } impl B { fn run()
-/// {} }` — therefore never share an ID, while indentation and one-construct
+/// same kind and name on one line. `impl A { fn run() {} } impl B { fn run()
+/// {} }`, therefore never share an ID, while indentation and one-construct
 /// lines leave the line-keyed ID unchanged.
 pub fn generate_node_id_at(
     file_path: &str,

@@ -37,10 +37,11 @@ test-helpers = [
     "tracedecay-session-temporal-store/test-helpers",
     "tracedecay-code-index/test-helpers",
     "tracedecay-graph-query/test-helpers",
+    "dep:tracedecay-temporal-query",
 ]
 
 # Mirrors the composition root's `test-transport`: the standalone
-# `TraceDecay::init` / `open` / `open_read_only` entry points route through
+# `TraceDecay::init` / `open` / `open_read_only_with_options` entry points route through
 # the registered test runtime instead of the exclusive maintenance lease.
 test-transport = [
     "test-helpers",
@@ -91,7 +92,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-source-edit = { path = "../tracedecay-source-edit", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0", optional = true }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 
 [dev-dependencies]

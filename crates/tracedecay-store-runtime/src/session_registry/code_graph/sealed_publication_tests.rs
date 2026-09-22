@@ -94,7 +94,7 @@ fn with_publication_context<T>(
         cancellation,
     };
     // 2020-01-01T00:00:00Z in micros. A seconds-scale stamp (~1.8e9) fails
-    // this bound — the 1970-era seconds-as-micros regression this pins.
+    // this bound, the 1970-era seconds-as-micros regression this pins.
     assert!(
         control.requested_at.0 > 1_577_836_800_000_000,
         "requested_at must be micros-scale, got {}",
@@ -425,7 +425,7 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
         projector_revision,
     };
     // The historical fixture is sealed at the retired manifest revision seven,
-    // so the current reader refuses it at the revision gate — before the row
+    // so the current reader refuses it at the revision gate, before the row
     // evidence it also predates, and before the source-commitment check. The
     // code-index suite pins the same refusal against these bytes.
     let refused = runtime
@@ -653,7 +653,7 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         .expect("restore source before active replay completion");
 
     // The issue-765 wedge shape: the journal above already carries this
-    // publication's active replay — the debris an interrupted publisher
+    // publication's active replay, the debris an interrupted publisher
     // leaves behind. First activation must resume that journaled replay and
     // publish in ONE call, regardless of sealed artifact size: no
     // manufactured stage-boundary `DeadlineExceeded`, no scheduler retry
@@ -874,8 +874,8 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
 /// - open loads the digest-verified catalog and installs it WITHOUT running
 ///   the projection warm scan (the scan counter proves no warm work ran);
 /// - a tampered artifact is the typed `Stale` state, a removed bundle is the
-///   typed `Absent` state, and in both cases the explicit fallback — the
-///   projection warm scan — still serves the catalog;
+///   typed `Absent` state, and in both cases the explicit fallback, the
+///   projection warm scan, still serves the catalog;
 /// - retirement removes every bundle file for the generation's digest.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sealed_read_bundle_serves_catalog_without_warm_and_degrades_typed() {
@@ -1937,7 +1937,7 @@ const PUBLICATION_FIRST_SCOPE_RETAINED_LIMIT: u64 = 448 * 1024 * 1024;
 /// This is the number #830 is about. The builds are serialized by the permit,
 /// so a scope that released everything it built would add only its served
 /// state. Before the sealed-generation and permit-boundary release work this
-/// marginal cost was ~0.59 GB per scope — a whole build's worth, retained.
+/// marginal cost was ~0.59 GB per scope, a whole build's worth, retained.
 /// It is now ~0.15 GB, which is still above the served-index size and is
 /// tracked as remaining work; the bound is set to catch a regression back
 /// toward build-sized retention, not to certify the residue as correct.
@@ -2350,7 +2350,7 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
          marginal per additional scope); observed {retained_bytes} bytes"
     );
     // Peak bound. With the permit serializing builds, the peak is one build's
-    // transient on top of what the finished scopes retain — never one
+    // transient on top of what the finished scopes retain, never one
     // transient per scope.
     let peak_growth = rss_peak_sampled.saturating_sub(rss_before);
     let peak_ceiling = PUBLICATION_SINGLE_BUILD_TRANSIENT_LIMIT + retained_ceiling;

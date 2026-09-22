@@ -31,10 +31,10 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
-    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId,
-    ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, OmissionReason, OpaqueCursor,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor, PageRequest,
+    PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
@@ -341,12 +341,6 @@ impl PrimitiveProjectRuntime {
 
     pub fn database(&self) -> &Database {
         &self.database
-    }
-
-    /// Releases the project database, dispatch, and all Arc-backed
-    /// primitive authorities as one teardown unit.
-    pub fn teardown(self) {
-        drop(self);
     }
 }
 
@@ -945,7 +939,7 @@ async fn dispatch_admitted(
                 .await;
             // A diagnostics read that reached no publishing authority has no
             // evidence to report. Returning the evidence envelope anyway made
-            // the surface answer `success` with an empty page — indistinguishable
+            // the surface answer `success` with an empty page, indistinguishable
             // from "this workspace is clean". The authority's own omission reason
             // is the actionable state, so it is surfaced as a typed problem.
             if let RetrievalPortOutcome::Unavailable(evidence) = &outcome
@@ -989,11 +983,7 @@ fn session_structural_refusal_problem(
             "The request exceeds its admitted session retrieval budget.",
         ),
     };
-    Ok(ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic::new(code, message)?,
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    })
+    Ok(ApplicationProblem::invalid_request(code, message))
 }
 
 const fn session_budget_diagnostic_code(stage: SessionRetrievalBudgetStageV1) -> &'static str {
@@ -1754,14 +1744,9 @@ fn primitive_failure<T>(
     failure: tracedecay_contracts::retrieval::PrimitiveFailure,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
     let application_problem = match failure.kind {
-        PrimitiveFailureKind::InvalidRequest => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: failure.code,
-                message: failure.message,
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        PrimitiveFailureKind::InvalidRequest => {
+            ApplicationProblem::invalid_request_without_action(failure.code, failure.message)
+        }
         PrimitiveFailureKind::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
@@ -1793,14 +1778,10 @@ fn grep_problem<T>(
         GrepAnalysisProblemV1::InvalidRequest(message) => problem(
             context,
             operation,
-            ApplicationProblem::InvalidRequest {
-                diagnostic: SafeDiagnostic {
-                    code: "application.retrieval.invalid-request".to_owned(),
-                    message,
-                },
-                retry: RetryDirective::Never,
-                legal_actions: Vec::new(),
-            },
+            ApplicationProblem::invalid_request_without_action(
+                "application.retrieval.invalid-request",
+                message,
+            ),
         ),
         GrepAnalysisProblemV1::AuthorityFailed(_) => unavailable(context, operation),
     }
@@ -1826,14 +1807,10 @@ fn invalid_request<T>(
     problem(
         context,
         operation,
-        ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "application.retrieval.invalid-request".to_owned(),
-                message: "The primitive request is invalid.".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: Vec::new(),
-        },
+        ApplicationProblem::invalid_request_without_action(
+            "application.retrieval.invalid-request",
+            "The primitive request is invalid.",
+        ),
     )
 }
 
@@ -1858,14 +1835,10 @@ fn saturated<T>(
     problem(
         context,
         operation,
-        ApplicationProblem::Saturated {
-            diagnostic: SafeDiagnostic::new(
-                "application.retrieval.saturated",
-                "The admitted primitive authority has reached its bounded capacity.",
-            )?,
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        },
+        ApplicationProblem::saturated(
+            "application.retrieval.saturated",
+            "The admitted primitive authority has reached its bounded capacity.",
+        ),
     )
 }
 

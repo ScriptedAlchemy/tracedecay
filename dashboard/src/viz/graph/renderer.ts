@@ -72,13 +72,13 @@ export interface FieldRenderer {
   retheme(): void;
   /**
    * The layers this renderer draws WebGL into, so the one thing that can stop
-   * a drawn field from being a field — the GPU dropping its context — can be
+   * a drawn field from being a field, the GPU dropping its context, can be
    * watched where it actually happens.
    *
    * Sigma stacks several canvases over the container and only some of them are
    * WebGL (labels, hover decoration and pointer capture ride 2d), so the set is
    * taken from the renderer's own layer map and each layer is asked which
-   * context it holds — no layer name is assumed and nothing reads the
+   * context it holds, no layer name is assumed and nothing reads the
    * container's children. Captured at construction because {@link kill} empties
    * that map, and a restore is dispatched at the canvas of the renderer that
    * died.
@@ -222,7 +222,7 @@ export function createFieldRenderer({
       const from = (data['srcReal'] as string | undefined) ?? '';
       const to = (data['dstReal'] as string | undefined) ?? '';
       const dim = hovered != null && from !== hovered && to !== hovered ? focus.t : 0;
-      // A relation conducts only when both of its ends are warm — that is
+      // A relation conducts only when both of its ends are warm, that is
       // what makes it a synapse rather than a wire. Vitality sets how
       // present the tissue is at rest.
       const edgeHeat = Math.min(field.heatOf(from), field.heatOf(to));
@@ -309,7 +309,7 @@ export function createFieldRenderer({
       sigma.setSetting('defaultEdgeColor', rgba(theme.colors.edge, 0.9));
       sigma.setSetting('labelColor', { color: rgb(theme.colors.label) });
       // kindRgb is baked once at construction, so a theme flip used to leave
-      // every node wearing the other theme's lightness — the hues only looked
+      // every node wearing the other theme's lightness, the hues only looked
       // right on whichever theme happened to be active at mount. Re-derive
       // them when, and only when, the medium actually changed sides.
       if (theme.colors.light !== wasLight) {
@@ -345,7 +345,7 @@ export function hasWebGl(): boolean {
  * A question rather than a mutation on any canvas Sigma has already made:
  * `getContext` hands back the existing context for a matching id and null for a
  * mismatched one, so the 2d layers answer null without being disturbed. One
- * rule for both readings of it — whether this browser can draw at all, and
+ * rule for both readings of it, whether this browser can draw at all, and
  * whether this is a layer that draws.
  */
 function webGlContextOf(canvas: HTMLCanvasElement): RenderingContext | null {
@@ -369,13 +369,13 @@ export interface WebGlContextHandlers {
 }
 
 /**
- * Watch a renderer's WebGL layers for a context lost — or restored — by the
+ * Watch a renderer's WebGL layers for a context lost, or restored, by the
  * GPU stack, which is the one failure that arrives AFTER a successful draw.
  *
  * The release is deliberately not the renderer's `kill`. A lost context has to
  * take the renderer with it (Sigma's own window listener would otherwise
  * measure a container that has gone), yet the restore that brings the field
- * back is dispatched at the canvas of the renderer that died — so this watch
+ * back is dispatched at the canvas of the renderer that died, so this watch
  * outlives it and belongs to whoever owns the surface, not to one composition.
  */
 export function watchWebGlContext(

@@ -1,16 +1,66 @@
 use std::collections::BTreeSet;
 
+use axum::http::StatusCode;
+
 use super::{
-    HttpApplicationOwnerKind, http_application_full_route_path, http_application_owner_kind,
-    is_http_application_operation_exposed, parse_callable_code_operation,
-    parse_configuration_operation, parse_context_scout_operation, parse_feedback_read_operation,
-    parse_git_read_operation, parse_native_integration_operation,
+    HttpApplicationOwnerKind, application_problem_status, http_application_full_route_path,
+    http_application_owner_kind, is_http_application_operation_exposed,
+    parse_callable_code_operation, parse_configuration_operation, parse_context_scout_operation,
+    parse_feedback_read_operation, parse_git_read_operation, parse_native_integration_operation,
 };
 use tracedecay_contracts::{
-    application_http_executable_binding_registry,
+    ApplicationProblemKind, application_http_executable_binding_registry,
     configuration::configuration_surface_operation_names,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OperationId, RouteExposureV1};
+
+#[test]
+fn application_problem_status_keeps_the_canonical_http_codes() {
+    let cases = [
+        (
+            ApplicationProblemKind::InvalidRequest,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            ApplicationProblemKind::NotFoundOrNotAuthorized,
+            StatusCode::NOT_FOUND,
+        ),
+        (ApplicationProblemKind::Conflict, StatusCode::CONFLICT),
+        (ApplicationProblemKind::PartialEffect, StatusCode::CONFLICT),
+        (ApplicationProblemKind::Stale, StatusCode::CONFLICT),
+        (
+            ApplicationProblemKind::Unsupported,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            ApplicationProblemKind::ResetRequired,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            ApplicationProblemKind::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            ApplicationProblemKind::ExecutionFailed,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            ApplicationProblemKind::Saturated,
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
+        (
+            ApplicationProblemKind::Cancelled,
+            StatusCode::REQUEST_TIMEOUT,
+        ),
+        (
+            ApplicationProblemKind::TimedOut,
+            StatusCode::GATEWAY_TIMEOUT,
+        ),
+    ];
+    for (kind, status) in cases {
+        assert_eq!(application_problem_status(kind), status, "{kind:?}");
+    }
+}
 
 #[test]
 fn git_read_operation_parser_is_exact_and_read_only() {

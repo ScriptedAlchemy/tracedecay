@@ -22,7 +22,7 @@ import {
 /**
  * The two reads behind the four Work projections.
  *
- * `useWorkAttempts` is the execution record — one page of `WorkAttemptV1`.
+ * `useWorkAttempts` is the execution record, one page of `WorkAttemptV1`.
  * `useWorkGraphViews` is the work-product graph and the projection bundle
  * derived from one version of it. Both are scoped through `scopedUrl`, both ask
  * once and state their coverage, and both are enabled per-projection so a
@@ -32,15 +32,15 @@ import {
 /**
  * The execution read behind the four Work projections.
  *
- * Scoped exactly like every other Work read — `scopedUrl` rewrites to the
- * project gateway when the scope bar names a project — so the attempts on the
+ * Scoped exactly like every other Work read, `scopedUrl` rewrites to the
+ * project gateway when the scope bar names a project, so the attempts on the
  * page belong to the same project as the snapshot drawn beside them.
  *
  * One page, deliberately. The projections state their coverage rather than
  * chasing it: an auto-paging loop would spend an unbounded number of round
  * trips to turn a `capped` reading into a `complete` one, and would have to
  * abandon the walk anyway the moment the topology generation moved underneath
- * it. Asking once and drawing what came back — with the cap said out loud —
+ * it. Asking once and drawing what came back, with the cap said out loud,
  * is the reading this build can defend.
  */
 
@@ -74,7 +74,7 @@ export function workTopologyMetricsRequest(
  * @param enabled the execution record is drawn by one projection, so the read
  * is issued when that projection is on screen rather than on every visit to the
  * Work page. A disabled query has no data, which the reading reports as pending
- * — correct, because nothing has been asked.
+ *, correct, because nothing has been asked.
  */
 export function useWorkAttempts(enabled: boolean, pageSize: number = WORK_ATTEMPT_PAGE_SIZE) {
   const scope = useScope((state) => state.scope);
@@ -173,8 +173,8 @@ export function useWorkTopologyMetrics(enabled: boolean) {
  * because `UtcMicros` is microseconds and a millisecond value here would place
  * every read a thousand-fold too early and quietly turn every churn reading
  * into "nothing recent". It is sent rather than defaulted because the authority
- * derives the runtime-dependent halves of the bundle — the ready/running/
- * blocked effort split and both concurrency figures — against the instant the
+ * derives the runtime-dependent halves of the bundle, the ready/running/
+ * blocked effort split and both concurrency figures, against the instant the
  * caller names.
  */
 export function workGraphReadRequest(observedAt: number, scope?: ResolvedScope) {

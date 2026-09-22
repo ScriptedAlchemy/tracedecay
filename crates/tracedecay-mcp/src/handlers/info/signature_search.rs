@@ -1,4 +1,4 @@
-//! `tracedecay_signature_search` — substring search over cached function/method signatures.
+//! `tracedecay_signature_search`, substring search over cached function/method signatures.
 
 use crate::ToolResult;
 use crate::generic_tool_result;
@@ -52,7 +52,7 @@ pub async fn handle_signature_search(
                 continue;
             }
             if let Some(prefix) = path_filter
-                && !tracedecay_runtime_core::path_scope::path_matches_scope(file_path, Some(prefix))
+                && !tracedecay_domain::path_matches_scope(file_path, Some(prefix))
             {
                 continue;
             }

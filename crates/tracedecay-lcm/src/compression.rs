@@ -13,7 +13,7 @@ use super::compression_decision::{
     CondensationDecision, CondensationDecisionInput, OverflowRecoveryCapInput,
     PreflightDecisionInput,
 };
-use super::compression_policy::is_policy_anchor_role;
+use super::compression_policy::{is_policy_anchor_role, source_token_count};
 use super::extraction;
 use super::summarizer::CompressionSummarizerAdapter;
 use super::types::{LcmExtractionResult, LcmRelationProjectionStatus, LcmSummarySourceRange};
@@ -40,7 +40,7 @@ struct IngestedActiveMessages {
 enum PreparedActiveMessage {
     /// Message without a real role: never stored (a fabricated role would
     /// enter identity hashes) but still carried verbatim into the replay
-    /// output — dropping it would silently lose conversation content.
+    /// output, dropping it would silently lose conversation content.
     ReplayVerbatim { source_index: usize },
     Ingest {
         source_index: usize,
@@ -114,14 +114,7 @@ pub async fn update_lifecycle(
     conn: &impl Executor,
     update: LcmLifecycleUpdate,
 ) -> Result<LcmLifecycleState, LcmError> {
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
     lifecycle_state(conn, &update.provider, &update.conversation_id).await
 }
 
@@ -207,14 +200,6 @@ async fn link_session_boundary(
     request: &LcmSessionBoundaryRequest,
     old_session_id: &str,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    link_in_transaction(conn, request, old_session_id).await
-}
-
-async fn link_in_transaction(
-    conn: &impl Executor,
-    request: &LcmSessionBoundaryRequest,
-    old_session_id: &str,
-) -> Result<LcmSessionBoundaryResponse, LcmError> {
     ensure_session(conn, &request.provider, &request.session_id).await?;
     let old_state =
         lifecycle_state_or_default(conn, &request.provider, old_session_id, old_session_id).await?;
@@ -237,14 +222,7 @@ async fn link_in_transaction(
         last_finalized_frontier_store_id: carried_frontier,
         maintenance_debt: old_state.maintenance_debt.clone(),
     };
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
 
     Ok(session_boundary_response(
         true,
@@ -1050,20 +1028,27 @@ async fn persist_compression_transaction_writes<'a>(
         last_finalized_frontier_store_id: write.existing_frontier.last_finalized_frontier_store_id,
         maintenance_debt: debt_for_deferred_backlog(remaining_backlog),
     };
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
 
     Ok(CompressionTransactionWriteResult {
         created_summaries,
         frontier: lifecycle_state(conn, &update.provider, &update.conversation_id).await?,
         remaining_backlog,
     })
+}
+
+async fn persist_lifecycle_update(
+    conn: &impl Executor,
+    update: &LcmLifecycleUpdate,
+) -> Result<(), LcmError> {
+    upsert_lifecycle_state(conn, update).await?;
+    replace_maintenance_debt(
+        conn,
+        &update.provider,
+        &update.conversation_id,
+        &update.maintenance_debt,
+    )
+    .await
 }
 
 async fn upsert_lifecycle_state(
@@ -1852,14 +1837,7 @@ async fn condense_summary_nodes_if_ready(
         last_finalized_frontier_store_id: existing_frontier.last_finalized_frontier_store_id,
         maintenance_debt: existing_frontier.maintenance_debt.clone(),
     };
-    upsert_lifecycle_state(conn, &update).await?;
-    replace_maintenance_debt(
-        conn,
-        &update.provider,
-        &update.conversation_id,
-        &update.maintenance_debt,
-    )
-    .await?;
+    persist_lifecycle_update(conn, &update).await?;
     let frontier = lifecycle_state(conn, &update.provider, &update.conversation_id).await?;
     // Mirrors hermes-lcm: `_assemble_context` always follows
     // `_maybe_condense`, so a condensation-only pass still returns the
@@ -2319,8 +2297,8 @@ async fn message_ids_for_store_ids(
     Ok(message_ids)
 }
 
-/// Stored LCM rows require a real role. Missing or empty role is a typed skip
-/// — never a fabricated `"user"` that would persist and enter identity hashes.
+/// Stored LCM rows require a real role. Missing or empty role is a typed skip,
+/// never a fabricated `"user"` that would persist and enter identity hashes.
 fn active_message_role(message: &Value) -> Option<&str> {
     message
         .get("role")
@@ -2638,13 +2616,6 @@ fn summary_replay_message(summary: &LcmSummaryNode) -> Value {
         "content": summary.summary_text,
         "lcm_summary_node_id": summary.node_id,
     })
-}
-
-fn source_token_count(backlog: &[LcmRawMessage]) -> i64 {
-    backlog
-        .iter()
-        .map(|message| crate::lcm_budget_tokens(&message.content))
-        .sum::<i64>()
 }
 
 fn debt_for_deferred_backlog(deferred_backlog: &[LcmRawMessage]) -> Vec<LcmMaintenanceDebt> {

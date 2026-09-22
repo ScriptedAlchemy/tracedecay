@@ -168,30 +168,6 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(backup_path))
 }
 
-/// Restore a config file from its backup. Prints instructions for manual
-/// recovery if the restore itself fails.
-pub fn restore_config_backup(original: &Path, backup: &Path) {
-    match std::fs::copy(backup, original) {
-        Ok(_) => {
-            eprintln!(
-                "\x1b[33m⚠\x1b[0m  Restored {} from backup",
-                original.display()
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "\x1b[31m✗\x1b[0m Failed to auto-restore {} from backup: {e}",
-                original.display()
-            );
-            eprintln!(
-                "  Manual recovery: cp '{}' '{}'",
-                backup.display(),
-                original.display()
-            );
-        }
-    }
-}
-
 /// Write a JSON value to a file via atomic rename.
 ///
 /// The caller is responsible for creating the backup via
@@ -232,7 +208,7 @@ pub(super) fn render_json_config(path: &Path, value: &serde_json::Value) -> Resu
         return Err(TraceDecayError::Config {
             message: format!(
                 "internal error: serialized JSON for {} failed re-parse validation.\n  \
-                 This is a bug in tracedecay — please report it.",
+                 This is a bug in tracedecay, please report it.",
                 path.display()
             ),
         });
@@ -701,16 +677,6 @@ pub(super) fn persist_host_config_remove_intent(path: &Path) -> Result<()> {
     })
 }
 
-/// Write a JSON value to a file with pretty formatting.
-/// Creates a backup, writes atomically, and restores on failure.
-#[hotpath::measure(label = "agent_hosts.agents.config.write_json")]
-pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
-    let backup = backup_config_file(path)?;
-    safe_write_json_file(path, value, backup.as_deref())?;
-    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", path.display());
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Shared MCP server registration
 // ---------------------------------------------------------------------------
@@ -726,8 +692,8 @@ pub fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
 /// The override is honored only when it is non-empty and falls under `home`.
 /// That keeps isolated-HOME tests from picking up the operator's real
 /// `KIMI_CODE_HOME` / `VIBE_HOME`, and refuses a host directory that escapes
-/// the admitted profile home. Anything else — unset, empty, or outside
-/// `home` — uses `home.join(default_relative)`.
+/// the admitted profile home. Anything else, unset, empty, or outside
+/// `home`, uses `home.join(default_relative)`.
 pub(crate) fn host_home_override(home: &Path, env_key: &str, default_relative: &str) -> PathBuf {
     std::env::var_os(env_key)
         .filter(|value| !value.is_empty())
@@ -741,7 +707,8 @@ pub(crate) fn host_home_override(home: &Path, env_key: &str, default_relative: &
 /// On Windows the returned path uses forward slashes so it can be safely
 /// embedded in JSON hook commands without backslash-escaping issues.
 pub fn which_tracedecay() -> Option<String> {
-    which_tracedecay_path().and_then(|path| path.to_str().map(normalize_path_separators))
+    which_tracedecay_path()
+        .and_then(|path| path.to_str().map(tracedecay_domain::forward_slash_text))
 }
 
 /// Finds the tracedecay binary without converting its platform-native path.
@@ -764,7 +731,7 @@ fn which_tracedecay_from(
     cargo_target_dir: Option<&Path>,
 ) -> Option<String> {
     which_tracedecay_path_from(current_exe, path_var, cargo_target_dir)
-        .and_then(|path| path.to_str().map(normalize_path_separators))
+        .and_then(|path| path.to_str().map(tracedecay_domain::forward_slash_text))
 }
 
 fn which_tracedecay_path_from(
@@ -860,12 +827,6 @@ fn path_component_eq(actual: &std::ffi::OsStr, expected: impl AsRef<std::ffi::Os
         (Some(actual), Some(expected)) => actual.eq_ignore_ascii_case(expected),
         _ => actual == expected,
     }
-}
-
-/// Replace backslashes with forward slashes so paths work in JSON/shell
-/// contexts on Windows. No-op on Unix where paths already use `/`.
-fn normalize_path_separators(path: &str) -> String {
-    path.replace('\\', "/")
 }
 
 /// Remove explicitly retired sibling plugin trees.
@@ -967,7 +928,7 @@ pub(crate) fn hook_command(tracedecay_bin: &str, subcommand: &str) -> String {
 
 fn hook_command_for_platform(tracedecay_bin: &str, subcommand: &str, windows: bool) -> String {
     let quoted = if windows {
-        quote_windows_command_arg(&normalize_path_separators(tracedecay_bin))
+        quote_windows_command_arg(&tracedecay_domain::forward_slash_text(tracedecay_bin))
     } else {
         quote_posix_command_arg(tracedecay_bin)
     };
@@ -1297,51 +1258,15 @@ fn parse_toml_config(path: &Path, contents: &str) -> Result<toml::Value> {
         return Ok(toml::Value::Table(toml::map::Map::new()));
     }
     // NOTE: `str.parse::<toml::Value>()` parses a single TOML value in toml v1,
-    // not a document — using it here would treat any well-formed config.toml as
+    // not a document, using it here would treat any well-formed config.toml as
     // unparseable and silently drop its contents. Use `toml::from_str` instead.
     let table: toml::Table = toml::from_str(contents).map_err(|e| TraceDecayError::Config {
         message: format!(
-            "failed to parse {} as TOML: {e}. Refusing to overwrite — fix the file or remove it manually.",
+            "failed to parse {} as TOML: {e}. Refusing to overwrite, fix the file or remove it manually.",
             path.display()
         ),
     })?;
     Ok(toml::Value::Table(table))
-}
-
-/// Copy `path` to `<path>.bak` if it exists. Used before overwriting a user
-/// config so an unexpected change is recoverable (issue #63).
-fn backup_file(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut backup = path.as_os_str().to_owned();
-    backup.push(".bak");
-    let backup = std::path::PathBuf::from(backup);
-    std::fs::copy(path, &backup).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to back up {} to {}: {e}",
-            path.display(),
-            backup.display()
-        ),
-    })?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Backed up {} to {}",
-        path.display(),
-        backup.display()
-    );
-    Ok(())
-}
-
-/// Write a TOML value to a file, backing up any existing file first.
-#[hotpath::measure(label = "agent_hosts.agents.config.write_toml")]
-pub fn write_toml_file(path: &Path, value: &toml::Value) -> Result<()> {
-    backup_file(path)?;
-    let contents = toml::to_string_pretty(value).unwrap_or_else(|_| String::new());
-    std::fs::write(path, contents).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write {}: {e}", path.display()),
-    })?;
-    eprintln!("\x1b[32m✔\x1b[0m Wrote {}", path.display());
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

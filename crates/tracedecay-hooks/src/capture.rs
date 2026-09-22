@@ -14,6 +14,7 @@ use crate::{
     HookEventEnvelopeV2, HookHostV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError,
     HookSpoolV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, OpenCodePluginSurfaceV1,
     decode_native_hook_event, decode_opencode_plugin_event, hook_configuration_path,
+    hook_v2_spool_root,
 };
 
 /// The real host surface that supplied native hook bytes.
@@ -122,7 +123,7 @@ fn capture_native_event_for_replay_inner(
         Ok(envelope) => envelope,
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
     };
-    let spool_root = data_root.join("hook-v2-spool").join(host.hook_key());
+    let spool_root = hook_v2_spool_root(data_root, host);
     let mut spool = match HookSpoolV1::open_within(
         spool_root,
         HookSpoolConfigV1::stock(host),
@@ -152,9 +153,9 @@ fn capture_native_event_for_replay_inner(
 /// the spool already holds.
 ///
 /// The event ID is derived from the host's own identity fields, so one host
-/// event delivered twice — a retried callback, or sibling hooks firing
-/// concurrently for the same edit — produces two envelopes that differ only in
-/// the instant each process observed it. `HookSpoolV1::append` is idempotent
+/// event delivered twice produces two envelopes that differ only in the
+/// instant each process observed it. A retried callback or sibling hooks
+/// firing concurrently for the same edit do the same. `HookSpoolV1::append` is idempotent
 /// for an identical envelope but reports `EventIdConflict` for that timestamp
 /// difference, which the capture lane surfaced as a failed hook exit even
 /// though the event was already durable. Normalise the observation instant the

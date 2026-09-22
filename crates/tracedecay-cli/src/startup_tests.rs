@@ -718,7 +718,7 @@ fn post_update_full_reinstall_advances_both_version_markers() {
     // `update_cmd::run_post_update_tasks`) and recorded it by advancing both
     // markers; the next ordinary command must not repeat that work via the
     // startup silent reinstall. The markers may only be advanced *after* the
-    // full install pass — advancing them for a plugin-artifact-only refresh
+    // full install pass, advancing them for a plugin-artifact-only refresh
     // would silently skip config-managed agents on minor/major bumps.
     let running = "6.1.0";
     let mut config = UserConfig {

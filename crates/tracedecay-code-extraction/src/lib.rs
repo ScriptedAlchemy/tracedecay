@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 mod types;
 
-// Lite — always available (no cfg needed)
+// Lite. Always available (no cfg needed)
 mod astro_extractor;
 mod c_extractor;
 mod clone_body;
@@ -122,14 +122,15 @@ mod wgsl_extractor;
 #[cfg(feature = "lang-zig")]
 mod zig_extractor;
 
-// Lite — always available (no cfg needed)
+// Lite. Always available (no cfg needed)
 pub use astro_extractor::AstroExtractor;
 pub use c_extractor::CExtractor;
 pub use clone_body::{
     CONSERVATIVE_CLONE_NORMALIZATION_REVISION_V1, CloneBodyEligibilityV1, CloneBodyRenameIssueV1,
     CloneBodyRenameStatusV1, CloneBodyTokenizationIssueV1, CloneBodyTokenizationStatusV1,
-    ConservativeCloneTokenV1, ExtractedCloneBodyV1, MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1,
-    RENAME_CLONE_NORMALIZATION_REVISION_V1,
+    CloneSyntaxKindV1, ConservativeCloneTokenV1, ExtractedCloneBodyV1,
+    MAX_AUTOMATIC_CLONE_BODY_BYTES_V1, MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1,
+    MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1, RENAME_CLONE_NORMALIZATION_REVISION_V1,
 };
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
@@ -364,12 +365,21 @@ pub struct LanguageRegistry {
     by_extension: HashMap<String, usize>,
 }
 
+/// Required by `clippy::new_without_default` for the argument-less `new`
+/// below, so this is API surface the lint owns rather than an uncalled entry
+/// point a dead-surface pass may drop.
+impl Default for LanguageRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LanguageRegistry {
     /// Creates a new registry with all built-in language extractors.
     pub fn new() -> Self {
         #[allow(unused_mut)]
         let mut extractors: Vec<Box<dyn LanguageExtractor>> = vec![
-            // Lite — always available
+            // Lite. Always available
             Box::new(RustExtractor),
             Box::new(GoExtractor),
             Box::new(JavaExtractor),
@@ -481,12 +491,6 @@ impl LanguageRegistry {
         }
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub fn from_extractors_for_test(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
-        Self::from_extractors(extractors)
-    }
-
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
         let extractor = path.rsplit('.').next().and_then(|ext| {
@@ -506,11 +510,5 @@ impl LanguageRegistry {
             .iter()
             .flat_map(|e| e.extensions().iter().copied())
             .collect()
-    }
-}
-
-impl Default for LanguageRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }

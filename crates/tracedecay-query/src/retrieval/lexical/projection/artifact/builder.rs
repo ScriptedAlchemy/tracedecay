@@ -34,9 +34,10 @@ use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, RECEIPT_RESERVATION_BYTES,
     SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11, STATISTICS_STEP_COUNT_V11,
     VerifiedCodeLexicalArtifactV1, absorb_page_base_sections_receipt, artifact_digest,
-    decode_padded_receipt, decode_padded_receipt_with_control, finish_base_section_receipt_fold,
-    initial_base_section_receipt_fold, metadata_digest, new_verified_receipt, padded_receipt,
-    section_names, verify_artifact_table_layout, verify_required_artifact_indexes,
+    contract_number, decode_padded_receipt, decode_padded_receipt_with_control,
+    finish_base_section_receipt_fold, hash_bytes, initial_base_section_receipt_fold,
+    metadata_digest, new_verified_receipt, padded_receipt, section_names,
+    verify_artifact_table_layout, verify_required_artifact_indexes,
 };
 use super::postings::document_ngram_scratch;
 use super::prepared::{
@@ -269,7 +270,7 @@ struct PreparedExactInsertPlanV1<'a> {
     entries: Vec<PreparedExactInsertRefV1<'a>>,
     merge_heap: BinaryHeap<Reverse<PreparedExactMergeCursorV1<'a>>>,
     /// The batch's distinct exact terms with the ids this plan
-    /// content-addressed, ascending by id — the order `exact_vocabulary` was
+    /// content-addressed, ascending by id, the order `exact_vocabulary` was
     /// always interned in.
     interned_terms: Vec<(&'a [u8], i64)>,
 }
@@ -3784,7 +3785,7 @@ const PAYLOAD_DIGEST_CONFLICT_CHECK_CHUNK: usize = 512;
 
 /// Verify that every payload digest about to be staged in this batch
 /// agrees, byte for byte, with the payload already recorded under that
-/// digest — either earlier in this same batch (checked in memory, no I/O)
+/// digest. Either earlier in this same batch (checked in memory, no I/O)
 /// or in a prior batch already committed to `clone_body_payloads` (checked
 /// with one batched `SELECT ... WHERE payload_digest IN (...)` per chunk of
 /// unique digests, rather than a `SELECT` after every single insert). A
@@ -3996,7 +3997,7 @@ fn derive_clone_fingerprint_postings(
         .map_err(sqlite_error)
 }
 
-fn derive_clone_fingerprint_counts(
+pub(super) fn derive_clone_fingerprint_counts(
     transaction: &Transaction<'_>,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     transaction
@@ -4042,7 +4043,7 @@ fn append_prepared_postings(
     // (this file) rejects any batch whose document ids are not a strictly
     // contiguous continuation of the already-committed cursor, and
     // `prepare_pages_inner` only ever prepares the fresh suffix of pages
-    // that cursor has not yet accepted — a resumed or replayed call reuses
+    // that cursor has not yet accepted, a resumed or replayed call reuses
     // no document id that is already durable. Together those invariants
     // make every (field, term, document_id) key in a prepared batch globally
     // unique, both within the batch and against every already-committed
@@ -5229,8 +5230,8 @@ fn build_serving_index_step(
         // `cardinality` rides in the index purely so the statistics
         // aggregation below is covered. Without it the index carries only the
         // reordered WITHOUT ROWID key columns, and every `SUM(cardinality)`
-        // fetch through it is one random main-tree lookup per posting row —
-        // an N+1 access pattern over a tree dominated by `documents` blobs
+        // fetch through it is one random main-tree lookup per posting row.
+        // An N+1 access pattern over a tree dominated by `documents` blobs
         // that collapses once the corpus outgrows the bounded page cache
         // (measured on a 12M-row/2.9M-group synthetic at production pragmas:
         // 121 s warm and 537 s cold non-covering, ~240 s as a sort-backed
@@ -6496,16 +6497,6 @@ fn hash_value(hasher: &mut Sha256, value: ValueRef<'_>) -> Result<(), CodeLexica
     Ok(())
 }
 
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), CodeLexicalArtifactErrorV1> {
-    hasher.update(
-        u64::try_from(bytes.len())
-            .map_err(contract_number)?
-            .to_le_bytes(),
-    );
-    hasher.update(bytes);
-    Ok(())
-}
-
 fn read_receipt(
     connection: &Connection,
 ) -> Result<Option<VerifiedCodeLexicalArtifactV1>, CodeLexicalArtifactErrorV1> {
@@ -6555,177 +6546,169 @@ fn verify_source_receipt(
     Ok(())
 }
 
-#[cfg(feature = "hotpath")]
 fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
-    match step {
-        CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
-            hotpath::gauge!("query.artifact.finalization.outcome.pending_total").inc(1u64);
-            crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
-            hotpath::gauge!("query.artifact.rows").set(*completed_rows);
-        }
-        CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
-            hotpath::gauge!("query.artifact.finalization.outcome.ready_total").inc(1u64);
-            crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
-            hotpath::gauge!("query.artifact.pages").set(receipt.page_count());
-            hotpath::gauge!("query.artifact.bytes").set(receipt.file_size_bytes());
+    #[cfg(feature = "hotpath")]
+    {
+        match step {
+            CodeLexicalArtifactFinalizationStepV1::Pending { completed_rows, .. } => {
+                hotpath::gauge!("query.artifact.finalization.outcome.pending_total").inc(1u64);
+                crate::hotpath_metrics::Residency::Rebuilding.record("query.artifact.residency");
+                hotpath::gauge!("query.artifact.rows").set(*completed_rows);
+            }
+            CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => {
+                hotpath::gauge!("query.artifact.finalization.outcome.ready_total").inc(1u64);
+                crate::hotpath_metrics::Residency::Warm.record("query.artifact.residency");
+                hotpath::gauge!("query.artifact.pages").set(receipt.page_count());
+                hotpath::gauge!("query.artifact.bytes").set(receipt.file_size_bytes());
+            }
         }
     }
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_finalization_step(step: &CodeLexicalArtifactFinalizationStepV1) {
+    #[cfg(not(feature = "hotpath"))]
     let _ = step;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_batch_outcome(
     result: &Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1>,
 ) {
-    match result {
-        Ok(_) => {
-            hotpath::gauge!("query.artifact.batch.outcome.committed_total").inc(1u64);
-        }
-        Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {
-            hotpath::gauge!("query.artifact.batch.outcome.interrupted_total").inc(1u64);
-        }
-        Err(_) => {
-            hotpath::gauge!("query.artifact.batch.outcome.failed_total").inc(1u64);
+    #[cfg(feature = "hotpath")]
+    {
+        match result {
+            Ok(_) => {
+                hotpath::gauge!("query.artifact.batch.outcome.committed_total").inc(1u64);
+            }
+            Err(CodeLexicalArtifactErrorV1::Interrupted(_)) => {
+                hotpath::gauge!("query.artifact.batch.outcome.interrupted_total").inc(1u64);
+            }
+            Err(_) => {
+                hotpath::gauge!("query.artifact.batch.outcome.failed_total").inc(1u64);
+            }
         }
     }
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_batch_outcome(
-    result: &Result<CodeLexicalArtifactBuildProgressV1, CodeLexicalArtifactErrorV1>,
-) {
+    #[cfg(not(feature = "hotpath"))]
     let _ = result;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-    let source_bytes = pages
-        .iter()
-        .map(PreparedCodeLexicalArtifactPageV1::source_retained_bytes)
-        .sum::<usize>();
-    let prepared_bytes = pages
-        .iter()
-        .map(PreparedCodeLexicalArtifactPageV1::retained_owned_bytes)
-        .sum::<usize>();
-    let effective_workers = tracedecay_code_index::parallelism::indexing_workers().min(pages.len());
-    let mut scratch = pages
-        .iter()
-        .map(PreparedCodeLexicalArtifactPageV1::preparation_scratch_bytes)
-        .collect::<Vec<_>>();
-    scratch.sort_unstable_by(|left, right| right.cmp(left));
-    let active_scratch = scratch.into_iter().take(effective_workers).sum::<usize>();
-    hotpath::gauge!("query.artifact.batch.prepared_pages_total").inc(pages.len() as u64);
-    hotpath::gauge!("query.artifact.batch.prepared_documents_total").inc(documents as u64);
-    hotpath::gauge!("query.artifact.batch.source_bytes_total").inc(source_bytes as u64);
-    hotpath::gauge!("query.artifact.batch.prepared_bytes_total").inc(prepared_bytes as u64);
-    hotpath::gauge!("query.artifact.batch.active_scratch_bytes_total").inc(active_scratch as u64);
-    hotpath::gauge!("query.artifact.batch.effective_workers").set(effective_workers as u64);
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_prepared_batch_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
+    #[cfg(feature = "hotpath")]
+    {
+        let documents = pages.iter().map(|page| page.documents.len()).sum::<usize>();
+        let source_bytes = pages
+            .iter()
+            .map(PreparedCodeLexicalArtifactPageV1::source_retained_bytes)
+            .sum::<usize>();
+        let prepared_bytes = pages
+            .iter()
+            .map(PreparedCodeLexicalArtifactPageV1::retained_owned_bytes)
+            .sum::<usize>();
+        let effective_workers =
+            tracedecay_code_index::parallelism::indexing_workers().min(pages.len());
+        let mut scratch = pages
+            .iter()
+            .map(PreparedCodeLexicalArtifactPageV1::preparation_scratch_bytes)
+            .collect::<Vec<_>>();
+        scratch.sort_unstable_by(|left, right| right.cmp(left));
+        let active_scratch = scratch.into_iter().take(effective_workers).sum::<usize>();
+        hotpath::gauge!("query.artifact.batch.prepared_pages_total").inc(pages.len() as u64);
+        hotpath::gauge!("query.artifact.batch.prepared_documents_total").inc(documents as u64);
+        hotpath::gauge!("query.artifact.batch.source_bytes_total").inc(source_bytes as u64);
+        hotpath::gauge!("query.artifact.batch.prepared_bytes_total").inc(prepared_bytes as u64);
+        hotpath::gauge!("query.artifact.batch.active_scratch_bytes_total")
+            .inc(active_scratch as u64);
+        hotpath::gauge!("query.artifact.batch.effective_workers").set(effective_workers as u64);
+    }
+    #[cfg(not(feature = "hotpath"))]
     let _ = pages;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_batch_import_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    let imports = pages.iter().map(|page| page.imports.len()).sum::<usize>();
-    hotpath::gauge!("query.artifact.batch.import_rows_total").inc(imports as u64);
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_batch_import_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
+    #[cfg(feature = "hotpath")]
+    {
+        let imports = pages.iter().map(|page| page.imports.len()).sum::<usize>();
+        hotpath::gauge!("query.artifact.batch.import_rows_total").inc(imports as u64);
+    }
+    #[cfg(not(feature = "hotpath"))]
     let _ = pages;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    let relational_postings = pages
-        .iter()
-        .flat_map(|page| &page.documents)
-        .map(|document| document.term_postings.len() + document.exact_postings.len())
-        .sum::<usize>();
-    let ngram_shards = pages
-        .iter()
-        .map(|page| page.ngram_shards.len())
-        .sum::<usize>();
-    let ngram_documents = pages
-        .iter()
-        .flat_map(|page| &page.ngram_shards)
-        .map(|shard| shard.cardinality)
-        .sum::<u64>();
-    let ngram_bytes = pages
-        .iter()
-        .flat_map(|page| &page.ngram_shards)
-        .map(|shard| shard.documents.len())
-        .sum::<usize>();
-    hotpath::gauge!("query.artifact.batch.posting_rows_total").inc(relational_postings as u64);
-    hotpath::gauge!("query.artifact.batch.ngram_shard_rows_total").inc(ngram_shards as u64);
-    hotpath::gauge!("query.artifact.batch.ngram_documents_total").inc(ngram_documents);
-    hotpath::gauge!("query.artifact.batch.ngram_bytes_total").inc(ngram_bytes as u64);
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_batch_posting_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
+    #[cfg(feature = "hotpath")]
+    {
+        let relational_postings = pages
+            .iter()
+            .flat_map(|page| &page.documents)
+            .map(|document| document.term_postings.len() + document.exact_postings.len())
+            .sum::<usize>();
+        let ngram_shards = pages
+            .iter()
+            .map(|page| page.ngram_shards.len())
+            .sum::<usize>();
+        let ngram_documents = pages
+            .iter()
+            .flat_map(|page| &page.ngram_shards)
+            .map(|shard| shard.cardinality)
+            .sum::<u64>();
+        let ngram_bytes = pages
+            .iter()
+            .flat_map(|page| &page.ngram_shards)
+            .map(|shard| shard.documents.len())
+            .sum::<usize>();
+        hotpath::gauge!("query.artifact.batch.posting_rows_total").inc(relational_postings as u64);
+        hotpath::gauge!("query.artifact.batch.ngram_shard_rows_total").inc(ngram_shards as u64);
+        hotpath::gauge!("query.artifact.batch.ngram_documents_total").inc(ngram_documents);
+        hotpath::gauge!("query.artifact.batch.ngram_bytes_total").inc(ngram_bytes as u64);
+    }
+    #[cfg(not(feature = "hotpath"))]
     let _ = pages;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    let rows = pages.iter().map(|page| page.documents.len()).sum::<usize>();
-    hotpath::gauge!("query.artifact.batch.document_rows_total").inc(rows as u64);
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_batch_row_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
+    #[cfg(feature = "hotpath")]
+    {
+        let rows = pages.iter().map(|page| page.documents.len()).sum::<usize>();
+        hotpath::gauge!("query.artifact.batch.document_rows_total").inc(rows as u64);
+    }
+    #[cfg(not(feature = "hotpath"))]
     let _ = pages;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
-    hotpath::gauge!("query.artifact.batch.receipt_rows_total").inc(pages.len() as u64);
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_batch_receipt_metrics(pages: &[PreparedCodeLexicalArtifactPageV1]) {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("query.artifact.batch.receipt_rows_total").inc(pages.len() as u64);
+    }
+    #[cfg(not(feature = "hotpath"))]
     let _ = pages;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
-    match limit {
-        CodeLexicalArtifactBatchLimitV1::Memory => {
-            hotpath::gauge!("query.artifact.batch.prefix_limited.memory_total").inc(1u64);
-        }
-        CodeLexicalArtifactBatchLimitV1::PreparedRows => {
-            hotpath::gauge!("query.artifact.batch.prefix_limited.prepared_rows_total").inc(1u64);
-        }
-        CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {
-            hotpath::gauge!("query.artifact.batch.prefix_limited.estimated_write_bytes_total")
-                .inc(1u64);
+    #[cfg(feature = "hotpath")]
+    {
+        match limit {
+            CodeLexicalArtifactBatchLimitV1::Memory => {
+                hotpath::gauge!("query.artifact.batch.prefix_limited.memory_total").inc(1u64);
+            }
+            CodeLexicalArtifactBatchLimitV1::PreparedRows => {
+                hotpath::gauge!("query.artifact.batch.prefix_limited.prepared_rows_total")
+                    .inc(1u64);
+            }
+            CodeLexicalArtifactBatchLimitV1::EstimatedWriteBytes => {
+                hotpath::gauge!("query.artifact.batch.prefix_limited.estimated_write_bytes_total")
+                    .inc(1u64);
+            }
         }
     }
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_batch_prefix_limit(limit: CodeLexicalArtifactBatchLimitV1) {
+    #[cfg(not(feature = "hotpath"))]
     let _ = limit;
 }
 
-#[cfg(feature = "hotpath")]
 fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
-    hotpath::gauge!("query.artifact.pages").set(progress.next_page_ordinal);
-    hotpath::gauge!("query.artifact.rows").set(progress.completed_chunks);
-    hotpath::gauge!("query.artifact.bytes").set(progress.completed_payload_bytes);
-}
-
-#[cfg(not(feature = "hotpath"))]
-fn record_artifact_progress(progress: &CodeLexicalArtifactBuildProgressV1) {
+    #[cfg(feature = "hotpath")]
+    {
+        hotpath::gauge!("query.artifact.pages").set(progress.next_page_ordinal);
+        hotpath::gauge!("query.artifact.rows").set(progress.completed_chunks);
+        hotpath::gauge!("query.artifact.bytes").set(progress.completed_payload_bytes);
+    }
+    #[cfg(not(feature = "hotpath"))]
     let _ = progress;
 }
 
@@ -6829,10 +6812,6 @@ fn require_integrity(
         return Err(CodeLexicalArtifactErrorV1::Corrupt(result));
     }
     Ok(())
-}
-
-fn contract_number(error: impl std::fmt::Display) -> CodeLexicalArtifactErrorV1 {
-    CodeLexicalArtifactErrorV1::Contract(error.to_string())
 }
 
 #[cfg(test)]

@@ -899,6 +899,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     "code-index background reconcile pass started"
                 );
                 let shutting_down = Arc::clone(&worker_shutting_down);
+                let bind_serving_generation = Arc::clone(&worker_serving_generation);
+                let bind_serving_source_witness = Arc::clone(&worker_serving_source_witness);
+                let bind_source_freshness = worker_source_freshness.clone();
                 let source_result = hotpath::future!(
                     tokio::task::spawn_blocking(move || {
                         let mut scheduler =
@@ -952,7 +955,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 },
                             ));
                         }
-                        if let Some(metadata) = retained_text_metadata {
+                        let outcome = if let Some(metadata) = retained_text_metadata {
                             match scheduler.reconcile_retained_text_generation_with(
                                 &metadata,
                                 !graph_activation_enabled,
@@ -968,7 +971,28 @@ impl CodeIndexSchedulerRegistryV1 {
                             scheduler.activate_or_reconcile()
                         } else {
                             scheduler.reconcile_now()
+                        }?;
+                        // A seat whose publishing pass could not prove its
+                        // source (`code_index_post_projection_source_unverified`)
+                        // installs without a currency witness. The swap arm
+                        // re-proves such a seat as `Offered`, but a retained
+                        // native graph that already serves skips the graph
+                        // prepare and with it the swap, so no later pass ever
+                        // reached that arm. This unchanged pass verified
+                        // exactly the snapshot the seat was sealed from, so
+                        // bind that proof here, while this pass still holds
+                        // the scheduler: a reader that holds the scheduler to
+                        // keep a seat unproven must not see the proof land
+                        // after the pass has already let go.
+                        if let CodeIndexReconcileOutcomeV1::Noop(evidence) = &outcome {
+                            Self::bind_unproven_seat_to_verified_source(
+                                &bind_serving_generation,
+                                &bind_serving_source_witness,
+                                &bind_source_freshness,
+                                &evidence.snapshot_content_identity,
+                            );
                         }
+                        Ok(outcome)
                     }),
                     // Sealing moved inside this blocking reconcile pipeline.
                     // Keep the outer future labeled so default reports retain
@@ -1033,10 +1057,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 // Source reconciliation is complete: release the background
                 // admission permit before HeadOpening / graph work so sibling
-                // stores can start. Keep `reconcile_pass` through text
-                // seating — dropping it made `reconcile_in_progress` lie while
-                // this worker still owned graph try_lock, which deadlocked
-                // tests that hold the scheduler mutex and wait for that flag.
+                // stores can start. The permit is never re-acquired inside
+                // this pass: `_build_publication` is held for the rest of the
+                // iteration, and `run_ignored_dependency_admission` takes the
+                // admission *before* that same gate, so waiting on admission
+                // here would invert that order (see
+                // `background_worker_waits_for_global_admission_before_publication_gate`).
+                // Keep `reconcile_pass` through text seating, dropping it
+                // made `reconcile_in_progress` lie while this worker still
+                // owned graph try_lock, which deadlocked tests that hold the
+                // scheduler mutex and wait for that flag.
                 drop(_background_reconcile_admission);
                 // A publication must first reopen its own lightweight text
                 // owner: publication moved the durable pointer, so the prior
@@ -1110,6 +1140,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         && !graph_activation_deferred
                         && let Some(text) = graph_text.clone()
                     {
+                        // `reconcile_pass` is held across this projection, so
+                        // the pointer rename is inside the pass a reader
+                        // samples. Taking the admission permit back here
+                        // instead would deadlock against an
+                        // ignored-dependency owner that already holds it and
+                        // is waiting for `_build_publication`.
                         let projection = tokio::spawn(Self::drive_text_projection(
                             text,
                             Arc::clone(&worker_shutting_down),
@@ -1168,7 +1204,21 @@ impl CodeIndexSchedulerRegistryV1 {
                 // A successor-only retained projection holds no pass guard of
                 // its own; keeping the worker's guard through graph seat would
                 // report rebuild_in_flight for clone backfill that is not
-                // exact/lexical work.
+                // exact/lexical work. Stamp the continuation this projection
+                // already owes before that drop: the slot, not a later note,
+                // is what an idle reader observes.
+                if let Some(outcome) = published_text_projection_outcome.as_ref() {
+                    let schedule_continuation = match outcome {
+                        PublishedTextProjectionOutcomeV1::Finished => graph_text
+                            .as_ref()
+                            .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work),
+                        PublishedTextProjectionOutcomeV1::Unfinished => true,
+                        PublishedTextProjectionOutcomeV1::Shutdown => false,
+                    };
+                    if schedule_continuation {
+                        Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                    }
+                }
                 if retained_text_projection.is_none() || retained_projection_successor_only {
                     drop(reconcile_pass.take());
                 }
@@ -1186,7 +1236,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // An arrival that landed during this retained pass is
                 // exact/lexical work waiting for the worker. The optional
                 // graph prepare parks this worker on an O(store) sealed
-                // decode — tens of seconds on a cold large repository — and
+                // decode, tens of seconds on a cold large repository, and
                 // serving that arrival must never queue behind it. The
                 // arrival's own notify re-runs this worker and the follow-up
                 // pass re-gates Prepare from its own terminal outcome, so
@@ -1296,6 +1346,14 @@ impl CodeIndexSchedulerRegistryV1 {
                         .filter(|retained| retained.uses_partitioned_manifest())
                         .cloned()
                 {
+                    // Every outcome of this attempt schedules one successor.
+                    // Stamp it before the recovery await, while the pass is
+                    // visible, so the wait cannot be sampled as an idle slot.
+                    Self::note_visible_worker_continuation(
+                        &worker_reconcile_in_progress,
+                        &worker_pending_wake,
+                        &worker_wake,
+                    );
                     retained_graph_head_recovery_attempted = true;
                     let generation_id = retained.metadata().manifest().generation_id.clone();
                     let replay_scheduler = Arc::clone(&worker_scheduler);
@@ -1378,7 +1436,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     }
                     // Hold a test-installed successor gate after every reserved
-                    // recovery attempt — including Memory authorities that
+                    // recovery attempt, including Memory authorities that
                     // abstain (`Ok(false)`) and degraded recoveries. Quiet
                     // Persistent recoveries already pause here so observers can
                     // see the retained text owner before the dirty successor
@@ -1400,8 +1458,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     // all and never published the successor generation. The
                     // `retained_graph_head_recovery_attempted` guard above is
                     // now false for every later pass, so this cannot spin
-                    // another retained-recovery Noop.
-                    Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                    // another retained-recovery Noop. The successor was
+                    // stamped before this await.
                 }
                 // A recovered revision-7 verified head already serves its
                 // native graph from the retained text owner, and that owner
@@ -1458,6 +1516,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         let graph_text = graph_text.clone();
                         let shutting_down = Arc::clone(&worker_shutting_down);
                         let prepare_passes = Arc::clone(&worker_reconcile_in_progress);
+                        let prepare_pending_wake = Arc::clone(&worker_pending_wake);
+                        let prepare_wake = Arc::clone(&worker_wake);
                         match hotpath::future!(
                             tokio::task::spawn_blocking(move || {
                                 let decoder = Self::lock_scheduler_for_graph_step(
@@ -1503,7 +1563,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 };
                                 // A refused ignored-source roster clears
                                 // itself, so the very next pass can publish
-                                // the successor — but this pass consumed the
+                                // the successor, but this pass consumed the
                                 // wake that would have run it.
                                 let roster_refusal_rebuild = latest.is_none()
                                     && Self::lock_scheduler_for_graph_step(
@@ -1513,6 +1573,18 @@ impl CodeIndexSchedulerRegistryV1 {
                                     )?
                                     .1
                                     .take_ignored_roster_refusal_rebuild();
+                                if roster_refusal_rebuild {
+                                    // One pass, claimed from the scheduler, so
+                                    // a refusal that keeps reproducing cannot
+                                    // spin this worker. Stamp before this
+                                    // closure drops the step guard: the result
+                                    // is observed only after the slot is set.
+                                    Self::note_visible_worker_continuation(
+                                        &prepare_passes,
+                                        &prepare_pending_wake,
+                                        &prepare_wake,
+                                    );
+                                }
                                 let replay_binding = match latest.as_ref() {
                                     Some(latest) => Some(
                                         Self::lock_scheduler_for_graph_step(
@@ -1543,15 +1615,6 @@ impl CodeIndexSchedulerRegistryV1 {
                                         roster_refusal_rebuild,
                                         "graph prepare produced no servable generation; \
                                          the sealed generation cannot seat"
-                                    );
-                                }
-                                if roster_refusal_rebuild {
-                                    // One pass, claimed from the scheduler, so
-                                    // a refusal that keeps reproducing cannot
-                                    // spin this worker.
-                                    Self::note_worker_continuation(
-                                        &worker_pending_wake,
-                                        &worker_wake,
                                     );
                                 }
                                 Ok((outcome, latest, replay_binding))
@@ -1638,6 +1701,11 @@ impl CodeIndexSchedulerRegistryV1 {
                             // A conflict verdict identical to the previous
                             // attempt's for this same generation is deterministic
                             // and falls through to the terminal arm instead.
+                            //
+                            // The prepared text candidate stays. Wiping it to
+                            // `Ok((Err, None, None))` skipped the serving swap,
+                            // so search kept the predecessor while graph backoff
+                            // ran.
                             if error.is_retryable_activation() && !repeated_conflict {
                                 last_seat_conflict = error
                                     .activation_conflict_context()
@@ -1654,7 +1722,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                     retry_delay_micros = retry_delay.as_micros() as u64,
                                     error = %error,
                                     "graph activation failed retryably; the sealed generation \
-                                     stays unseated until the scheduled retry"
+                                     still seats and the next pass retries native graph"
                                 );
                                 hotpath::gauge!("daemon.code_index.graph_seat.retry_total")
                                     .inc(1_u64);
@@ -1668,7 +1736,15 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // The scheduled retry is the seat attempt, so it
                                 // must not be turned away as already attempted.
                                 graph_seat_attempted = None;
-                                result = Ok((Err(error), None, None));
+                                // The prepared candidate stays. Rewriting the
+                                // pass result to `Ok((Err, None, None))` here
+                                // failed the serving swap's own guard, so an
+                                // activation that kept failing retryably never
+                                // let any pass seat: search held its predecessor
+                                // while a complete generation sat on disk. The
+                                // terminal arm below already keeps the seat and
+                                // marks graph unavailable; a retry is a weaker
+                                // verdict than terminal and must not seat less.
                             } else {
                                 next_seat_attempt_at = None;
                                 seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
@@ -1699,6 +1775,18 @@ impl CodeIndexSchedulerRegistryV1 {
                 // and serving-swap boundary. Graph work above ran only when
                 // the outcome was ready.
                 if let Some(outcome) = published_text_projection_outcome.take() {
+                    // A clone-fingerprint successor is still `Unfinished` work
+                    // after exact and lexical owners are ready. That must not
+                    // clear the prepared generation the way a missing owner does.
+                    let owners_ready = exact_and_lexical_ready_for_graph(graph_text.as_ref());
+                    let outcome = match outcome {
+                        PublishedTextProjectionOutcomeV1::Unfinished
+                            if !super::text_projection_unfinished_withholds_seat(owners_ready) =>
+                        {
+                            PublishedTextProjectionOutcomeV1::Finished
+                        }
+                        other => other,
+                    };
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished => {
                             // The seat needs only the ready exact/lexical
@@ -1714,7 +1802,14 @@ impl CodeIndexSchedulerRegistryV1 {
                                 .as_ref()
                                 .is_some_and(LatestCodeTextGenerationV1::text_projection_needs_work)
                             {
-                                Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                                // Already stamped before optional graph. Re-enter
+                                // the pass so a reader that cleared the slot
+                                // during graph still cannot sample the stamp.
+                                Self::note_visible_worker_continuation(
+                                    &worker_reconcile_in_progress,
+                                    &worker_pending_wake,
+                                    &worker_wake,
+                                );
                             }
                             // Large text projections can outlive the bounded
                             // source proof established before publication. The
@@ -1784,7 +1879,11 @@ impl CodeIndexSchedulerRegistryV1 {
                                 "the publication's text owner did not finish its projection; \
                                  the sealed generation stays unseated until it does"
                             );
-                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                            Self::note_visible_worker_continuation(
+                                &worker_reconcile_in_progress,
+                                &worker_pending_wake,
+                                &worker_wake,
+                            );
                         }
                     }
                     // Keep the pass lifetime around the post-projection source
@@ -1801,8 +1900,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_generation = Arc::clone(&worker_text_generation);
                     let serving_seats = Arc::clone(&worker_serving_seats);
                     let serving_generation_changed = worker_serving_generation_changed.clone();
-                    let source_freshness = worker_source_freshness.clone();
-                    let project_root = worker_project_root.clone();
                     let text_latest = latest.clone();
                     let latest = latest.clone();
                     let shutting_down = Arc::clone(&worker_shutting_down);
@@ -1836,13 +1933,15 @@ impl CodeIndexSchedulerRegistryV1 {
                             // proofs to the seat. Asking the fence whether it
                             // has verified *this* sealed snapshot is what makes
                             // the binding truthful for a seat this pass did not
-                            // publish.
-                            let pass_proves_latest = source_freshness
-                                .serves_recently_verified_source(
-                                    &latest.generation().snapshot().content_identity,
-                                    &project_root,
-                                    &shutting_down,
-                                );
+                            // publish. An expired clock, or a git-index sample
+                            // this seal moved, is not a different snapshot.
+                            // Dropping the witness here cleared the newer
+                            // generation. The lexical full-copy is not decided
+                            // on this swap.
+                            let sealed_currency = scheduler.currency_witness_for_sealed_snapshot(
+                                &latest.generation().manifest().generation_id,
+                                &latest.generation().snapshot().content_identity,
+                            );
                             let mut serving = serving_generation
                                 .write()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1876,24 +1975,14 @@ impl CodeIndexSchedulerRegistryV1 {
                             // serves and this pass re-observed the checkout it
                             // was sealed from. Arming only on a publication
                             // left a restored, retired, or withdrawn seat
-                            // permanently unproven — busy verified reads then
+                            // permanently unproven, busy verified reads then
                             // refused a generation whose source was current.
                             match outcome {
                                 ServingSwapOutcomeV1::Seated | ServingSwapOutcomeV1::Offered => {
                                     *serving_source_witness
                                         .write()
                                         .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                        pass_proves_latest
-                                            .then(|| {
-                                                source_freshness.source_currency_witness_for(
-                                                    &latest.generation().manifest().generation_id,
-                                                    &latest
-                                                        .generation()
-                                                        .snapshot()
-                                                        .content_identity,
-                                                )
-                                            })
-                                            .flatten();
+                                        sealed_currency;
                                 }
                                 // The durable pointer names a successor, so no
                                 // proof of this seat's currency exists to bind.
@@ -1954,18 +2043,23 @@ impl CodeIndexSchedulerRegistryV1 {
                                 ServingSwapOutcomeV1::Offered => {}
                             }
                             // A seated owner whose exact and lexical serving
-                            // are ready has at most the clone-fingerprint
-                            // backfill left. That is demand-driven work: a
-                            // query over pending clone work requests the
-                            // background pass that drives it (see
-                            // `query_admission_serves_v14_while_clone_successor_is_pending`),
-                            // as does the ordinary cadence, so the worker
-                            // stays idle after the seat. Only an owner still
-                            // short of ready owners needs the follow-up now.
-                            if text_latest.text_projection_needs_work()
-                                && !text_latest.query_owners_are_ready()
-                            {
-                                Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
+                            // are ready still owes its clone-fingerprint
+                            // backfill, and this worker owns that slice.
+                            // Leaving it for query demand only looked free:
+                            // the worker has no cadence timer, it blocks on
+                            // `wake.notified()`, so the next search had to
+                            // stamp the pending-wake slot to deliver it, and
+                            // the freshness ladder reads that slot as
+                            // `refresh_in_flight` and answered `verifying`
+                            // for a seat whose source proof was current.
+                            // Stamp what the two sibling publication sites
+                            // above already stamp.
+                            if text_latest.text_projection_needs_work() {
+                                Self::note_visible_worker_continuation(
+                                    &worker_reconcile_in_progress,
+                                    &worker_pending_wake,
+                                    &worker_wake,
+                                );
                             }
                         }
                         Ok(Err(error)) => {
@@ -1994,7 +2088,27 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 // The source proof and serving witness are now published as
                 // one lifecycle. Optional receipts do not keep source
-                // verification in flight.
+                // verification in flight. A clone-backfill continuation this
+                // pass already knows about is stamped first, so the drop is
+                // not an empty slot.
+                if clone_backfill_waiting_for_source
+                    && matches!(
+                        &result,
+                        Ok((Ok(CodeIndexReconcileOutcomeV1::Noop(_)), _, _))
+                    )
+                    && worker_text_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_some()
+                    && worker_source_freshness
+                        .ready_without_stat(&worker_project_root, &worker_shutting_down)
+                {
+                    Self::note_visible_worker_continuation(
+                        &worker_reconcile_in_progress,
+                        &worker_pending_wake,
+                        &worker_wake,
+                    );
+                }
                 drop(reconcile_pass.take());
                 if let Ok((Ok(outcome), _, _)) = &result {
                     // A pass that ran to a terminal outcome proves neither the
@@ -2026,32 +2140,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         && worker_source_freshness
                             .ready_without_stat(&worker_project_root, &worker_shutting_down)
                     {
-                        // A seat whose publishing pass could not prove its
-                        // source (`code_index_post_projection_source_unverified`)
-                        // installs without a currency witness. The swap arm
-                        // re-proves such a seat as `Offered`, but a retained
-                        // native graph that already serves skips the graph
-                        // prepare and with it the swap, so no later pass ever
-                        // reached that arm: every ready probe kept requesting a
-                        // reconcile and the route stayed `stale / verifying`
-                        // indefinitely. This unchanged pass verified exactly
-                        // the snapshot the seat was sealed from, so bind that
-                        // proof here.
-                        if let CodeIndexReconcileOutcomeV1::Noop(evidence) = outcome {
-                            Self::bind_unproven_seat_to_verified_source(
-                                &worker_serving_generation,
-                                &worker_serving_source_witness,
-                                &worker_source_freshness,
-                                &evidence.snapshot_content_identity,
-                            );
-                        }
+                        // The pass bound the seat's source proof under the
+                        // scheduler lock; announce the change now that the
+                        // proof is public.
                         worker_serving_generation_changed.send_replace(());
-                        // The retained slice was checked before reconciliation
-                        // renewed this proof. Preserve its wake now that source
-                        // is current, without requiring another query arrival.
-                        if clone_backfill_waiting_for_source {
-                            Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
-                        }
+                        // The clone-backfill continuation was stamped before
+                        // this pass dropped `reconcile_in_progress`.
                     }
                 } else {
                     // Surface bounded non-terminal failure without new project-path data.
@@ -2269,7 +2363,6 @@ impl CodeIndexSchedulerRegistryV1 {
                             PublishedTextProjectionOutcomeV1::Unfinished
                         }
                     };
-                    drop(reconcile_pass.take());
                     match outcome {
                         PublishedTextProjectionOutcomeV1::Finished
                             if !retained_head_recovered_without_complete_replay
@@ -2316,6 +2409,9 @@ impl CodeIndexSchedulerRegistryV1 {
                             Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                         }
                     }
+                    // The continuation is already in the slot. Dropping here
+                    // is the first moment this pass looks idle.
+                    drop(reconcile_pass.take());
                 }
                 if worker_shutting_down.load(Ordering::Acquire) {
                     tracing::info!(

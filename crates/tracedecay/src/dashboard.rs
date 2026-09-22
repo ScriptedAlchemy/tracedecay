@@ -1,12 +1,12 @@
 //! Root-side dashboard composition: the SPA-router seam plus the
 //! daemon-coupled integration fixtures.
 //!
-//! The dashboard API — routes, read models, services and their tests — lives
+//! The dashboard API, routes, read models, services and their tests, lives
 //! in `crates/tracedecay-dashboard-api`; callers import it directly.
 //!
 //! The embedded asset bundle is not generated here: the shipping binary crate
 //! embeds it and hands it to this library through the registered product
-//! runtime ([`crate::product_runtime`]). The canonical API crate owns the
+//! runtime ([`mod@crate::product_runtime`]). The canonical API crate owns the
 //! resulting HTTP router and transport policy.
 
 use tracedecay_dashboard_api::DashboardProjectContext;
@@ -229,7 +229,7 @@ pub async fn dashboard_configuration_authorities_for_test(
 }
 
 /// Composes the daemon-owned LCM read authority over the fixture's
-/// registered project-sessions store — the same `DashboardLcmReadAdapter`
+/// registered project-sessions store, the same `DashboardLcmReadAdapter`
 /// over the daemon session retrieval service that the MCP dashboard
 /// composition mounts in production. Without it every `hermes-lcm` and
 /// explorer session read answers `lcm_daemon_authority_unavailable`.
@@ -267,7 +267,7 @@ pub async fn dashboard_lcm_read_authority_for_test(
 }
 
 /// Composes the daemon-owned git-correlation read authority over the
-/// fixture's registered project-sessions store — the same
+/// fixture's registered project-sessions store, the same
 /// `DashboardGitCorrelationReadAdapter` the MCP dashboard composition mounts
 /// in production. Without it Loom's session↔commit and branch/worktree
 /// sources answer their typed unavailable states.

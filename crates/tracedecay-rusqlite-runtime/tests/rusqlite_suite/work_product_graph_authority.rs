@@ -1,6 +1,6 @@
 //! The Work product graph authority, end to end over the registered store.
 //!
-//! This suite drives the REAL composition — the application's
+//! This suite drives the REAL composition, the application's
 //! `WorkProductMutationServiceV1` and `WorkProductReadServiceV1` over the
 //! registered exact-SQL storage, with no port doubles. A suite that
 //! substituted its own port would not prove the registered-store path.
@@ -26,7 +26,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,
-    ManifestDigest, MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, TaskId, UtcMicros,
+    MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, TaskId, UtcMicros,
     WorkAcceptanceCriterionV1, WorkCommandId, WorkGraphVersionV1, WorkHierarchyV1,
     WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
     WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductGraphV1,
@@ -43,17 +43,9 @@ const REPOSITORY: &str = "repository.work-product.fixture";
 /// `occurred_at`, so a projection is never asked to describe its own future.
 const PROJECTED_AT: UtcMicros = UtcMicros(400);
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn binding() -> WorkProductBindingV1 {
     WorkProductBindingV1::new(
@@ -590,8 +582,8 @@ fn a_selection_that_covers_no_event_has_no_current_version() {
 /// The no-Git poisoning defect, stated as the contract that replaced it.
 ///
 /// A profile owner creates work with no Git relation, and later an authority
-/// that can only act under a repository scope — attempt admission is the real
-/// one — appends a repository-scoped event to the same owner journal. The old
+/// that can only act under a repository scope, attempt admission is the real
+/// one, appends a repository-scoped event to the same owner journal. The old
 /// rule refused the entire no-Git read from that moment on, permanently, so
 /// work the caller was plainly authorized for became unreadable because of an
 /// event admitted beside it.
@@ -675,7 +667,7 @@ fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_selection() {
     assert_eq!(snapshot.projections().workload().total_effort(), 2);
 
     // A repository selection covers the scope-free events too, so the same
-    // journal reads whole under it — with a `Complete` disclosure. That is the
+    // journal reads whole under it, with a `Complete` disclosure. That is the
     // remedy the mutation refusal names, proven to actually work.
     let whole = reads(&store)
         .read_graph(
@@ -691,7 +683,7 @@ fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_selection() {
 
 /// Reads answer over a covered slice; mutations do not. A prepared change pins
 /// the head it read, and under partial coverage that head is the slice's head,
-/// not the journal's — so the refusal is kept, but typed by its actual cause
+/// not the journal's, so the refusal is kept, but typed by its actual cause
 /// with the selection remedy in it, instead of the concealed
 /// `not_found_or_not_authorized` the old rule produced.
 #[test]

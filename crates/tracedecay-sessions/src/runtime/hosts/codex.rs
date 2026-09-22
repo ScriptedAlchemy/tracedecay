@@ -6,36 +6,36 @@
 //! line is `{"timestamp": "<iso8601>", "type": "<kind>", "payload": {…}}`. The
 //! relevant kinds for conversation text are:
 //!
-//! * `session_meta` — first line; `payload.cwd`, session `id`. Real rollouts
+//! * `session_meta`, first line; `payload.cwd`, session `id`. Real rollouts
 //!   carry no `model` here (only `model_provider`); the active model is on
 //!   `turn_context` lines and can change mid-session.
 //! * `event_msg` with `payload.type == "item_completed"` and
-//!   `payload.item.type == "UserMessage"` — a current Codex user prompt
+//!   `payload.item.type == "UserMessage"`, a current Codex user prompt
 //!   (`payload.item.content`). The stable item id is retained as message
 //!   identity. Legacy `payload.type == "user_message"` records remain
 //!   supported through `payload.message`.
-//! * `event_msg` with `payload.type == "agent_message"` — a real assistant reply
+//! * `event_msg` with `payload.type == "agent_message"`, a real assistant reply
 //!   (`payload.message`).
-//! * `event_msg` with `payload.type == "token_count"` — provider usage captured
+//! * `event_msg` with `payload.type == "token_count"`, provider usage captured
 //!   by the canonical observation path, not conversational message metadata.
-//! * `event_msg` with `payload.type == "thread_goal_updated"` — the structured
+//! * `event_msg` with `payload.type == "thread_goal_updated"`, the structured
 //!   session goal and its lifecycle (`payload.goal.{objective,status,tokensUsed,
 //!   timeUsedSeconds,createdAt,updatedAt}`). `TraceDecay` records each state as a
 //!   compact `goal` row (objective as text, the rest in `metadata_json`) so the
 //!   session's goal and whether it is still active is searchable. `status` is
-//!   stored verbatim — real rollouts emit `active`/`paused`, but any future
+//!   stored verbatim, real rollouts emit `active`/`paused`, but any future
 //!   value (e.g. `completed`) is carried through unchanged rather than mapped to
 //!   a fixed enum. Consecutive events that repeat the same `(objective, status)`
 //!   within one parse pass are deduped; each genuine transition keeps its row.
-//! * `compacted` — Codex context-compression boundary. The rollout stores the
+//! * `compacted`. Codex context-compression boundary. The rollout stores the
 //!   replacement history and an encrypted compaction body, so `TraceDecay` records
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
-//! * `response_item` goal context — Codex replays active thread goals as
+//! * `response_item` goal context. Codex replays active thread goals as
 //!   synthetic user context. `TraceDecay` indexes those as compact goal-context
 //!   records so LCM can catalog the objective and budget without treating the
 //!   instruction boilerplate as normal conversation.
-//! * subagent rollouts — separate `rollout-*.jsonl` files whose leading
+//! * subagent rollouts, separate `rollout-*.jsonl` files whose leading
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
@@ -127,7 +127,7 @@ const IDLE_FULL_VALIDATION_CYCLES: u16 = 256;
 /// Retained directories revalidated on *every* idle poll, ahead of the
 /// round-robin rotation.
 ///
-/// Creating or removing a transcript changes exactly one directory identity —
+/// Creating or removing a transcript changes exactly one directory identity,
 /// its parent. A uniform rotation over the whole retained authority therefore
 /// hides a brand-new session behind an O(corpus) rotation, so recent-first
 /// discovery would only notice today's session after several scheduler ticks
@@ -269,17 +269,23 @@ impl Default for CodexReplayIndex {
 }
 
 #[cfg(test)]
-static CODEX_REPLAY_INDEX_ENTRIES_VISITED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// Per-thread, because `indexed_replay_pass` runs entirely on its caller's
+    /// thread and the one test that measures B-tree traversal shares the
+    /// process with every other test replaying an index in parallel. A global
+    /// counter measures the whole suite's traversal, not this pass's.
+    static CODEX_REPLAY_INDEX_ENTRIES_VISITED: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 fn reset_replay_index_entries_visited_for_test() {
-    CODEX_REPLAY_INDEX_ENTRIES_VISITED.store(0, std::sync::atomic::Ordering::Release);
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.with(|visited| visited.set(0));
 }
 
 #[cfg(test)]
 fn replay_index_entries_visited_for_test() -> u64 {
-    CODEX_REPLAY_INDEX_ENTRIES_VISITED.load(std::sync::atomic::Ordering::Acquire)
+    CODEX_REPLAY_INDEX_ENTRIES_VISITED.with(std::cell::Cell::get)
 }
 
 fn indexed_replay_pass(
@@ -295,7 +301,8 @@ fn indexed_replay_pass(
     let lower = position.map_or(Bound::Unbounded, Bound::Excluded);
     for indexed in index.paths.range((lower, Bound::Unbounded)) {
         #[cfg(test)]
-        CODEX_REPLAY_INDEX_ENTRIES_VISITED.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        CODEX_REPLAY_INDEX_ENTRIES_VISITED
+            .with(|visited| visited.set(visited.get().saturating_add(1)));
         let path_bytes =
             u64::try_from(crate::runtime::source::path_byte_len(&indexed.path)).unwrap_or(u64::MAX);
         if paths.len() >= bounds.max_files.max(1)
@@ -1957,7 +1964,7 @@ fn retained_scan_step(
     // The structural walk and the candidate walk are distinct bounded budgets.
     // Charging both against one counter lets a deep-but-small tree spend the
     // whole pass discovering its own bucket layout, leaving nothing to retain
-    // candidates with — a corpus far under `max_files` then reports truncation
+    // candidates with. A corpus far under `max_files` then reports truncation
     // forever. Each phase is bounded independently.
     // Reaching one candidate can require walking every component of its dated
     // bucket path. Scale structural work with the requested candidate slice

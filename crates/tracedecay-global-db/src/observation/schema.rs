@@ -29,8 +29,8 @@ pub(super) const OBSERVATION_SCHEMA_MIGRATION: &str = "observations-v2-canonical
 /// [`ResetRequired`](tracedecay_domain::errors::TraceDecayError::ResetRequired)
 /// instead. The marker is recorded for any authority that holds no rows yet,
 /// and for one whose retained rows and cursors name no Cline/Roo/Kilo source at
-/// all — the scheme change touched only those hosts, so such a store cannot
-/// double-count anything (see [`cline_like_sources_present`]). Only stores
+/// all, the scheme change touched only those hosts, so such a store cannot
+/// double-count anything (see `cline_like_sources_present`). Only stores
 /// carrying old-scheme rows from those hosts refuse.
 pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
     "observations-native-source-scheme-v2-cline-ui-messages";
@@ -38,8 +38,8 @@ pub const OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION: &str =
 /// Marker proving every `observation_repository_provenance` row references
 /// its repository capture through `observation_repository_captures` instead of
 /// embedding it. One checkout state is shared by every observation taken under
-/// it, so the embedded copy — held twice per row, in `capture_json` and inside
-/// `availability_json.value` — repeated a handful of distinct captures hundreds
+/// it, so the embedded copy, held twice per row, in `capture_json` and inside
+/// `availability_json.value`, repeated a handful of distinct captures hundreds
 /// of thousands of times. Rows written before the marker are split in place on
 /// the next schema admission.
 pub(super) const OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION: &str =
@@ -143,7 +143,7 @@ async fn observation_authority_populated(
 }
 
 /// Whether any retained observation or admission cursor names a Cline, Roo
-/// Code, or Kilo source — the only hosts whose admission scheme changed under
+/// Code, or Kilo source, the only hosts whose admission scheme changed under
 /// [`OBSERVATION_NATIVE_SOURCE_SCHEME_MIGRATION`]. A populated authority
 /// without such rows was written by a scheme that never applied to it, so
 /// enrolling it is exact rather than a migration of ambiguous data; one with
@@ -301,9 +301,9 @@ fn canonical_column_set(columns: &[&str]) -> BTreeSet<String> {
 
 /// Refuses a store whose `observations` or `source_cursor_advances` table
 /// carries anything but the canonical shape (plus, for `observations`, its
-/// creation marker). The alternative shapes — the `idempotency_key` column
+/// creation marker). The alternative shapes, the `idempotency_key` column
 /// era, unmarked non-AUTOINCREMENT tables, and the byte-offset
-/// `source_cursor_advances` predecessor — were branch-local and never shipped
+/// `source_cursor_advances` predecessor, were branch-local and never shipped
 /// in a published release, so there is no sanctioned migration: the store
 /// surfaces a typed `ResetRequired` naming this authority instead of
 /// rewriting data in place. Runs at schema installation for fresh stores and

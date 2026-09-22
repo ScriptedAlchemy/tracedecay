@@ -2,6 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_domain::collapse_whitespace;
 
 use crate::hook_events::HookEvent;
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
@@ -23,15 +24,15 @@ pub struct McpToolAnalyticsEvent<'a> {
     /// `clientInfo.name` (e.g. `"claude-code"`, `"codex"`, `"cursor"`).
     /// `None` when the client omitted `clientInfo` or no `initialize` was
     /// observed yet (e.g. a daemon-proxied first call). Bounded to the
-    /// negotiated name only — never the full `clientInfo` payload.
+    /// negotiated name only, never the full `clientInfo` payload.
     pub client_name: Option<&'a str>,
     /// Stable per-process MCP server instance id (a random hex token minted
     /// once at server start). Recorded in `metadata.mcp_instance_id` on every
     /// event so calls from one server lifetime can be grouped even when
-    /// `session_id` is absent — which is the common case: the MCP transport
+    /// `session_id` is absent, which is the common case: the MCP transport
     /// negotiates only `clientInfo` (host name), never a session/conversation
     /// id, so `session_id` is populated only when the client happens to thread
-    /// `session_id`/`sessionId` through the tool arguments (rare — ~97.6% of
+    /// `session_id`/`sessionId` through the tool arguments (rare, ~97.6% of
     /// historical events had a NULL `session_id`). This is an honest grouping
     /// key, NOT a real session id, so it stays in metadata rather than
     /// masquerading in the `session_id` column.
@@ -57,10 +58,10 @@ const CARDINALITY_LABEL_HASH_CHARS: usize = 16;
 const LOOKUP_IDENTIFIER_MAX_BYTES: usize = 256;
 
 /// Collapse whitespace and cap a failure reason to
-/// [`FAILURE_REASON_MAX_CHARS`] characters (never argument bodies — callers
+/// `FAILURE_REASON_MAX_CHARS` characters (never argument bodies, callers
 /// must derive `reason` from response/error text only).
 pub fn bounded_failure_reason(reason: &str) -> String {
-    let collapsed: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(reason);
     if collapsed.chars().count() <= FAILURE_REASON_MAX_CHARS {
         collapsed
     } else {
@@ -69,7 +70,7 @@ pub fn bounded_failure_reason(reason: &str) -> String {
 }
 
 /// Stable short hash for high-cardinality or private identifiers. Never
-/// embeds the raw value — only `h:` + truncated SHA-256 hex.
+/// embeds the raw value, only `h:` + truncated SHA-256 hex.
 fn hashed_cardinality_label(value: &str) -> String {
     let digest = sha256_hex(value.as_bytes());
     format!("h:{}", &digest[..CARDINALITY_LABEL_HASH_CHARS])
@@ -97,8 +98,8 @@ fn bounded_lookup_identifier(value: Option<&str>) -> Option<String> {
 }
 
 /// One durable spool sequence represents one admitted host event. Identical
-/// envelopes intentionally receive distinct sequences, so the sequence—not
-/// route/session content—is the non-lossy analytics idempotency identity.
+/// envelopes intentionally receive distinct sequences, so the sequence, not
+/// route/session content, is the non-lossy analytics idempotency identity.
 fn hook_route_idempotency_key(project_root: &Path, admission_seq: u64) -> String {
     hashed_cardinality_label(&format!(
         "hook_route_v1|{}|{admission_seq}",

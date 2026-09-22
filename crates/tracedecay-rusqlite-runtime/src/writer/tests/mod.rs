@@ -609,8 +609,8 @@ fn competing_write_authority_fails_instead_of_reporting_retryable_saturation() {
 
 /// Every compatible write already waiting must commit in one transaction.
 ///
-/// The guard is a ratio of two exact counters — commands per committed
-/// transaction — and deliberately not a duration: timings on a loaded machine
+/// The guard is a ratio of two exact counters, commands per committed
+/// transaction, and deliberately not a duration: timings on a loaded machine
 /// swing by more than the effect being protected, so an elapsed-time assertion
 /// here would be noise wearing a threshold. Counters do not move with load.
 ///

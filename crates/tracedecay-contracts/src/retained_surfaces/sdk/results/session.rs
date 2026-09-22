@@ -1,5 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::{
+    HydrationStateV1, SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1, TemporalModeV1,
+};
 
 use super::{RetainedErrorV1, RetainedOutcomeStatusV1};
 
@@ -98,6 +101,21 @@ pub enum HydrationStateResultV1 {
     UnverifiableLegacy,
 }
 
+impl From<HydrationStateV1> for HydrationStateResultV1 {
+    fn from(value: HydrationStateV1) -> Self {
+        match value {
+            HydrationStateV1::Available => Self::Available,
+            HydrationStateV1::RetainedButUnavailable => Self::RetainedButUnavailable,
+            HydrationStateV1::Redacted => Self::Redacted,
+            HydrationStateV1::Deleted => Self::Deleted,
+            HydrationStateV1::RetentionExpired => Self::RetentionExpired,
+            HydrationStateV1::Unauthorized => Self::Unauthorized,
+            HydrationStateV1::Locked => Self::Locked,
+            HydrationStateV1::UnverifiableLegacy => Self::UnverifiableLegacy,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TemporalOmissionV1 {
@@ -151,6 +169,17 @@ pub enum SessionCoverageModeV1 {
     Forensic,
 }
 
+impl From<TemporalModeV1> for SessionCoverageModeV1 {
+    fn from(value: TemporalModeV1) -> Self {
+        match value {
+            TemporalModeV1::Current => Self::Current,
+            TemporalModeV1::AsOf { cutoff } => Self::AsOf { cutoff: cutoff.0 },
+            TemporalModeV1::Evolution => Self::Evolution,
+            TemporalModeV1::Forensic => Self::Forensic,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCoverageStateV1 {
@@ -161,6 +190,20 @@ pub enum SessionCoverageStateV1 {
     Redacted,
     RetentionWithheld,
     Unavailable,
+}
+
+impl From<SessionSourceCoverageStateV1> for SessionCoverageStateV1 {
+    fn from(value: SessionSourceCoverageStateV1) -> Self {
+        match value {
+            SessionSourceCoverageStateV1::Fresh => Self::Fresh,
+            SessionSourceCoverageStateV1::Stale => Self::Stale,
+            SessionSourceCoverageStateV1::Partial => Self::Partial,
+            SessionSourceCoverageStateV1::Locked => Self::Locked,
+            SessionSourceCoverageStateV1::Redacted => Self::Redacted,
+            SessionSourceCoverageStateV1::RetentionWithheld => Self::RetentionWithheld,
+            SessionSourceCoverageStateV1::Unavailable => Self::Unavailable,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -202,6 +245,31 @@ pub enum SessionCoverageReasonV1 {
     Redacted,
     RetentionWithheld,
     Unavailable,
+}
+
+impl From<&SessionSourceCoverageReasonV1> for SessionCoverageReasonV1 {
+    fn from(value: &SessionSourceCoverageReasonV1) -> Self {
+        match value {
+            SessionSourceCoverageReasonV1::CaughtUp => Self::CaughtUp,
+            SessionSourceCoverageReasonV1::ProjectionBehindSource { lag } => {
+                Self::ProjectionBehindSource { lag: *lag }
+            }
+            SessionSourceCoverageReasonV1::SourceBehindTarget { lag } => {
+                Self::SourceBehindTarget { lag: *lag }
+            }
+            SessionSourceCoverageReasonV1::ProjectionAndSourceBehind {
+                projection_lag,
+                source_lag,
+            } => Self::ProjectionAndSourceBehind {
+                projection_lag: *projection_lag,
+                source_lag: *source_lag,
+            },
+            SessionSourceCoverageReasonV1::Locked => Self::Locked,
+            SessionSourceCoverageReasonV1::Redacted => Self::Redacted,
+            SessionSourceCoverageReasonV1::RetentionWithheld => Self::RetentionWithheld,
+            SessionSourceCoverageReasonV1::Unavailable => Self::Unavailable,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -594,4 +662,45 @@ pub struct WorkflowsResultV1 {
     pub runs: Option<Vec<WorkflowRunV1>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+#[cfg(test)]
+mod coverage_projection_tests {
+    use tracedecay_domain::{
+        HydrationStateV1, SessionSourceCoverageReasonV1, SessionSourceCoverageStateV1,
+        TemporalModeV1, UtcMicros,
+    };
+
+    use super::{
+        HydrationStateResultV1, SessionCoverageModeV1, SessionCoverageReasonV1,
+        SessionCoverageStateV1,
+    };
+
+    #[test]
+    fn coverage_projection_keeps_mode_cutoff_and_status_labels() {
+        assert_eq!(
+            SessionCoverageModeV1::from(TemporalModeV1::AsOf {
+                cutoff: UtcMicros(7),
+            }),
+            SessionCoverageModeV1::AsOf { cutoff: 7 }
+        );
+        assert_eq!(
+            SessionCoverageModeV1::from(TemporalModeV1::Forensic),
+            SessionCoverageModeV1::Forensic
+        );
+        assert_eq!(
+            SessionCoverageStateV1::from(SessionSourceCoverageStateV1::RetentionWithheld),
+            SessionCoverageStateV1::RetentionWithheld
+        );
+        assert_eq!(
+            SessionCoverageReasonV1::from(&SessionSourceCoverageReasonV1::ProjectionBehindSource {
+                lag: 4
+            }),
+            SessionCoverageReasonV1::ProjectionBehindSource { lag: 4 }
+        );
+        assert_eq!(
+            HydrationStateResultV1::from(HydrationStateV1::UnverifiableLegacy),
+            HydrationStateResultV1::UnverifiableLegacy
+        );
+    }
 }

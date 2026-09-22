@@ -218,20 +218,12 @@ pub fn configuration_authority_unavailable_error() -> DashboardConfigurationRout
 pub fn configuration_application_problem_error(
     problem: ApplicationProblemEnvelope,
 ) -> DashboardConfigurationRouteErrorV1 {
-    let status = match problem.problem.kind {
-        ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
-        ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
-        ApplicationProblemKind::Conflict
-        | ApplicationProblemKind::PartialEffect
-        | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
-        ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
-        ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
-        ApplicationProblemKind::Cancelled => StatusCode::CONFLICT,
-        ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+    // Cancellation stays a conflict on this historic configuration route.
+    // Every other kind uses the canonical application status.
+    let status = if problem.problem.kind == ApplicationProblemKind::Cancelled {
+        StatusCode::CONFLICT
+    } else {
+        crate::application_problem_status(problem.problem.kind)
     };
     let payload = serde_json::to_value(problem)
         .unwrap_or_else(|_| json!({ "detail": "configuration mutation was rejected" }));

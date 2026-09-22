@@ -228,11 +228,7 @@ fn project_http_binding(
             disposition: unavailable_disposition(availability),
         });
     };
-    let RouteExposureV1::Public {
-        binding_id,
-        route_path,
-    } = executable.exposure()
-    else {
+    let Some((binding_id, route_path)) = executable.public_route() else {
         return Ok(SdkExecutableBindingAvailabilityV1::Unavailable {
             operation_id: executable.operation_id().clone(),
             disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
@@ -244,7 +240,7 @@ fn project_http_binding(
         binding_id.clone(),
         sdk_method,
         SdkTransportBindingV1::Http {
-            route_path: route_path.clone(),
+            route_path: route_path.to_owned(),
         },
     )?;
     Ok(SdkExecutableBindingAvailabilityV1::available(binding))
@@ -365,7 +361,7 @@ mod tests {
     /// Handoff and multi-root shipped mounted HTTP routes that the SDK
     /// projection silently omitted, so authorized non-enumerating results were
     /// callable over HTTP but absent from both generated SDKs. Asserting the
-    /// whole mounted set — not one named family — is what keeps a future
+    /// whole mounted set, not one named family, is what keeps a future
     /// family from repeating that omission.
     #[test]
     fn sdk_registry_projects_every_mounted_family_including_handoff_and_multi_root() {

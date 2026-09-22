@@ -13,7 +13,7 @@ use tracedecay_code_extraction::{
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
-    WorktreeId, canonical_json_bytes, canonical_sha256,
+    WorktreeId, canonical_json_bytes, canonical_sha256, nonnegative_sha256_prefix,
 };
 
 const BODY_DIGEST_DOMAIN: &str = "tracedecay.clone-body.v1";
@@ -120,12 +120,12 @@ pub struct CloneBodyPayloadV1 {
     pub token_count: u32,
     pub conservative_normalization_revision: u16,
     pub conservative_digest: ManifestDigest,
-    pub conservative_tokens: Vec<ConservativeCloneTokenV1>,
+    pub conservative_tokens: Arc<[ConservativeCloneTokenV1]>,
     pub tokenization_status: CloneBodyTokenizationStatusV1,
     pub tokenization_issues: Vec<CloneBodyTokenizationIssueV1>,
     pub rename_normalization_revision: Option<u16>,
     pub rename_digest: Option<ManifestDigest>,
-    pub rename_tokens: Option<Vec<ConservativeCloneTokenV1>>,
+    pub rename_tokens: Option<Arc<[ConservativeCloneTokenV1]>>,
     pub rename_coverage: CloneBodyRenameStatusV1,
     pub rename_issues: Vec<CloneBodyRenameIssueV1>,
 }
@@ -361,10 +361,10 @@ impl CodeIndexCloneBodyV1 {
                 .fold(std::mem::size_of_val(tokens), |bytes, token| match token {
                     ConservativeCloneTokenV1::StructureStart { syntax_kind }
                     | ConservativeCloneTokenV1::StructureEnd { syntax_kind } => {
-                        bytes.saturating_add(syntax_kind.capacity())
+                        bytes.saturating_add(syntax_kind.len())
                     }
                     ConservativeCloneTokenV1::Syntax { syntax_kind, text } => bytes
-                        .saturating_add(syntax_kind.capacity())
+                        .saturating_add(syntax_kind.len())
                         .saturating_add(text.capacity()),
                 })
         }
@@ -432,7 +432,7 @@ impl CloneBodyPayloadV1 {
             token_count: body.non_trivia_token_count,
             conservative_normalization_revision: body.normalization_revision,
             conservative_digest: digests.conservative,
-            conservative_tokens: body.conservative_tokens.clone(),
+            conservative_tokens: Arc::clone(&body.conservative_tokens),
             tokenization_status: body.tokenization_status,
             tokenization_issues: body.tokenization_issues.clone(),
             rename_normalization_revision: body.rename_normalization_revision,
@@ -616,11 +616,7 @@ fn winnow_clone_tokens(
         .map(|window| {
             let bytes = canonical_json_bytes(&(FINGERPRINT_DOMAIN, window))
                 .map_err(|error| error.to_string())?;
-            let digest = Sha256::digest(bytes);
-            let prefix: [u8; 8] = digest[..8]
-                .try_into()
-                .map_err(|error: std::array::TryFromSliceError| error.to_string())?;
-            Ok(u64::from_be_bytes(prefix) & i64::MAX as u64)
+            Ok(nonnegative_sha256_prefix(Sha256::digest(bytes).as_slice()))
         })
         .collect::<Result<Vec<_>, String>>()?;
     select_rightmost_minima(&hashes)
@@ -668,7 +664,7 @@ pub fn verify_exact_clone_payload(
                 if payload.conservative_normalization_revision == key.normalization_revision
                     && payload.conservative_digest == key.digest =>
             {
-                Some(&payload.conservative_tokens)
+                Some(&payload.conservative_tokens[..])
             }
             CloneNormalizationClassV1::Rename
                 if payload.rename_normalization_revision == Some(key.normalization_revision)
@@ -1180,7 +1176,7 @@ mod fingerprint_tests {
     fn tokens(prefix: &str, count: usize) -> Vec<ConservativeCloneTokenV1> {
         (0..count)
             .map(|ordinal| ConservativeCloneTokenV1::Syntax {
-                syntax_kind: "identifier".to_owned(),
+                syntax_kind: std::borrow::Cow::Borrowed("identifier"),
                 text: format!("{prefix}{ordinal}"),
             })
             .collect()
@@ -1250,7 +1246,7 @@ mod fingerprint_tests {
         let left = tokens("left", CLONE_FINGERPRINT_K_V1);
         let mut right = left.clone();
         right[3] = ConservativeCloneTokenV1::Syntax {
-            syntax_kind: "identifier".to_owned(),
+            syntax_kind: std::borrow::Cow::Borrowed("identifier"),
             text: "different".to_owned(),
         };
 
@@ -1304,10 +1300,12 @@ mod fingerprint_tests {
             .validate()
             .expect("extracted tokens match their digests");
         let mut colliding = payload;
-        colliding.conservative_tokens[0] = ConservativeCloneTokenV1::Syntax {
-            syntax_kind: "identifier".to_owned(),
+        let mut tokens = colliding.conservative_tokens.to_vec();
+        tokens[0] = ConservativeCloneTokenV1::Syntax {
+            syntax_kind: std::borrow::Cow::Borrowed("identifier"),
             text: "colliding-but-different".to_owned(),
         };
+        colliding.conservative_tokens = tokens.into();
         assert_eq!(
             colliding.validate(),
             Err("clone payload digests do not match their canonical tokens".to_owned())
@@ -1321,7 +1319,7 @@ mod fingerprint_tests {
         right.extend(tokens("added-branch", 2));
         right.extend(left[10..20].iter().cloned());
         right.push(ConservativeCloneTokenV1::Syntax {
-            syntax_kind: "string".to_owned(),
+            syntax_kind: std::borrow::Cow::Borrowed("string"),
             text: "\"changed\"".to_owned(),
         });
         right.extend(left[21..].iter().cloned());
@@ -1360,7 +1358,7 @@ mod fingerprint_tests {
         assert_eq!(
             alignment.differences[1].right_tokens,
             vec![ConservativeCloneTokenV1::Syntax {
-                syntax_kind: "string".to_owned(),
+                syntax_kind: std::borrow::Cow::Borrowed("string"),
                 text: "\"changed\"".to_owned(),
             }]
         );

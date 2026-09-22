@@ -14,6 +14,7 @@ use crate::extraction_artifact::{
     ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1, ImportReexportScopeV1,
     import_module_kind,
 };
+use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, SourceSpan,
     UnresolvedRef, Visibility, generate_node_id,
@@ -28,12 +29,12 @@ struct ShadowedCallNames {
 }
 
 /// Receiver bindings whose type the function body states outright: typed
-/// parameters, typed `let`s, and `let`s initialised by a struct literal
-/// (`T { .. }`, possibly behind `?`). A dotted
+/// parameters, typed `let`s, `let`s initialised by a struct literal
+/// (`T { .. }`, possibly behind `?`), and `self` in a method. A dotted
 /// call on such a binding also names the method by its type
 /// (`builder.build()` → `ignore::WalkBuilder::build`), which is the only form
 /// the resolver can bind across files. Method calls and constructor-like names
-/// (`new`, `with_*`, `from_*`, `default`) are never treated as return-type evidence —
+/// (`new`, `with_*`, `from_*`, `default`) are never treated as return-type evidence.
 /// Rust does not require those associated functions to return their owning
 /// type. Bindings are function-scoped: a name bound more than once to
 /// different or unknown types is withheld rather than guessed.
@@ -61,11 +62,75 @@ impl ReceiverTypes {
     }
 }
 
+/// One type parameter's trait bounds, as a method owner.
+///
+/// `T: Processor` makes `value.process()` the callee `Processor::process`.
+/// Two bounds, or a bound the syntax does not name, stay unresolved so the
+/// call is not attached to both traits. This does not rename `self`: #1814
+/// still records that binding from the enclosing type.
+enum ParamBound {
+    Unbound,
+    Unique(String),
+    Ambiguous,
+}
+
+#[derive(Default)]
+struct TraitBounds {
+    parameters: BTreeMap<String, ParamBound>,
+}
+
+struct BoundClause {
+    paths: Vec<String>,
+    ambiguous: bool,
+}
+
+impl TraitBounds {
+    fn declare(&mut self, name: String) {
+        self.parameters.insert(name, ParamBound::Unbound);
+    }
+
+    fn knows(&self, name: &str) -> bool {
+        self.parameters.contains_key(name)
+    }
+
+    fn constrain(&mut self, name: &str, clause: BoundClause) {
+        if clause.paths.is_empty() && !clause.ambiguous {
+            return;
+        }
+        let Some(slot) = self.parameters.get_mut(name) else {
+            return;
+        };
+        if clause.ambiguous || clause.paths.len() != 1 {
+            *slot = ParamBound::Ambiguous;
+            return;
+        }
+        let Some(path) = clause.paths.into_iter().next() else {
+            *slot = ParamBound::Ambiguous;
+            return;
+        };
+        match slot {
+            ParamBound::Unbound => *slot = ParamBound::Unique(path),
+            ParamBound::Unique(existing) if existing == &path => {}
+            ParamBound::Unique(_) | ParamBound::Ambiguous => *slot = ParamBound::Ambiguous,
+        }
+    }
+
+    /// Replace a written type-parameter name with its unique trait. Any other
+    /// path, including the enclosing type recorded for `self`, is unchanged.
+    fn resolve(&self, path: String) -> Option<String> {
+        match self.parameters.get(path.as_str()) {
+            Some(ParamBound::Unique(bound)) => Some(bound.clone()),
+            Some(ParamBound::Ambiguous) => None,
+            Some(ParamBound::Unbound) | None => Some(path),
+        }
+    }
+}
+
 /// Internal state used during AST traversal.
 ///
 /// Borrows the caller's source for the lifetime of the walk: copying the
-/// whole file here made every `extract_parsed` pass — including incremental
-/// walks of one tiny item — pay a full-file memcpy before visiting a node.
+/// whole file here made every `extract_parsed` pass, including incremental
+/// walks of one tiny item, pay a full-file memcpy before visiting a node.
 struct ExtractionState<'s> {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
@@ -101,8 +166,7 @@ impl<'s> ExtractionState<'s> {
     ///
     /// The file root is pushed onto `node_stack` as the first frame when
     /// extraction begins, so iterating the stack already yields the file
-    /// path as the leading segment — prepending `self.file_path` here was
-    /// a leftover that duplicated the prefix (`<file>::<file>::Type::method`).
+    /// path as the leading segment.
     fn qualified_prefix(&self) -> String {
         self.node_stack
             .iter()
@@ -498,7 +562,7 @@ impl RustExtractor {
 
         Self::extract_annotations_from_modifiers(state, node, &id);
 
-        // Supertrait bounds (`trait Leaf: Middle + Base`) — emit one
+        // Supertrait bounds (`trait Leaf: Middle + Base`). Emit one
         // unresolved `Extends` ref per bound so the resolver can hook them
         // up to the corresponding trait nodes. Each bound is a
         // `type_identifier` reachable through the `bounds: trait_bounds`
@@ -545,7 +609,7 @@ impl RustExtractor {
     fn extract_trait_bound_name(state: &ExtractionState<'_>, bound: TsNode<'_>) -> Option<String> {
         match bound.kind() {
             "type_identifier" => Some(state.node_text(bound).to_string()),
-            // `Module::Trait` or `Trait<Generics>` — take the right-most
+            // `Module::Trait` or `Trait<Generics>`. Take the right-most
             // identifier so we ignore module paths and generic args.
             "scoped_type_identifier" | "generic_type" => {
                 let mut cursor = bound.walk();
@@ -1579,24 +1643,11 @@ impl RustExtractor {
                                 column: child.start_position().column as u32,
                                 file_path: state.file_path.clone(),
                             });
-                            // For dot-calls (e.g. `instance.method()`), also emit
-                            // a ref with just the method name so the resolver can
-                            // match it against impl method definitions.
-                            if let Some(method_name) = callee_name.rsplit('.').next()
-                                && method_name != callee_name
-                            {
-                                state.unresolved_refs.push(UnresolvedRef {
-                                    from_node_id: fn_node_id.to_string(),
-                                    reference_name: method_name.to_string(),
-                                    reference_kind: EdgeKind::Calls,
-                                    line: child.start_position().row as u32,
-                                    column: child.start_position().column as u32,
-                                    file_path: state.file_path.clone(),
-                                });
-                            }
-                            // A dotted call on a binding with a stated type also
-                            // names the method through its type, the only form
-                            // that binds across files.
+                            // The simple name of a dotted call is not itself a call.
+                            // `items.push()` must not bind a same-file `fn push`.
+                            // Only a stated receiver type names the method
+                            // (`Rows::len`), which is also the form that binds
+                            // across files.
                             if let Some(typed_method) =
                                 Self::typed_receiver_method(state, callee, receivers)
                             {
@@ -1639,7 +1690,7 @@ impl RustExtractor {
                     "token_tree" => {
                         Self::extract_calls_in_token_tree(state, child, fn_node_id);
                     }
-                    // Skip nested function definitions — they are handled separately.
+                    // Skip nested function definitions. They are handled separately.
                     "function_item" => {}
                     _ => {
                         Self::extract_call_sites(state, child, fn_node_id, receivers);
@@ -1664,11 +1715,83 @@ impl RustExtractor {
         }
         let value = callee.child_by_field_name("value")?;
         let field = callee.child_by_field_name("field")?;
-        if value.kind() != "identifier" || field.kind() != "field_identifier" {
+        if field.kind() != "field_identifier" {
             return None;
         }
-        let type_path = receivers.type_of(state.node_text(value))?;
+        // `self` is its own token, not an identifier. Both name a binding.
+        let receiver_name = match value.kind() {
+            "identifier" | "self" => state.node_text(value),
+            _ => return None,
+        };
+        let type_path = receivers.type_of(receiver_name)?;
         Some(format!("{type_path}::{}", state.node_text(field)))
+    }
+
+    /// The type `self` names in the enclosing impl or trait, carrying the
+    /// enclosing module path.
+    ///
+    /// Trait impls store `<Type as Trait>` so the method keeps a UFCS name.
+    /// `self` still names `Type`, the path a call site writes and the alias
+    /// same-file resolution binds. Same-file resolution keys a definition by
+    /// its file-relative qualified name, so an impl inside `mod inner` has to
+    /// name `inner::Type::method` or the call binds nothing.
+    fn enclosing_receiver_type(state: &ExtractionState<'_>) -> Option<String> {
+        let owner = state
+            .node_stack
+            .iter()
+            .rposition(|(_, id)| id.starts_with("impl:") || id.starts_with("trait:"))?;
+        let (name, id) = &state.node_stack[owner];
+        let type_name = if id.starts_with("impl:") {
+            Self::impl_owner_type_name(name)
+        } else {
+            name.as_str()
+        };
+        if type_name.is_empty()
+            || type_name == "Self"
+            || type_name == "<unknown>"
+            || type_name == "<anonymous>"
+        {
+            return None;
+        }
+        // Frame 0 is the file root, which the qualified name drops.
+        let mut path = state
+            .node_stack
+            .get(1..owner)
+            .unwrap_or_default()
+            .iter()
+            .map(|(segment, _)| segment.as_str())
+            .collect::<Vec<_>>();
+        path.push(type_name);
+        Some(path.join("::"))
+    }
+
+    /// The self type inside a stored impl owner name.
+    ///
+    /// A trait impl stores `<Type as Trait>`, and `Type` can itself be a
+    /// projection (`<Foo as Assoc>::Item`), so the delimiter is the ` as ` at
+    /// depth zero inside the wrapper, not the first one in the string.
+    fn impl_owner_type_name(owner: &str) -> &str {
+        let Some(inner) = owner.strip_prefix('<') else {
+            return owner;
+        };
+        let mut depth = 0_i32;
+        for (index, character) in inner.char_indices() {
+            match character {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {
+                    if depth == 0 && inner[index..].starts_with(" as ") {
+                        return inner[..index].trim();
+                    }
+                }
+            }
+        }
+        owner
     }
 
     /// Records every binding the function introduces with the type it states,
@@ -1680,19 +1803,35 @@ impl RustExtractor {
         function: TsNode<'_>,
         receivers: &mut ReceiverTypes,
     ) {
+        let bounds = Self::trait_bounds_for(state, function);
+        Self::collect_receiver_bindings(state, node, function, receivers, &bounds);
+    }
+
+    fn collect_receiver_bindings(
+        state: &ExtractionState<'_>,
+        node: TsNode<'_>,
+        function: TsNode<'_>,
+        receivers: &mut ReceiverTypes,
+        bounds: &TraitBounds,
+    ) {
         match node.kind() {
+            "self_parameter" => {
+                if let Some(type_path) = Self::enclosing_receiver_type(state) {
+                    receivers.record("self".to_owned(), Some(type_path));
+                }
+            }
             "parameter" => {
                 if let Some(pattern) = node.child_by_field_name("pattern") {
                     let type_path = node
                         .child_by_field_name("type")
-                        .and_then(|ty| Self::stated_type_path(state, ty));
+                        .and_then(|ty| Self::receiver_type_path(state, ty, bounds));
                     Self::record_receiver_pattern(state, pattern, type_path, receivers);
                 }
             }
             "let_declaration" => {
                 if let Some(pattern) = node.child_by_field_name("pattern") {
                     let type_path = match node.child_by_field_name("type") {
-                        Some(ty) => Self::stated_type_path(state, ty),
+                        Some(ty) => Self::receiver_type_path(state, ty, bounds),
                         None => node
                             .child_by_field_name("value")
                             .and_then(|value| Self::stated_initializer_type_path(state, value)),
@@ -1729,7 +1868,7 @@ impl RustExtractor {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
-                Self::collect_receiver_types(state, cursor.node(), function, receivers);
+                Self::collect_receiver_bindings(state, cursor.node(), function, receivers, bounds);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -1737,15 +1876,15 @@ impl RustExtractor {
         }
     }
 
-    /// A bare identifier pattern takes `type_path`; every identifier inside any
-    /// other pattern is bound with an unknown type.
+    /// A bare identifier or `self` pattern takes `type_path`; every identifier
+    /// inside any other pattern is bound with an unknown type.
     fn record_receiver_pattern(
         state: &ExtractionState<'_>,
         pattern: TsNode<'_>,
         type_path: Option<String>,
         receivers: &mut ReceiverTypes,
     ) {
-        if pattern.kind() == "identifier" {
+        if pattern.kind() == "identifier" || pattern.kind() == "self" {
             receivers.record(state.node_text(pattern).to_owned(), type_path);
             return;
         }
@@ -1763,10 +1902,18 @@ impl RustExtractor {
     /// The nominal type path a type annotation names, seen through references,
     /// generic arguments, and `dyn`/`impl` trait objects; `None` for tuples,
     /// slices, function pointers, and anything else without one nominal head.
+    /// `Self` is the enclosing impl or trait type when one is on the stack.
     fn stated_type_path(state: &ExtractionState<'_>, ty: TsNode<'_>) -> Option<String> {
         match ty.kind() {
             "type_identifier" | "scoped_type_identifier" => {
-                Some(state.node_text(ty).to_owned()).filter(|path| path != "Self")
+                let path = state.node_text(ty);
+                if path == "Self" {
+                    // `Self` in an annotation is the enclosing impl or trait,
+                    // not a type the file declared under that name.
+                    Self::enclosing_receiver_type(state)
+                } else {
+                    Some(path.to_owned())
+                }
             }
             "reference_type" | "generic_type" => ty
                 .child_by_field_name("type")
@@ -1774,13 +1921,172 @@ impl RustExtractor {
             "dynamic_type" | "abstract_type" => ty
                 .child_by_field_name("trait")
                 .and_then(|inner| Self::stated_type_path(state, inner)),
+            "higher_ranked_trait_bound" => ty
+                .child_by_field_name("type")
+                .and_then(|inner| Self::stated_type_path(state, inner)),
+            // `impl Trait + 'a` still names that trait. Two nominals do not.
+            "bounded_type" => Self::unique_sum_type_path(state, ty),
             _ => None,
         }
     }
 
+    /// A parameter type, with a type parameter replaced by its unique trait
+    /// bound. `Self` is left as #1814 mapped it: the enclosing type, not the
+    /// trait the parameter happens to implement.
+    fn receiver_type_path(
+        state: &ExtractionState<'_>,
+        ty: TsNode<'_>,
+        bounds: &TraitBounds,
+    ) -> Option<String> {
+        if Self::annotation_is_self(state, ty) {
+            return Self::enclosing_receiver_type(state);
+        }
+        bounds.resolve(Self::stated_type_path(state, ty)?)
+    }
+
+    fn annotation_is_self(state: &ExtractionState<'_>, ty: TsNode<'_>) -> bool {
+        match ty.kind() {
+            "type_identifier" => state.node_text(ty) == "Self",
+            "reference_type" => ty
+                .child_by_field_name("type")
+                .is_some_and(|inner| Self::annotation_is_self(state, inner)),
+            _ => false,
+        }
+    }
+
+    fn unique_sum_type_path(state: &ExtractionState<'_>, ty: TsNode<'_>) -> Option<String> {
+        let mut found = None;
+        let mut cursor = ty.walk();
+        if !cursor.goto_first_child() {
+            return None;
+        }
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                let path = match child.kind() {
+                    "lifetime" | "use_bounds" => None,
+                    "bounded_type" => Self::unique_sum_type_path(state, child),
+                    _ => Self::stated_type_path(state, child),
+                };
+                match path {
+                    None if matches!(child.kind(), "lifetime" | "use_bounds") => {}
+                    None => return None,
+                    Some(path) => {
+                        if found.replace(path).is_some() {
+                            return None;
+                        }
+                    }
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        found
+    }
+
+    fn trait_bounds_for(state: &ExtractionState<'_>, function: TsNode<'_>) -> TraitBounds {
+        let mut ancestors = Vec::new();
+        let mut current = function.parent();
+        while let Some(node) = current {
+            if matches!(node.kind(), "function_item" | "function_signature_item") {
+                break;
+            }
+            if matches!(node.kind(), "impl_item" | "trait_item") {
+                ancestors.push(node);
+            }
+            current = node.parent();
+        }
+        ancestors.reverse();
+        let mut bounds = TraitBounds::default();
+        for item in ancestors {
+            Self::absorb_generic_bounds(state, item, &mut bounds);
+        }
+        Self::absorb_generic_bounds(state, function, &mut bounds);
+        bounds
+    }
+
+    fn absorb_generic_bounds(
+        state: &ExtractionState<'_>,
+        item: TsNode<'_>,
+        bounds: &mut TraitBounds,
+    ) {
+        if let Some(parameters) = item.child_by_field_name("type_parameters") {
+            let mut cursor = parameters.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "type_parameter"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = state.node_text(name_node).to_owned();
+                        bounds.declare(name.clone());
+                        if let Some(clause) = child.child_by_field_name("bounds") {
+                            bounds.constrain(&name, Self::trait_bound_clause(state, clause));
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(where_clause) = find_direct_child_by_kind(item, "where_clause") else {
+            return;
+        };
+        let mut cursor = where_clause.walk();
+        if !cursor.goto_first_child() {
+            return;
+        }
+        loop {
+            let child = cursor.node();
+            if child.kind() == "where_predicate"
+                && let Some(left) = child.child_by_field_name("left")
+                && left.kind() == "type_identifier"
+            {
+                let name = state.node_text(left);
+                if bounds.knows(name)
+                    && let Some(clause) = child.child_by_field_name("bounds")
+                {
+                    bounds.constrain(name, Self::trait_bound_clause(state, clause));
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+
+    fn trait_bound_clause(state: &ExtractionState<'_>, bounds: TsNode<'_>) -> BoundClause {
+        let mut clause = BoundClause {
+            paths: Vec::new(),
+            ambiguous: false,
+        };
+        let mut cursor = bounds.walk();
+        if !cursor.goto_first_child() {
+            return clause;
+        }
+        loop {
+            let child = cursor.node();
+            if child.is_named() {
+                match child.kind() {
+                    "lifetime" | "use_bounds" | "removed_trait_bound" => {}
+                    _ => match Self::stated_type_path(state, child) {
+                        Some(path) => clause.paths.push(path),
+                        None => clause.ambiguous = true,
+                    },
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+        clause
+    }
+
     /// The type a `let` initialiser states in syntax: a `T { .. }` literal,
-    /// optionally behind `?`. Method names are never return-type evidence —
-    /// abstain rather than fabricate a receiver type.
+    /// optionally behind `?`. Method names are never return-type evidence.
+    /// Abstain rather than fabricate a receiver type.
     fn stated_initializer_type_path(
         state: &ExtractionState<'_>,
         value: TsNode<'_>,
@@ -1909,10 +2215,10 @@ impl RustExtractor {
                     continue;
                 }
             } else if cur.kind() == "token_tree" {
-                // Standalone token_tree (e.g. `{…}` or `(…)` block) — recurse.
+                // Standalone token_tree (e.g. `{…}` or `(…)` block). Recurse.
                 Self::extract_calls_in_token_tree(state, cur, fn_node_id);
             } else if cur.kind() == "macro_invocation" {
-                // Nested macro inside a macro — handled via extract_call_sites.
+                // Nested macro inside a macro. Handled via extract_call_sites.
                 // Receiver types are not tracked through macro token trees.
                 Self::extract_call_sites(state, cur, fn_node_id, &ReceiverTypes::default());
             }
@@ -1995,7 +2301,7 @@ impl RustExtractor {
     /// Walks a type expression and emits an `UnresolvedRef` of the given kind
     /// for every named type identifier it contains. For a type like
     /// `Result<Vec<T>, MyError>` this yields refs for `Result`, `Vec`, `T`,
-    /// and `MyError` — letting the resolver wire them up to declared nodes.
+    /// and `MyError`, letting the resolver wire them up to declared nodes.
     fn emit_type_refs(
         state: &mut ExtractionState<'_>,
         type_node: TsNode<'_>,
@@ -2064,7 +2370,7 @@ impl RustExtractor {
         while let Some(sibling) = current {
             if sibling.kind() == "attribute_item" {
                 let text = state.node_text(sibling);
-                // Skip derive attributes — they are handled by extract_derive_macros.
+                // Skip derive attributes. They are handled by extract_derive_macros.
                 if !text.contains("derive") {
                     Self::extract_annotations_from_node(state, sibling, target_id);
                 }

@@ -139,7 +139,7 @@ struct FactVectorCache {
 /// (owner, fact, active assertion) triple can never serve a stale vector:
 /// any payload change activates a new assertion id and misses this cache.
 /// Without it, ranking re-derives every candidate fact's encoding on every
-/// search — ~512 SHA-256 digests per distinct token at 2048 dimensions —
+/// search, ~512 SHA-256 digests per distinct token at 2048 dimensions,
 /// which dominates recall latency once a store holds more than a handful of
 /// facts.
 static FACT_VECTOR_CACHE: LazyLock<Mutex<FactVectorCache>> =

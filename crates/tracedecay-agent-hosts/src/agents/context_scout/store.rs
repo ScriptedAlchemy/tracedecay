@@ -960,7 +960,7 @@ impl ProjectContextScoutDurableStoreV1 {
         // depend on it unconditionally: a concurrently opening sibling route
         // holds this project's single writer, so the lane arrives late or the
         // idle lease expires under it, and the read-shaped startup reports
-        // `Unavailable` — a durable-state verdict — for lane contention.
+        // `Unavailable`, a durable-state verdict, for lane contention.
         // Project open then refuses a route whose durable state is intact.
         // Decode through the read path first and answer from it whenever the
         // state already reconciles; the atomic write below stays exactly as it
@@ -982,7 +982,7 @@ impl ProjectContextScoutDurableStoreV1 {
     }
 
     /// Decodes the durable state without taking the writer lane. `None` means
-    /// "read it under the write path instead" — an unreadable, oversized, or
+    /// "read it under the write path instead", an unreadable, oversized, or
     /// invalid record is not something this read may decide alone.
     async fn load_state(&self) -> Option<StoredContextScoutStateV1> {
         let encoded = self.database.get_metadata(STORE_KEY_V1).await.ok()?;

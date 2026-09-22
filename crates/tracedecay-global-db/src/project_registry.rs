@@ -189,7 +189,7 @@ impl RegistryReapPlan {
         for retained in &self.retained {
             let _ = writeln!(
                 out,
-                "  retain  {} {} — {}",
+                "  retain  {} {}, {}",
                 retained.entry.kind.label(),
                 retained.entry.key,
                 retained.reason
@@ -238,8 +238,8 @@ pub const PROJECT_REGISTRY_AUTHORITY: &str = "project registry";
 /// Registry admission policy for a project root, returning the refusal reason
 /// when the root must not become a durable project authority.
 ///
-/// A checkout under the OS temporary directory is throwaway by construction —
-/// `mktemp -d` fixtures, extracted archives, scratch clones — yet registering
+/// A checkout under the OS temporary directory is throwaway by construction,
+/// `mktemp -d` fixtures, extracted archives, scratch clones, yet registering
 /// one writes a `code_projects` row and a shard that outlive it by years.
 /// The comparison is against the *profile*, not absolute: a hermetic profile
 /// that itself lives under the temp directory is equally throwaway, so test
@@ -597,7 +597,7 @@ async fn list_code_project_paths_from(
     } in roots
     {
         // One project's stale or malformed evidence must not make every
-        // registered root unlistable — a listing consumer (transcript sweeps,
+        // registered root unlistable, a listing consumer (transcript sweeps,
         // storage inventory) degrades to skipping that project, while doctor
         // still surfaces the row through its own registry checks. Genuine
         // storage failures (query/transaction errors) are a different class
@@ -721,8 +721,8 @@ impl RegisteredGlobalDb {
     /// Mints or refreshes the durable authority row for a code project.
     ///
     /// Every non-success is a **named** state. The previous `Option` return
-    /// coerced three unrelated truths — an admission refusal, an unresolvable
-    /// authority conflict, and any database fault — into one indistinguishable
+    /// coerced three unrelated truths, an admission refusal, an unresolvable
+    /// authority conflict, and any database fault, into one indistinguishable
     /// `None`, so no caller could tell "this root is not allowed to be an
     /// authority" from "the registry is broken right now":
     ///
@@ -910,7 +910,7 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
         // A committed authority that cannot be read back is a registry
-        // inconsistency, not an "unregistered project" — say so rather than
+        // inconsistency, not an "unregistered project", say so rather than
         // handing the caller an absence it would read as a clean refusal.
         self.get_code_project(&authority_project_id)
             .await?
@@ -1012,7 +1012,7 @@ impl RegisteredGlobalDb {
     /// Every non-success is a [`TraceDecayError::Database`] naming the
     /// `upsert store instance` operation, covering the write, the commit,
     /// and the post-commit read-back through
-    /// [`RegisteredGlobalDb::project_registry_context_by_id`] — including the
+    /// [`RegisteredGlobalDb::project_registry_context_by_id`], including the
     /// case where that context no longer names the store just written, which
     /// is a registry inconsistency and not a legitimate absence.
     ///
@@ -1281,7 +1281,7 @@ impl RegisteredGlobalDb {
     /// unregistered alias is [`ProjectStoreResolutionError::ProjectNotRegistered`],
     /// a project with zero or multiple stores stays
     /// `StoreNotRegistered`/`AmbiguousStores`, and a failed registry read is
-    /// `Unavailable` — never a silent "no store".
+    /// `Unavailable`, never a silent "no store".
     #[hotpath::skip]
     pub async fn resolve_project_store_by_alias(
         &self,
@@ -1616,7 +1616,7 @@ impl RegisteredGlobalDb {
         self.project_registry_context_by_id(&project_id).await
     }
 
-    /// Resolves one registered project context from an operator selector — a
+    /// Resolves one registered project context from an operator selector, a
     /// project id, a registered alias path, or a repository root whose
     /// identity marker or git common directory is registered. Path-shaped
     /// selectors skip the id lookup; id-shaped selectors skip filesystem
@@ -1756,7 +1756,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Deletes registry authority rows, returning the committed row count.
-    /// A failed transaction, delete, or commit is an error — never "0 deleted".
+    /// A failed transaction, delete, or commit is an error, never "0 deleted".
     #[hotpath::measure(future = true, label = "global_db.registry.persist.delete")]
     pub async fn delete_code_projects(
         &self,
@@ -1792,7 +1792,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Deletes one savings-ledger row, returning how many rows went away
-    /// (0 when the path was never registered — a truthful absence).
+    /// (0 when the path was never registered, a truthful absence).
     #[hotpath::measure(future = true, label = "global_db.registry.persist.delete_ledger")]
     pub async fn delete_project(
         &self,

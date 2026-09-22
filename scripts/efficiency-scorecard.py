@@ -18,8 +18,8 @@ Outputs (under --output, default target/efficiency-scorecard):
 
 What is measured
 ----------------
-Every run builds a fresh SANDBOX under the OS temp dir — isolated HOME/XDG,
-isolated TRACEDECAY_DATA_DIR/GLOBAL_DB, private daemon socket — and drives
+Every run builds a fresh SANDBOX under the OS temp dir, isolated HOME/XDG,
+isolated TRACEDECAY_DATA_DIR/GLOBAL_DB, private daemon socket, and drives
 the pinned fixture repo through the production journeys with the real
 binary. The operator's daemon, profile, and stores are never touched.
 
@@ -703,7 +703,7 @@ def store_measurements(sandbox: Sandbox) -> dict:
 
     - `generation_payload_bytes`: files under `**/code-generations-v*/`
       grouped by the 64-hex generation digest embedded in the file name
-      (generation-<digest>.json) — the manifest-size-per-generation signal.
+      (generation-<digest>.json), the manifest-size-per-generation signal.
     - `generation_segment_bytes`: physical bytes in the shared
       `code-generation-segments-v*/` content-addressed pool.
     - `code_index_children_bytes`: one-level size breakdown under each
@@ -1085,7 +1085,7 @@ def human_summary(scorecard: dict) -> str:
     runs = scorecard["runs"]
     ok = sum(1 for run in runs if run.get("status") == "ok")
     lines = [
-        f"## TraceDecay efficiency scorecard — {scorecard.get('label') or 'unlabeled'}",
+        f"## TraceDecay efficiency scorecard, {scorecard.get('label') or 'unlabeled'}",
         "",
         f"binary `{scorecard['binary']['version']}` · fixture "
         f"`{scorecard['fixture']['tree_sha256'][:12]}` ({scorecard['fixture']['files']} files) · "
@@ -1159,7 +1159,7 @@ def human_summary(scorecard: dict) -> str:
         "incremental_sync",
         "daemon_restart",
     ):
-        row(f"peak daemon RSS — {phase}", f"rss.peak_bytes.{phase}", "B")
+        row(f"peak daemon RSS, {phase}", f"rss.peak_bytes.{phase}", "B")
     lines.append("")
     return "\n".join(lines)
 

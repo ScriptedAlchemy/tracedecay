@@ -11,9 +11,9 @@
 //! means a caller depends on the protocol, not on the server that happens to
 //! implement it.
 //!
-//! Behavior stays with the daemon. Anything that interprets a request —
-//! authority minting, scope resolution, dispatch — remains in
-//! `tracedecay-daemon-service`; only construction, validation, and the
+//! Behavior stays with the daemon. Anything that interprets a request remains
+//! in `tracedecay-daemon-service`. That includes authority minting, scope
+//! resolution, and dispatch. Only construction, validation, and the
 //! application-DTO conversions travel with the types they belong to.
 
 mod feedback;
@@ -74,6 +74,14 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 
 fn valid_lsp_control(deadline: &Deadline, cancellation: &CancellationContext) -> bool {
     deadline.expires_at.0 > 0 && cancellation.token_id.as_str().len() <= MAX_OPAQUE_HANDLE_BYTES
+}
+
+fn valid_observation_window(
+    observed_at: &UtcMicros,
+    deadline: &Deadline,
+    cancellation: &CancellationContext,
+) -> bool {
+    observed_at.0 > 0 && valid_lsp_control(deadline, cancellation)
 }
 
 /// Stable discriminator for the closed post-handshake invocation protocol.
@@ -1823,9 +1831,7 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                if !valid_observation_window(observed_at, deadline, cancellation)
                     || MultiRootScopeSetReadRequestV1::new(request.scope_set_id.clone()).is_err()
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
@@ -1837,9 +1843,7 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                if !valid_observation_window(observed_at, deadline, cancellation)
                     || request.validate().is_err()
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
@@ -1851,9 +1855,7 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                if !valid_observation_window(observed_at, deadline, cancellation)
                     || request.validate().is_err()
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
@@ -1866,10 +1868,7 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
                 let expected = match &request.request {
@@ -1900,10 +1899,7 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
                 let expected = match request {
@@ -2027,10 +2023,7 @@ impl DaemonInvocationRequest {
                 cancellation,
                 ..
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
@@ -2042,9 +2035,7 @@ impl DaemonInvocationRequest {
                 ..
             } => {
                 if !(1..=365).contains(&request.window_days)
-                    || observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || !valid_observation_window(observed_at, deadline, cancellation)
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
@@ -2055,10 +2046,7 @@ impl DaemonInvocationRequest {
                 cancellation,
                 ..
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
@@ -2073,7 +2061,7 @@ impl DaemonInvocationRequest {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || PageRequest::new(page.page_size, page.cursor.clone()).is_err()
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || !valid_lsp_control(deadline, cancellation)
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
@@ -2111,7 +2099,7 @@ impl DaemonInvocationRequest {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || PageRequest::new(page.page_size, page.cursor.clone()).is_err()
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || !valid_lsp_control(deadline, cancellation)
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
@@ -2155,9 +2143,7 @@ impl DaemonInvocationRequest {
                 cancellation,
                 ..
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                if !valid_observation_window(observed_at, deadline, cancellation)
                     || !request.matches(*surface_operation)
                     || matches!(
                         request,
@@ -2175,10 +2161,7 @@ impl DaemonInvocationRequest {
                 cancellation,
                 ..
             } => {
-                if observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                {
+                if !valid_observation_window(observed_at, deadline, cancellation) {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
@@ -2220,9 +2203,7 @@ impl DaemonInvocationRequest {
                 cancellation,
             } => {
                 if !valid_token(request_handle, MAX_OPAQUE_HANDLE_BYTES)
-                    || observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || !valid_observation_window(observed_at, deadline, cancellation)
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
@@ -2234,9 +2215,7 @@ impl DaemonInvocationRequest {
                 cancellation,
             } => {
                 if !valid_printable(document_uri, MAX_ROOT_HINT_BYTES)
-                    || observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || !valid_observation_window(observed_at, deadline, cancellation)
                 {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
@@ -2246,10 +2225,7 @@ impl DaemonInvocationRequest {
                 deadline,
                 cancellation,
             } => {
-                if request.observed_at.0 <= 0
-                    || deadline.expires_at.0 <= 0
-                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                {
+                if !valid_observation_window(&request.observed_at, deadline, cancellation) {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }

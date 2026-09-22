@@ -62,7 +62,7 @@ export const HONEST_INBOX: { id: HonestInbox; label: string; note: string }[] = 
   { id: "denied", label: "denied", note: "org policy blocked the read" },
   { id: "stale", label: "stale", note: "freshness window elapsed" },
   { id: "unavailable", label: "unavailable", note: "authority or transport missing" },
-  { id: "served-empty", label: "served-empty", note: "complete zero — not a blank panel" },
+  { id: "served-empty", label: "served-empty", note: "complete zero, not a blank panel" },
 ];
 
 export const DELIVERY_META: Record<DeliveryStateId, DeliveryMeta> = {
@@ -700,7 +700,7 @@ export const CROSS_REPO_RAILS: JourneyLane[] = [
   },
 ];
 
-/** Replay lanes (state 05) — labeled episodes with wall-clock captions, PR #18337. */
+/** Replay lanes (state 05), labeled episodes with wall-clock captions, PR #18337. */
 export const REPLAY_LANES: JourneyLane[] = [
   {
     id: "r-human",

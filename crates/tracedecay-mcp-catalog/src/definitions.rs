@@ -12,7 +12,10 @@
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
-use tracedecay_tool_catalog::{ApplicationSurfaceOperation, ScopeDimension};
+use tracedecay_tool_catalog::{
+    ApplicationSurfaceOperation, CatalogValidationError, ExecutableBindingRegistryV1, OperationId,
+    ScopeDimension,
+};
 
 use crate::McpCatalogError;
 use crate::ToolDefinition;
@@ -25,7 +28,6 @@ mod application_schema;
 pub mod ast_grep;
 mod edit;
 mod git;
-mod git_scope;
 mod graph;
 mod lcm;
 mod memory;
@@ -47,7 +49,6 @@ use git::*;
 use graph::*;
 pub use graph::{SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS};
 use lcm::*;
-use memory::*;
 use multi_root::*;
 use skills::*;
 use testing::*;
@@ -354,7 +355,7 @@ pub(super) static MAXIMAL_DEFINITION_BUILDS: std::sync::atomic::AtomicUsize =
 ///
 /// Every input is static for the life of the process: the application catalog
 /// is a `LazyLock` snapshot and `ast_grep_available()` is a `OnceLock` host
-/// probe. Nothing session-scoped is frozen here — the per-session passes
+/// probe. Nothing session-scoped is frozen here, the per-session passes
 /// (`apply_context_budget`, `apply_context_warming_budget`, and the
 /// profile/capability filtering in
 /// `get_catalog_filtered_tool_definitions_with_budget`) all run on the *clone*
@@ -454,20 +455,9 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_diagnose(),
         def_derives(),
         def_run_affected_tests(),
-        def_fact_store_add(request_schema("fact_store_add")?),
-        def_fact_store_search(request_schema("fact_store_search")?),
-        def_fact_store_probe(request_schema("fact_store_probe")?),
-        def_fact_store_related(request_schema("fact_store_related")?),
-        def_fact_store_reason(request_schema("fact_store_reason")?),
-        def_fact_store_contradict(request_schema("fact_store_contradict")?),
-        def_fact_store_get(request_schema("fact_store_get")?),
-        def_fact_store_update(request_schema("fact_store_update")?),
-        def_fact_store_remove(request_schema("fact_store_remove")?),
-        def_fact_store_supersede(request_schema("fact_store_supersede")?),
-        def_fact_store_list(request_schema("fact_store_list")?),
-        def_fact_feedback(request_schema("fact_feedback")?),
-        def_memory_status(request_schema("memory_status")?),
-        def_fact_store_curate(request_schema("fact_store_curate")?),
+    ];
+    definitions.extend(memory::memory_definitions(&request_schema)?);
+    definitions.extend([
         def_automation_run_list(),
         def_automation_run_view(),
         def_automation_run_artifact_view(),
@@ -504,7 +494,7 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
         def_source_edit_reconcile(),
         def_source_edit_rollback(),
         def_find_exact_symbol(),
-    ];
+    ]);
     definitions.extend(application_definitions()?);
     let work = work_worker.join().map_err(|_| {
         McpCatalogError::Initialization(
@@ -525,6 +515,52 @@ fn build_maximal_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogErr
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
     Ok(definitions)
+}
+
+pub(super) struct FamilyOperation {
+    pub operation_id: String,
+    pub name: String,
+    pub title: String,
+    pub description: String,
+}
+
+/// Project one executable registry into MCP tools. Callers own the transport
+/// prefix, title, and description; the registry owns the schema and effect.
+pub(super) fn project_executable_family(
+    registry: &ExecutableBindingRegistryV1,
+    operations: &[FamilyOperation],
+    incomplete: (&'static str, &'static str),
+    identity: (&'static str, &'static str),
+    missing: (&'static str, &'static str),
+) -> Result<Vec<ToolDefinition>, McpCatalogError> {
+    if registry.iter().count() != operations.len() {
+        return Err(catalog_invalid(incomplete.0, incomplete.1));
+    }
+    operations
+        .iter()
+        .map(|operation| {
+            let operation_id = OperationId::new(operation.operation_id.clone())
+                .map_err(|_| catalog_invalid(identity.0, identity.1))?;
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .ok_or_else(|| catalog_invalid(missing.0, missing.1))?;
+            Ok(ToolDefinition {
+                name: operation.name.clone(),
+                description: operation.description.clone(),
+                input_schema: binding.request_schema().body().clone(),
+                annotations: Some(json!({
+                    "readOnlyHint": binding.effect().is_read_only(),
+                    "title": operation.title,
+                })),
+                meta: None,
+            })
+        })
+        .collect()
+}
+
+fn catalog_invalid(field: &'static str, reason: &'static str) -> McpCatalogError {
+    CatalogValidationError::InvalidValue { field, reason }.into()
 }
 
 fn spawn_definition_worker(

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracedecay_automation_runtime::automation::config_error;
 use tracedecay_domain::errors::Result;
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 use super::hermes::user_review;
 use super::ingest::ingest_transcript_with_cancellation;
@@ -20,6 +21,7 @@ pub(super) fn retain_codex_stop(
     profile_root: &Path,
     session_runtime_registry: &Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>,
     session_authorities: &SessionAuthorities<'_>,
+    user_refresh: Arc<dyn SessionRefreshWorkerPort>,
 ) -> Result<Value> {
     let session_id = required_str(args, "session_id")?.to_owned();
     let user_sessions = session_authorities
@@ -51,7 +53,7 @@ pub(super) fn retain_codex_stop(
                         "action": "ingest_transcript",
                         "provider": "codex",
                         "user_scope": true,
-                        "session_id": task_session_id,
+                        "session_id": task_session_id.clone(),
                     });
                     let authorities = SessionAuthorities::new(None, Some(&user_sessions))
                         .with_profile_identity(Some(std::sync::Arc::clone(&profile_identity)))
@@ -65,10 +67,21 @@ pub(super) fn retain_codex_stop(
                         authorities,
                         &cancellation,
                     )
-                    .await
-                    .ok()
-                    .and_then(|result| result.get("messages_upserted").and_then(Value::as_u64))
-                    .is_some_and(|count| count > 0);
+                    .await;
+                    // The parent `codex_stop` acknowledgement returns before
+                    // this task writes. Wake the profile scheduler that owns
+                    // the user store, or the new effects sit until some other
+                    // pass happens to run.
+                    if !user_refresh.wake() {
+                        tracing::warn!(
+                            session_id = %task_session_id,
+                            "retained hook ingest did not wake session temporal refresh"
+                        );
+                    }
+                    let ingested = ingested
+                        .ok()
+                        .and_then(|result| result.get("messages_upserted").and_then(Value::as_u64))
+                        .is_some_and(|count| count > 0);
                     if ingested
                         && !cancellation.is_cancelled()
                         && let Some(session_id) = ingest_args.get("session_id").cloned()

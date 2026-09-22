@@ -408,13 +408,7 @@ mod tests {
     };
     use crate::shard_runtime::shard::ShardRuntime;
 
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        T::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
+    use tracedecay_domain::test_fixtures::id;
 
     fn profile_shard() -> StoreShardIdV1 {
         StoreShardIdV1::profile(

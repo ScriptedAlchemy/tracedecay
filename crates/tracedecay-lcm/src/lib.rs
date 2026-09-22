@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
 pub mod compression;
 pub mod compression_decision;
@@ -82,7 +83,7 @@ pub use retention::{
 
 /// The LCM token-budget heuristic: whitespace-delimited words, never zero.
 ///
-/// Every LCM budget decision is denominated in this unit — the compression
+/// Every LCM budget decision is denominated in this unit, the compression
 /// trigger, the replay accounting, the retrieval window, and the policy
 /// reducer. It lives here, above both the contract reducers and the runtime,
 /// because the four of them must agree: a heuristic that only some callers
@@ -103,7 +104,7 @@ pub(crate) fn lcm_budget_tokens(text: &str) -> i64 {
 /// String bodies stay strings; `{ "text": ... }` objects and arrays of
 /// `{ "text": ... }` parts contribute that text. Structured payloads with no
 /// text parts fall through to `Value`'s compact Display so a count is still
-/// produced — never a silent empty from a failed stringify.
+/// produced, never a silent empty from a failed stringify.
 pub(crate) fn lcm_message_visible_text(message: &Value) -> String {
     match visible_content(message) {
         VisibleContent::Empty => String::new(),
@@ -188,23 +189,32 @@ pub enum SessionMessageType {
     ToolResult,
 }
 
-impl SessionMessageType {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "direct_user" => Some(Self::DirectUser),
-            "tool_result" => Some(Self::ToolResult),
-            _ => None,
+impl From<MessageTypeFilterV1> for SessionMessageType {
+    fn from(value: MessageTypeFilterV1) -> Self {
+        match value {
+            MessageTypeFilterV1::All => Self::All,
+            MessageTypeFilterV1::DirectUser => Self::DirectUser,
+            MessageTypeFilterV1::ToolResult => Self::ToolResult,
         }
+    }
+}
+
+impl SessionMessageType {
+    const fn filter(self) -> MessageTypeFilterV1 {
+        match self {
+            Self::All => MessageTypeFilterV1::All,
+            Self::DirectUser => MessageTypeFilterV1::DirectUser,
+            Self::ToolResult => MessageTypeFilterV1::ToolResult,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        MessageTypeFilterV1::parse(value.trim()).map(Self::from)
     }
 
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::DirectUser => "direct_user",
-            Self::ToolResult => "tool_result",
-        }
+        self.filter().as_str()
     }
 }
 
@@ -215,23 +225,32 @@ pub enum SessionSearchScope {
     SubagentsOnly,
 }
 
-impl SessionSearchScope {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "parents_only" => Some(Self::ParentsOnly),
-            "subagents_only" => Some(Self::SubagentsOnly),
-            _ => None,
+impl From<MessageRelationshipScopeV1> for SessionSearchScope {
+    fn from(value: MessageRelationshipScopeV1) -> Self {
+        match value {
+            MessageRelationshipScopeV1::All => Self::All,
+            MessageRelationshipScopeV1::ParentsOnly => Self::ParentsOnly,
+            MessageRelationshipScopeV1::SubagentsOnly => Self::SubagentsOnly,
         }
+    }
+}
+
+impl SessionSearchScope {
+    const fn relationship(self) -> MessageRelationshipScopeV1 {
+        match self {
+            Self::All => MessageRelationshipScopeV1::All,
+            Self::ParentsOnly => MessageRelationshipScopeV1::ParentsOnly,
+            Self::SubagentsOnly => MessageRelationshipScopeV1::SubagentsOnly,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        MessageRelationshipScopeV1::parse(value.trim()).map(Self::from)
     }
 
     #[hotpath::skip]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::ParentsOnly => "parents_only",
-            Self::SubagentsOnly => "subagents_only",
-        }
+        self.relationship().as_str()
     }
 }
 
@@ -303,5 +322,72 @@ mod budget_tests {
             );
             assert_eq!(materialized, expected, "budget unit changed for {message}");
         }
+    }
+}
+
+#[cfg(test)]
+mod relationship_scope_map_tests {
+    use tracedecay_contracts::retained_surfaces::MessageRelationshipScopeV1;
+
+    use super::SessionSearchScope;
+
+    #[test]
+    fn session_scope_uses_the_contract_wire_label() {
+        let scopes = [
+            (SessionSearchScope::All, MessageRelationshipScopeV1::All),
+            (
+                SessionSearchScope::ParentsOnly,
+                MessageRelationshipScopeV1::ParentsOnly,
+            ),
+            (
+                SessionSearchScope::SubagentsOnly,
+                MessageRelationshipScopeV1::SubagentsOnly,
+            ),
+        ];
+        for (scope, contract) in scopes {
+            assert_eq!(scope.as_str(), contract.as_str());
+            assert_eq!(SessionSearchScope::from(contract), scope);
+            assert_eq!(SessionSearchScope::parse(scope.as_str()), Some(scope));
+            assert_eq!(
+                SessionSearchScope::parse(&format!(" {} ", scope.as_str())),
+                Some(scope)
+            );
+        }
+        assert_eq!(SessionSearchScope::parse("all_sessions"), None);
+    }
+}
+
+#[cfg(test)]
+mod message_type_map_tests {
+    use tracedecay_contracts::retained_surfaces::MessageTypeFilterV1;
+
+    use super::SessionMessageType;
+
+    #[test]
+    fn session_message_type_uses_the_contract_wire_label() {
+        let types = [
+            (SessionMessageType::All, MessageTypeFilterV1::All),
+            (
+                SessionMessageType::DirectUser,
+                MessageTypeFilterV1::DirectUser,
+            ),
+            (
+                SessionMessageType::ToolResult,
+                MessageTypeFilterV1::ToolResult,
+            ),
+        ];
+        for (message_type, contract) in types {
+            assert_eq!(message_type.as_str(), contract.as_str());
+            assert_eq!(SessionMessageType::from(contract), message_type);
+            assert_eq!(
+                SessionMessageType::parse(message_type.as_str()),
+                Some(message_type)
+            );
+            assert_eq!(
+                SessionMessageType::parse(&format!(" {} ", message_type.as_str())),
+                Some(message_type)
+            );
+        }
+        assert_eq!(SessionMessageType::parse("user"), None);
     }
 }

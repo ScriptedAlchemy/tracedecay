@@ -144,6 +144,15 @@ impl AgentIntegration for ClaudeIntegration {
         eprintln!("\n\x1b[1mClaude Code integration\x1b[0m");
         doctor_check_plugin(dc, &ctx.home);
         doctor_check_permissions_json(dc, &ctx.home);
+        super::doctor_check_managed_skill_prompt_indexes(
+            dc,
+            &ctx.home,
+            &[
+                ctx.home.join(".claude").join("CLAUDE.md"),
+                ctx.project_path.join(".claude/CLAUDE.md"),
+            ],
+            tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::Claude,
+        );
         doctor_check_local_config(dc, &ctx.project_path);
     }
 
@@ -509,7 +518,7 @@ fn plugin_deploy_dir(home: &Path) -> PathBuf {
     home.join(".claude/plugins/marketplaces/tracedecay")
 }
 
-/// The deployed marketplace manifest — presence signals a plugin install.
+/// The deployed marketplace manifest, presence signals a plugin install.
 fn plugin_marketplace_manifest_path(home: &Path) -> PathBuf {
     plugin_deploy_dir(home).join(".claude-plugin/marketplace.json")
 }
@@ -779,7 +788,7 @@ fn plugin_perms_satisfied(installed: &[&str]) -> tracedecay_domain::errors::Resu
 }
 
 /// Coverage check against a concrete expected-tool list. An empty expected
-/// list must not read as vacuously satisfied — only the wildcard rule can
+/// list must not read as vacuously satisfied, only the wildcard rule can
 /// cover it.
 fn plugin_perms_covered(installed: &[&str], per_tool: &[String]) -> bool {
     installed.contains(&plugin_wildcard_perm().as_str())
@@ -808,7 +817,7 @@ const CLAUDE_MD_HISTORICAL_MARKERS: [&str; 3] = [
     "No Explore Agents When Codegraph Is Available",
 ];
 /// The one `## ` sub-heading historical blocks owned. A historical block range
-/// extends across exactly this heading — never any arbitrary line containing
+/// extends across exactly this heading, never any arbitrary line containing
 /// "tracedecay", which would wrongly absorb a user's own `## …tracedecay…`
 /// heading on uninstall.
 const CLAUDE_MD_HISTORICAL_OWNED_SUBHEADING: &str =
@@ -941,7 +950,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let manifest_path = plugin_marketplace_manifest_path(home);
     if !manifest_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install` if you use Claude Code",
+            "{} not found, run `tracedecay install` if you use Claude Code",
             manifest_path.display()
         ));
         return;
@@ -961,7 +970,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     match plugin_manifest.get("version").and_then(|v| v.as_str()) {
         Some(crate::PRODUCT_VERSION) => dc.pass("Deployed plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
-            "Deployed plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
+            "Deployed plugin version {version} does not match tracedecay {}, run `tracedecay update-plugin`",
             crate::PRODUCT_VERSION
         )),
         None => dc.warn("Deployed plugin.json does not contain a version"),
@@ -976,7 +985,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             dc.pass(&format!("Plugin {label} present"));
         } else {
             dc.fail(&format!(
-                "Plugin {label} missing in {} — run `tracedecay install`",
+                "Plugin {label} missing in {}, run `tracedecay install`",
                 deploy_dir.display()
             ));
         }
@@ -990,7 +999,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             dc.pass(&format!("Plugin {label} present"));
         } else {
             dc.fail(&format!(
-                "Plugin {label} missing in {} — run `tracedecay install`",
+                "Plugin {label} missing in {}, run `tracedecay install`",
                 deploy_dir.display()
             ));
         }
@@ -1012,7 +1021,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     });
     if registered && !schema_complete {
         dc.fail(&format!(
-            "Marketplace entry in {} is missing installLocation/lastUpdated — repair it with Claude Code's native plugin command",
+            "Marketplace entry in {} is missing installLocation/lastUpdated, repair it with Claude Code's native plugin command",
             known_marketplaces_path(home).display()
         ));
     } else if registered {
@@ -1022,7 +1031,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.warn(&format!(
-            "Marketplace not registered in {} — run the native Claude plugin marketplace command",
+            "Marketplace not registered in {}, run the native Claude plugin marketplace command",
             known_marketplaces_path(home).display()
         ));
     }
@@ -1040,7 +1049,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.warn(&format!(
-            "Plugin {PLUGIN_IDENTIFIER} not enabled in settings.json — enable it with Claude Code's native plugin command"
+            "Plugin {PLUGIN_IDENTIFIER} not enabled in settings.json, enable it with Claude Code's native plugin command"
         ));
     }
 }
@@ -1049,7 +1058,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = home.join(".claude").join("settings.json");
     if !settings_path.exists() {
-        dc.warn("~/.claude/settings.json not found — configure plugin permissions in Claude Code");
+        dc.warn("~/.claude/settings.json not found, configure plugin permissions in Claude Code");
         return;
     }
     let Some(settings) = std::fs::read_to_string(&settings_path)
@@ -1068,7 +1077,7 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
 
     // The plugin-namespace entries are the ones the plugin MCP server actually
     // matches against; without coverage every call to a tool prompts
-    // interactively and hard-fails headless/in subagents. Check these first —
+    // interactively and hard-fails headless/in subagents. Check these first,
     // this is the real adoption gate. Install/update add the one managed
     // wildcard while preserving the rest of Claude's host-owned settings.
     let wildcard = plugin_wildcard_perm();
@@ -1076,7 +1085,7 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
         Ok(per_tool) => per_tool,
         Err(error) => {
             // An unreadable catalog is a composition failure, never "this host
-            // advertises no tools" — say so instead of reporting coverage of
+            // advertises no tools", say so instead of reporting coverage of
             // an empty set.
             dc.fail(&format!(
                 "Could not read the advertised tool catalog, so tool permissions cannot be \
@@ -1091,13 +1100,13 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else if plugin_perms_covered(&installed, &per_tool) {
         dc.pass(&format!(
-            "All {} plugin tool permissions granted individually — the single allow rule \
+            "All {} plugin tool permissions granted individually, the single allow rule \
              \"{wildcard}\" would replace them",
             per_tool.len()
         ));
     } else {
         dc.fail(&format!(
-            "Plugin tool calls will prompt interactively — add the single allow rule \
+            "Plugin tool calls will prompt interactively, add the single allow rule \
              \"{wildcard}\" to `permissions.allow` in {} (or run `/permissions` in Claude Code \
              and allow that rule); it covers every tracedecay plugin tool",
             settings_path.display()
@@ -1125,7 +1134,7 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
         ));
     } else {
         dc.info(&format!(
-            "{} legacy tool permission(s) not present (harmless — plugin namespace is authoritative)",
+            "{} legacy tool permission(s) not present (harmless, plugin namespace is authoritative)",
             missing.len()
         ));
     }
@@ -1159,7 +1168,7 @@ fn doctor_check_local_config(dc: &mut DoctorCounters, project_path: &Path) {
         dc.pass("No tracedecay in local config");
     } else {
         dc.warn(&format!(
-            "TraceDecay entries remain in local config ({}) — leave them or remove them manually; TraceDecay does not rewrite Claude config",
+            "TraceDecay entries remain in local config ({}), leave them or remove them manually; TraceDecay does not rewrite Claude config",
             tracedecay_paths.join(", ")
         ));
     }
@@ -1190,11 +1199,11 @@ fn warn_missing_permissions(settings: &serde_json::Value) {
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
 
-    // Check the plugin namespace — the entries the plugin MCP server matches.
+    // Check the plugin namespace, the entries the plugin MCP server matches.
     // A machine mid-upgrade may carry legacy `mcp__tracedecay__*` entries but
     // lack coverage of the `mcp__plugin_tracedecay_graph__*` namespace, which
     // is exactly what causes per-call prompts, so that is the gap worth
-    // warning about — with the one-rule remedy, not a tool census.
+    // warning about, with the one-rule remedy, not a tool census.
     match plugin_perms_satisfied(&installed) {
         Ok(true) => {}
         Ok(false) => eprintln!(

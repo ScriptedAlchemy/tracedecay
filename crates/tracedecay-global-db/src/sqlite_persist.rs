@@ -3,13 +3,18 @@
 //! Git-index, native-integration, and configuration each own their tables and
 //! conflict kinds. The commit, rollback, receipt-replay, CAS row-count, and
 //! insert-or-equal decisions used to be copied beside those tables and then
-//! dropped the engine cause — or, on rollback failure, the original outcome.
+//! dropped the engine cause, or, on rollback failure, the original outcome.
 //! One helper keeps both errors.
 
 use std::fmt;
 use std::future::Future;
 
 use tracedecay_runtime_core::db::engine::{self, Transaction};
+
+pub(crate) use tracedecay_runtime_core::db::{
+    decode_stored_json as decode_json, encode_stored_json as encode_json,
+    optional_text_column as row_optional_text, text_column as row_text,
+};
 
 use crate::RegisteredGlobalDbWriteTransaction;
 

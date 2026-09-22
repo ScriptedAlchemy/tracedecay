@@ -4,8 +4,8 @@
  * expanded into once it is selected.
  *
  * It opens two ways and says which. A PEEK is a pointer resting on a row or
- * keyboard focus landing on it — the panel shows the row from what is already
- * on screen and fetches nothing. A SELECTION is a click or Enter — it persists,
+ * keyboard focus landing on it, the panel shows the row from what is already
+ * on screen and fetches nothing. A SELECTION is a click or Enter, it persists,
  * and only then does a transcript row open its session reads. Nothing here is
  * computed about the row; every value names the field it was read from.
  */
@@ -241,7 +241,7 @@ function sessionIdOf(hit: Hit): string | undefined {
  * The one pivot a result can make today: a code row's graph node id is the
  * same identity the Code workspace focuses on, so the link is exact. Session
  * and fact rows have no deep-link target in their workspaces yet and get no
- * link — a control to nowhere would be worse than none.
+ * link, a control to nowhere would be worse than none.
  */
 function CodePivot({ hit }: { hit: Hit }) {
   const scope = useScope((s) => s.scope);

@@ -104,7 +104,7 @@ async fn execute_refresh(
 
 /// The profile session authority owns profile-scoped refreshes end to end:
 /// begin issues an opaque handle bound to the profile store, status reads
-/// it back, and cancel settles a receipt — all through one canonical
+/// it back, and cancel settles a receipt, all through one canonical
 /// request shape and without any project.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_retained_session_refresh_begins_reads_and_cancels_in_the_profile_store() {

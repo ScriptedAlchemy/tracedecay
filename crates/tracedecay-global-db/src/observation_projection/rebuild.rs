@@ -4,11 +4,9 @@ use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_lcm::retrieval_content::{
     derived_text_for_index, derived_text_for_snippet, projected_content_hash,
 };
-#[cfg(test)]
-use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
 use tracedecay_runtime_core::db::{
     Database,
-    engine::{Executor, QueryExecutor, params},
+    engine::{Executor, QueryExecutor, Row, params},
 };
 use tracedecay_store::{
     ObservationProjection, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
@@ -27,8 +25,8 @@ use super::state::{
     canonicalize_session_project_paths, consume_projection_queue_item, decode_observation_row,
     decode_sequence, ensure_projection_output_state_cache, projection_retry_state, queued_sequence,
     read_checkpoint, read_message, read_observation, read_session,
-    reaggregate_output_state_for_output, reconcile_session_rows, schedule_projection_retry,
-    storage, storage_message, write_checkpoint,
+    reaggregate_output_state_for_output, reconcile_session_rows_detailed,
+    schedule_projection_retry, storage, storage_message, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -43,6 +41,7 @@ const PROJECTION_RETRY_MAX_MICROS: i64 = 300_000_000;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 const SESSION_JSON_COLUMN: &str = "session_json";
+const MERGED_SESSION_JSON_COLUMN: &str = "merged.value";
 const MESSAGE_JSON_COLUMN: &str = "message_json";
 const STAGED_MESSAGE_JSON_COLUMN: &str = "staged.message_json";
 
@@ -184,7 +183,7 @@ pub async fn project_observation(
 /// Projects up to `max` ready queue-head observations inside one write
 /// transaction, in strict sequence order, committing once for the window.
 ///
-/// Each item runs the exact per-item projection ([`project_observation_in_transaction`]
+/// Each item runs the exact per-item projection (`project_observation_in_transaction`
 /// with its gap, queue, and duplicate checks). A retry-deferred queue head
 /// stops the window before consuming it, mirroring the scalar head-of-queue
 /// gate. Any per-item error rolls the whole window back and surfaces the
@@ -291,81 +290,6 @@ async fn projection_queue_has_items(conn: &impl QueryExecutor) -> ProjectionStor
         .is_some())
 }
 
-#[cfg(test)]
-pub async fn project_observation_with_engine(
-    conn: &Connection,
-    observation_id: &CanonicalObservationIdV1,
-) -> ProjectionStoreResult<ProjectionPersistOutcome> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|error| storage("begin projection transaction", error))?;
-    let now_micros = tracedecay_contracts::clock::now_micros().0;
-    if let Some(retry) = projection_retry_state(&transaction, observation_id).await?
-        && retry.next_retry_at_micros > now_micros
-    {
-        transaction
-            .rollback()
-            .await
-            .map_err(|error| storage("rollback deferred projection transaction", error))?;
-        return Err(ProjectionStoreError::RetryDeferred {
-            attempt_count: retry.attempt_count,
-            next_retry_at_micros: retry.next_retry_at_micros,
-            last_error: retry.last_error.ok_or_else(|| {
-                storage_message(
-                    "read deferred projection retry",
-                    "deferred projection retry has no failure detail",
-                )
-            })?,
-        });
-    }
-    match project_observation_in_transaction(&transaction, observation_id).await {
-        Ok(outcome) => match transaction.commit().await {
-            Ok(()) => Ok(outcome),
-            Err(commit_error) => {
-                let error = storage("commit projection transaction", commit_error);
-                persist_projection_retry_with_engine(
-                    conn,
-                    observation_id,
-                    now_micros,
-                    &error.durable_detail(),
-                )
-                .await?;
-                Err(error)
-            }
-        },
-        Err(error) => {
-            transaction.rollback().await.map_err(|rollback_error| {
-                storage("rollback failed projection transaction", rollback_error)
-            })?;
-            if matches!(error, ProjectionStoreError::Storage { .. }) {
-                persist_projection_retry_with_engine(
-                    conn,
-                    observation_id,
-                    now_micros,
-                    &error.durable_detail(),
-                )
-                .await?;
-            } else if matches!(error, ProjectionStoreError::Contract(_)) {
-                persist_projection_rejection_with_engine(
-                    conn,
-                    observation_id,
-                    ProjectionSkipReason::InvalidContract,
-                )
-                .await?;
-            } else if matches!(error, ProjectionStoreError::SanitizationRefused { .. }) {
-                persist_projection_rejection_with_engine(
-                    conn,
-                    observation_id,
-                    ProjectionSkipReason::SanitizationRefused,
-                )
-                .await?;
-            }
-            Err(error)
-        }
-    }
-}
-
 fn projection_retry_delay_micros(attempt_count: u32) -> i64 {
     let shift = attempt_count.saturating_sub(1).min(16);
     PROJECTION_RETRY_BASE_MICROS
@@ -410,73 +334,6 @@ async fn persist_projection_rejection_on_database(
 ) -> ProjectionStoreResult<()> {
     let transaction = database
         .begin_write_transaction("begin projection rejection transaction")
-        .await
-        .map_err(|error| storage("begin projection rejection transaction", error))?;
-    let checkpoint = read_checkpoint(&transaction).await?;
-    let Some((sequence, observation)) = read_observation(&transaction, observation_id).await?
-    else {
-        return Err(ProjectionStoreError::ObservationNotFound);
-    };
-    let expected = checkpoint.last_sequence().saturating_add(1);
-    if sequence > checkpoint.last_sequence() && sequence != expected {
-        return Err(ProjectionStoreError::Gap {
-            expected,
-            actual: sequence,
-        });
-    }
-    if queued_sequence(&transaction, observation_id).await? != Some(sequence) {
-        return Err(ProjectionStoreError::NotQueued);
-    }
-    apply_skip_disposition(&transaction, &observation, reason).await?;
-    consume_projection_queue_item(&transaction, observation_id).await?;
-    if sequence > checkpoint.last_sequence() {
-        write_checkpoint(&transaction, sequence).await?;
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage("commit projection rejection transaction", error))
-}
-
-#[cfg(test)]
-async fn persist_projection_retry_with_engine(
-    conn: &Connection,
-    observation_id: &CanonicalObservationIdV1,
-    now_micros: i64,
-    last_error: &str,
-) -> ProjectionStoreResult<()> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|error| storage("begin projection retry transaction", error))?;
-    let retry = projection_retry_state(&transaction, observation_id)
-        .await?
-        .ok_or(ProjectionStoreError::NotQueued)?;
-    let attempt_count = retry.attempt_count.saturating_add(1);
-    let next_retry_at_micros =
-        now_micros.saturating_add(projection_retry_delay_micros(attempt_count));
-    schedule_projection_retry(
-        &transaction,
-        observation_id,
-        attempt_count,
-        next_retry_at_micros,
-        last_error,
-    )
-    .await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage("commit projection retry transaction", error))
-}
-
-#[cfg(test)]
-async fn persist_projection_rejection_with_engine(
-    conn: &Connection,
-    observation_id: &CanonicalObservationIdV1,
-    reason: ProjectionSkipReason,
-) -> ProjectionStoreResult<()> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| storage("begin projection rejection transaction", error))?;
     let checkpoint = read_checkpoint(&transaction).await?;
@@ -670,122 +527,6 @@ async fn advance_projection_rebuild(
             Ok(RebuildAdvance::Complete(outcome))
         }
     }
-}
-
-#[cfg(test)]
-pub async fn rebuild_projection_with_engine(
-    conn: &Connection,
-    frontier_sequence: u64,
-) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
-    rebuild_projection_until_cancelled_with_engine(conn, frontier_sequence, &NEVER_CANCELLED).await
-}
-
-#[cfg(test)]
-async fn rebuild_projection_until_cancelled_with_engine(
-    conn: &Connection,
-    frontier_sequence: u64,
-    cancelled: &AtomicBool,
-) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
-    prepare_projection_rebuild_with_engine(conn, frontier_sequence).await?;
-    for _ in 0..REBUILD_MAX_STEPS_PER_INVOCATION {
-        if cancelled.load(Ordering::Acquire) {
-            break;
-        }
-        match advance_projection_rebuild_with_engine(conn, frontier_sequence, cancelled).await? {
-            RebuildAdvance::Pending => {}
-            RebuildAdvance::Complete(outcome) => return Ok(outcome),
-        }
-    }
-    projection_rebuild_progress_on(conn).await
-}
-
-#[cfg(test)]
-async fn prepare_projection_rebuild_with_engine(
-    conn: &Connection,
-    frontier_sequence: u64,
-) -> ProjectionStoreResult<()> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|error| storage("begin projection rebuild staging", error))?;
-    start_or_resume_projection_rebuild_transaction(&transaction, frontier_sequence).await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage("commit projection rebuild staging", error))
-}
-
-#[cfg(test)]
-async fn advance_projection_rebuild_with_engine(
-    conn: &Connection,
-    frontier_sequence: u64,
-    cancelled: &AtomicBool,
-) -> ProjectionStoreResult<RebuildAdvance> {
-    let job = read_rebuild_job(conn).await?;
-    match job.state {
-        RebuildState::Aliasing => {
-            stage_projection_alias_batch_with_engine(conn).await?;
-            Ok(RebuildAdvance::Pending)
-        }
-        RebuildState::Building => {
-            stage_projection_rebuild_batch_with_engine(conn, cancelled).await?;
-            Ok(RebuildAdvance::Pending)
-        }
-        RebuildState::Ready => activate_projection_rebuild_with_engine(conn, frontier_sequence)
-            .await
-            .map(RebuildAdvance::Complete),
-    }
-}
-
-#[cfg(test)]
-async fn stage_projection_alias_batch_with_engine(conn: &Connection) -> ProjectionStoreResult<()> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|error| storage("begin projection alias staging", error))?;
-    stage_projection_alias_batch_transaction(&transaction).await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage("commit projection alias batch", error))
-}
-
-#[cfg(test)]
-async fn stage_projection_rebuild_batch_with_engine(
-    conn: &Connection,
-    cancelled: &AtomicBool,
-) -> ProjectionStoreResult<()> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|error| storage("begin projection rebuild batch", error))?;
-    let outcome = stage_projection_rebuild_batch_transaction(&transaction, cancelled).await?;
-    let commit_operation = match outcome {
-        RebuildBatchStage::AlreadyReady => "commit completed projection rebuild batch",
-        RebuildBatchStage::Advanced => "commit projection rebuild batch",
-    };
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage(commit_operation, error))?;
-    Ok(())
-}
-
-#[cfg(test)]
-async fn activate_projection_rebuild_with_engine(
-    conn: &Connection,
-    frontier_sequence: u64,
-) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .map_err(|error| storage("begin projection rebuild activation", error))?;
-    let outcome = activate_projection_rebuild_transaction(&transaction, frontier_sequence).await?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage("commit projection rebuild activation", error))?;
-    Ok(outcome)
 }
 
 async fn project_observation_in_transaction(
@@ -1412,7 +1153,7 @@ fn decode_usize(value: i64, operation: &'static str) -> ProjectionStoreResult<us
 /// `observations`. The query's row cursor lives only inside this function and
 /// is fully consumed and dropped before it returns, so a caller may safely go
 /// on to read or write further rows through the same connection and observe
-/// them — a cursor left open past that point would otherwise pin the
+/// them, a cursor left open past that point would otherwise pin the
 /// connection's read snapshot and hide those subsequent writes.
 async fn read_observation_frontier(conn: &impl QueryExecutor) -> ProjectionStoreResult<u64> {
     let mut rows = conn
@@ -1565,10 +1306,11 @@ async fn stage_rebuild_session(
         };
     let session = match actual {
         Some(actual) => {
-            reconcile_session_rows(&canonicalize_session_project_paths(&actual), &expected)
-                .ok_or_else(|| ProjectionStoreError::OutputCollision {
+            reconcile_session_rows_detailed(&canonicalize_session_project_paths(&actual), &expected)
+                .map_err(|conflict| ProjectionStoreError::SessionOutputCollision {
                     provider: expected.provider.clone(),
-                    message_id: format!("session:{}", expected.session_id),
+                    session_id: expected.session_id.clone(),
+                    field: conflict.field(),
                 })?
         }
         None => expected,
@@ -2192,76 +1934,167 @@ async fn retire_projection_predecessor_output_ownership(
     .map_err(|error| storage("retire predecessor projection provenance", error))
 }
 
-async fn activate_rebuild_sessions(
+fn decode_overlapping_session(row: &Row) -> ProjectionStoreResult<SessionRecord> {
+    macro_rules! cell {
+        ($index:literal) => {
+            row.get($index)
+                .map_err(|error| storage("decode overlapping projection session", error))?
+        };
+        ($index:literal, $ty:ty) => {
+            row.get::<$ty>($index)
+                .map_err(|error| storage("decode overlapping projection session", error))?
+        };
+    }
+    Ok(SessionRecord {
+        provider: cell!(1),
+        session_id: cell!(2),
+        project_key: cell!(3),
+        project_path: cell!(4),
+        title: cell!(5),
+        started_at: cell!(6),
+        ended_at: cell!(7),
+        transcript_path: cell!(8),
+        metadata_json: cell!(9),
+        parent_session_id: cell!(10),
+        is_subagent: cell!(11, i64) != 0,
+        agent_id: cell!(12),
+        parent_tool_use_id: cell!(13),
+    })
+}
+
+/// Write every reconciled overlap in one set-based statement. Rebuild
+/// activation owns the database writer, so a per-row `UPDATE` loop would hold
+/// admission for as long as the history is large; the merge itself already ran
+/// in Rust, so each column is taken verbatim from the merged row.
+async fn write_reconciled_sessions(
+    conn: &impl Executor,
+    merged: &[SessionRecord],
+) -> ProjectionStoreResult<()> {
+    if merged.is_empty() {
+        return Ok(());
+    }
+    let rows = encode_json(&merged, "encode reconciled projection sessions")?;
+    let session_extracts =
+        json_extract_select_list(MERGED_SESSION_JSON_COLUMN, SESSION_JSON_FIELDS);
+    let assignments = SESSION_JSON_FIELDS
+        .iter()
+        .map(|field| format!("{field} = excluded.{field}"))
+        .collect::<Vec<_>>()
+        .join(",\n            ");
+    conn.execute(
+        &format!(
+            "INSERT INTO sessions (
+            provider, session_id, project_key, project_path, title, started_at, ended_at,
+            transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
+            parent_tool_use_id
+         )
+         SELECT {}, {},
+                {session_extracts}
+         FROM json_each(?1) AS merged
+         -- `WHERE true` disambiguates the upsert clause from a join constraint.
+         WHERE true
+         ON CONFLICT(provider, session_id) DO UPDATE SET
+            {assignments}",
+            json_extract_expr(MERGED_SESSION_JSON_COLUMN, "provider"),
+            json_extract_expr(MERGED_SESSION_JSON_COLUMN, "session_id"),
+        ),
+        params![rows.as_str()],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| storage("activate reconciled projection sessions", error))
+}
+
+/// Classify every staged session that already exists through
+/// [`reconcile_session_rows_detailed`], the same authority live apply uses.
+/// A parallel SQL predicate used to report those conflicts as message
+/// `OutputCollision` values with `message_id = session:{id}`, which erased
+/// the field and sent session conflicts down the message-skip path.
+/// Paged by `(provider, session_id)` because the exact-SQL transport refuses a
+/// result set past `MAX_QUERY_ROWS` (10_000 rows) or 64 MiB, and a rebuild
+/// overlapping more history than that would fail activation instead of
+/// reconciling it. Both the staged primary key and `sessions` are unique on
+/// that pair, so one page's writes never move a later page's cursor.
+async fn reconcile_overlapping_rebuild_sessions(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    let mut conflicts = conn
-        .query(
-            "SELECT staged.provider, staged.session_id
+    let mut cursor: Option<(String, String)> = None;
+    loop {
+        let (after_provider, after_session) = match cursor.as_ref() {
+            Some((provider, session_id)) => (Some(provider.as_str()), Some(session_id.as_str())),
+            None => (None, None),
+        };
+        let mut overlaps = conn
+            .query(
+                "SELECT staged.session_json,
+                    active.provider, active.session_id, active.project_key,
+                    active.project_path, active.title, active.started_at,
+                    active.ended_at, active.transcript_path, active.metadata_json,
+                    active.parent_session_id, active.is_subagent, active.agent_id,
+                    active.parent_tool_use_id
              FROM observation_projection_rebuild_sessions AS staged
              JOIN sessions AS active
                ON active.provider = staged.provider AND active.session_id = staged.session_id
              WHERE staged.projector_version = ?1 AND staged.generation = ?2
-               AND (
-                 (active.project_key <> json_extract(staged.session_json, '$.project_key')
-                   AND active.project_key <> 'user'
-                   AND json_extract(staged.session_json, '$.project_key') <> 'user')
-                 OR (active.project_path <> json_extract(staged.session_json, '$.project_path')
-                   AND active.project_path <> active.project_key
-                   AND json_extract(staged.session_json, '$.project_path')
-                       <> json_extract(staged.session_json, '$.project_key'))
-                 OR (active.transcript_path IS NOT NULL
-                   AND json_extract(staged.session_json, '$.transcript_path') IS NOT NULL
-                   AND active.transcript_path IS NOT json_extract(staged.session_json, '$.transcript_path'))
-                 OR (active.parent_session_id IS NOT NULL
-                   AND json_extract(staged.session_json, '$.parent_session_id') IS NOT NULL
-                   AND active.parent_session_id IS NOT json_extract(staged.session_json, '$.parent_session_id'))
-                 OR (active.agent_id IS NOT NULL
-                   AND json_extract(staged.session_json, '$.agent_id') IS NOT NULL
-                   AND active.agent_id IS NOT json_extract(staged.session_json, '$.agent_id'))
-                 OR (active.parent_tool_use_id IS NOT NULL
-                   AND json_extract(staged.session_json, '$.parent_tool_use_id') IS NOT NULL
-                   AND active.parent_tool_use_id IS NOT json_extract(staged.session_json, '$.parent_tool_use_id'))
-                 OR (active.metadata_json IS NOT NULL
-                   AND json_extract(staged.session_json, '$.metadata_json') IS NOT NULL
-                   AND active.metadata_json IS NOT json_extract(staged.session_json, '$.metadata_json')
-                   AND (
-                     json_valid(active.metadata_json) = 0
-                     OR json_valid(json_extract(staged.session_json, '$.metadata_json')) = 0
-                     OR json_type(active.metadata_json) <> 'object'
-                     OR json_type(json_extract(staged.session_json, '$.metadata_json')) <> 'object'
-                     OR EXISTS (
-                       SELECT 1
-                       FROM json_each(json_extract(staged.session_json, '$.metadata_json')) AS expected
-                       JOIN json_each(active.metadata_json) AS actual USING (key)
-                       WHERE expected.key NOT IN ('source', 'usage')
-                         AND actual.value IS NOT expected.value
-                     )
-                   ))
-               )
-             LIMIT 1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-        )
-        .await
-        .map_err(|error| storage("validate staged projection sessions", error))?;
-    if let Some(row) = conflicts
-        .next()
-        .await
-        .map_err(|error| storage("validate staged projection sessions", error))?
-    {
-        return Err(ProjectionStoreError::OutputCollision {
-            provider: row
+               AND (?3 IS NULL
+                    OR staged.provider > ?3
+                    OR (staged.provider = ?3 AND staged.session_id > ?4))
+             ORDER BY staged.provider, staged.session_id
+             LIMIT ?5",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    generation,
+                    after_provider,
+                    after_session,
+                    REBUILD_PAGE_SIZE
+                ],
+            )
+            .await
+            .map_err(|error| storage("read overlapping projection sessions", error))?;
+        let mut updates = Vec::new();
+        let mut scanned = 0_i64;
+        let mut last = None;
+        while let Some(row) = overlaps
+            .next()
+            .await
+            .map_err(|error| storage("read overlapping projection sessions", error))?
+        {
+            let staged_json: String = row
                 .get(0)
-                .map_err(|error| storage("validate staged projection sessions", error))?,
-            message_id: format!(
-                "session:{}",
-                row.get::<String>(1)
-                    .map_err(|error| storage("validate staged projection sessions", error))?
-            ),
-        });
+                .map_err(|error| storage("read overlapping projection sessions", error))?;
+            let staged: SessionRecord =
+                decode_json(&staged_json, "decode staged projection session")?;
+            let actual = decode_overlapping_session(&row)?;
+            scanned += 1;
+            last = Some((actual.provider.clone(), actual.session_id.clone()));
+            let expected = canonicalize_session_project_paths(&staged);
+            let normalized_actual = canonicalize_session_project_paths(&actual);
+            let merged = reconcile_session_rows_detailed(&normalized_actual, &expected).map_err(
+                |conflict| ProjectionStoreError::SessionOutputCollision {
+                    provider: expected.provider.clone(),
+                    session_id: expected.session_id.clone(),
+                    field: conflict.field(),
+                },
+            )?;
+            if merged != actual {
+                updates.push(merged);
+            }
+        }
+        drop(overlaps);
+        write_reconciled_sessions(conn, &updates).await?;
+        if scanned < REBUILD_PAGE_SIZE {
+            return Ok(());
+        }
+        cursor = last;
     }
-    drop(conflicts);
+}
+
+async fn activate_rebuild_sessions(
+    conn: &impl Executor,
+    generation: &str,
+) -> ProjectionStoreResult<()> {
+    reconcile_overlapping_rebuild_sessions(conn, generation).await?;
     let session_extracts = json_extract_select_list(SESSION_JSON_COLUMN, SESSION_JSON_FIELDS);
     conn.execute(
         &format!(
@@ -2270,37 +2103,15 @@ async fn activate_rebuild_sessions(
             transcript_path, metadata_json, parent_session_id, is_subagent, agent_id,
             parent_tool_use_id
          )
-         SELECT provider, session_id,
+         SELECT staged.provider, staged.session_id,
                 {session_extracts}
-         FROM observation_projection_rebuild_sessions
-         WHERE projector_version = ?1 AND generation = ?2
-         ON CONFLICT(provider, session_id) DO UPDATE SET
-            project_key = CASE
-              WHEN sessions.project_key = 'user' THEN excluded.project_key
-              ELSE sessions.project_key END,
-            project_path = CASE
-              WHEN sessions.project_path = sessions.project_key THEN excluded.project_path
-              ELSE sessions.project_path END,
-            title = COALESCE(sessions.title, excluded.title),
-            started_at = CASE
-              WHEN sessions.started_at IS NULL THEN excluded.started_at
-              WHEN excluded.started_at IS NULL THEN sessions.started_at
-              ELSE MIN(sessions.started_at, excluded.started_at) END,
-            ended_at = CASE
-              WHEN sessions.ended_at IS NULL THEN excluded.ended_at
-              WHEN excluded.ended_at IS NULL THEN sessions.ended_at
-              ELSE MAX(sessions.ended_at, excluded.ended_at) END,
-            transcript_path = COALESCE(sessions.transcript_path, excluded.transcript_path),
-            metadata_json = CASE
-              WHEN sessions.metadata_json IS NULL THEN excluded.metadata_json
-              WHEN excluded.metadata_json IS NULL THEN sessions.metadata_json
-              ELSE json_patch(excluded.metadata_json, sessions.metadata_json) END,
-            parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
-            is_subagent = MAX(sessions.is_subagent, excluded.is_subagent),
-            agent_id = COALESCE(sessions.agent_id, excluded.agent_id),
-            parent_tool_use_id = COALESCE(
-              sessions.parent_tool_use_id, excluded.parent_tool_use_id
-            )"
+         FROM observation_projection_rebuild_sessions AS staged
+         WHERE staged.projector_version = ?1 AND staged.generation = ?2
+           AND NOT EXISTS (
+             SELECT 1 FROM sessions AS active
+             WHERE active.provider = staged.provider
+               AND active.session_id = staged.session_id
+           )"
         ),
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
@@ -2596,4 +2407,277 @@ async fn activate_rebuild_dispositions(
     .await
     .map(|_| ())
     .map_err(|error| storage("activate rebuilt projection dispositions", error))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod activation_tests {
+    use super::{
+        REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION, activate_rebuild_sessions,
+        reconcile_overlapping_rebuild_sessions,
+    };
+    use crate::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_runtime_core::db::engine::{Executor, params};
+    use tracedecay_store::{ProjectionStoreError, SessionRecord};
+
+    const SESSION_ID: &str = "002bd803-dc62-46e2-b66a-a61cc282f0dc";
+    /// One past the exact-SQL transport's `MAX_QUERY_ROWS`
+    /// (`tracedecay-rusqlite-runtime/src/exact_sql/mod.rs`), which refuses a
+    /// result set rather than truncating it.
+    const OVERLAPS_PAST_TRANSPORT_ROW_CAP: i64 = 10_001;
+
+    fn session(transcript_path: Option<&str>, title: Option<&str>) -> SessionRecord {
+        SessionRecord {
+            provider: "cursor".to_owned(),
+            session_id: SESSION_ID.to_owned(),
+            project_key: "project.fixture".to_owned(),
+            project_path: "project.fixture".to_owned(),
+            title: title.map(str::to_owned),
+            started_at: Some(1),
+            ended_at: Some(2),
+            transcript_path: transcript_path.map(str::to_owned),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        }
+    }
+
+    async fn stage(transaction: &impl Executor, generation: &str, staged: &SessionRecord) {
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_rebuilds (
+                    projector_version, generation, frontier_sequence, state
+                 ) VALUES (?1, ?2, 0, 'ready')",
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
+            )
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_rebuild_sessions (
+                    projector_version, generation, provider, session_id, session_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    generation,
+                    staged.provider.as_str(),
+                    staged.session_id.as_str(),
+                    serde_json::to_string(staged).unwrap().as_str(),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlap_reconciliation_pages_past_the_transport_row_cap() {
+        const GENERATION: &str = "generation.session-overlap-paging";
+        let harness = RegisteredGlobalDbHarness::open("session-overlap-paging").await;
+        let mut staged_rows = Vec::with_capacity(OVERLAPS_PAST_TRANSPORT_ROW_CAP as usize);
+        for index in 0..OVERLAPS_PAST_TRANSPORT_ROW_CAP {
+            let session_id = format!("session.{index:05}");
+            let active = SessionRecord {
+                session_id: session_id.clone(),
+                ..session(None, None)
+            };
+            assert!(harness.registered.upsert_session(&active).await);
+            staged_rows.push(SessionRecord {
+                session_id,
+                title: Some(format!("composer {index:05}")),
+                ..session(None, None)
+            });
+        }
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_rebuilds (
+                    projector_version, generation, frontier_sequence, state
+                 ) VALUES (?1, ?2, 0, 'ready')",
+                params![SESSION_MESSAGE_PROJECTOR_VERSION, GENERATION],
+            )
+            .await
+            .unwrap();
+        let staged_json = serde_json::to_string(&staged_rows).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO observation_projection_rebuild_sessions (
+                    projector_version, generation, provider, session_id, session_json
+                 )
+                 SELECT ?1, ?2,
+                        json_extract(staged.value, '$.provider'),
+                        json_extract(staged.value, '$.session_id'),
+                        staged.value
+                 FROM json_each(?3) AS staged",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    GENERATION,
+                    staged_json.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+
+        reconcile_overlapping_rebuild_sessions(&transaction, GENERATION)
+            .await
+            .expect("an overlap larger than one transport page must still reconcile");
+
+        let mut rows = transaction
+            .query(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE provider = 'cursor' AND title LIKE 'composer %'",
+                (),
+            )
+            .await
+            .unwrap();
+        let reconciled = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+        assert_eq!(
+            reconciled, OVERLAPS_PAST_TRANSPORT_ROW_CAP,
+            "every overlapping session must be reconciled, not one page of {REBUILD_PAGE_SIZE}",
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_names_the_session_field_instead_of_a_message_collision() {
+        let harness = RegisteredGlobalDbHarness::open("session-collision-field").await;
+        let active = session(Some("/private/old-transcript.jsonl"), None);
+        assert!(harness.registered.upsert_session(&active).await);
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        let staged = session(Some("/private/new-transcript.jsonl"), None);
+        stage(&transaction, "generation.session-collision", &staged).await;
+
+        let error = activate_rebuild_sessions(&transaction, "generation.session-collision")
+            .await
+            .expect_err("incompatible transcript paths must not activate");
+        match &error {
+            ProjectionStoreError::SessionOutputCollision {
+                provider,
+                session_id,
+                field,
+            } => {
+                assert_eq!(provider, "cursor");
+                assert_eq!(session_id, SESSION_ID);
+                assert_eq!(*field, "transcript_path");
+            }
+            other => panic!("session conflict classified as {other}"),
+        }
+        let rendered = error.to_string();
+        assert!(rendered.contains("transcript_path"));
+        assert!(!rendered.contains("session:"));
+        assert!(!rendered.contains("/private/old-transcript.jsonl"));
+        assert!(!rendered.contains("/private/new-transcript.jsonl"));
+
+        let mut rows = transaction
+            .query(
+                "SELECT transcript_path FROM sessions WHERE provider = 'cursor' AND session_id = ?1",
+                params![SESSION_ID],
+            )
+            .await
+            .unwrap();
+        let persisted = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        assert_eq!(persisted, "/private/old-transcript.jsonl");
+    }
+
+    #[tokio::test]
+    async fn activation_merges_a_compatible_session_and_inserts_a_new_one() {
+        let harness = RegisteredGlobalDbHarness::open("session-collision-merge").await;
+        let active = session(None, None);
+        assert!(harness.registered.upsert_session(&active).await);
+        let second_active = SessionRecord {
+            session_id: "session.second".to_owned(),
+            ..active.clone()
+        };
+        assert!(harness.registered.upsert_session(&second_active).await);
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        let staged = session(None, Some("Composer session"));
+        stage(&transaction, "generation.session-merge", &staged).await;
+        // A second overlap keeps the set-based reconciled write honest: each
+        // merged row must land on its own session, not the first one twice.
+        let second_staged = SessionRecord {
+            title: Some("Second composer session".to_owned()),
+            ..second_active.clone()
+        };
+        let fresh = SessionRecord {
+            provider: "cursor".to_owned(),
+            session_id: "session.fresh".to_owned(),
+            title: Some("fresh session".to_owned()),
+            ..active.clone()
+        };
+        for staged in [&second_staged, &fresh] {
+            transaction
+                .execute(
+                    "INSERT INTO observation_projection_rebuild_sessions (
+                    projector_version, generation, provider, session_id, session_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        SESSION_MESSAGE_PROJECTOR_VERSION,
+                        "generation.session-merge",
+                        staged.provider.as_str(),
+                        staged.session_id.as_str(),
+                        serde_json::to_string(staged).unwrap().as_str(),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        activate_rebuild_sessions(&transaction, "generation.session-merge")
+            .await
+            .unwrap();
+
+        let mut rows = transaction
+            .query(
+                "SELECT title FROM sessions WHERE provider = 'cursor' AND session_id = ?1",
+                params![SESSION_ID],
+            )
+            .await
+            .unwrap();
+        let title = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        assert_eq!(title, "Composer session");
+        drop(rows);
+        let mut rows = transaction
+            .query(
+                "SELECT title FROM sessions WHERE provider = 'cursor' AND session_id = 'session.second'",
+                (),
+            )
+            .await
+            .unwrap();
+        let second_title = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        assert_eq!(second_title, "Second composer session");
+        drop(rows);
+        let mut rows = transaction
+            .query(
+                "SELECT title FROM sessions WHERE provider = 'cursor' AND session_id = 'session.fresh'",
+                (),
+            )
+            .await
+            .unwrap();
+        let fresh_title = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        assert_eq!(fresh_title, "fresh session");
+    }
 }

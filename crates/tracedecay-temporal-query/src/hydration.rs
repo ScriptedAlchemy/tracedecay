@@ -254,7 +254,7 @@ pub async fn hydrate_selected(
     // resulting payloads are also appended to `batch` in anchor order. Running
     // anchors concurrently would have to grant each read a budget computed
     // before its predecessors finished, changing truncation, the first
-    // over-budget anchor, and batch ordering — i.e. changing the output.
+    // over-budget anchor, and batch ordering, i.e. changing the output.
     // Bounded concurrency cannot preserve this running-budget semantics, so the
     // sequential walk is the correct implementation.
     for anchor_id in anchors {
@@ -327,9 +327,7 @@ mod tests {
         serde_json::from_str(&format!("\"{value}\"")).expect("valid anchor")
     }
 
-    fn digest(byte: char) -> String {
-        format!("sha256:{}", byte.to_string().repeat(64))
-    }
+    use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
     fn snapshot() -> TemporalExecutionSnapshot {
         snapshot_with_limits(ExecutionLimits::default())

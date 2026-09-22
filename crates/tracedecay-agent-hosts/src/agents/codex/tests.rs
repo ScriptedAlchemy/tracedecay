@@ -605,7 +605,7 @@ fn codex_hook_command_invokes_tracedecay_is_a_safety_valve() {
 
 /// The install-output follow-up must stand until explicit, current trust is
 /// recorded for every managed hook (normally by the auto-trust sync, or by
-/// `/hooks` when the safety valve skipped a hook) — and clear the moment it is.
+/// `/hooks` when the safety valve skipped a hook), and clear the moment it is.
 #[test]
 fn codex_hook_trust_followup_clears_only_after_explicit_current_trust() {
     let home = tempfile::tempdir().expect("tempdir");
@@ -960,7 +960,7 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
 }
 
 /// Preflight still reports that the cache is not yet active; activation itself
-/// is no longer an interactive deferral — Codex CLI 0.147 drives `plugin add`.
+/// is no longer an interactive deferral. Codex CLI 0.147 drives `plugin add`.
 #[test]
 fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
     let home = tempfile::tempdir().unwrap();
@@ -979,11 +979,36 @@ fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
     assert!(CodexIntegration.interactive_removal_guidance().is_none());
 }
 
+/// Install an executable `codex` on the host-program search path only.
+///
+/// Preparation is `Ready` exactly when Codex's own plugin CLI is present, so
+/// the outcome under test is a property of the environment, not of the host
+/// integration. CI runners carry no `codex` binary while a developer box
+/// usually does; pin it here instead of reading whichever the machine has.
+/// Only host program resolution sees this directory, the process `PATH` is
+/// untouched.
+fn install_fake_codex_cli(
+    dir: &Path,
+) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
+    let binary = dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+    }
+    tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
+}
+
 #[test]
 fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
     let home = tempfile::tempdir().unwrap();
+    let cli_dir = tempfile::tempdir().unwrap();
+    let _codex_cli = install_fake_codex_cli(cli_dir.path());
     // Pre-existing user config: preparation runs before the component
-    // transaction stages `config.toml`, so it must not write there — hook
+    // transaction stages `config.toml`, so it must not write there, hook
     // trust is recorded by activation, inside the rollback boundary.
     let config_path = codex_config_path(home.path());
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -1000,6 +1025,42 @@ fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
         "model = \"gpt-5\"\n",
         "preparation must leave config.toml untouched"
     );
+}
+
+/// `Ready` promises Core apply can drive `codex plugin add`, so an
+/// unresolvable plugin CLI must defer instead.
+///
+/// Answering `Ready` opens a component transaction that can only die in
+/// activation with `HostCliUnavailable`. Its rollback leaves a `RolledBack`
+/// journal pinning `config.toml` and the versioned cache as they were before
+/// the operator runs the remediation the failure prints, and the next
+/// lifecycle command's `recover_host` then refuses the drifted host with
+/// `StalePreview`.
+#[test]
+fn prepare_defers_when_no_plugin_cli_resolves() {
+    let home = tempfile::tempdir().unwrap();
+    // Resolution sees only this empty directory; the process `PATH` (which on
+    // a developer box usually does carry `codex`) is untouched.
+    let empty = tempfile::tempdir().unwrap();
+    let _host_programs =
+        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty.path());
+
+    let outcome = CodexIntegration
+        .prepare_non_interactive_install(&install_ctx(home.path()))
+        .unwrap();
+    let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = outcome else {
+        panic!("staging Codex without a resolvable plugin CLI must defer, got {outcome:?}");
+    };
+    assert!(
+        deferred
+            .remediation
+            .contains("`codex plugin add tracedecay@personal`"),
+        "the deferral must print the executable remediation: {}",
+        deferred.remediation
+    );
+    // The source is still staged: the operator's `codex plugin add` consumes it.
+    assert!(codex_plugin_manifest_path(home.path()).is_file());
+    assert!(codex_personal_marketplace_path(home.path()).is_file());
 }
 
 /// Activation must record hook trust even when Codex already reports the

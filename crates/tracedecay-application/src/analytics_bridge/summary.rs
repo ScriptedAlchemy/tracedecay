@@ -204,8 +204,8 @@ struct HintEfficacyCounts {
 
 /// Per-category hint efficacy from durable `hint_emitted` + `hint_outcome`
 /// events: how many hints were emitted, how many the model then acted on, how
-/// many it ignored, and how many remain unresolved (emitted with no outcome yet
-/// — the correlator's later-pass backlog). `unresolved` is derived so it stays
+/// many it ignored, and how many remain unresolved (emitted with no outcome yet,
+/// the correlator's later-pass backlog). `unresolved` is derived so it stays
 /// non-negative even if the event sample is truncated mid-pair.
 pub fn hint_efficacy_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHintEfficacyV1 {
     let mut by_category: BTreeMap<String, HintEfficacyCounts> = BTreeMap::new();
@@ -583,7 +583,7 @@ impl HookAnalyticsRows {
 /// filtering. Shared with the `tracedecay analytics` CLI.
 ///
 /// Reads only the trailing [`HOOK_ANALYTICS_WINDOW_ROWS`] rows of each file;
-/// see [`HookAnalyticsRows::window_payload`] for the caption callers must
+/// see `HookAnalyticsRows::window_payload` for the caption callers must
 /// surface alongside any derived figure.
 pub fn read_hook_analytics_rows_at(
     store_root: Option<&std::path::Path>,

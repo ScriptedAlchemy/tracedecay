@@ -6,16 +6,30 @@ use serde_json::Value;
 use serde_json::json;
 
 #[cfg(feature = "test-transport")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
 use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+#[cfg(feature = "test-transport")]
+use tracedecay::project::TraceDecay;
 use tracedecay_domain::SessionId;
 #[cfg(feature = "test-transport")]
 use tracedecay_session_temporal_store::SessionTemporalStore;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
+
+/// Where a composed journey seeds host transcripts.
+///
+/// The composition reads them from its own isolated layout rather than from
+/// the ambient `$HOME`, so a rollout written under the process home is
+/// invisible to it.
+#[cfg(feature = "test-transport")]
+fn composed_transcript_home(isolation: &Path) -> PathBuf {
+    std::fs::create_dir_all(isolation).expect("production composition root");
+    ProductionProjectCompositionHarnessV1::transcript_source_home(isolation)
+        .expect("composed transcript source home")
+}
 
 #[cfg(feature = "test-transport")]
 fn write_production_codex_rollout(home: &Path, project: &Path) {
@@ -81,6 +95,51 @@ async fn production_codex_message_search(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
 ) -> Value {
+    // A `partial` generation is the store saying "still converging", the same
+    // not-ready contract as `stale`: re-read it. Every other outcome answers
+    // now, so an empty `complete_zero` still fails the assertions below.
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let payload = production_codex_message_search_once(harness, project).await;
+            if payload["outcome"] != "partial"
+                || payload["results"]
+                    .as_array()
+                    .is_some_and(|results| !results.is_empty())
+            {
+                break payload;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("production Codex message search convergence deadline");
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["message"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("cobalt orchard scheduler migration"))
+            })
+        }),
+        "production Codex message search was empty after completed ingest: {payload}"
+    );
+    assert!(
+        payload["results"].as_array().is_some_and(|results| {
+            results.iter().any(|result| {
+                result["message"]["text"].as_str()
+                    == Some("The cobalt orchard scheduler migration is ready for review")
+            })
+        }),
+        "production Codex message search did not hydrate the exact assistant message: {payload}"
+    );
+    payload
+}
+
+#[cfg(feature = "test-transport")]
+async fn production_codex_message_search_once(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) -> Value {
     let response = harness
         .call_tool(
             project,
@@ -106,30 +165,10 @@ async fn production_codex_message_search(
     .expect("production message search JSON");
     // Retained tools respond with the full evidence envelope; the search
     // payload the assertions consume lives under `outcome.value.payload`.
-    let payload = envelope
+    envelope
         .pointer("/outcome/value/payload")
         .cloned()
-        .unwrap_or(envelope);
-    assert!(
-        payload["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["message"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("cobalt orchard scheduler migration"))
-            })
-        }),
-        "production Codex message search was empty after completed ingest: {payload}"
-    );
-    assert!(
-        payload["results"].as_array().is_some_and(|results| {
-            results.iter().any(|result| {
-                result["message"]["text"].as_str()
-                    == Some("The cobalt orchard scheduler migration is ready for review")
-            })
-        }),
-        "production Codex message search did not hydrate the exact assistant message: {payload}"
-    );
-    payload
+        .unwrap_or(envelope)
 }
 
 #[cfg(feature = "test-transport")]
@@ -260,8 +299,8 @@ async fn message_search_rejects_unsupported_project_scope() {
     .expect("project-scoped message search must stay served");
 }
 
-/// Cross-project selection has exactly one spelling —
-/// `project_selector.project_id` — so top-level aliases are refused with the
+/// Cross-project selection has exactly one spelling,
+/// `project_selector.project_id`, so top-level aliases are refused with the
 /// typed invalid-selector route error, a foreign registered id fails closed
 /// as not-found-or-not-authorized, and a malformed selector is a decode error
 /// naming the argument.
@@ -473,41 +512,17 @@ async fn message_search_limit_one_hydrates_a_bounded_multi_session_corpus() {
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_codex_hook_ingest_survives_message_search_reopen() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+    let env_lock = lock_process_env().await;
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
+    let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
     fixture::write_indexed_fixture_sources(&project);
-    let init = Command::new(common::git_program())
-        .args(["init", "-q"])
-        .current_dir(&project)
-        .status()
-        .expect("git init");
-    assert!(init.success(), "git init must succeed");
-    let add = Command::new(common::git_program())
-        .args(["add", "."])
-        .current_dir(&project)
-        .status()
-        .expect("git add");
-    assert!(add.success(), "git add must succeed");
-    let commit = Command::new(common::git_program())
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "-qm",
-            "production Codex transcript fixture",
-        ])
-        .current_dir(&project)
-        .status()
-        .expect("git commit");
-    assert!(commit.success(), "git commit must succeed");
-    write_production_codex_rollout(&home, &project);
+    commit_worktree(&project, "production Codex transcript fixture");
+    write_production_codex_rollout(&transcripts, &project);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
         &isolation,
@@ -534,15 +549,19 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     )
     .expect("production Codex hook ingest JSON");
     assert_eq!(ingest["completed"], true, "{ingest}");
-    // The composition's background Codex catch-up may admit the rollout
-    // before the hook pass reaches it, in which case the hook truthfully
-    // reports zero new bytes. Either path must leave the rollout durable and
-    // searchable, which the retrieval assertions below verify directly.
+    // The composition's background Codex catch-up may admit the rollout before
+    // the hook pass reaches it, in which case the hook persists no new frames
+    // and reports the rollout as an exact duplicate. Both terminals prove the
+    // transcript is durable; `accepted_for_replay` proves neither a commit nor
+    // a duplicate and must not be reported for a rollout that is on disk and
+    // admitted. Either path must also leave the rollout searchable, which the
+    // retrieval assertions below verify directly.
     assert!(
-        ingest["admission"]["status"]
-            .as_str()
-            .is_some_and(|status| status != "unavailable" && status != "unknown"),
-        "real Codex hook ingest was refused: {ingest}"
+        matches!(
+            ingest["admission"]["status"].as_str(),
+            Some("committed" | "exact_duplicate")
+        ),
+        "real Codex hook ingest proved neither a commit nor a duplicate: {ingest}"
     );
 
     let initial = production_codex_message_search(&harness, &project).await;
@@ -643,6 +662,39 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
         expanded["expansion"]["raw_message"]["message_id"], message_id,
         "{expanded}"
     );
+    let described = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_lcm_describe",
+        json!({
+            "provider": "codex",
+            "session_id": session_id,
+            "target": {"kind": "session"},
+            "format": "json"
+        }),
+    )
+    .await;
+    let captured = "Find the cobalt orchard scheduler migration";
+    let overview = described["description"]["raw_messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["message_id"] == message_id)
+        })
+        .unwrap_or_else(|| panic!("describe omitted the captured prompt: {described}"));
+    assert_eq!(
+        overview["content_range"]["total_chars"],
+        captured.chars().count() as u64,
+        "{overview}"
+    );
+    let preview = overview["content_preview"]
+        .as_str()
+        .unwrap_or_else(|| panic!("describe preview missing: {overview}"));
+    assert!(
+        preview.contains("cobalt orchard"),
+        "describe preview was empty: {preview:?}"
+    );
 
     harness.shutdown().await;
 
@@ -662,14 +714,74 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     restarted.shutdown().await;
 }
 
+/// Isolation is total: a composed daemon serves exactly one transcript home.
+///
+/// The composition pins that home, so no route it serves may reach a rollout
+/// that only exists under the ambient process `$HOME`. The hook ingest route
+/// resolved the process home on its own, which let a harness journey observe
+/// two different readers behind one daemon.
 #[cfg(feature = "test-transport")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn completed_session_import_immediately_searches_canonical_message() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
+async fn production_hook_ingest_reads_only_the_pinned_transcript_home() {
+    let env_lock = lock_process_env().await;
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
     let home = root.path().join("home");
-    let _home_guard = HomeEnvGuard::set(&home);
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
+    let transcripts = composed_transcript_home(&isolation);
+    let project = isolation.join("project");
+    std::fs::create_dir_all(&project).expect("production composition project");
+    fixture::write_indexed_fixture_sources(&project);
+    commit_worktree(&project, "production Codex transcript fixture");
+    write_production_codex_rollout(&home, &project);
+    assert!(
+        !transcripts.join(".codex/sessions").exists(),
+        "the rollout must exist only under the process home for this journey"
+    );
+
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        &isolation,
+        [project.clone()],
+    )
+    .await
+    .expect("production composition harness");
+    let ingest = call_production_tool(
+        &harness,
+        &project,
+        "tracedecay_hook_runtime",
+        json!({"action": "ingest_transcript", "provider": "codex", "format": "json"}),
+    )
+    .await;
+    assert_eq!(ingest["completed"], true, "{ingest}");
+    assert_eq!(
+        ingest["messages_upserted"], 0,
+        "hook ingest swept the ambient process home: {ingest}"
+    );
+    assert_ne!(
+        ingest["admission"]["status"], "committed",
+        "hook ingest committed a rollout outside the pinned transcript home: {ingest}"
+    );
+
+    let search = production_codex_message_search_once(&harness, &project).await;
+    assert_eq!(
+        search["results"],
+        Value::Array(Vec::new()),
+        "a rollout under the process home reached the composed daemon: {search}"
+    );
+    harness.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_session_import_immediately_searches_canonical_message() {
+    let env_lock = lock_process_env().await;
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let home = root.path().join("home");
+    let _home_guard = HomeEnvGuard::set(&env_lock, &home);
+    // `sessions_import` is the composition's own pass, so it reads the
+    // isolated transcript layout rather than the process home.
+    let transcripts = composed_transcript_home(&isolation);
     let project = isolation.join("project");
     std::fs::create_dir_all(&project).expect("production composition project");
     fixture::write_indexed_fixture_sources(&project);
@@ -682,7 +794,7 @@ async fn completed_session_import_immediately_searches_canonical_message() {
     // More than one bounded transcript pass admits. The searchable message is
     // in the final source, so Complete proves the production continuation
     // worker consumed every durable Codex frontier before returning.
-    write_production_codex_rollouts(&home, &project, 33);
+    write_production_codex_rollouts(&transcripts, &project, 33);
 
     let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
         &isolation,
@@ -762,4 +874,363 @@ async fn completed_session_import_immediately_searches_canonical_message() {
 
     production_codex_message_search(&harness, &project).await;
     harness.shutdown().await;
+}
+
+/// `tracedecay_message_search` reads already-admitted messages through MCP
+/// `tools/call`. A query that names a seeded message returns that message's
+/// text, id, session, provider, and role. Those observations carry an unknown
+/// valid time, so the hit is partial: one omitted record, coverage `unknown`
+/// 1 and `visible` 0, not a complete answer. A query that matches nothing, the
+/// wrong provider, an assistant message filtered as a tool result, and goals
+/// with no goals are empty complete answers. Omitting `query` outside goals
+/// mode, and naming an unknown provider, are typed invalid-request refusals.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn message_search_returns_literal_seeded_messages() {
+    let dir = test_temp_dir();
+    let (cg, _env) = init_test_project(dir.path()).await;
+
+    seed_temporal_lcm_session_message(
+        &cg,
+        "proof-plum-session",
+        "proof-plum-message",
+        "The plum quartz regulator holds at 41 degrees",
+        1,
+    )
+    .await;
+    seed_temporal_lcm_session_message(
+        &cg,
+        "proof-amber-session",
+        "proof-amber-message",
+        "The amber lattice stays closed",
+        1,
+    )
+    .await;
+    seed_temporal_lcm_session_message_for_provider(
+        &cg,
+        "codex",
+        "proof-orchid-session",
+        "proof-orchid-message",
+        "The orchid spool tension is 12 newtons",
+        1,
+    )
+    .await;
+    seed_temporal_lcm_tool_result_message(
+        &cg,
+        "proof-zinc-session",
+        "proof-zinc-message",
+        "zinc spindle torque reading 17",
+        1,
+    )
+    .await;
+    for session_id in [
+        "proof-plum-session",
+        "proof-amber-session",
+        "proof-orchid-session",
+        "proof-zinc-session",
+    ] {
+        materialize_proof_session(&cg, session_id).await;
+    }
+
+    let plum = message_search_payload(
+        &cg,
+        json!({
+            "query": "plum quartz regulator",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(plum["query"], "plum quartz regulator");
+    assert_eq!(plum["outcome"], "partial");
+    assert_eq!(plum["status"], "partial");
+    assert_eq!(plum["count"], 1);
+    assert_eq!(plum["omitted"], 1);
+    assert_eq!(plum["provider"], "all");
+    assert_eq!(plum["requested_provider"], Value::Null);
+    assert_eq!(plum["scope"], "all");
+    assert_eq!(plum["message_type"], "all");
+    assert_eq!(plum["goals"], false);
+    assert_eq!(plum["catch_up"], false);
+    assert_eq!(plum["catch_up_performed"], false);
+    assert_eq!(plum["catch_up_provider"], "all");
+    assert_eq!(plum["include_subagents"], true);
+    assert_eq!(plum["refresh_required"], false);
+    assert_eq!(plum["store_scope"], "project");
+    assert_eq!(
+        plum["temporal"]["coverage"],
+        json!({"hidden": 0, "redacted": 0, "unknown": 1, "visible": 0})
+    );
+    assert_eq!(plum["temporal"]["freshness"], json!({"state": "fresh"}));
+    assert_eq!(plum["results"].as_array().map(Vec::len), Some(1));
+    let plum_hit = &plum["results"][0];
+    assert_eq!(
+        plum_hit["message"]["text"],
+        "The plum quartz regulator holds at 41 degrees"
+    );
+    assert_eq!(plum_hit["message"]["message_id"], "proof-plum-message");
+    assert_eq!(plum_hit["message"]["session_id"], "proof-plum-session");
+    assert_eq!(plum_hit["message"]["provider"], "cursor");
+    assert_eq!(plum_hit["message"]["role"], "assistant");
+    assert_eq!(plum_hit["message"]["model"], "test-model");
+    assert_eq!(plum_hit["session"]["session_id"], "proof-plum-session");
+    assert_eq!(plum_hit["session"]["provider"], "cursor");
+    assert_eq!(plum_hit["session"]["is_subagent"], false);
+
+    let amber = message_search_payload(
+        &cg,
+        json!({
+            "query": "amber lattice",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(amber["outcome"], "partial");
+    assert_eq!(amber["status"], "partial");
+    assert_eq!(amber["count"], 1);
+    assert_eq!(amber["omitted"], 1);
+    assert_eq!(
+        amber["results"][0]["message"]["text"],
+        "The amber lattice stays closed"
+    );
+    assert_eq!(
+        amber["results"][0]["message"]["message_id"],
+        "proof-amber-message"
+    );
+    assert_eq!(
+        amber["results"][0]["message"]["session_id"],
+        "proof-amber-session"
+    );
+    assert_eq!(amber["results"][0]["message"]["provider"], "cursor");
+    assert_eq!(amber["results"][0]["message"]["role"], "assistant");
+
+    let miss = message_search_payload(
+        &cg,
+        json!({
+            "query": "no such nautilus phrase",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(miss["query"], "no such nautilus phrase");
+    assert_eq!(miss["outcome"], "complete_zero");
+    assert_eq!(miss["status"], "ok");
+    assert_eq!(miss["count"], 0);
+    assert_eq!(miss["results"], json!([]));
+    assert_eq!(miss["provider"], "all");
+    assert_eq!(miss["refresh_required"], false);
+    assert_eq!(
+        miss["temporal"]["coverage"],
+        json!({"hidden": 0, "redacted": 0, "unknown": 0, "visible": 0})
+    );
+
+    let cursor_only = message_search_payload(
+        &cg,
+        json!({
+            "query": "orchid spool tension",
+            "provider": "cursor",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(cursor_only["provider"], "cursor");
+    assert_eq!(cursor_only["requested_provider"], "cursor");
+    assert_eq!(cursor_only["outcome"], "complete_zero");
+    assert_eq!(cursor_only["count"], 0);
+    assert_eq!(cursor_only["results"], json!([]));
+
+    let codex_only = message_search_payload(
+        &cg,
+        json!({
+            "query": "orchid spool tension",
+            "provider": "codex",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(codex_only["provider"], "codex");
+    assert_eq!(codex_only["requested_provider"], "codex");
+    assert_eq!(codex_only["outcome"], "partial");
+    assert_eq!(codex_only["status"], "partial");
+    assert_eq!(codex_only["count"], 1);
+    assert_eq!(codex_only["omitted"], 1);
+    assert_eq!(
+        codex_only["results"][0]["message"]["text"],
+        "The orchid spool tension is 12 newtons"
+    );
+    assert_eq!(
+        codex_only["results"][0]["message"]["message_id"],
+        "proof-orchid-message"
+    );
+    assert_eq!(codex_only["results"][0]["message"]["provider"], "codex");
+    assert_eq!(codex_only["results"][0]["message"]["role"], "assistant");
+    assert_eq!(
+        codex_only["results"][0]["message"]["session_id"],
+        "proof-orchid-session"
+    );
+    assert_eq!(codex_only["results"][0]["session"]["provider"], "codex");
+
+    let not_a_tool = message_search_payload(
+        &cg,
+        json!({
+            "query": "plum quartz regulator",
+            "message_type": "tool_result",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(not_a_tool["message_type"], "tool_result");
+    assert_eq!(not_a_tool["outcome"], "complete_zero");
+    assert_eq!(not_a_tool["count"], 0);
+    assert_eq!(not_a_tool["results"], json!([]));
+
+    let tool_hit = message_search_payload(
+        &cg,
+        json!({
+            "query": "zinc spindle torque",
+            "message_type": "tool_result",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(tool_hit["message_type"], "tool_result");
+    assert_eq!(tool_hit["outcome"], "partial");
+    assert_eq!(tool_hit["status"], "partial");
+    assert_eq!(tool_hit["count"], 1);
+    assert_eq!(tool_hit["omitted"], 1);
+    assert_eq!(
+        tool_hit["results"][0]["message"]["text"],
+        "zinc spindle torque reading 17"
+    );
+    assert_eq!(
+        tool_hit["results"][0]["message"]["message_id"],
+        "proof-zinc-message"
+    );
+    assert_eq!(tool_hit["results"][0]["message"]["role"], "tool");
+    assert_eq!(tool_hit["results"][0]["message"]["model"], Value::Null);
+    assert_eq!(tool_hit["results"][0]["message"]["provider"], "cursor");
+    assert_eq!(
+        tool_hit["results"][0]["message"]["session_id"],
+        "proof-zinc-session"
+    );
+
+    let goals = message_search_payload(
+        &cg,
+        json!({
+            "goals": true,
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(goals["goals"], true);
+    assert_eq!(goals["query"], "");
+    assert_eq!(goals["outcome"], "complete_zero");
+    assert_eq!(goals["status"], "ok");
+    assert_eq!(goals["count"], 0);
+    assert_eq!(goals["results"], json!([]));
+
+    let missing_query = refusal_problem(&expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({"format": "json"}),
+            None,
+            None,
+        )
+        .await,
+    ));
+    assert_eq!(missing_query["kind"], "invalid_request");
+    assert_eq!(
+        missing_query["code"],
+        "application.retained.invalid-request"
+    );
+    assert_eq!(
+        missing_query["message"],
+        "The retained operation request is invalid."
+    );
+    assert_eq!(
+        missing_query["diagnostic"]["code"],
+        "application.retained.invalid-request"
+    );
+    assert_eq!(
+        missing_query["diagnostic"]["message"],
+        "The retained operation request is invalid."
+    );
+    assert_eq!(missing_query["retry"], "never");
+    assert_eq!(missing_query["legal_actions"], json!(["correct_request"]));
+
+    let unknown_provider = refusal_problem(&expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({
+                "query": "plum quartz regulator",
+                "provider": "unknown-agent",
+                "format": "json",
+            }),
+            None,
+            None,
+        )
+        .await,
+    ));
+    assert_eq!(unknown_provider["kind"], "invalid_request");
+    assert_eq!(
+        unknown_provider["code"],
+        "application.retained.message-search-provider-invalid"
+    );
+    assert_eq!(
+        unknown_provider["message"],
+        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+    );
+    assert_eq!(
+        unknown_provider["diagnostic"]["message"],
+        "unknown session provider 'unknown-agent' (expected all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes)"
+    );
+    assert_eq!(unknown_provider["retry"], "never");
+    assert_eq!(
+        unknown_provider["legal_actions"],
+        json!(["correct_request"])
+    );
+}
+
+#[cfg(feature = "test-transport")]
+async fn materialize_proof_session(cg: &TraceDecay, session_id: &str) {
+    let runtime = open_active_project_session_db(cg).await;
+    SessionTemporalStore::new(
+        runtime
+            .registered_database(HostAdmissionScope::Project)
+            .expect("registered project session database"),
+    )
+    .materialize_pending_session_refresh_for_test(
+        &SessionId::new(session_id).expect("fixture session id"),
+    )
+    .await
+    .expect("materialize canonical temporal session");
+}
+
+#[cfg(feature = "test-transport")]
+async fn message_search_payload(cg: &TraceDecay, arguments: Value) -> Value {
+    let result = handle_tool_call(cg, "tracedecay_message_search", arguments, None, None)
+        .await
+        .expect("tracedecay_message_search MCP call");
+    let envelope = extract_json(&result.value);
+    envelope
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .unwrap_or(envelope)
+}
+
+#[cfg(feature = "test-transport")]
+fn refusal_problem(error: &str) -> Value {
+    const MARKER: &str = "answered with a retained refusal: ";
+    let json = error
+        .split_once(MARKER)
+        .unwrap_or_else(|| panic!("expected a retained refusal, got {error}"))
+        .1;
+    let envelope: Value = serde_json::from_str(json)
+        .unwrap_or_else(|parse_error| panic!("{parse_error} in retained refusal: {json}"));
+    envelope
+        .pointer("/Err/problem")
+        .cloned()
+        .or_else(|| envelope.get("problem").cloned())
+        .unwrap_or_else(|| panic!("retained refusal has no problem record: {envelope}"))
 }

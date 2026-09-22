@@ -5,14 +5,12 @@
 //! module gathers live daemon signals, maps daemon-owned types into kernel
 //! reads, and wires those reads into the composer. Truthfulness is preserved
 //! end to end: a signal that cannot be consulted maps to the kernel's typed
-//! `Unsupported`/`Absent`/`Denied`/`Unknown` read — never a fabricated healthy
-//! result — and partial coverage carries its real reason.
+//! `Unsupported`/`Absent`/`Denied`/`Unknown` read, never a fabricated healthy
+//! result, and partial coverage carries its real reason.
 //!
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
 use tracedecay_contracts::doctor::{
@@ -51,8 +49,8 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 ///
 /// A pinned snapshot resolves in-sync (the cache invariant guarantees the pinned
 /// configuration equals the value derived from its resolved snapshot, so within
-/// the cache there is no unobserved drift). A cold cache — the fail-closed
-/// accessor's `Err` — is a typed [`ConfigurationAuthorityReadV1::Absent`], never
+/// the cache there is no unobserved drift). A cold cache, the fail-closed
+/// accessor's `Err`, is a typed [`ConfigurationAuthorityReadV1::Absent`], never
 /// a fabricated healthy result.
 #[must_use]
 pub fn configuration_read_from_pin<E>(
@@ -74,7 +72,7 @@ pub fn configuration_read_from_pin<E>(
 /// ([`tracedecay_global_db::schema_stages::validate_observation_authority_connection`]):
 /// read-only, so Doctor observes the invariant without owning any repair of it.
 /// `true` means the audit ran and every invariant held; `false` means it ran and
-/// an invariant failed. "Could not run" is not representable here — the caller
+/// an invariant failed. "Could not run" is not representable here, the caller
 /// owns that distinction.
 async fn observation_authority_audit_passed(
     snapshot: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
@@ -190,13 +188,13 @@ pub async fn code_index_read_from_registry(
 
 /// Report the shards whose historical schema convergence has not completed.
 ///
-/// Convergence carries the migrations whose cost scales with store size — a
-/// full index rebuild, a whole-table rewrite — so on a large store it runs for
+/// Convergence carries the migrations whose cost scales with store size, a
+/// full index rebuild, a whole-table rewrite, so on a large store it runs for
 /// minutes after the daemon is already serving. That is deliberate: it runs
 /// after the fail-closed admission checks and outside any caller's write
 /// lease, so it blocks neither admission nor retrieval. What it must not do is
-/// stay invisible. A shard still pending or running reads as `Stale` — the
-/// store is behind its current schema but readable — and one whose migration
+/// stay invisible. A shard still pending or running reads as `Stale`, the
+/// store is behind its current schema but readable, and one whose migration
 /// failed reads as `Degraded`, carrying the failure the convergence task
 /// recorded. An empty set is absent rather than a healthy claim, since a
 /// daemon with no mounted shard has converged nothing.
@@ -354,8 +352,8 @@ struct CollectedStoreTelemetryV1 {
 const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
 /// Entry ceiling for the code-index generation census.
 ///
-/// The census is metadata-only — a `stat` and a bounded manifest prefix per
-/// generation — so its cost scales with the number of directory entries, not
+/// The census is metadata-only, a `stat` and a bounded manifest prefix per
+/// generation, so its cost scales with the number of directory entries, not
 /// with their size. Gating it on bytes instead (the previous
 /// `MAX_SYNCHRONOUS_EXHAUSTIVE_SCAN_BYTES` budget) compared a 64 MiB ceiling
 /// against generation files that are routinely ~1 GiB each, so the gate failed
@@ -1110,7 +1108,7 @@ pub fn production_doctor_report_reader(
                     // The exhaustive invariant pass
                     // (`validate_observation_authority_connection`) observed just
                     // above, never a boolean re-derived from schema and write-scope
-                    // currency — that is a different question and is already
+                    // currency, that is a different question and is already
                     // reported through `startup_converged`. `None` here means the
                     // audit genuinely could not run and drops runtime coverage to
                     // partial, exactly as the coverage split intends.
@@ -1188,12 +1186,7 @@ pub fn doctor_report_request_context(
 }
 
 fn now_secs() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs()),
-    )
-    .unwrap_or(i64::MAX)
+    tracedecay_runtime_core::tracedecay::saturating_unix_secs()
 }
 
 #[cfg(test)]

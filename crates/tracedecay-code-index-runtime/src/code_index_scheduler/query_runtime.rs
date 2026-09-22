@@ -468,7 +468,7 @@ impl CodeIndexSchedulerRegistryV1 {
         validate_search_policy(&input)?;
         // Stale-while-revalidate, resolved serve-old first. The ready gate
         // admits only an *already current* generation, so it abstains for the
-        // whole window of any rebuild — freshness unknown, git metadata moved,
+        // whole window of any rebuild, freshness unknown, git metadata moved,
         // staleness threshold elapsed. Every other callable code query keeps
         // serving the last complete generation through that window, and search
         // must not be the one lane that collapses.
@@ -579,7 +579,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         // Nothing servable and the ready gate refused. Search is the
                         // one lane whose resolution never runs the freshness ladder,
                         // so nothing else on this path will ever request the rebuild
-                        // that would remedy the failure — it would return this typed
+                        // that would remedy the failure, it would return this typed
                         // error forever. Ask for the remedy exactly once per
                         // admission (debounced on the pending wake), never inline and
                         // never parking, then still fail typed rather than degrade
@@ -625,7 +625,7 @@ impl CodeIndexSchedulerRegistryV1 {
         validate_search_policy(&input)?;
         // Checkout-identity gate: the caller pinned this generation
         // explicitly, so a foreign project/repository/worktree is refused
-        // while a branch-label difference stays servable — the sealed
+        // while a branch-label difference stays servable, the sealed
         // reference is attribution, not identity (see
         // [`super::registry::latest_matches_scope_identity`]).
         if !super::registry::latest_matches_scope_identity(&latest, scope) {
@@ -715,9 +715,15 @@ where
         let sanitized = RawRetrievalRequestV1::new(input.query, request)
             .sanitize(input.sanitizer_revision, input.normalization_revision)?;
         let readiness = text.query_owner_readiness();
-        if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_))
-            || text.text_projection_needs_work()
-        {
+        // Only this search's own owners decide whether it needs the worker.
+        // A clone-fingerprint successor keeps `text_projection_needs_work`
+        // true long after exact and lexical are ready, and asking for it here
+        // stamped the pending-wake slot on a seat whose source proof was
+        // current: the freshness ladder reads that slot as
+        // `refresh_in_flight`, so the very response that stamped it answered
+        // `verifying`. The successor is the worker's own continuation, and
+        // the similarity path that consumes it still requests it directly.
+        if !matches!(&readiness, CodeTextQueryOwnerReadinessV1::Ready(_)) {
             match schedulers.request_query_background_reconcile(scope).await {
                 CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(_) => {
                     return Err(QuerySearchExecutionErrorV1::ExactGenerationUnavailable(

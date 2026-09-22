@@ -1,4 +1,4 @@
-//! `tracedecay_todos` — marker-word scan (TODO, FIXME, …) across indexed files.
+//! `tracedecay_todos`, marker-word scan (TODO, FIXME, …) across indexed files.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -106,7 +106,7 @@ pub async fn handle_todos(
 
             'outer: for file in &files {
                 if let Some(prefix) = path.as_deref()
-                    && !tracedecay_runtime_core::path_scope::path_matches_scope(file, Some(prefix))
+                    && !tracedecay_domain::path_matches_scope(file, Some(prefix))
                 {
                     continue;
                 }

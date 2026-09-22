@@ -22,7 +22,7 @@
 //! is built on. The store runtime that decides which shards a daemon opens and
 //! how they converge, retire, and shut down is `tracedecay-store-runtime`; it
 //! stores `RegisteredGlobalDbLeaseV1` in its public surface, and
-//! `tracedecay-global-db` depends on this kernel — so the kernel taking that
+//! `tracedecay-global-db` depends on this kernel, so the kernel taking that
 //! edge back would be a Cargo cycle. `global_db`, sessions, and semantic
 //! projection are above this crate for the same reason.
 //!
@@ -32,7 +32,7 @@
 //! **fails closed**: an unregistered installer refuses the open rather than
 //! publishing an uninitialised store. `tracedecay-store-runtime` registers it
 //! from `register_registered_schema_installer()`, called at the top of
-//! `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor of the
+//! `DaemonSessionRuntimeRegistryV1::open()`, the sole constructor of the
 //! production registry.
 //!
 //! `test-transport` forwards to `tracedecay-rusqlite-runtime/test-transport`.
@@ -102,13 +102,13 @@ pub mod config;
 pub mod db;
 pub mod git;
 pub mod git_discovery;
+pub mod git_open;
 pub mod git_repository;
 pub mod lifecycle_lease;
 pub mod logging;
 pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;
-pub mod path_scope;
 mod profiled_lock;
 pub mod resident_memory;
 pub mod runtime_identity;

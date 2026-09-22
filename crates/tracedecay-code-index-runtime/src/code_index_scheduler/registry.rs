@@ -56,6 +56,8 @@ mod query_authority;
 mod reconcile_failure_isolation_tests;
 mod scope_identity;
 #[cfg(test)]
+mod seat_swap_tests;
+#[cfg(test)]
 mod serving_readiness_tests;
 mod serving_reads;
 
@@ -241,7 +243,7 @@ impl GraphSeatGateV1 {
 ///
 /// Preparation binds the complete generation and hands it to the serving
 /// swap; activation installs its native graph. The two used to share one
-/// gate, so refusing a redundant activation also refused the seat — a restart
+/// gate, so refusing a redundant activation also refused the seat, a restart
 /// that restored an owner whose graph was already Ready therefore left the
 /// serving slot empty forever while status read the same owner and reported
 /// Ready. Every arm here refuses activation only; the seat always happens.
@@ -336,7 +338,7 @@ impl ServingSwapOutcomeV1 {
                 // generation must not move the slot backwards.
                 return Self::Superseded;
             }
-            // Nothing active holds the slot — it is empty, or its incumbent
+            // Nothing active holds the slot, it is empty, or its incumbent
             // was superseded too. Either way this generation is no worse than
             // what is there, and refusing left the route wedged on a
             // generation the store no longer publishes.
@@ -350,6 +352,15 @@ impl ServingSwapOutcomeV1 {
     pub const fn installs(self) -> bool {
         matches!(self, Self::Seated | Self::SeatedStale)
     }
+}
+
+/// An unfinished text projection withholds the serving seat only when exact
+/// or lexical owners are still missing.
+///
+/// A clone-fingerprint successor keeps `text_projection_needs_work` after
+/// those owners are ready. That is not `published_text_owner_unfinished`.
+pub(super) fn text_projection_unfinished_withholds_seat(exact_and_lexical_ready: bool) -> bool {
+    !exact_and_lexical_ready
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -696,8 +707,8 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// passes or when a generation extracted this pass seats as the active
     /// publication; cleared when the probe fails or the slot is rewritten
     /// with an unproven generation. A background reconcile owns the scheduler
-    /// mutex for its whole pass — sealing a production-scale corpus holds it
-    /// for minutes — and verified graph reads re-prove the witness against
+    /// mutex for its whole pass, sealing a production-scale corpus holds it
+    /// for minutes, and verified graph reads re-prove the witness against
     /// the live checkout through that window instead of refusing.
     serving_source_witness: Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
     /// Immutable progress snapshot independently readable while the scheduler
@@ -808,7 +819,7 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
 
 const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the durable code-index \
      publication store is corrupt; retire this project route, replace or rebuild that store, \
-     then remount — `tracedecay sync` and ordinary wakes cannot clear it";
+     then remount, `tracedecay sync` and ordinary wakes cannot clear it";
 
 fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1) -> bool {
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)
@@ -1063,8 +1074,8 @@ mod terminal_publication_park_tests {
 
 /// The sealed-generation identity half of a freshness reading. Every other
 /// field is left at its default so callers can fill in the observation half
-/// with struct-update syntax, which keeps these seven — six of them
-/// `Option<String>` — matched by name rather than by position.
+/// with struct-update syntax, which keeps these seven, six of them
+/// `Option<String>`, matched by name rather than by position.
 fn dashboard_freshness_identity(
     latest: Option<&LatestCompleteCodeIndexV1>,
 ) -> tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1 {
@@ -1266,11 +1277,17 @@ enum ColdMountAdmissionV1 {
 
 /// One exact worktree's pending worker wake. `micros == 0` means no pending
 /// arrival, and every nonzero arrival is held by one nonzero owner token.
+///
+/// `attributable` is false for a worker-owned continuation: the slot stays
+/// nonzero so freshness still sees the follow-up, but the instant is not an
+/// external wake. Publishing it as [`CodeIndexArrivalV1::Observed`] fabricated
+/// an event-to-ready receipt for a pass nobody requested.
 struct PendingWakeStateV1 {
     micros: u64,
     trigger: u64,
     owner: u64,
     next_owner: u64,
+    attributable: bool,
 }
 
 /// The single synchronization authority for one worktree's coalesced wake.
@@ -1348,6 +1365,7 @@ impl Default for PendingWakeStateV1 {
             trigger: 0,
             owner: 0,
             next_owner: 1,
+            attributable: false,
         }
     }
 }
@@ -1385,6 +1403,7 @@ impl PendingWakeClaimV1 {
         let claimed_micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
         let owner = state.next_owner();
         state.micros = claimed_micros;
+        state.attributable = true;
         state.owner = owner;
         drop(state);
         Some(Self {
@@ -1426,6 +1445,7 @@ impl Drop for PendingWakeClaimV1 {
                 state.micros = 0;
                 state.trigger = 0;
                 state.owner = 0;
+                state.attributable = false;
             }
         }
     }
@@ -1444,8 +1464,8 @@ type ReadyProbeServingPartsV1 = (
 );
 
 /// Typed verdict from a demand-driven reconcile wake (hooks, overflow, query
-/// admission). Callers must match this — especially
-/// [`Self::PublicationAuthorityCorrupt`] — instead of swallowing a bool and
+/// admission). Callers must match this, especially
+/// [`Self::PublicationAuthorityCorrupt`], instead of swallowing a bool and
 /// driving inline work against a terminal park.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodeIndexReconcileAdmissionV1 {
@@ -1878,6 +1898,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 pending_wake.micros = 0;
                 pending_wake.owner = 0;
                 pending_wake.trigger = 0;
+                pending_wake.attributable = false;
             }
         }
     }
@@ -2065,9 +2086,13 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.owner = state.next_owner();
-        if state.micros == 0 {
+        // A worker continuation occupies the slot without an external instant.
+        // This wake is the arrival; keep an already-observed one so a later
+        // stamp cannot shorten the wait that wake already took.
+        if state.micros == 0 || !state.attributable {
             state.micros = wake_micros;
         }
+        state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
         drop(state);
         wake.notify_one();
@@ -2085,55 +2110,95 @@ impl CodeIndexSchedulerRegistryV1 {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.micros != 0 {
+        // An unattributable continuation is not an arrival. Upgrade it: the
+        // caller that just proved work is the event the receipt must name.
+        if state.micros != 0 && state.attributable {
             return false;
         }
         state.owner = state.next_owner();
         state.micros = wake_micros;
+        state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
         drop(state);
         wake.notify_one();
         true
     }
 
-    /// Queue worker-owned continuation work through the same pending-arrival
-    /// authority as external wakes. This keeps readiness truthful while the
-    /// continuation waits for shared admission; a bare `Notify` permit is not
-    /// observable by freshness readers.
+    /// Queue worker-owned continuation work so freshness still sees it.
+    ///
+    /// A bare `Notify` permit is not observable by freshness readers, so the
+    /// slot is stamped like an arrival. It is not one. The worker decided to
+    /// continue work an earlier wake already claimed. `attributable = false`
+    /// keeps that stamp out of the event-to-ready receipt, which otherwise
+    /// charged a suppressed freshness probe that raced it.
     fn note_worker_continuation(pending_wake: &PendingWakeV1, wake: &tokio::sync::Notify) {
-        if !Self::note_wake_if_idle(pending_wake, wake, CodeIndexCadenceTriggerV1::BusyFollowUp) {
-            // This pass may have consumed the permit for an arrival it has not
-            // claimed yet. Keep that observable arrival and replenish its
-            // coalesced permit so the continuation cannot sleep behind it.
+        let mut state = pending_wake
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.micros != 0 {
+            // An arrival is already queued, or a continuation already occupies
+            // the slot. Replenish the coalesced permit so the worker cannot
+            // sleep behind work it has not claimed.
+            drop(state);
             wake.notify_one();
+            return;
         }
+        state.owner = state.next_owner();
+        state.micros = u64::try_from(now_micros().0).unwrap_or(u64::MAX);
+        state.attributable = false;
+        state.trigger = Self::pack_trigger(CodeIndexCadenceTriggerV1::BusyFollowUp);
+        drop(state);
+        wake.notify_one();
+    }
+
+    /// Stamp a continuation while `reconcile_in_progress` still reports this pass.
+    ///
+    /// Callers that already released the worker's pass guard use this so a
+    /// reader waiting for the counter to hit zero cannot observe an empty
+    /// slot and then lose to `BusyFollowUp`. The stamp is the idle boundary;
+    /// the guard lives only for the note.
+    fn note_visible_worker_continuation(
+        passes: &Arc<AtomicUsize>,
+        pending_wake: &PendingWakeV1,
+        wake: &tokio::sync::Notify,
+    ) {
+        let _visible = super::ReconcilePassGuard::enter(passes);
+        Self::note_worker_continuation(pending_wake, wake);
     }
 
     /// Claim the pending wake as one reconcile's arrival, at the instant the
     /// scheduler dequeues it.
     ///
-    /// A reconcile with no pending wake — a follow-up pass draining work an
-    /// earlier wake already claimed — has no attributable arrival. Reporting the
+    /// A reconcile with no pending wake, a follow-up pass draining work an
+    /// earlier wake already claimed, has no attributable arrival. Reporting the
     /// dequeue or terminal instant instead would publish a fabricated zero queue
     /// delay, so the absence stays typed.
     fn take_pending_arrival(
         pending_wake: &PendingWakeV1,
         default_trigger: CodeIndexCadenceTriggerV1,
     ) -> (CodeIndexArrivalV1, CodeIndexCadenceTriggerV1) {
-        let (wake_micros, packed_trigger) = {
+        let (wake_micros, packed_trigger, attributable) = {
             let mut state = pending_wake
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let wake_micros = state.micros;
             let packed_trigger = state.trigger;
+            let attributable = state.attributable;
             state.micros = 0;
             state.trigger = 0;
             state.owner = 0;
-            (wake_micros, packed_trigger)
+            state.attributable = false;
+            (wake_micros, packed_trigger, attributable)
         };
-        if wake_micros == 0 {
-            return (CodeIndexArrivalV1::Unavailable, default_trigger);
+        if wake_micros == 0 || !attributable {
+            let trigger = if wake_micros == 0 {
+                default_trigger
+            } else {
+                Self::unpack_trigger(packed_trigger)
+            };
+            return (CodeIndexArrivalV1::Unavailable, trigger);
         }
         let trigger = Self::unpack_trigger(packed_trigger);
         match i64::try_from(wake_micros) {
@@ -2163,12 +2228,14 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A wake that arrived while this pass ran is newer, so the restored
-        // arrival remains the earliest and stays authoritative.
-        if state.micros != 0 && state.micros <= wake_micros {
+        // arrival remains the earliest and stays authoritative. A continuation
+        // occupying the slot is not an arrival and must not hide this one.
+        if state.attributable && state.micros != 0 && state.micros <= wake_micros {
             return;
         }
         state.owner = state.next_owner();
         state.micros = wake_micros;
+        state.attributable = true;
         state.trigger = Self::pack_trigger(trigger);
     }
 
@@ -2225,8 +2292,8 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|scheduler| (pass, scheduler))
     }
 
-    /// Drive one pass's text owner — a publication's replacement owner or the
-    /// restored retained owner — through its bounded projection, one blocking
+    /// Drive one pass's text owner, a publication's replacement owner or the
+    /// restored retained owner, through its bounded projection, one blocking
     /// advance at a time, until exact and lexical serving are ready or the
     /// projection stops typed.
     ///
@@ -2469,7 +2536,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // A successful publication is the terminal outcome operators need to see
         // to know a rebuild window actually closed, so it is `info`, not `debug`:
         // the cadence receipt below is debug-level and was invisible in the
-        // journal during the live search outage. Identifiers and counters only —
+        // journal during the live search outage. Identifiers and counters only,
         // no project path.
         if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
             tracing::info!(
@@ -3429,8 +3496,8 @@ fn feedback_document_logical_path(
 ///
 /// The caller canonicalizes the mounted root; the client addresses a document
 /// by whatever path it opened. Those two spellings differ whenever any prefix
-/// of the root is a symlink — on macOS every `/var/folders/...` root the
-/// daemon holds as `/private/var/folders/...` — and a raw prefix strip
+/// of the root is a symlink, on macOS every `/var/folders/...` root the
+/// daemon holds as `/private/var/folders/...`, and a raw prefix strip
 /// refused every document under such a root as outside it.
 ///
 /// The document need not exist yet (an unsaved buffer), so the deepest
@@ -3542,7 +3609,9 @@ mod feedback_document_path_tests {
 
 #[cfg(test)]
 mod text_slice_fairness_tests {
-    use super::{CodeIndexCadenceTriggerV1, CodeIndexSchedulerRegistryV1, PendingWakeV1};
+    use super::{
+        CodeIndexArrivalV1, CodeIndexCadenceTriggerV1, CodeIndexSchedulerRegistryV1, PendingWakeV1,
+    };
 
     #[test]
     fn pending_reconcile_is_serviced_between_bounded_text_slices() {
@@ -3571,6 +3640,58 @@ mod text_slice_fairness_tests {
             CodeIndexSchedulerRegistryV1::incomplete_text_slice_may_continue(&pending),
             "text continuation resumes only after reconcile claims the pending arrival"
         );
+    }
+
+    #[test]
+    fn worker_continuation_stays_pending_without_an_observed_arrival() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        CodeIndexSchedulerRegistryV1::note_worker_continuation(&pending, &wake);
+        assert!(
+            pending.has_pending_arrival(),
+            "freshness must still see the continuation while it waits"
+        );
+
+        let (arrival, trigger) = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert_eq!(
+            arrival,
+            CodeIndexArrivalV1::Unavailable,
+            "a worker continuation is not an external wake and must not publish \
+             an event-to-ready sample"
+        );
+        assert_eq!(trigger, CodeIndexCadenceTriggerV1::BusyFollowUp);
+        assert!(
+            !pending.has_pending_arrival(),
+            "claiming the continuation clears the slot"
+        );
+    }
+
+    #[test]
+    fn an_external_wake_replaces_an_unattributable_continuation() {
+        let pending = PendingWakeV1::default();
+        let wake = tokio::sync::Notify::new();
+        CodeIndexSchedulerRegistryV1::note_worker_continuation(&pending, &wake);
+        assert!(
+            CodeIndexSchedulerRegistryV1::note_wake_if_idle(
+                &pending,
+                &wake,
+                CodeIndexCadenceTriggerV1::QueryAdmission,
+            ),
+            "a real wake must replace the continuation placeholder"
+        );
+
+        let (arrival, trigger) = CodeIndexSchedulerRegistryV1::take_pending_arrival(
+            &pending,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
+        assert!(
+            matches!(arrival, CodeIndexArrivalV1::Observed { wake_micros } if wake_micros > 1),
+            "the receipt names the external wake, not the continuation slot: {arrival:?}"
+        );
+        assert_eq!(trigger, CodeIndexCadenceTriggerV1::QueryAdmission);
     }
 }
 

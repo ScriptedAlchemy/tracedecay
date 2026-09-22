@@ -49,7 +49,7 @@ except Exception:
         pass
 
 # Hermes' centralized auxiliary LLM facade is the MODULE-LEVEL
-# agent.auxiliary_client.call_llm(task=..., messages=..., ...) — AIAgent
+# agent.auxiliary_client.call_llm(task=..., messages=..., ...). AIAgent
 # instances carry no ``auxiliary_client`` attribute and no host call site
 # hands the plugin an agent object. Guarded so the plugin still degrades
 # gracefully (deterministic fallback summaries) outside a hermes install.
@@ -369,7 +369,7 @@ LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
 # Direct duplicates of the memory provider's own tool surface
 # (fact_store / fact_feedback / memory_status). Skipped at register() time
 # when tracedecay is the active memory.provider so the same store is not
-# exposed twice per API call. tracedecay_message_search stays registered —
+# exposed twice per API call. tracedecay_message_search stays registered,
 # the provider does not expose transcript search.
 MEMORY_PROVIDER_TOOLS = frozenset((
     *FACT_STORE_EXACT_ROUTES.values(),
@@ -454,7 +454,7 @@ def _pre_llm_call(*args, **kwargs):
     # can hijack the assistant's response and surface tracedecay when the user
     # did not ask for code work. Keep it first-turn-only for prompt-cache
     # stability, and skip it entirely when no tracedecay tools registered on
-    # this host — advertising unregistered tools invites hallucinated calls.
+    # this host, advertising unregistered tools invites hallucinated calls.
     if not kwargs.get("is_first_turn"):
         return None
     if not _REGISTERED_TOOL_NAMES:
@@ -1962,7 +1962,7 @@ class TraceDecayContextEngine(ContextEngine):
 
         run_agent.py logs ``context_length``/``threshold_tokens`` directly and
         the minimum-context guard in agent/agent_init.py reads
-        ``context_length`` — leaving them 0 logged a bogus 0-token window and
+        ``context_length``, leaving them 0 logged a bogus 0-token window and
         silently bypassed that guard.
         """
         try:
@@ -2258,7 +2258,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         """
         if not _tracedecay_binary_available():
             print(
-                f"  tracedecay binary not found at {tools.TRACEDECAY_BIN} — "
+                f"  tracedecay binary not found at {tools.TRACEDECAY_BIN}. "
                 "install it (cargo install tracedecay) and re-run `hermes memory setup`."
             )
             return
@@ -2283,7 +2283,7 @@ class TracedecayMemoryProvider(MemoryProvider):
             print(f"  tracedecay memory store check failed: {detail}")
 
     def system_prompt_block(self):
-        # Built once per session by the host during system prompt assembly —
+        # Built once per session by the host during system prompt assembly,
         # cache-stable, unlike per-turn pre_llm_call injection.
         return (
             "tracedecay memory is active: durable facts live in the holographic "
@@ -2690,7 +2690,7 @@ def register(ctx):
     #   - Only the live-ingest LCM verbs whose schemas take the in-memory
     #     ``messages`` list (MESSAGE_DEPENDENT_TOOLS) and the context-engine
     #     native tool mirrors stay gated behind the message-forwarding
-    #     capability flag — without forwarding their ingest piggyback can
+    #     capability flag, without forwarding their ingest piggyback can
     #     never fire (the host still mounts the native LCM tools itself via
     #     context_engine.get_tool_schemas()).
     register_tool = getattr(ctx, "register_tool", None)
@@ -2704,7 +2704,7 @@ def register(ctx):
                 continue
             if name in MEMORY_PROVIDER_TOOLS and tracedecay_is_memory_provider:
                 # The active memory provider already exposes this store as
-                # fact_store/fact_feedback/memory_status — registering the
+                # fact_store/fact_feedback/memory_status, registering the
                 # prefixed twins would double the schema footprint.
                 continue
             raw_handler = (

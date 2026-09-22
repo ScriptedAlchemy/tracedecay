@@ -45,7 +45,7 @@ pub fn build_cursor_session_context(
         append_tracedecay_bootstrap_context(&mut s);
         s.push_str("Workflow skills: tracedecay:");
         s.push_str(&CURSOR_PLUGIN_SKILLS.join(", "));
-        s.push_str(" — each maps a common workflow stage to the right tracedecay tools.\n");
+        s.push_str(", each maps a common workflow stage to the right tracedecay tools.\n");
         if let Some(saved) = tokens_saved.filter(|saved| *saved > 0) {
             s.push_str("Tokens saved by tracedecay this session: ");
             s.push_str(&saved.to_string());
@@ -63,7 +63,7 @@ pub(super) fn index_status_line(initialized: bool, staleness_hint: Option<&str>)
             None => "tracedecay index status: initialized.\n".to_string(),
         }
     } else {
-        "tracedecay index status: no project index found in this workspace — \
+        "tracedecay index status: no project index found in this workspace. \
          run `tracedecay init` to enable tracedecay MCP tools.\n"
             .to_string()
     }
@@ -138,7 +138,7 @@ pub fn build_codex_session_context_for_workspace(
                     }
                 }
                 HookWorkspaceStatus::UnindexedProject => s.push_str(
-                    "Index status: no project index found in this code workspace — \
+                    "Index status: no project index found in this code workspace. \
                      run `tracedecay init` to enable tracedecay code-graph tools.\n",
                 ),
                 HookWorkspaceStatus::Generic => {}
@@ -214,10 +214,7 @@ fn enforce_context_budget(mut text: String, budget: usize) -> String {
     if text.len() <= budget {
         return text;
     }
-    let mut end = budget.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = tracedecay_domain::utf8_prefix_at_or_before(&text, budget.min(text.len())).len();
     text.truncate(end);
     text
 }

@@ -15,7 +15,7 @@ from lib.process_control import terminate
 
 
 # Default MCP Inspector pin, shared with scripts/mcp-conformance-smoke.sh
-# via scripts/lib/inspector_version — override both through INSPECTOR_VERSION.
+# via scripts/lib/inspector_version, override both through INSPECTOR_VERSION.
 INSPECTOR_VERSION = os.environ.get(
     "INSPECTOR_VERSION",
     Path(__file__)

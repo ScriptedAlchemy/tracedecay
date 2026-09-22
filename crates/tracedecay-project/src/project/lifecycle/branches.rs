@@ -186,7 +186,7 @@ impl TraceDecay {
     ) -> Result<Self> {
         let meta = branch_meta::load_branch_meta(&store_layout.data_root).ok_or_else(|| {
             TraceDecayError::Config {
-                message: "no branch tracking configured — run `tracedecay branch add` first"
+                message: "no branch tracking configured. Run `tracedecay branch add` first"
                     .to_string(),
             }
         })?;
@@ -260,13 +260,7 @@ impl TraceDecay {
             let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 graph.db.clone(),
                 project_id,
-                tracedecay_domain::UtcMicros(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(1, |duration| {
-                            duration.as_micros().min(i64::MAX as u128) as i64
-                        }),
-                ),
+                tracedecay_runtime_core::tracedecay::utc_now_or_one(),
                 None,
             )
             .await;

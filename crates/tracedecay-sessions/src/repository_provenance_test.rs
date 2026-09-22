@@ -31,6 +31,12 @@ impl GitFixture {
             tracedecay_runtime_core::git::try_git_program()
                 .expect("absolute git executable should resolve"),
         )
+        // Git 2.47+ detaches `maintenance run --auto` after a commit and holds
+        // `.git/objects/maintenance.lock` while it runs, which lands in one
+        // git-dir fingerprint and vanishes before the next. The read-only
+        // capture test compares those fingerprints, so the fixture must not
+        // write either.
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .args(args)
         .current_dir(self.path())
         .output()
@@ -317,7 +323,7 @@ fn bare_repository_is_typed_unsupported() {
 fn removed_opened_worktree_is_captured_as_partially_readable() {
     let fixture = GitFixture::new();
     fixture.commit("base");
-    let repo = gix::discover(fixture.path()).unwrap();
+    let repo = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let workdir = repo.workdir().unwrap().to_path_buf();
     fs::remove_dir_all(&workdir).unwrap();
 
@@ -670,7 +676,7 @@ fn defunct_checkout_capture_never_falls_back_to_an_ambient_parent_repository() {
 
     // The nested checkout's repository is gone, but its path still exists
     // inside the ambient parent worktree. The contract requires a safe typed
-    // state — never the ambient parent's HEAD.
+    // state, never the ambient parent's HEAD.
     fs::remove_dir_all(child.join(".git")).unwrap();
     fs::remove_file(child.join("tracked.txt")).unwrap();
     let after = capture_repository_provenance(&request);

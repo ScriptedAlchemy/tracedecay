@@ -426,8 +426,8 @@ where
     // Every file resolves against the same immutable whole-set index, so this
     // is one ordered fan-out over the indexing pool. Concatenating each file's
     // edges in file-index order reproduces the exact sequence the serial loop
-    // pushed, so the stable sort and dedup below — and therefore every edge
-    // digest downstream — do not depend on the width.
+    // pushed, so the stable sort and dedup below, and therefore every edge
+    // digest downstream, do not depend on the width.
     let per_file = collect_by_file_index_ordered(files.len(), workers, &|index| {
         resolve_one_file_cross_file_references(files, &by_simple_name, &rust_files, index)
     })?;
@@ -480,11 +480,10 @@ where
 /// Resolve one file's retained unresolved references against the whole staged
 /// file set.
 ///
-/// Both memos are file-local on purpose. `ResolvedReferenceCacheV1` is keyed by
-/// source-file index, so a shared map could never serve another file's entry;
-/// `RustReexportCacheV1` memoizes a pure predicate over the immutable file set,
-/// so sharing it changes lookup cost and nothing else. A per-file resolution
-/// therefore decides exactly what the whole-repository serial loop decided.
+/// The memo is file-local on purpose. `ResolvedReferenceCacheV1` is keyed by
+/// source-file index, so a shared map could never serve another file's entry.
+/// A per-file resolution therefore decides exactly what the whole-repository
+/// serial loop decided.
 fn resolve_one_file_cross_file_references<T>(
     files: &[T],
     by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
@@ -495,7 +494,6 @@ where
     T: AsRef<FileGenerationArtifactsV1>,
 {
     let mut resolved_references = ResolvedReferenceCacheV1::new();
-    let mut reexport_cache = RustReexportCacheV1::new();
     let mut edges = Vec::new();
     for reference in &files[index].as_ref().artifacts.unresolved_references {
         let cache_key = (index, reference.reference_name.as_str(), reference.kind);
@@ -504,14 +502,7 @@ where
         } else {
             let resolved = hotpath::measure_block!(
                 "code_index.seal.reference_candidate_lookup",
-                resolve_cross_file_reference(
-                    files,
-                    by_simple_name,
-                    rust_files,
-                    &mut reexport_cache,
-                    index,
-                    reference,
-                )
+                resolve_cross_file_reference(files, by_simple_name, rust_files, index, reference)
             );
             resolved_references.insert(cache_key, resolved.clone());
             resolved
@@ -549,8 +540,7 @@ type ResolvedReferenceCacheV1<'a> =
 fn resolve_cross_file_reference<T>(
     files: &[T],
     by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
-    rust_files: &RustFileIndexV1,
-    reexport_cache: &mut RustReexportCacheV1,
+    rust: &RustFileIndexV1,
     index: usize,
     reference: &CodeIndexUnresolvedReferenceV1,
 ) -> Option<(usize, SymbolOccurrenceId)>
@@ -593,20 +583,21 @@ where
     let source_path = &file.authority.logical_path;
     let crate_qualified = reference.reference_name.strip_prefix("crate::");
     let is_rust = file.extraction.language.as_str() == "rust";
-    let mut rust = RustResolutionContextV1 {
-        files: rust_files,
-        reexports: reexport_cache,
-    };
     // A blocklisted member (`new`, `read`, `spawn`) is exempt from the
     // blocklist only behind an owner this file attests as project code;
     // `fs::read` through `use std::fs` keeps the member's verdict.
     if qualified
         && is_rust
         && CROSS_FILE_REFERENCE_BLOCKLIST.contains(&simple_name)
-        && !rust_qualified_owner_is_project_attested(&rust, file, &reference.reference_name)
+        && !rust_qualified_owner_is_project_attested(rust, file, &reference.reference_name)
     {
         return None;
     }
+    // The walk's target-independent half is computed once per reference, not
+    // once per candidate: `new` alone has thousands of candidates.
+    let walk = (qualified && is_rust)
+        .then(|| RustQualifiedWalkV1::new(files, rust, index, &reference.reference_name))
+        .flatten();
     let compatible = candidates
         .iter()
         .filter(|(candidate_index, symbol)| {
@@ -625,7 +616,7 @@ where
                                         "code_index.seal.glob_expansion",
                                         rust_parent_glob_import_matches(
                                             files,
-                                            &mut rust,
+                                            rust,
                                             index,
                                             &reference.reference_name,
                                             reference.kind,
@@ -654,18 +645,12 @@ where
                             ),
                         };
                         direct
-                            || (qualified
-                                && is_rust
-                                && hotpath::measure_block!(
+                            || walk.as_ref().is_some_and(|walk| {
+                                hotpath::measure_block!(
                                     "code_index.seal.qualified_path_walk",
-                                    rust_qualified_path_matches(
-                                        files,
-                                        &mut rust,
-                                        index,
-                                        &reference.reference_name,
-                                        target,
-                                    )
-                                ))
+                                    walk.matches(files, rust, target)
+                                )
+                            })
                     }
                     Some(binding) => match binding.module_kind {
                         ImportModuleKindV1::ProjectRelative => project_import_matches(
@@ -679,9 +664,7 @@ where
                         {
                             hotpath::measure_block!(
                                 "code_index.seal.reexport_walk",
-                                rust_bare_import_matches(
-                                    files, &mut rust, index, binding, target, ""
-                                )
+                                rust_bare_import_matches(files, rust, index, binding, target, "")
                             )
                         }
                         ImportModuleKindV1::BareModule => false,
@@ -736,13 +719,6 @@ fn unique_import<'a>(
     });
     let binding = matches.next()?;
     matches.next().is_none().then_some(binding)
-}
-
-type RustReexportCacheV1 = HashMap<(usize, usize, usize, String, usize, String), bool>;
-
-struct RustResolutionContextV1<'a> {
-    files: &'a RustFileIndexV1,
-    reexports: &'a mut RustReexportCacheV1,
 }
 
 #[derive(Clone, Copy)]
@@ -854,7 +830,7 @@ fn insert_unique_index<K: Ord>(index: &mut BTreeMap<K, Option<usize>>, key: K, v
 
 fn rust_parent_glob_import_matches<T>(
     files: &[T],
-    rust: &mut RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     source_index: usize,
     local_name: &str,
     relation: RelationEdgeKindV1,
@@ -876,7 +852,7 @@ where
         .filter_map(|binding| {
             rust_relative_module(&binding.module_specifier, &source.authority.logical_path)
         })
-        .filter_map(|module| rust.files.module(&source.authority.logical_path, &module))
+        .filter_map(|module| rust.module(&source.authority.logical_path, &module))
         .filter_map(|scope_index| unique_import(files[scope_index].as_ref(), local_name, relation))
         .any(|binding| match binding.module_kind {
             ImportModuleKindV1::ProjectRelative => project_import_matches(
@@ -893,7 +869,7 @@ where
 
 fn rust_bare_import_matches<T>(
     files: &[T],
-    rust: &mut RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     access_index: usize,
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
@@ -902,41 +878,9 @@ fn rust_bare_import_matches<T>(
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    if target.symbol.visibility != "public" {
-        return false;
-    }
-    let Some(imported_name) = binding.imported_name.as_deref() else {
-        return false;
-    };
-    let mut module = binding.module_specifier.split("::");
-    let Some(crate_name) = module.next() else {
-        return false;
-    };
-    let module = module.collect::<Vec<_>>().join("/");
-    let Some(root_index) = rust.files.crate_root(crate_name) else {
-        return false;
-    };
-    let scope_index = if module.is_empty() {
-        root_index
-    } else {
-        let root_path = &files[root_index].as_ref().authority.logical_path;
-        let Some(index) = rust.files.module(root_path, &module) else {
-            return false;
-        };
-        index
-    };
-    let mut visited = BTreeSet::new();
-    rust_export_resolves_to_target(
-        files,
-        rust,
-        root_index,
-        scope_index,
-        access_index,
-        imported_name,
-        target,
-        member,
-        &mut visited,
-    )
+    let mut chain = Vec::new();
+    rust_bare_import_chain(files, rust, access_index, binding, member, &mut chain);
+    rust_export_chain_matches(files, rust, &chain, target)
 }
 
 /// Where a qualified Rust path starts once its head segment is expanded.
@@ -958,7 +902,7 @@ enum RustPathOriginV1 {
 /// a path that does not exist in the staged file set never binds.
 fn rust_qualified_path_matches<T>(
     files: &[T],
-    rust: &mut RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     index: usize,
     reference_name: &str,
     target: RustSymbolTargetV1<'_>,
@@ -966,64 +910,87 @@ fn rust_qualified_path_matches<T>(
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    let file = files[index].as_ref();
-    let source_path = file.authority.logical_path.as_str();
-    let segments = reference_name.split("::").collect::<Vec<_>>();
-    if segments.len() < 2
-        || segments
-            .iter()
-            .any(|segment| segment.is_empty() || segment.contains('<'))
+    RustQualifiedWalkV1::new(files, rust, index, reference_name)
+        .is_some_and(|walk| walk.matches(files, rust, target))
+}
+
+/// The target-independent half of [`rust_qualified_path_matches`]: the head
+/// expansion and, for every module split of one reference, the chain of
+/// export hops the walk visits, built once and then matched against each
+/// candidate.
+struct RustQualifiedWalkV1 {
+    /// Each split treats `path[..k]` as modules, `path[k]` as the exported
+    /// name, and the rest as the `::member` path below it, so both a method
+    /// on a re-exported type and a free function in a nested module are
+    /// covered. Splits whose module prefix names no file are dropped.
+    chains: Vec<Vec<RustExportHopV1>>,
+}
+
+impl RustQualifiedWalkV1 {
+    fn new<T>(
+        files: &[T],
+        rust: &RustFileIndexV1,
+        index: usize,
+        reference_name: &str,
+    ) -> Option<Self>
+    where
+        T: AsRef<FileGenerationArtifactsV1>,
     {
-        return false;
-    }
-    let Some((origin, path)) = rust_expand_path_head(rust, file, &segments) else {
-        return false;
-    };
-    let (origin_index, root_path) = match origin {
-        RustPathOriginV1::InCrate => (index, source_path),
-        RustPathOriginV1::Crate { root_index } => {
-            if target.symbol.visibility != "public" {
-                return false;
-            }
-            (
-                root_index,
-                files[root_index].as_ref().authority.logical_path.as_str(),
-            )
+        let file = files[index].as_ref();
+        let segments = reference_name.split("::").collect::<Vec<_>>();
+        if segments.len() < 2
+            || segments
+                .iter()
+                .any(|segment| segment.is_empty() || segment.contains('<'))
+        {
+            return None;
         }
-    };
-    // Each split treats `path[..k]` as modules, `path[k]` as the exported
-    // name, and the rest as the member path below it, so both a method on a
-    // re-exported type and a free function in a nested module are covered.
-    for k in 0..path.len() {
-        let module = path[..k].join("/");
-        let scope_index = if module.is_empty() {
-            rust.files.module(root_path, "")
-        } else {
-            rust.files.module(root_path, &module)
+        let (origin, path) = rust_expand_path_head(rust, file, &segments)?;
+        // A path into another workspace crate binds only public targets.
+        let (origin_index, requires_public) = match origin {
+            RustPathOriginV1::InCrate => (index, false),
+            RustPathOriginV1::Crate { root_index } => (root_index, true),
         };
-        let Some(scope_index) = scope_index else {
-            continue;
-        };
-        let member = path[k + 1..]
+        let root_path = files[origin_index].as_ref().authority.logical_path.as_str();
+        let chains = (0..path.len())
+            .filter_map(|k| {
+                let scope_index = rust.module(root_path, &path[..k].join("/"))?;
+                let member = path[k + 1..]
+                    .iter()
+                    .map(|segment| format!("::{segment}"))
+                    .collect::<String>();
+                let mut chain = Vec::new();
+                rust_export_chain(
+                    files,
+                    rust,
+                    origin_index,
+                    scope_index,
+                    index,
+                    &path[k],
+                    &member,
+                    requires_public,
+                    &mut BTreeSet::new(),
+                    &mut chain,
+                );
+                Some(chain)
+            })
+            .collect();
+        Some(Self { chains })
+    }
+
+    fn matches<T>(
+        &self,
+        files: &[T],
+        rust: &RustFileIndexV1,
+        target: RustSymbolTargetV1<'_>,
+    ) -> bool
+    where
+        T: AsRef<FileGenerationArtifactsV1>,
+    {
+        self.chains
             .iter()
-            .map(|segment| format!("::{segment}"))
-            .collect::<String>();
-        let mut visited = BTreeSet::new();
-        if rust_export_resolves_to_target(
-            files,
-            rust,
-            origin_index,
-            scope_index,
-            index,
-            &path[k],
-            target,
-            &member,
-            &mut visited,
-        ) {
-            return true;
-        }
+            .any(|chain| rust_export_chain_matches(files, rust, chain, target))
     }
-    false
 }
 
 /// Expands the head of a qualified path into its origin and the remaining
@@ -1033,7 +1000,7 @@ where
 /// module beside the referencing one. A path whose head is not attested by
 /// any of those is `None`.
 fn rust_expand_path_head(
-    rust: &RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     file: &FileGenerationArtifactsV1,
     segments: &[&str],
 ) -> Option<(RustPathOriginV1, Vec<String>)> {
@@ -1058,13 +1025,13 @@ fn rust_expand_path_head(
             return rust_relative_path(source_path, &expanded_segments)
                 .map(|path| (RustPathOriginV1::InCrate, path));
         }
-        let root_index = rust.files.crate_root(head)?;
+        let root_index = rust.crate_root(head)?;
         return Some((
             RustPathOriginV1::Crate { root_index },
             expanded[1..].to_vec(),
         ));
     }
-    if let Some(root_index) = rust.files.crate_root(head) {
+    if let Some(root_index) = rust.crate_root(head) {
         return Some((
             RustPathOriginV1::Crate { root_index },
             segments[1..]
@@ -1086,7 +1053,7 @@ fn rust_expand_path_head(
 /// `fs::read` is judged by its member, while `ignore::WalkBuilder::new`
 /// behind a workspace crate is not.
 fn rust_qualified_owner_is_project_attested(
-    rust: &RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     file: &FileGenerationArtifactsV1,
     reference_name: &str,
 ) -> bool {
@@ -1103,14 +1070,14 @@ fn rust_qualified_owner_is_project_attested(
             .next()
             .unwrap_or_default();
         return matches!(import_head, "crate" | "self" | "super")
-            || rust.files.crate_root(import_head).is_some();
+            || rust.crate_root(import_head).is_some();
     }
-    if rust.files.crate_root(head).is_some() {
+    if rust.crate_root(head).is_some() {
         return true;
     }
     let source_path = file.authority.logical_path.as_str();
     rust_relative_module(&format!("self::{head}"), source_path)
-        .is_some_and(|module| rust.files.module(source_path, &module).is_some())
+        .is_some_and(|module| rust.module(source_path, &module).is_some())
         || file.artifacts.symbols.iter().any(|symbol| {
             symbol.simple_name == head
                 && relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
@@ -1216,6 +1183,24 @@ fn rust_module_contains(container: &str, candidate: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+/// One hop of an export walk: the target-independent state at which every
+/// candidate is tested. `qualified` is the crate-relative path the hop names
+/// directly; `import_qualified` is the path a `crate::`/`self::`/`super::`
+/// re-export at this hop names, member appended. `origin_index` is the file
+/// whose Cargo source root anchors both comparisons.
+struct RustExportHopV1 {
+    origin_index: usize,
+    scope_index: usize,
+    scope_module: String,
+    exported_name: String,
+    member: String,
+    qualified: String,
+    import_qualified: Option<String>,
+    /// Reached through a workspace crate's re-export, which binds only public
+    /// targets; every later hop of the chain inherits the requirement.
+    requires_public: bool,
+}
+
 /// Whether `exported_name` in the scope file `scope_index` reaches `target`,
 /// directly or through re-exports visible to `access_index`. `member` is the
 /// `::segment` suffix below the exported name (`::build` for a method on a
@@ -1224,103 +1209,242 @@ fn rust_module_contains(container: &str, candidate: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn rust_export_resolves_to_target<T>(
     files: &[T],
-    rust: &mut RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     origin_index: usize,
     scope_index: usize,
     access_index: usize,
     exported_name: &str,
     target: RustSymbolTargetV1<'_>,
     member: &str,
-    visited: &mut BTreeSet<(usize, String)>,
 ) -> bool
 where
     T: AsRef<FileGenerationArtifactsV1>,
 {
-    let cache_key = (
+    let mut chain = Vec::new();
+    rust_export_chain(
+        files,
+        rust,
         origin_index,
         scope_index,
         access_index,
-        format!("{exported_name}{member}"),
-        target.index,
-        target.symbol.qualified_name.clone(),
+        exported_name,
+        member,
+        false,
+        &mut BTreeSet::new(),
+        &mut chain,
     );
-    if let Some(resolves) = rust.reexports.get(&cache_key) {
-        return *resolves;
-    }
+    rust_export_chain_matches(files, rust, &chain, target)
+}
+
+/// The hops `exported_name` in `scope_index` walks through re-exports visible
+/// to `access_index`, appended to `chain` in walk order: this scope, then the
+/// unique visible import named `exported_name` leads either into another
+/// module of this crate (the walk continues with the same origin) or into a
+/// workspace crate's root (the walk continues from that root and binds only
+/// public targets). A scope revisited on one path ends it.
+#[allow(clippy::too_many_arguments)]
+fn rust_export_chain<T>(
+    files: &[T],
+    rust: &RustFileIndexV1,
+    origin_index: usize,
+    scope_index: usize,
+    access_index: usize,
+    exported_name: &str,
+    member: &str,
+    requires_public: bool,
+    visited: &mut BTreeSet<(usize, String)>,
+    chain: &mut Vec<RustExportHopV1>,
+) where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
     if !visited.insert((scope_index, format!("{exported_name}{member}"))) {
-        return false;
+        return;
     }
-    let root_path = &files[origin_index].as_ref().authority.logical_path;
     let scope_path = &files[scope_index].as_ref().authority.logical_path;
     let Some(source_root) = rust_source_root(scope_path) else {
-        return false;
+        return;
     };
     let Some(relative_scope) = scope_path
         .strip_prefix(source_root)
         .and_then(|path| path.strip_prefix('/'))
     else {
-        return false;
+        return;
     };
     let Some(scope_module) = rust_file_module(relative_scope) else {
-        return false;
+        return;
     };
-    let scope_qualified_type = if scope_module.is_empty() {
+    let mut hop = RustExportHopV1 {
+        origin_index,
+        scope_index,
+        scope_module: scope_module.to_owned(),
+        exported_name: exported_name.to_owned(),
+        member: member.to_owned(),
+        qualified: format!(
+            "{}{member}",
+            rust_scope_qualified_name(scope_module, exported_name)
+        ),
+        import_qualified: None,
+        requires_public,
+    };
+    let mut bindings = files[scope_index]
+        .as_ref()
+        .artifacts
+        .imports
+        .iter()
+        .filter(|binding| {
+            binding.local_name.as_deref() == Some(exported_name)
+                && rust_reexport_visible(files, binding, access_index, scope_index)
+        });
+    let binding = match (bindings.next(), bindings.next()) {
+        (Some(binding), None) => binding,
+        _ => {
+            chain.push(hop);
+            return;
+        }
+    };
+    match binding.module_kind {
+        ImportModuleKindV1::BareModule => {
+            chain.push(hop);
+            rust_bare_import_chain(files, rust, access_index, binding, member, chain);
+        }
+        ImportModuleKindV1::ProjectRelative => {
+            let Some(imported_name) = binding.imported_name.as_deref() else {
+                chain.push(hop);
+                return;
+            };
+            let Some(qualified) =
+                rust_import_qualified_name(&binding.module_specifier, imported_name, scope_path)
+            else {
+                chain.push(hop);
+                return;
+            };
+            hop.import_qualified = Some(format!("{qualified}{member}"));
+            chain.push(hop);
+            let (module, imported_name) = qualified.rsplit_once("::").unwrap_or(("", &qualified));
+            let Some(next_scope) = rust.module(scope_path, &module.replace("::", "/")) else {
+                return;
+            };
+            rust_export_chain(
+                files,
+                rust,
+                origin_index,
+                next_scope,
+                access_index,
+                imported_name,
+                member,
+                requires_public,
+                visited,
+                chain,
+            );
+        }
+    }
+}
+
+/// The hops a workspace-crate import (`use krate::module::Name`) walks from
+/// that crate's root: its `Name` export, then whatever that re-exports. Such
+/// a walk binds only public targets and starts a fresh revisit set, so a
+/// cross-crate re-export cycle is the crate authors' problem, as before.
+fn rust_bare_import_chain<T>(
+    files: &[T],
+    rust: &RustFileIndexV1,
+    access_index: usize,
+    binding: &CodeIndexImportEvidenceV1,
+    member: &str,
+    chain: &mut Vec<RustExportHopV1>,
+) where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let Some(imported_name) = binding.imported_name.as_deref() else {
+        return;
+    };
+    let mut module = binding.module_specifier.split("::");
+    let Some(crate_name) = module.next() else {
+        return;
+    };
+    let module = module.collect::<Vec<_>>().join("/");
+    let Some(root_index) = rust.crate_root(crate_name) else {
+        return;
+    };
+    let scope_index = if module.is_empty() {
+        root_index
+    } else {
+        let root_path = &files[root_index].as_ref().authority.logical_path;
+        let Some(index) = rust.module(root_path, &module) else {
+            return;
+        };
+        index
+    };
+    rust_export_chain(
+        files,
+        rust,
+        root_index,
+        scope_index,
+        access_index,
+        imported_name,
+        member,
+        true,
+        &mut BTreeSet::new(),
+        chain,
+    );
+}
+
+/// Whether any hop of `chain` names `target`. A hop that requires a public
+/// target ends the chain for a non-public one.
+fn rust_export_chain_matches<T>(
+    files: &[T],
+    rust: &RustFileIndexV1,
+    chain: &[RustExportHopV1],
+    target: RustSymbolTargetV1<'_>,
+) -> bool
+where
+    T: AsRef<FileGenerationArtifactsV1>,
+{
+    let target_path = &files[target.index].as_ref().authority.logical_path;
+    for hop in chain {
+        if hop.requires_public && target.symbol.visibility != "public" {
+            return false;
+        }
+        let root_path = &files[hop.origin_index].as_ref().authority.logical_path;
+        if (target.index == hop.scope_index
+            && rust_crate_qualified_name_matches(
+                &hop.qualified,
+                root_path,
+                target_path,
+                &target.symbol.qualified_name,
+            ))
+            || rust_inherent_method_owned_by_scope_type(
+                files,
+                rust,
+                hop.origin_index,
+                hop.scope_index,
+                &hop.scope_module,
+                &hop.exported_name,
+                &hop.member,
+                target,
+            )
+            || hop.import_qualified.as_deref().is_some_and(|qualified| {
+                rust_crate_qualified_name_matches(
+                    qualified,
+                    root_path,
+                    target_path,
+                    &target.symbol.qualified_name,
+                )
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The crate-relative path of `exported_name` defined in the module file
+/// `scope_module` (`""` for the crate root).
+fn rust_scope_qualified_name(scope_module: &str, exported_name: &str) -> String {
+    if scope_module.is_empty() {
         exported_name.to_owned()
     } else {
         format!("{}::{exported_name}", scope_module.replace('/', "::"))
-    };
-    let qualified = format!("{scope_qualified_type}{member}");
-    let target_path = &files[target.index].as_ref().authority.logical_path;
-    let resolves = if (target.index == scope_index
-        && rust_crate_qualified_name_matches(
-            &qualified,
-            root_path,
-            target_path,
-            &target.symbol.qualified_name,
-        ))
-        || rust_inherent_method_owned_by_scope_type(
-            files,
-            rust,
-            origin_index,
-            scope_index,
-            &scope_qualified_type,
-            exported_name,
-            member,
-            target,
-        ) {
-        true
-    } else {
-        let mut bindings = files[scope_index]
-            .as_ref()
-            .artifacts
-            .imports
-            .iter()
-            .filter(|binding| {
-                rust_reexport_visible(files, binding, access_index, scope_index)
-                    && binding.local_name.as_deref() == Some(exported_name)
-            });
-        match (bindings.next(), bindings.next()) {
-            (Some(binding), None) => match binding.module_kind {
-                ImportModuleKindV1::BareModule => {
-                    rust_bare_import_matches(files, rust, access_index, binding, target, member)
-                }
-                ImportModuleKindV1::ProjectRelative => rust_project_import_resolves_to_target(
-                    files,
-                    rust,
-                    origin_index,
-                    access_index,
-                    scope_path,
-                    binding,
-                    target,
-                    member,
-                    visited,
-                ),
-            },
-            _ => false,
-        }
-    };
-    rust.reexports.insert(cache_key, resolves);
-    resolves
+    }
 }
 
 /// Whether the `crate::`/`self::`/`super::` import `binding`, read from the
@@ -1330,14 +1454,13 @@ where
 #[allow(clippy::too_many_arguments)]
 fn rust_project_import_resolves_to_target<T>(
     files: &[T],
-    rust: &mut RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     origin_index: usize,
     access_index: usize,
     scope_path: &str,
     binding: &CodeIndexImportEvidenceV1,
     target: RustSymbolTargetV1<'_>,
     member: &str,
-    visited: &mut BTreeSet<(usize, String)>,
 ) -> bool
 where
     T: AsRef<FileGenerationArtifactsV1>,
@@ -1360,7 +1483,7 @@ where
         return true;
     }
     let (module, imported_name) = qualified.rsplit_once("::").unwrap_or(("", &qualified));
-    let Some(next_scope) = rust.files.module(scope_path, &module.replace("::", "/")) else {
+    let Some(next_scope) = rust.module(scope_path, &module.replace("::", "/")) else {
         return false;
     };
     rust_export_resolves_to_target(
@@ -1372,7 +1495,6 @@ where
         imported_name,
         target,
         member,
-        visited,
     )
 }
 
@@ -1521,9 +1643,9 @@ fn file_qualified_name_matches(
         == Some(symbol_path)
 }
 
-/// A `Type::method` whose owning type is defined in `scope_index` (as
-/// `scope_qualified_type`, the type's crate-relative path) may live in any
-/// other file of the same crate — either an inherent `impl Type` or a unique
+/// A `Type::method` whose owning type is defined in `scope_index` (the
+/// module file `scope_module`, `""` for the crate root) may live in any
+/// other file of the same crate, either an inherent `impl Type` or a unique
 /// `impl Trait for Type` whose UFCS name still answers the type-path call.
 /// Validate the type at scope, match the method by its file-relative
 /// `Type::method` path (including the UFCS alias), and require the `impl`
@@ -1534,10 +1656,10 @@ fn file_qualified_name_matches(
 #[allow(clippy::too_many_arguments)]
 fn rust_inherent_method_owned_by_scope_type<T>(
     files: &[T],
-    rust: &mut RustResolutionContextV1<'_>,
+    rust: &RustFileIndexV1,
     origin_index: usize,
     scope_index: usize,
-    scope_qualified_type: &str,
+    scope_module: &str,
     exported_name: &str,
     member: &str,
     target: RustSymbolTargetV1<'_>,
@@ -1549,22 +1671,9 @@ where
         return false;
     }
     let root_path = &files[origin_index].as_ref().authority.logical_path;
-    let scope = files[scope_index].as_ref();
-    let Some(scope_type) = scope.artifacts.symbols.iter().find(|symbol| {
-        relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
-            && rust_crate_qualified_name_matches(
-                scope_qualified_type,
-                root_path,
-                &scope.authority.logical_path,
-                &symbol.qualified_name,
-            )
-    }) else {
-        return false;
-    };
+    // The member's own identity settles nearly every candidate (another
+    // crate, another member name) without scanning either file's rows.
     let impl_file = files[target.index].as_ref();
-    if !rust_method_belongs_to_type_impl(impl_file, target.symbol) {
-        return false;
-    }
     let Some(impl_owner) = rust_inherent_method_owner(
         exported_name,
         member,
@@ -1577,6 +1686,22 @@ where
     if impl_owner.rsplit("::").next() != Some(exported_name) {
         return false;
     }
+    if !rust_method_belongs_to_type_impl(impl_file, target.symbol) {
+        return false;
+    }
+    let scope = files[scope_index].as_ref();
+    let scope_qualified_type = rust_scope_qualified_name(scope_module, exported_name);
+    let Some(scope_type) = scope.artifacts.symbols.iter().find(|symbol| {
+        relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
+            && rust_crate_qualified_name_matches(
+                &scope_qualified_type,
+                root_path,
+                &scope.authority.logical_path,
+                &symbol.qualified_name,
+            )
+    }) else {
+        return false;
+    };
     let shadowed = impl_file.artifacts.symbols.iter().any(|symbol| {
         symbol.simple_name == exported_name
             && relation_target_kind_is_compatible(RelationEdgeKindV1::TypeOf, &symbol.kind)
@@ -1606,7 +1731,6 @@ where
                 binding,
                 type_target,
                 "",
-                &mut BTreeSet::new(),
             );
     }
     let glob_modules = impl_file
@@ -1619,21 +1743,18 @@ where
         .filter_map(|binding| rust_relative_module(&binding.module_specifier, impl_path))
         .collect::<Vec<_>>();
     glob_modules.iter().any(|module| {
-        rust.files
-            .module(impl_path, module)
-            .is_some_and(|glob_scope| {
-                rust_export_resolves_to_target(
-                    files,
-                    rust,
-                    origin_index,
-                    glob_scope,
-                    target.index,
-                    exported_name,
-                    type_target,
-                    "",
-                    &mut BTreeSet::new(),
-                )
-            })
+        rust.module(impl_path, module).is_some_and(|glob_scope| {
+            rust_export_resolves_to_target(
+                files,
+                rust,
+                origin_index,
+                glob_scope,
+                target.index,
+                exported_name,
+                type_target,
+                "",
+            )
+        })
     })
 }
 

@@ -2,7 +2,7 @@
  * The review state for one selected key, drawn inline under its row.
  *
  * It renders one state of the editor machine and reports intent back. It never
- * decides whether a change may be applied — the machine does — so a stage that
+ * decides whether a change may be applied, the machine does, so a stage that
  * cannot submit simply offers no way to try. What it always shows is the
  * ladder the brief names: the effective value stays authoritative; a proposal
  * is a proposal until the write authority validates it, persists it against
@@ -189,7 +189,7 @@ function PanelBody({
 /**
  * A frozen review that outlived its gate: the scope moved, or the authority
  * withdrew, after a change was staged. The locked branch cannot apply it, but
- * it must still be able to let go of it — otherwise `review_dismissed` is
+ * it must still be able to let go of it, otherwise `review_dismissed` is
  * unreachable and the machine sits in a verdict no control can leave.
  */
 function HeldReviewUnderLock({
@@ -380,7 +380,7 @@ function WritableBody({
 /**
  * Once the change is frozen against a revision the panel shows exactly what
  * will be sent, asks for confirmation against that revision, and then renders
- * whatever verdict came back — each as its own state, none as "the save failed".
+ * whatever verdict came back, each as its own state, none as "the save failed".
  */
 function FrozenReview({
   state,
@@ -578,8 +578,8 @@ function OriginText({ row }: { row: EffectiveRow }) {
 }
 
 function Readouts({ children }: { children: ReactNode }) {
-  // Container variants: the panel sits inside the table, whose width — not the
-  // viewport's — decides how many readouts fit on a line.
+  // Container variants: the panel sits inside the table, whose width, not the
+  // viewport's, decides how many readouts fit on a line.
   return <dl className="grid gap-x-4 gap-y-3 @md:grid-cols-2 @2xl:grid-cols-3">{children}</dl>;
 }
 

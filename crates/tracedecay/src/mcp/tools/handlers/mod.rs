@@ -13,6 +13,15 @@ mod application_surface;
     clippy::redundant_closure_for_method_calls,
     clippy::uninlined_format_args
 )]
+mod configuration_batch_behavior_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
 mod configuration_dispatch_tests;
 #[cfg(test)]
 #[allow(
@@ -53,6 +62,15 @@ mod dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod graph_search_dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod hook_runtime_behavior_tests;
 pub mod info;
 pub(crate) mod retained_catalog;
 #[cfg(test)]
@@ -82,6 +100,15 @@ mod runtime_generation_census_dispatch_tests;
     clippy::uninlined_format_args
 )]
 mod search_graph_independence_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod stack_snapshot_behavior_tests;
 mod support;
 mod tool_call_support;
 #[cfg(test)]
@@ -265,7 +292,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<tracedecay_session_memory::context::ResolvedSessionIdentity>,
     /// The canonical profile identity bound by the daemon handshake. A
     /// dashboard profile write resolves its configuration layer through this
-    /// identity, so it must not be derived from the project-session store —
+    /// identity, so it must not be derived from the project-session store,
     /// that authority mounts behind the core project-open publication and is
     /// absent on the core server that answers the first tool calls.
     pub(crate) daemon_user_profile_id: Option<tracedecay_domain::configuration::UserProfileId>,
@@ -801,7 +828,7 @@ pub(super) fn append_code_graph_freshness(
         "while source freshness remains unverified"
     };
     content.push(json!({"type": "text", "text": format!(
-        "\ncode_graph_freshness: stale — serving the last complete generation \
+        "\ncode_graph_freshness: stale, serving the last complete generation \
          {generation} (sealed {age} ago) {remedy}; results may trail the live worktree"
     )}));
 }

@@ -108,8 +108,8 @@ impl SessionRequestBinding {
         // registered under, while the request context carries whatever label
         // HEAD happens to hold. Those diverge on every ordinary branch switch,
         // and comparing whole scopes (directly or through the derived
-        // `scope_digest`) turned that label move into an authorization refusal
-        // — every session read on a checkout serving another branch answered
+        // `scope_digest`) turned that label move into an authorization refusal,
+        // every session read on a checkout serving another branch answered
         // `WrongScope`, which surfaces as `not_found_or_not_authorized`.
         if !scope.identifies_same_checkout(context.scope()) {
             return Err(SessionAuthorizationError::WrongScope);

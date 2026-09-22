@@ -1,4 +1,4 @@
-//! `tracedecay_recursion` — self-recursive and mutually recursive symbol detection.
+//! `tracedecay_recursion`, self-recursive and mutually recursive symbol detection.
 
 use super::*;
 
@@ -30,8 +30,8 @@ pub async fn handle_recursion(
             .collect::<HashMap<_, _>>();
         let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
         for edge in call_edges {
-            let src = edge.edge.from_occurrence.as_str().to_string();
-            let tgt = edge.edge.to_occurrence.as_str().to_string();
+            let src = edge.from_occurrence.as_str().to_string();
+            let tgt = edge.to_occurrence.as_str().to_string();
             adj.entry(src).or_default().insert(tgt.clone());
             adj.entry(tgt).or_default();
         }

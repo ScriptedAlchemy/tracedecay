@@ -5,7 +5,7 @@ use tracedecay::project::TraceDecay;
 use super::daemon::daemon_tool_json;
 
 /// True when the global DB has zero registered projects (or can't be opened
-/// at all) — i.e. the user has not run `tracedecay init` anywhere yet.
+/// at all), i.e. the user has not run `tracedecay init` anywhere yet.
 async fn is_fresh_install() -> bool {
     daemon_tool_json(
         None,
@@ -22,7 +22,7 @@ async fn is_fresh_install() -> bool {
 pub(crate) async fn handle_no_command() -> tracedecay_domain::errors::Result<()> {
     let project_path = tracedecay_configuration::resolve_path(None);
     if TraceDecay::has_initialized_store(&project_path).await {
-        // Already initialized — show help via clap
+        // Already initialized, show help via clap
         let _ = <crate::cli::Cli as clap::CommandFactory>::command().print_help();
         eprintln!();
         return Ok(());
@@ -69,10 +69,7 @@ pub(crate) async fn handle_init(
         true,
     )?;
     handshake.moved_store_adoption = adoption;
-    #[cfg(unix)]
-    let daemon_available = tracedecay_daemon_control::daemon_reachable();
-    #[cfg(not(unix))]
-    let daemon_available = true;
+    let daemon_available = init_daemon_available();
 
     let project_path_for_remedy = project_path.clone();
     handle_init_with_daemon_availability(
@@ -84,6 +81,24 @@ pub(crate) async fn handle_init(
     )
     .await
     .map_err(|error| annotate_reset_required_init_error(error, &project_path_for_remedy))
+}
+
+/// Whether a daemon is accepting connections for this profile.
+///
+/// A connectable endpoint is the whole precondition: `brokered_init` carries
+/// its own 120 s bootstrap deadline, so a daemon that has not finished
+/// answering initialize within the one-second reachability probe is still the
+/// daemon this init must broker through. Requiring the identity proof here
+/// refused cold starts on CPU-constrained hosts and told the operator to start
+/// a daemon that was already running.
+///
+/// This resolves through the daemon-control authority on every platform rather
+/// than a `cfg` split. The unix socket and the Windows loopback authority are
+/// both behind `daemon_socket_connectable`, so assuming availability wherever
+/// the transport differs would let init proceed on Windows without the
+/// scheduler it then requires.
+fn init_daemon_available() -> bool {
+    tracedecay_daemon_control::daemon_socket_connectable()
 }
 
 /// Maps explicit `tracedecay init` flags to the adoption request the daemon
@@ -142,7 +157,7 @@ fn annotate_reset_required_init_error(
         message: format!(
             "{error}\n\nthis store cannot be opened until it is reset; run:\n  \
              {reset_command}\n\
-             then re-run `{init_command}` — sessions re-ingest from the \
+             then re-run `{init_command}`, sessions re-ingest from the \
              preserved transcripts"
         ),
     }
@@ -171,11 +186,11 @@ async fn brokered_init(
     include_folders: &[String],
     handshake: &tracedecay_daemon_protocol::DaemonHandshake,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first".to_string(),
-        });
-    }
+    reject_brokered_folder_options(
+        skip_folders,
+        include_folders,
+        "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first",
+    )?;
     // Init deliberately triggers a cold project open behind this single
     // status call. The default warming-retry grace is far tighter than a cold
     // open can take on a debug build or slow shared runner, which surfaced as
@@ -219,7 +234,7 @@ async fn brokered_init(
         // Status `queued` means the daemon accepted the reconcile demand into
         // its pre-mount queue. Init's user-facing confirmation names that
         // request (`requested`), matching the brokered-init contract tests and
-        // dogfood journeys — not the internal queue noun.
+        // dogfood journeys, not the internal queue noun.
         Some("queued") => eprintln!(
             "initialized {}; daemon code-index reconciliation requested",
             project_path.display()
@@ -238,6 +253,19 @@ async fn brokered_init(
         ),
     }
     Ok(())
+}
+
+fn reject_brokered_folder_options(
+    skip_folders: &[String],
+    include_folders: &[String],
+    message: &'static str,
+) -> tracedecay_domain::errors::Result<()> {
+    if skip_folders.is_empty() && include_folders.is_empty() {
+        return Ok(());
+    }
+    Err(tracedecay_domain::errors::TraceDecayError::Config {
+        message: message.to_owned(),
+    })
 }
 
 fn admin_sync_status(envelope: &serde_json::Value) -> Option<String> {
@@ -275,6 +303,58 @@ async fn code_index_reconciliation_is_optional(
         .await,
         tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod daemon_precondition_tests {
+    use std::path::Path;
+
+    pub(super) struct SocketEnvGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl SocketEnvGuard {
+        pub(super) fn set(value: &Path) -> Self {
+            let previous = std::env::var_os(tracedecay_daemon_protocol::SOCKET_ENV);
+            unsafe {
+                std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for SocketEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => {
+                        std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, previous);
+                    }
+                    None => std::env::remove_var(tracedecay_daemon_protocol::SOCKET_ENV),
+                }
+            }
+        }
+    }
+
+    /// Init's daemon precondition is a probe on every platform, not a `cfg`.
+    ///
+    /// This test is deliberately not gated to unix. On Windows the endpoint is
+    /// the loopback authority rather than a socket file, and a profile that
+    /// has no authority record has no daemon to broker through, so the answer
+    /// must be `false` there exactly as it is on unix. Hardcoding availability
+    /// off-unix let init run past the scheduler it then requires, and that
+    /// regression is only observable from a test the Windows shard compiles.
+    #[test]
+    fn init_daemon_availability_is_probed_on_every_platform() {
+        let profile = tempfile::TempDir::new().expect("temp profile");
+        let _socket = SocketEnvGuard::set(&profile.path().join("absent.sock"));
+
+        assert!(
+            !super::init_daemon_available(),
+            "an endpoint with no listener must not count as an available daemon"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -334,32 +414,7 @@ mod init_bootstrap_tests {
         );
     }
 
-    struct SocketEnvGuard {
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl SocketEnvGuard {
-        fn set(value: &Path) -> Self {
-            let previous = std::env::var_os(tracedecay_daemon_protocol::SOCKET_ENV);
-            unsafe {
-                std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, value);
-            }
-            Self { previous }
-        }
-    }
-
-    impl Drop for SocketEnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.previous.take() {
-                    Some(previous) => {
-                        std::env::set_var(tracedecay_daemon_protocol::SOCKET_ENV, previous);
-                    }
-                    None => std::env::remove_var(tracedecay_daemon_protocol::SOCKET_ENV),
-                }
-            }
-        }
-    }
+    use super::daemon_precondition_tests::SocketEnvGuard;
 
     /// Init's "daemon code-index reconciliation requested" must describe a
     /// request that actually crossed the wire: admission first, then the
@@ -549,21 +604,16 @@ pub(crate) async fn handle_sync(
     doctor: bool,
     verbose: bool,
 ) -> tracedecay_domain::errors::Result<()> {
-    if !skip_folders.is_empty() || !include_folders.is_empty() {
-        return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first".to_string(),
-        });
-    }
+    reject_brokered_folder_options(
+        &skip_folders,
+        &include_folders,
+        "brokered sync does not yet support --skip-folders/--include-folders; update tracedecay.toml first",
+    )?;
     let resolved = super::scope::resolve_project_scope(
         tracedecay_configuration::resolve_path_with_discovery(path),
     )
     .await?;
-    let handshake = tracedecay::daemon::handshake_for_current_client(
-        Some(resolved.project_path.clone()),
-        None,
-        false,
-        false,
-    )?;
+    let handshake = super::daemon::client_handshake(Some(&resolved.project_path))?;
     let result = tracedecay::daemon::call_default_tool(
         &handshake,
         "tracedecay_admin_sync",

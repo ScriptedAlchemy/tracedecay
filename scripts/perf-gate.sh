@@ -1,26 +1,57 @@
 #!/usr/bin/env bash
 # Serving-path performance gate.
 #
-# Enforces the invariant in docs/SERVING-PATH-PERFORMANCE.md — "a serving-path
-# operation performs O(result) work, never O(store)" — end to end, against
+# Enforces the invariant in docs/SERVING-PATH-PERFORMANCE.md. "a serving-path
+# operation performs O(result) work, never O(store)", end to end, against
 # TraceDecay's own codebase:
 #
 #   PHASE BUILD   build (or accept) a tracedecay binary
-#   PHASE INDEX   `tracedecay init` over THIS repo, timed, into a throwaway profile
-#   PHASE SERVE   start a daemon that serves that store
+#   PHASE SERVE   start a private daemon and time its first answered read
+#   PHASE INDEX   `tracedecay init` over THIS repo through that daemon, timed
+#                 until the daemon reports the worktree queryable
 #   PHASE LOAD    K concurrent workers hammer search/grep/callers/context for N s
 #   PHASE VERDICT metrics JSON + markdown table, checked against the budgets below
 #
+# SERVE runs before INDEX because indexing is daemon-owned. Without a daemon
+# `tracedecay init` refuses with `code_index_scheduler_unavailable`; with one it
+# queues the reconcile and returns while the daemon indexes in the background.
+# Timing the init process alone would therefore time a request, not an index.
+#
+# The two headline numbers:
+#
+#   COLD_STATUS_SECONDS  daemon process start to its first answered
+#                        `tracedecay_status`. Taken BEFORE init on purpose. It
+#                        is the readiness signal that lets the index clock
+#                        start from a serving daemon instead of a booting one,
+#                        and it is the only genuinely cold moment in the run.
+#                        After init the daemon has just built this store and
+#                        holds it hot, so a status taken there would measure a
+#                        warm read and label it cold. Nothing is enrolled this
+#                        early, so the answer is the daemon's typed "not
+#                        enrolled" refusal; answered, not succeeded, is the
+#                        readiness bar, and the number is daemon boot plus one
+#                        served round trip.
+#
+#   INDEX_SECONDS        init start to the daemon reporting
+#                        `code_index_freshness.status = current` with
+#                        `worktree.code_graph_serving.state = ready`, the same
+#                        terminal signal the MCP suite waits on in
+#                        crates/tracedecay/tests/mcp_suite/support.rs
+#                        (`wait_for_current_graph`). It still means "time to a
+#                        queryable index", now measured along the daemon's own
+#                        path rather than an in-process build that no longer
+#                        exists.
+#
 # The regression class this catches is the one profiled on 2026-08-01: a read
 # that went from milliseconds to minutes because per-request work scaled with
-# store size. The budgets are therefore deliberately loose — they are tripwires
+# store size. The budgets are therefore deliberately loose, they are tripwires
 # for order-of-magnitude regressions, not a microbenchmark. A run that is 3x
 # slower than yesterday still passes; a run that is 100x slower does not.
 #
 # Isolation: the run NEVER touches the operator's real profile. HOME, XDG, and
 # every TRACEDECAY_* storage variable are redirected into one throwaway
 # directory that is removed on exit, and the daemon is a private foreground
-# process on a private socket — no user service is installed, started, stopped,
+# process on a private socket, no user service is installed, started, stopped,
 # or signalled.
 #
 # Usage:
@@ -35,13 +66,13 @@
 set -uo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BUDGETS — the entire pass/fail contract of this gate lives in this block.
+# BUDGETS, the entire pass/fail contract of this gate lives in this block.
 #
 # Sized for a 2-4 core GitHub runner building in release mode. Raise one only
 # with a recorded reason; a budget that has to grow to stay green is usually
 # reporting a real regression rather than runner noise.
 # ─────────────────────────────────────────────────────────────────────────────
-PERF_BUDGET_INDEX_SECONDS="${PERF_BUDGET_INDEX_SECONDS:-900}"           # full index of this repo
+PERF_BUDGET_INDEX_SECONDS="${PERF_BUDGET_INDEX_SECONDS:-900}"           # init to a queryable index of this repo
 PERF_BUDGET_WARM_P95_SECONDS="${PERF_BUDGET_WARM_P95_SECONDS:-10}"      # p95 of any read tool under load
 PERF_BUDGET_MAX_CALL_SECONDS="${PERF_BUDGET_MAX_CALL_SECONDS:-60}"      # slowest single call in the run
 PERF_BUDGET_DAEMON_RSS_MB="${PERF_BUDGET_DAEMON_RSS_MB:-6144}"          # peak daemon process-group RSS
@@ -52,11 +83,17 @@ PERF_BUDGET_MIN_THROUGHPUT_RPS="${PERF_BUDGET_MIN_THROUGHPUT_RPS:-0.5}" # calls/
 
 # Reindex-under-load. When > 0, that many private clones of the target repo are
 # mounted into the SAME daemon during the load window, so the read battery is
-# measured while the daemon is running full cold code-index builds — the
+# measured while the daemon is running full cold code-index builds, the
 # "agent worktrees reindexing while a live tool battery runs" shape. This is
 # the probe for docs/SERVING-PATH-PERFORMANCE.md Principle 2: indexing races to
 # idle at machine width, and interactive reads stay fast because of the
 # reserved core slice, not because indexing was slowed down.
+#
+# One clone is one cycle, and a cycle is one full cold index, because the
+# driver waits for that clone to become queryable before starting the next.
+# Size this to
+# cover the load window, an exhausted rotation ends the driver early rather
+# than spinning on inits that have no work left to do.
 PERF_REINDEX_WORKTREES="${PERF_REINDEX_WORKTREES:-0}"
 
 # Load shape. Overridable so a laptop can run a shorter pass than CI.
@@ -68,7 +105,7 @@ PERF_INDEX_TIMEOUT="${PERF_INDEX_TIMEOUT:-$((PERF_BUDGET_INDEX_SECONDS + 120))}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The repo under test. Defaults to this checkout — indexing TraceDecay with
+# The repo under test. Defaults to this checkout, indexing TraceDecay with
 # TraceDecay is the point of the gate. Overridable so the harness itself can be
 # smoke-tested against a tiny fixture in seconds, and so a bigger corpus can be
 # substituted without editing the script.
@@ -94,6 +131,17 @@ for required in python3 setsid ps timeout awk; do
 done
 [[ -n "${EPOCHREALTIME:-}" ]] || die "bash 5+ is required (EPOCHREALTIME is unset)"
 [[ -f "$REPO_ROOT/Cargo.toml" ]] || die "cannot locate the repo root from ${BASH_SOURCE[0]}"
+
+# A linked git worktree mounts as the typed `linked_worktree_disabled` route
+# unless `sync.watch_linked_worktrees` is set. The daemon still indexes it and
+# still reports the generation current, but every ranked query lane answers
+# `unavailable`, so the load phase would have no reads to time. Refuse here
+# rather than after a full index has already been paid for.
+TARGET_GIT_DIR="$(git -C "$PERF_TARGET_REPO" rev-parse --git-dir 2>/dev/null)"
+TARGET_GIT_COMMON_DIR="$(git -C "$PERF_TARGET_REPO" rev-parse --git-common-dir 2>/dev/null)"
+if [[ "$TARGET_GIT_DIR" != "$TARGET_GIT_COMMON_DIR" ]]; then
+  die "PERF_TARGET_REPO '$PERF_TARGET_REPO' is a linked git worktree, whose query lanes serve nothing without the sync.watch_linked_worktrees opt-in; point it at a normal checkout"
+fi
 
 # ── throwaway profile ────────────────────────────────────────────────────────
 #
@@ -128,7 +176,7 @@ signal_tree() {
 }
 
 # Stop a process and everything it spawned. Never blocks on `wait` for a
-# process that is still running — that is how a teardown turns into a hang.
+# process that is still running, that is how a teardown turns into a hang.
 stop_tree() {
   local pid="$1" label="$2" deadline
   [[ -n "$pid" ]] || return 0
@@ -220,21 +268,10 @@ esac
 
 elapsed_since() { awk -v a="$1" -v b="$EPOCHREALTIME" 'BEGIN{printf "%.3f", b - a}'; }
 
-# ── PHASE INDEX ──────────────────────────────────────────────────────────────
-
-log "==> PHASE INDEX: indexing $PERF_TARGET_REPO into $TRACEDECAY_DATA_DIR"
-index_start="$EPOCHREALTIME"
-if ! (cd "$PERF_TARGET_REPO" && timeout "$PERF_INDEX_TIMEOUT" "$BIN" init) >"$RUN_DIR/init.log" 2>&1; then
-  log "----- init log (last 40 lines) -----"
-  tail -40 "$RUN_DIR/init.log" >&2 || true
-  die "\`tracedecay init\` failed or exceeded ${PERF_INDEX_TIMEOUT}s"
-fi
-INDEX_SECONDS="$(elapsed_since "$index_start")"
-log "    indexed in ${INDEX_SECONDS}s"
-
 # ── PHASE SERVE ──────────────────────────────────────────────────────────────
 
 log "==> PHASE SERVE: starting a private daemon on $DAEMON_SOCKET"
+serve_start="$EPOCHREALTIME"
 setsid "$BIN" daemon run --socket "$DAEMON_SOCKET" >"$DAEMON_LOG" 2>&1 &
 DAEMON_PID=$!
 
@@ -245,16 +282,28 @@ until [[ -S "$DAEMON_SOCKET" ]]; do
   sleep 0.2
 done
 
-# A bound socket only proves the listener exists; one read tool that answers is
-# the real readiness signal. This first call also absorbs cold-open cost, which
-# docs/SERVING-PATH-PERFORMANCE.md sanctions as the one slow path.
-td() {
-  local tool="$1" args="$2"
-  "$BIN" tool "$tool" --args "$args" --project "$PERF_TARGET_REPO" --json
+td_project() {
+  local project="$1" tool="$2" args="$3"
+  "$BIN" tool "$tool" --args "$args" --project "$project" --json
+}
+td() { td_project "$PERF_TARGET_REPO" "$1" "$2"; }
+
+# A bound socket only proves the listener exists; the daemon answering a read
+# is the real readiness signal, and the clock runs from the daemon process
+# start so boot cost lands here rather than inside INDEX_SECONDS.
+#
+# Nothing is enrolled yet, so the answer here is the daemon's typed "project is
+# not enrolled" refusal, which is exactly what init goes on to fix. A refusal the
+# daemon routed still proves the request path serves, which is the whole claim
+# of this phase, so readiness means answered rather than succeeded. The CLI
+# prefixes every routed refusal with `daemon tool call failed`, so that marker
+# separates an answer from a connection that never landed.
+daemon_answered_status() {
+  td status '{"format":"json"}' >"$RUN_DIR/status-cold.json" 2>"$RUN_DIR/status.err" && return 0
+  grep -q 'daemon tool call failed' "$RUN_DIR/status.err"
 }
 
-cold_start="$EPOCHREALTIME"
-until td status '{"format":"json"}' >"$RUN_DIR/status.json" 2>"$RUN_DIR/status.err"; do
+until daemon_answered_status; do
   process_alive "$DAEMON_PID" || die "the daemon exited before answering tracedecay_status"
   if ((SECONDS >= ready_deadline)); then
     log "----- last status error -----"
@@ -263,23 +312,110 @@ until td status '{"format":"json"}' >"$RUN_DIR/status.json" 2>"$RUN_DIR/status.e
   fi
   sleep 1
 done
-COLD_STATUS_SECONDS="$(elapsed_since "$cold_start")"
-log "    daemon ready; first tracedecay_status answered in ${COLD_STATUS_SECONDS}s"
+COLD_STATUS_SECONDS="$(elapsed_since "$serve_start")"
+log "    daemon serving; first tracedecay_status answered ${COLD_STATUS_SECONDS}s after start"
 
-# The CLI wraps every payload in an MCP content envelope, so the graph counts
-# live in content[0].text as an embedded JSON document.
+# ── PHASE INDEX ──────────────────────────────────────────────────────────────
+#
+# `tracedecay init` hands the reconcile to the daemon and returns once it is
+# queued, so the request is the start of the measurement, not the whole of it.
+# The terminal signal is the daemon's own, a sealed current generation whose
+# graph projection serves reads. `status = current` alone still permits a graph
+# that is pending or unavailable, which is why the serving state is checked
+# too, exactly as wait_for_current_graph does in the MCP suite.
+
+# 0 queryable, 1 not yet, 2 the daemon refused to serve a graph.
+index_is_current() {
+  python3 - "$1" <<'PY'
+import json, sys
+
+try:
+    envelope = json.load(open(sys.argv[1]))
+    payload = json.loads(envelope["content"][0]["text"])
+except Exception:
+    raise SystemExit(1)
+
+freshness = payload.get("code_index_freshness") or {}
+serving = (freshness.get("worktree") or {}).get("code_graph_serving") or {}
+state = serving.get("state")
+if freshness.get("status") == "current" and state == "ready":
+    raise SystemExit(0)
+if state == "refused" or serving.get("reason") == "activation_disabled":
+    print(f"graph serving refused: {serving}", file=sys.stderr)
+    raise SystemExit(2)
+raise SystemExit(1)
+PY
+}
+
+# 0 queryable, 1 deadline, 2 refused, 3 the daemon died. Leaves the last status
+# payload in $3 so a deadline can report what the daemon was still saying.
+wait_for_current_index() {
+  local project="$1" deadline="$2" out="$3" probe
+  while :; do
+    process_alive "$DAEMON_PID" || return 3
+    if td_project "$project" status '{"format":"json"}' >"$out" 2>/dev/null; then
+      index_is_current "$out"
+      probe=$?
+      ((probe == 0)) && return 0
+      ((probe == 2)) && return 2
+    fi
+    (($(date +%s) < deadline)) || return 1
+    sleep 1
+  done
+}
+
+log "==> PHASE INDEX: indexing $PERF_TARGET_REPO through the daemon"
+index_start="$EPOCHREALTIME"
+if ! (cd "$PERF_TARGET_REPO" && timeout "$PERF_INDEX_TIMEOUT" "$BIN" init) >"$RUN_DIR/init.log" 2>&1; then
+  log "----- init log (last 40 lines) -----"
+  tail -40 "$RUN_DIR/init.log" >&2 || true
+  die "\`tracedecay init\` failed or exceeded ${PERF_INDEX_TIMEOUT}s"
+fi
+log "    $(tail -1 "$RUN_DIR/init.log")"
+
+wait_for_current_index "$PERF_TARGET_REPO" "$(($(date +%s) + PERF_INDEX_TIMEOUT))" "$RUN_DIR/status.json"
+case $? in
+  0) ;;
+  2) die "the daemon refused to serve a code graph for $PERF_TARGET_REPO" ;;
+  3) die "the daemon exited while indexing $PERF_TARGET_REPO" ;;
+  *)
+    log "----- last status payload (2 KiB) -----"
+    tail -c 2048 "$RUN_DIR/status.json" >&2 || true
+    die "the daemon did not report a queryable index within ${PERF_INDEX_TIMEOUT}s"
+    ;;
+esac
+INDEX_SECONDS="$(elapsed_since "$index_start")"
+log "    queryable index in ${INDEX_SECONDS}s"
+
+# One warm status with storage health attached, for the graph counts. The poll
+# above deliberately leaves it off, because a database snapshot every second
+# would tax the daemon it is measuring.
+td status '{"format":"json","include_storage_health":true}' >"$RUN_DIR/status.json" 2>&1 ||
+  die "the daemon stopped answering tracedecay_status after indexing"
+
+# The CLI wraps every payload in an MCP content envelope, so the counts live in
+# content[0].text as an embedded JSON document. Each one comes from its own
+# authority inside that document: the sealed graph reports its symbol and edge
+# totals, the code-index progress record reports how many files it covered, and
+# storage health reports the store on disk. The store is the database plus its
+# write-ahead log, which is where most of a freshly built index still lives
+# until a checkpoint folds it back.
 python3 - "$RUN_DIR/status.json" >"$RUN_DIR/counts.env" <<'PY' || die "could not parse tracedecay_status"
 import json, sys
 
 envelope = json.load(open(sys.argv[1]))
 payload = json.loads(envelope["content"][0]["text"])
-for name, key in (
-    ("NODE_COUNT", "node_count"),
-    ("EDGE_COUNT", "edge_count"),
-    ("FILE_COUNT", "file_count"),
-    ("DB_SIZE_BYTES", "db_size_bytes"),
+statistics = payload.get("graph_statistics") or {}
+health = payload.get("storage_health") or {}
+worktree = (payload.get("code_index_freshness") or {}).get("worktree") or {}
+progress = worktree.get("progress") or {}
+for name, value in (
+    ("NODE_COUNT", statistics.get("symbol_count")),
+    ("EDGE_COUNT", statistics.get("edge_count")),
+    ("FILE_COUNT", progress.get("total_files")),
+    ("DB_SIZE_BYTES", (health.get("db_size_bytes") or 0) + (health.get("wal_size_bytes") or 0)),
 ):
-    print(f"{name}={int(payload.get(key, 0))}")
+    print(f"{name}={int(value or 0)}")
 PY
 # shellcheck disable=SC1090
 source "$RUN_DIR/counts.env"
@@ -287,30 +423,47 @@ log "    graph: ${NODE_COUNT} nodes / ${EDGE_COUNT} edges / ${FILE_COUNT} files 
 
 # Resolve one real node id so the callers probe traverses the graph instead of
 # erroring on a made-up id. Walks the seed list so one renamed symbol cannot
-# turn the gate into a harness error.
-NODE_ID=""
-for seed in "${PERF_SEED_SYMBOLS[@]}"; do
-  td search "$(printf '{"query":"%s","limit":10,"format":"json"}' "$seed")" \
-    >"$RUN_DIR/search.json" 2>/dev/null || continue
-  NODE_ID="$(python3 - "$RUN_DIR/search.json" <<'PY'
+# turn the gate into a harness error, and retries the whole list for a bounded
+# spell. A sealed, serving graph is the signal the index phase waits on, but the
+# ranked query lanes settle on their own clock just after it, and a probe that
+# gives up on the first pass turns that ordinary warm-up into a failed gate.
+resolve_seed_node() {
+  python3 - "$RUN_DIR/search.json" <<'PY'
 import json, sys
 
 try:
     envelope = json.load(open(sys.argv[1]))
     payload = json.loads(envelope["content"][0]["text"])
-    for hit in payload.get("results", []):
-        node_id = hit.get("node_id") or hit.get("id")
-        if node_id:
-            print(node_id)
-            break
 except Exception:
-    pass
+    raise SystemExit(0)
+for hit in payload.get("results") or []:
+    node_id = hit.get("node_id") or (hit.get("candidate") or {}).get("anchor_id")
+    if node_id:
+        print(node_id)
+        break
 PY
-  )"
+}
+
+NODE_ID=""
+seed_deadline=$(($(date +%s) + 120))
+while :; do
+  for seed in "${PERF_SEED_SYMBOLS[@]}"; do
+    td search "$(printf '{"query":"%s","limit":10,"format":"json"}' "$seed")" \
+      >"$RUN_DIR/search.json" 2>"$RUN_DIR/search.err" || continue
+    NODE_ID="$(resolve_seed_node)"
+    [[ -n "$NODE_ID" ]] && break
+  done
   [[ -n "$NODE_ID" ]] && break
+  (($(date +%s) < seed_deadline)) || break
+  sleep 2
 done
-[[ -n "$NODE_ID" ]] ||
+if [[ -z "$NODE_ID" ]]; then
+  log "----- last search payload (2 KiB) -----"
+  tail -c 2048 "$RUN_DIR/search.json" >&2 || true
+  log "----- last search error -----"
+  tail -5 "$RUN_DIR/search.err" >&2 || true
   die "none of the seed symbols (${PERF_SEED_SYMBOLS[*]}) resolved to a node; set PERF_SEED_SYMBOLS"
+fi
 log "    callers probe node: $NODE_ID"
 
 # ── PHASE LOAD ───────────────────────────────────────────────────────────────
@@ -324,7 +477,7 @@ CONTEXT_TASKS=(
   "how does storage retention work"
 )
 
-# One call. Records `tool,milliseconds,ok|err` — the raw sample stream the
+# One call. Records `tool,milliseconds,ok|err`, the raw sample stream the
 # verdict phase aggregates.
 timed_call() {
   local record="$1" tool="$2" args="$3" start status
@@ -386,11 +539,12 @@ setsid bash -c '
 ' _ "$DAEMON_PID" >"$RSS_SAMPLES" 2>/dev/null &
 SAMPLER_PID=$!
 
-# Reindex driver: keeps a full cold index running for the whole load window,
-# so the read battery is measured against a daemon on a box that indexing is
-# saturating. Each cycle is a real `tracedecay init` over a private clone —
-# the same pipeline (read, sanitize, extract, chunk, digest) at the same width
-# a worktree reconcile uses.
+# Reindex driver: keeps full cold indexing running beside the read battery, so
+# the battery is measured against a daemon on a box that indexing is
+# saturating. Each cycle is a real `tracedecay init` over a private clone,
+# routed through the SAME daemon and awaited to that clone's own queryable
+# signal, so a cycle is a whole index rather than a queued request. Clones are
+# created before the timed window; the driver does no git work inside it.
 REINDEX_PID=""
 if ((PERF_REINDEX_WORKTREES > 0)); then
   log "==> PHASE LOAD: preparing $PERF_REINDEX_WORKTREES reindex clone(s)"
@@ -408,17 +562,17 @@ if ((PERF_REINDEX_WORKTREES > 0)); then
   ((${#REINDEX_ROOTS[@]} > 0)) || die "no reindex clone could be created"
   reindex_driver() {
     local deadline="$1" root cycles=0
-    while (($(date +%s) < deadline)); do
-      for root in "${REINDEX_ROOTS[@]}"; do
-        (($(date +%s) < deadline)) || break
-        rm -rf "$root/.tracedecay" 2>/dev/null || true
-        (cd "$root" && "$BIN" init) >/dev/null 2>&1 || true
-        cycles=$((cycles + 1))
-      done
+    for root in "${REINDEX_ROOTS[@]}"; do
+      (($(date +%s) < deadline)) || break
+      (cd "$root" && "$BIN" init) >/dev/null 2>&1 || continue
+      wait_for_current_index "$root" "$deadline" "$RUN_DIR/reindex-status.json" || continue
+      cycles=$((cycles + 1))
     done
     # Full indexes completed inside the load window: the direct read on
-    # whether indexing raced to idle or stayed in the way.
+    # whether indexing raced to idle or stayed in the way. Zero means the
+    # window closed before one whole index finished, not that nothing ran.
     printf '%s\n' "$cycles" >"$PERF_OUTPUT_DIR/reindex-cycles"
+    log "    reindex driver completed $cycles full index cycle(s)"
   }
 fi
 
@@ -548,7 +702,7 @@ daemon_survived = env["PERF_DAEMON_SURVIVED"] == "true"
 
 # (label, measured, comparison, budget, unit)
 checks = [
-    ("index duration", round(index_seconds, 1), "<=", budgets["index_seconds"], "s"),
+    ("index duration (init to queryable)", round(index_seconds, 1), "<=", budgets["index_seconds"], "s"),
     ("graph size (indexed the real repo)", node_count, ">=", budgets["min_node_count"], "nodes"),
     (f"worst warm p95 ({worst_p95_tool})", worst_p95, "<=", budgets["warm_p95_seconds"], "s"),
     ("slowest single call", worst_max, "<=", budgets["max_call_seconds"], "s"),
@@ -609,18 +763,18 @@ with open(metrics_path, "w") as handle:
 lines = [
     f"## Serving-path perf gate: {metrics['verdict']}",
     "",
-    f"`{metrics['binary_version']}` — {metrics['cargo_profile']} profile, "
+    f"`{metrics['binary_version']}`, {metrics['cargo_profile']} profile, "
     f"{metrics['workers']} workers x {load_seconds:.0f}s",
     "",
     "### Index",
     "",
     "| metric | value |",
     "| --- | ---: |",
-    f"| duration | {index_seconds:.1f} s |",
+    f"| init to queryable | {index_seconds:.1f} s |",
     f"| nodes | {node_count} |",
     f"| edges | {metrics['index']['edge_count']} |",
     f"| files | {metrics['index']['file_count']} |",
-    f"| store size | {metrics['index']['db_size_bytes'] / 1048576:.1f} MiB |",
+    f"| graph store (db + wal) | {metrics['index']['db_size_bytes'] / 1048576:.1f} MiB |",
     "",
     "### Serving latency under load",
     "",
@@ -636,7 +790,7 @@ lines += [
     f"| **total** | **{total_calls}** | **{total_errors}** | | | |",
     "",
     f"Throughput {throughput} calls/s · daemon peak RSS {peak_rss_mb} MB · "
-    f"cold first status {metrics['serve']['cold_status_seconds']:.2f} s",
+    f"daemon start to first answered status {metrics['serve']['cold_status_seconds']:.2f} s",
     "",
     "### Budgets",
     "",
@@ -668,6 +822,6 @@ log "perf-gate: metrics written to $METRICS_JSON"
 if ((VERDICT_STATUS == 0)); then
   log "perf-gate: PASS"
 else
-  log "perf-gate: FAIL — see the budget table above"
+  log "perf-gate: FAIL, see the budget table above"
 fi
 exit "$VERDICT_STATUS"

@@ -1,10 +1,10 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
-    CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
+    CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
+    CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
+    ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ProviderId,
     ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
     ProviderUsageScopeV1, SessionId,
 };
@@ -137,7 +137,9 @@ fn normalize_cursor_record(
     if let Some(content) = content {
         if let Some(message_content) = canonical_cursor_message_content(content) {
             facts.push(CanonicalObservationFactV1::Message {
-                role: canonical_message_role(native.get("role").and_then(Value::as_str)),
+                role: crate::content::canonical_message_role(
+                    native.get("role").and_then(Value::as_str),
+                ),
                 content: message_content,
                 model: cursor_record_message_model(native, message.unwrap_or(native)).or_else(
                     || {
@@ -380,7 +382,7 @@ fn append_cursor_usage_fact(
         // The counters ride the message record itself, so they are correlated
         // to this exact session/message (the envelope relations) and count that
         // one message's tokens: message scope, delta semantics. The model comes
-        // only from the record's own spellings — never from tracedecay-injected
+        // only from the record's own spellings, never from tracedecay-injected
         // session enrichment, which is neighboring-session evidence.
         facts.push(CanonicalObservationFactV1::ProviderUsage {
             model: cursor_record_message_model(native, message.unwrap_or(native)).map_or(
@@ -484,7 +486,7 @@ pub fn cursor_observation_identity(
     range: tracedecay_domain::ObservationSourceRangeV1,
 ) -> Result<CursorObservationIdentityV1, ObservationRecordParseErrorV1> {
     let has_native_id = cursor_native_record_id(value).is_some();
-    let primary = observation_native_record_id("cursor", session_id, value)?;
+    let primary = observation_native_record_id(session_id, value)?;
     let collision_disambiguation = if has_native_id {
         None
     } else {
@@ -501,26 +503,25 @@ pub fn cursor_observation_identity(
 }
 
 pub fn observation_native_record_id(
-    provider: &str,
     session_id: &str,
     value: &Value,
 ) -> Result<ObservationId, ObservationRecordParseErrorV1> {
     let mut hasher = Sha256::new();
     if let Some(native_id) = cursor_native_record_id(value) {
         hasher.update(b"tracedecay.provider-native-record.native-id.v1\0");
-        hasher.update(provider.as_bytes());
+        hasher.update(b"cursor");
         hasher.update([0]);
         hasher.update(session_id.as_bytes());
         hasher.update([0]);
         hasher.update(native_id.as_bytes());
         return ObservationId::new(format!(
-            "{provider}.native.sha256:{}",
+            "cursor.native.sha256:{}",
             sha256_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed);
     }
     hasher.update(b"tracedecay.provider-native-record.v1\0");
-    hasher.update(provider.as_bytes());
+    hasher.update(b"cursor");
     hasher.update([0]);
     hasher.update(session_id.as_bytes());
     hasher.update([0]);
@@ -529,7 +530,7 @@ pub fn observation_native_record_id(
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
     );
     ObservationId::new(format!(
-        "{provider}.native.sha256:{}",
+        "cursor.native.sha256:{}",
         sha256_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
@@ -565,16 +566,6 @@ pub fn cursor_projected_message_id(
         base
     };
     ObservationId::new(message_id).map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-}
-
-fn canonical_message_role(role: Option<&str>) -> CanonicalMessageRoleV1 {
-    match role {
-        Some("user") => CanonicalMessageRoleV1::User,
-        Some("assistant") => CanonicalMessageRoleV1::Assistant,
-        Some("system" | "developer") => CanonicalMessageRoleV1::System,
-        Some("tool") => CanonicalMessageRoleV1::Tool,
-        _ => CanonicalMessageRoleV1::Unknown,
-    }
 }
 
 fn canonical_native_observation_id(

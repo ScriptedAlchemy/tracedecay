@@ -1,7 +1,7 @@
 //! Writing, advancing, and reading one observation.
 //!
 //! The executor owns the transaction shape; the siblings own the pieces it
-//! composes — [`authority`] the anchor/provenance/receipt rows a write persists
+//! composes, [`authority`] the anchor/provenance/receipt rows a write persists
 //! and a replay verifies, and [`rows`] the single projection every read decodes
 //! through.
 
@@ -177,16 +177,16 @@ impl ObservationExecutor {
         let source_json = encode(advance.next_cursor().source())?;
         let scope_json = encode(advance.next_cursor().scope())?;
         let actual_cursor = read_cursor(savepoint, &source_json, &scope_json)?;
-        if actual_cursor.as_ref() == Some(advance.next_cursor()) {
-            if let Some(disagreement) =
-                cursor_advance_ledger_disagreement(savepoint, &source_json, &scope_json, advance)?
-            {
-                return Err(disagreement);
-            }
-            if cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
-                return Ok(());
-            }
-            return Err(StorageOperationError::ObservationCursorAdvanceCollision);
+        // The durable cursor owns the range. Live ingest and catch-up both
+        // advance the same bytes with legitimately different reasons; once
+        // the frontier is reached the first ledger row stays and the later
+        // owner is a no-op. A disagreement is still a failure below, when
+        // this advance would be the write that moves the cursor.
+        if actual_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.reached(advance.next_cursor()))
+        {
+            return Ok(());
         }
         if actual_cursor.as_ref() != advance.expected_cursor() {
             return Err(observation_source_cursor_conflict(

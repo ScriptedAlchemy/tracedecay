@@ -39,13 +39,7 @@ use crate::registered_workflow_store;
 
 use registered_workflow_store::RegisteredWorkflowStore;
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
 /// A distinct, valid `sha256:`-tagged digest per input byte.
 fn digest(byte: char) -> ManifestDigest {

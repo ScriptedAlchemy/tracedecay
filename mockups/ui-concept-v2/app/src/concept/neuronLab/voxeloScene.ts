@@ -389,7 +389,7 @@ export function mountVoxelo(host: HTMLElement, hooks: LabHooks = {}): VoxeloHand
     return new THREE.Color().lerpColors(new THREE.Color(0x2f7a96), new THREE.Color(0xc49a3c), warm);
   }
 
-  /** Registry project color / real checkout color — 2D and 3D stay one organism. */
+  /** Registry project color / real checkout color, 2D and 3D stay one organism. */
   function identityColor(id: string): THREE.Color | null {
     const co = CHECKOUT_COLORS[id];
     if (co) return new THREE.Color(co);
@@ -427,7 +427,7 @@ export function mountVoxelo(host: HTMLElement, hooks: LabHooks = {}): VoxeloHand
     world.add(pts);
   }
 
-  /** Spherical dendritic nebula — plate 03 geodesic orb, not a tuft at a pipe end. */
+  /** Spherical dendritic nebula, plate 03 geodesic orb, not a tuft at a pipe end. */
   function addCheckoutOrb(b: LabBody) {
     const rng = mulberry32(hash32(b.project.id) ^ 0xa11ce);
     const R = b.somaR;
@@ -587,7 +587,7 @@ export function mountVoxelo(host: HTMLElement, hooks: LabHooks = {}): VoxeloHand
     g.renderOrder = 4;
     world.add(g);
     somaHits.push(g);
-    nameOf.set(HUB_ID, "repo:git_common_dir · hub — massless");
+    nameOf.set(HUB_ID, "repo:git_common_dir · hub, massless");
     addLabel("repo:git_common_dir", origin, HUB_HALO, HUB_ID, "under");
   }
 
@@ -628,7 +628,7 @@ export function mountVoxelo(host: HTMLElement, hooks: LabHooks = {}): VoxeloHand
   /**
    * Registry hub glyph below the field with idle hairlines (the overview never
    * fires). tracedecay's hairline is the admitted conduction tube: energy
-   * travels along it only in the synapse state — never a soma tint.
+   * travels along it only in the synapse state, never a soma tint.
    */
   function addRegistryHub() {
     if (!bodies.length) return;
@@ -1012,7 +1012,7 @@ export function mountVoxelo(host: HTMLElement, hooks: LabHooks = {}): VoxeloHand
 
   /**
    * Scoped hover isolates: the hovered node and its evidenced relations stay
-   * lit, the rest of the constellation recedes. Inspection only — no scope
+   * lit, the rest of the constellation recedes. Inspection only, no scope
    * change, no synapse, no invented nodes.
    */
   function applyScopedIsolation() {
@@ -1254,7 +1254,7 @@ export function mountVoxelo(host: HTMLElement, hooks: LabHooks = {}): VoxeloHand
             const bOrb = checkoutIds.has(b.id);
             if (b.place === "under") b.y = Math.max(b.y, a.y + a.h + gapY);
             else if (aOrb !== bOrb && a.place !== "under") {
-              // Packet chip stays near its checkout orb — stack above, don't slide into it.
+              // Packet chip stays near its checkout orb, stack above, don't slide into it.
               const tuft = aOrb ? b : a;
               const orb = aOrb ? a : b;
               tuft.y = Math.min(tuft.y, orb.y - tuft.h - gapY);

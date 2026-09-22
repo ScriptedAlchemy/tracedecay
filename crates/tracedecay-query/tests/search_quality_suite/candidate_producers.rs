@@ -430,7 +430,7 @@ fn real_lexical_source_fixture() -> RealLexicalSourceFixture {
 }
 
 /// The in-memory projection over every admitted chunk of `generation`,
-/// carrying the generation's own extracted qualified names — the same
+/// carrying the generation's own extracted qualified names, the same
 /// authority the sealed-page artifact path reads per chunk.
 fn generation_backed_projection(
     metadata: CodeLexicalProjectionMetadataV1,
@@ -886,13 +886,7 @@ impl TestArtifactSourceStaging for CodeLexicalArtifactBuilderV1 {
     }
 }
 
-pub(crate) fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    <T as TryFrom<String>>::Error: fmt::Debug,
-{
-    T::try_from(value.to_owned()).expect("valid fixture identity")
-}
+pub(crate) use tracedecay_domain::test_fixtures::id;
 
 pub(crate) fn digest_id<T>(byte: char) -> T
 where
@@ -1453,6 +1447,15 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         .append_page(&pages[0], &control)
         .expect("append first clone page");
     drop(successor);
+    // A successor staged before occurrence indexes existed must still verify
+    // on resume. Dropping them here is that shipped shape.
+    rusqlite::Connection::open(&successor_path)
+        .expect("open successor before index backfill")
+        .execute_batch(
+            "DROP INDEX IF EXISTS clone_exact_postings_by_occurrence;
+             DROP INDEX IF EXISTS clone_fingerprint_postings_by_occurrence;",
+        )
+        .expect("drop occurrence indexes");
     let mut successor = CodeLexicalCloneSuccessorV1::open_or_create(
         &legacy_path,
         &successor_path,
@@ -1461,6 +1464,23 @@ fn v16_clone_payloads_are_content_addressed_and_postings_page() {
         CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
     )
     .expect("resume clone-only successor");
+    // The resume reads the same rows with or without the indexes, so assert
+    // the backfill itself as well as the verification it is there to speed up.
+    let backfilled = rusqlite::Connection::open(&successor_path)
+        .expect("open successor after index backfill")
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name IN ('clone_exact_postings_by_occurrence', 'clone_fingerprint_postings_by_occurrence')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("count occurrence indexes");
+    assert_eq!(
+        backfilled, 2,
+        "opening a successor staged before the occurrence indexes must install both"
+    );
+    successor
+        .verify_resumed_page(&pages[0], &control)
+        .expect("resumed clone page verifies through the occurrence index");
     assert_eq!(
         successor
             .next_cursor()
@@ -2355,7 +2375,7 @@ fn hot_only_fingerprints_are_partial_while_exact_digest_reads_still_work() {
 /// row sources. Over a real multi-file corpus whose every chunk matches the
 /// query, a request cancelled after its `k`-th control consultation unwinds
 /// with the typed cancellation error and stops consulting the control at that
-/// checkpoint — far short of the candidate set — while the same request under
+/// checkpoint, far short of the candidate set, while the same request under
 /// an active control completes, agrees byte-for-byte between the sealed
 /// artifact and the in-memory projection, and is stable across runs.
 #[test]
@@ -5517,7 +5537,7 @@ fn disk_artifact_bounded_work_budget_exhaustion_resumes_activation() {
     // lane: daemon PID 32033 still `warming` after ~56 minutes,
     // `latest_generation_id: null`, graph `exact_scope_generation_not_ready`,
     // pre-embedding (no model.onnx/generation/graph-replay FD), ~135% CPU
-    // across 115 threads, and VmRSS 6.88GB — past every advertised memory
+    // across 115 threads, and VmRSS 6.88GB, past every advertised memory
     // ceiling. This regression drives the same retry shape through the real
     // sealed source: every exhausted window must stay a typed, resumable
     // interruption that never advances a row twice, the retry storm must

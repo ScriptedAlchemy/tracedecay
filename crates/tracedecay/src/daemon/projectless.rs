@@ -1,6 +1,8 @@
 //! Projectless client handling: tool calls served without a mounted project
 //! (user-scoped LCM, message search, dashboard, doctor, version).
 
+use std::sync::Arc;
+
 use serde_json::json;
 
 use tracedecay_daemon_identity::authority;
@@ -18,6 +20,7 @@ use tracedecay_mcp::{
 };
 use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 use tracedecay_sessions::runtime::user_sessions_db_path;
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 use tracedecay_store::StoreShardIdV1;
 
 use super::*;
@@ -50,7 +53,7 @@ struct ProjectlessConnectionStateV1 {
 /// carries whatever path the host process derived from its own environment,
 /// which is never canonicalized on the wire. A byte comparison therefore
 /// refuses a connection that is in fact addressing the very same directory
-/// whenever any component of the client's profile root is a symlink — the
+/// whenever any component of the client's profile root is a symlink, the
 /// default on macOS, where the per-user temporary root and anything under
 /// `/var` resolve through `/var -> /private/var`. Project routing already
 /// canonicalizes this exact field before it compares
@@ -558,6 +561,7 @@ async fn projectless_hook_runtime_response(
             ),
     )
     .await;
+    let user_refresh: Arc<dyn SessionRefreshWorkerPort> = Arc::new(refresh_wake.clone());
     match boxed_projectless_phase(
         tracedecay_mcp::handlers::hook_runtime::handle_projectless_hook_runtime(
             arguments.clone(),
@@ -572,6 +576,7 @@ async fn projectless_hook_runtime_response(
                         .background_cpu(),
                 ),
             host_admission_broker,
+            Arc::clone(&user_refresh),
         ),
     )
     .await
@@ -582,7 +587,6 @@ async fn projectless_hook_runtime_response(
         Ok(result) => match boxed_projectless_phase(join_required_live_transcript_refresh(
             "tracedecay_hook_runtime",
             &arguments,
-            false,
             None,
             Some(&refresh_wake),
         ))

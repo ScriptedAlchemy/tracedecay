@@ -1,7 +1,7 @@
 /**
  * Tool activity, derived from the analytics diagnostics fold.
  *
- * The Agents page already ranks `by_mcp_tool` — WHICH tools were called most.
+ * The Agents page already ranks `by_mcp_tool`, WHICH tools were called most.
  * Tool activity is a different question: how much of
  * what the connected agents did was tool use at all, what kind of tool use it
  * was, and which agent did it. Those live in members of
@@ -66,7 +66,7 @@ export function rankedCounts(rows: readonly CountRow[], field: string): Labelled
  *
  * `mcp` is served directly. `other` is the remainder of `tool_call_count` after
  * the MCP calls, which is a subtraction and therefore only legal when BOTH
- * counts arrived — a remainder computed against a missing total would be the
+ * counts arrived, a remainder computed against a missing total would be the
  * total restated under a second name.
  *
  * `contradiction` is the case the subtraction must not silently absorb: a store
@@ -116,8 +116,8 @@ export function toolCallsPerMessage(ratios: unknown): number | null {
  *
  * `recent_hooks` is the only member of the diagnostics payload that names an
  * AGENT beside a tool, which makes it the only per-agent tool attribution this
- * build can read. It is a recent suffix and never a total — the caller must say
- * so — but a suffix of real attributed rows is a stronger reading than a
+ * build can read. It is a recent suffix and never a total, the caller must say
+ * so, but a suffix of real attributed rows is a stronger reading than a
  * complete count attributed to nobody.
  */
 export interface AgentToolActivityRow {

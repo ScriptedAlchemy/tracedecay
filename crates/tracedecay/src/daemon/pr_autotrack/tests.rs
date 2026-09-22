@@ -460,7 +460,7 @@ async fn partial_discovery_suppresses_removals() {
     save_state(data_root.path(), &state).unwrap();
 
     // Empty BUT partial discovery: PR 5 is absent only because the listing was
-    // truncated, not because it closed — it must NOT be untracked.
+    // truncated, not because it closed, it must NOT be untracked.
     let discovery = PrDiscovery {
         partial: true,
         ..Default::default()

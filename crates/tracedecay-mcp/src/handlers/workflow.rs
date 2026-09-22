@@ -118,9 +118,12 @@ fn test_target_key(node: &GraphTestSymbol) -> String {
 
 /// Handles `tracedecay_diagnose`.
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.total")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Diagnose handling is one workflow match onto the live diagnostic readers."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Diagnose handling is one workflow match onto the live diagnostic readers."
+    )
 )]
 pub async fn handle_diagnose(
     cg: &TraceDecay,
@@ -352,8 +355,8 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 /// store as one clean-generation snapshot.
 ///
 /// This is the production write path for the compiler pillar. Failure to
-/// publish never fails the diagnose call — the caller still receives its
-/// mapped diagnostics — but the outcome is reported in the response so a
+/// publish never fails the diagnose call. The caller still receives its
+/// mapped diagnostics, but the outcome is reported in the response so a
 /// silent no-op is observable.
 ///
 /// Identity is resolved from the code-index generation authority, never minted
@@ -361,7 +364,7 @@ fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
 /// the projection compares a record's `file_occurrence_id` against the
 /// saved-edit cycle's impact target and its `generation_id` against the cycle's
 /// code-index generation, and both sides now come from the same mint. Without a
-/// resolver — a direct, non-daemon server — the honest outcome is to publish
+/// resolver, a direct, non-daemon server, the honest outcome is to publish
 /// nothing under a named reason rather than to guess a repository-relative
 /// path, which the projection could only refuse.
 #[hotpath::measure(future = true, label = "mcp.workflow.diagnose.publish")]
@@ -464,9 +467,12 @@ where
 }
 
 #[hotpath::measure(future = true, label = "mcp.workflow.affected_tests.total")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Affected-test run is one select-and-execute through the injected runner."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Affected-test run is one select-and-execute through the injected runner."
+    )
 )]
 async fn handle_run_affected_tests_with_runner<F, Runner, RunFuture>(
     cg: &TraceDecay,
@@ -654,8 +660,8 @@ async fn wait_for_test_run_cancellation(
 ) {
     // CancellationSignal is still a polled atomic (no event wait API on this
     // type without changing application crate callers we do not own). When no
-    // signal is attached, wait only on the emitter. Otherwise poll at 50ms —
-    // same cancel semantics, ~10x fewer timers than the prior 5ms wakeups.
+    // signal is attached, wait only on the emitter. Otherwise poll at 50ms.
+    // Same cancel semantics, ~10x fewer timers than the prior 5ms wakeups.
     let Some(cancellation) = cancellation else {
         emitter.cancelled().await;
         return;
@@ -766,7 +772,7 @@ async fn managed_test_document_content_digests(
 }
 
 fn current_head_commit_id(root: &Path) -> Option<CommitId> {
-    let repository = gix::open(root).ok()?;
+    let repository = tracedecay_runtime_core::git_open::open(root).ok()?;
     let commit = repository.head_commit().ok()?;
     CommitId::new(commit.id().to_hex().to_string()).ok()
 }
@@ -1028,8 +1034,8 @@ fn test_annotations_in_file<'a>(
                 MAX_ANNOTATION_RELATIONS,
             )?
             .into_iter()
-            .filter(|edge| markers.contains(&edge.edge.from_occurrence))
-            .map(|edge| edge.edge.to_occurrence.as_str().to_owned())
+            .filter(|edge| markers.contains(&edge.from_occurrence))
+            .map(|edge| edge.to_occurrence.as_str().to_owned())
             .collect();
         cache.insert(path.to_owned(), annotated);
     }

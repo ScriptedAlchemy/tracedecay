@@ -1,12 +1,10 @@
 use schemars::schema_for;
 use tracedecay_domain::{
-    CollectionRevision, ManifestDigest, RootGenerationV1, ScopeOutcome, ScopePartialReasonV1,
-    ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,
+    CollectionRevision, RootGenerationV1, ScopeOutcome, ScopePartialReasonV1, ScopeSetId,
+    ScopeSetRevision, ScopeUnavailableReasonV1, StackRevision,
 };
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 #[test]
 fn scope_set_and_root_revision_identities_are_typed_and_nonzero() {

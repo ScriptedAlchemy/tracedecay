@@ -24,7 +24,7 @@ import { WorkTopologyAccounting } from './WorkTopologyAccounting.tsx';
 import { ChannelAbsence, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
- * Execution topology — the canonical structural view for Work.
+ * Execution topology, the canonical structural view for Work.
  *
  * `operation.work.topology` publishes placement, branch, review, and
  * integration policy under one topology generation. This lens renders those

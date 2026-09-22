@@ -9,7 +9,7 @@
 //! The `cancel` side is not decoration. `prepare_shutdown_owner_phases` runs
 //! every phase's `cancel` synchronously before the *first* join is polled, so
 //! an owner that only cancels inside its join future is not actually told to
-//! stop until its phase is reached — and if the coordinator aborts the drain
+//! stop until its phase is reached, and if the coordinator aborts the drain
 //! runner first, it is never told at all and keeps running past the terminal
 //! receipt. Owners with a cheap synchronous stop (`invocation`, `maintenance`,
 //! `git_watcher`) therefore supply a real `cancel`; a `|| {}` cancel side is
@@ -31,9 +31,12 @@ use tracedecay_store_runtime::ShutdownTaskReceipt;
 
 impl DaemonEngine {
     #[hotpath::measure(label = "daemon.engine.shutdown_owner_phases", future = true)]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Shutdown owner-phase list is the ordered drain plan for one daemon stop."
+    #[cfg_attr(
+        not(feature = "hotpath"),
+        expect(
+            clippy::too_many_lines,
+            reason = "Shutdown owner-phase list is the ordered drain plan for one daemon stop."
+        )
     )]
     pub(in crate::daemon) async fn shutdown_owner_phases(&self) -> Vec<Vec<ShutdownOwner>> {
         let project_open = project_open_tasks(&self.project_open_gates).await;

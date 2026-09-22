@@ -7,17 +7,15 @@ use tracedecay_application::work::workflow_topology::{
     workflow_topology_namespace, workflow_topology_projection_identity,
 };
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef,
-    WorkflowStep, WorkflowStepId,
+    ProjectId, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowStep,
+    WorkflowStepId,
 };
 use tracedecay_graph_db::{
     GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision, NeverCancelled,
     VerifiedGraphSnapshot,
 };
 
-fn digest(label: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", label.to_string().repeat(64))).expect("digest")
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn step_id(label: &str) -> WorkflowStepId {
     WorkflowStepId::new(format!("step.{label}")).expect("step ID")

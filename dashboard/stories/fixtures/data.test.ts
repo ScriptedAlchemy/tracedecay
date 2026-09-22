@@ -11,7 +11,7 @@
  * generated contract for the route it answers, straight out of
  * `src/contracts/generated.ts`. That is deliberately a different question from
  * `src/workspaces/endpoint-fixtures.test.ts`, which parses the same fixtures
- * against what their *consuming workspace* decodes — including, for the routes
+ * against what their *consuming workspace* decodes, including, for the routes
  * Rust still answers with a bare `Value`, hand-written mirrors of page-local
  * schemas. A mirror can be wrong in the same direction as the fixture; the
  * generated contract cannot, because it is derived from the Rust type.
@@ -66,7 +66,7 @@ import {
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
 import { TrustHistoryPayloadSchema } from '../../src/data/query/memory.ts';
 
-/** Parse one resolved fixture, surfacing zod's issues on failure — the same
+/** Parse one resolved fixture, surfacing zod's issues on failure. The same
  * reporting shape `endpoint-fixtures.test.ts` uses, so a drift report reads the
  * same whichever gate catches it. */
 function expectParses(schema: ZodType<unknown>, pathname: string, search = ''): void {
@@ -147,8 +147,8 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
  * Routes that answer with the application's `HttpJsonEnvelope` instead of
  * `DashboardEnvelopeV1`, mapped to the generated contract inside it.
  *
- * The wrapper itself has no generated schema — `contract_schema.rs` exports the
- * Work payloads but not the application envelope around them — so these cannot
+ * The wrapper itself has no generated schema. `contract_schema.rs` exports the
+ * Work payloads but not the application envelope around them, so these cannot
  * go in `CONTRACTS`, and putting them in `UNCONTRACTED` would be false: their
  * payloads are fully contracted. The gate below unwraps with the production
  * walker rather than reaching into the fixture by hand, so a fixture whose
@@ -255,12 +255,12 @@ describe('fixtures parse against the generated contract for their route', () => 
     expectParses(CONTRACTS[pathname]!, pathname);
   });
 
-  it.each(DYNAMIC)('GET $pathname — $label', ({ pathname, search, schema }) => {
+  it.each(DYNAMIC)('GET $pathname: $label', ({ pathname, search, schema }) => {
     expectParses(schema, pathname, search ?? '');
   });
 
   it.each(Object.keys(APPLICATION_ENVELOPE))(
-    'POST %s — application envelope, generated payload',
+    'POST %s: application envelope, generated payload',
     (pathname) => {
       // The walk the browser performs. A wrapper the app cannot open is
       // reported to the user as `unsupported_schema`, so a fixture that fails

@@ -4,7 +4,7 @@
 //! (`code-index-v1/<sha256(canonical_project_root)>/`). Every process opens
 //! exactly one scope from the project root it was handed, so no journey ever
 //! enumerates the siblings. A profile therefore accumulates scope trees
-//! belonging to project roots that no longer exist — and those bytes are
+//! belonging to project roots that no longer exist, and those bytes are
 //! unreachable by generation retention and uncounted by any report.
 //!
 //! This module closes that gap under the same discipline as generation
@@ -39,7 +39,7 @@ use super::{
     storage,
 };
 
-const SCOPE_TRANSACTION_JOURNAL: BoundedJournalSpec<ScopeRootRetentionTransactionV1> =
+pub(super) const SCOPE_TRANSACTION_JOURNAL: BoundedJournalSpec<ScopeRootRetentionTransactionV1> =
     BoundedJournalSpec {
         file_name: SCOPE_RETENTION_TRANSACTION_FILE,
         max_bytes: MAX_SCOPE_TRANSACTION_BYTES,
@@ -48,16 +48,17 @@ const SCOPE_TRANSACTION_JOURNAL: BoundedJournalSpec<ScopeRootRetentionTransactio
         validate: validate_scope_transaction,
     };
 
-const SCOPE_BINDING_CLEANUP_INTENT_JOURNAL: BoundedJournalSpec<ScopeRootBindingCleanupIntentV1> =
-    BoundedJournalSpec {
-        file_name: SCOPE_BINDING_CLEANUP_INTENT_FILE,
-        max_bytes: MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES,
-        label: "scope binding cleanup intent",
-        write_context: "code-index-scope-binding-cleanup-intent",
-        validate: validate_scope_binding_cleanup_intent,
-    };
+pub(super) const SCOPE_BINDING_CLEANUP_INTENT_JOURNAL: BoundedJournalSpec<
+    ScopeRootBindingCleanupIntentV1,
+> = BoundedJournalSpec {
+    file_name: SCOPE_BINDING_CLEANUP_INTENT_FILE,
+    max_bytes: MAX_SCOPE_BINDING_CLEANUP_INTENT_BYTES,
+    label: "scope binding cleanup intent",
+    write_context: "code-index-scope-binding-cleanup-intent",
+    validate: validate_scope_binding_cleanup_intent,
+};
 
-const SCOPE_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
+pub(super) const SCOPE_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     directory: SCOPE_RETENTION_RECEIPTS_DIRECTORY,
     label: "scope reconciliation receipt",
 };
@@ -88,8 +89,8 @@ pub fn record_scope_root(scope_root: &Path, canonical_project_root: &Path) -> st
 ///
 /// `true` only when a record exists, hashes to `scope_hash` (so a stray or
 /// tampered record cannot condemn a different scope), and the path is
-/// definitively absent. Any other observation — no record, a mismatch, a
-/// present root, or an unreadable one — is `false`: the age gate decides.
+/// definitively absent. Any other observation, no record, a mismatch, a
+/// present root, or an unreadable one, is `false`: the age gate decides.
 fn recorded_scope_root_missing(scope_root: &Path, scope_hash: &str) -> bool {
     let Ok(recorded) = std::fs::read_to_string(scope_root.join(SCOPE_ROOT_RECORD_FILE)) else {
         return false;
@@ -222,7 +223,8 @@ pub fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
 pub fn git_worktree_scope_root_inventory(
     project_root: &Path,
 ) -> Result<(BTreeSet<PathBuf>, ScopeRootAuthorityReceiptV1), &'static str> {
-    let repository = gix::open(project_root).map_err(|_| "git_repository_unavailable")?;
+    let repository = tracedecay_runtime_core::git_open::open(project_root)
+        .map_err(|_| "git_repository_unavailable")?;
     let linked = repository
         .worktrees()
         .map_err(|_| "git_worktree_inventory_unavailable")?;
@@ -541,8 +543,8 @@ pub(super) fn plan_scope_root_retention_from_hashes(
             continue;
         };
         // Only a directory literally named `hex(sha256(root))` is a scope. This
-        // is what keeps the receipts and quarantine directories — and anything
-        // else a future layout adds — structurally uncollectable.
+        // is what keeps the receipts and quarantine directories, and anything
+        // else a future layout adds, structurally uncollectable.
         if !is_code_index_scope_hash(&scope_hash) {
             plan.unrecognized_entry_count = plan.unrecognized_entry_count.saturating_add(1);
             continue;
@@ -644,7 +646,7 @@ pub fn execute_scope_root_retention(
             "scope liveness authority changed at the quarantine boundary".to_owned(),
         ));
     }
-    match load_scope_binding_cleanup_intent(store_root)? {
+    match load_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)? {
         Some(intent) if intent == expected_binding_cleanup_intent => {}
         Some(_) => {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
@@ -716,18 +718,28 @@ pub fn execute_scope_root_retention(
         receipt: receipt.clone(),
         scope_identities: quarantine.scope_identities().clone(),
     };
-    persist_scope_transaction(store_root, &transaction)?;
+    persist_journal(store_root, &SCOPE_TRANSACTION_JOURNAL, &transaction)?;
 
     let result = (|| {
         quarantine.stage(&transaction.receipt.collected_scopes)?;
-        write_scope_receipt(store_root, &receipt)?;
+        receipt_store::write_receipt(
+            store_root,
+            &SCOPE_RECEIPT_STORE,
+            &receipt.receipt_digest,
+            &receipt,
+        )?;
         quarantine.cleanup_committed(&transaction.receipt.collected_scopes)?;
-        clear_scope_transaction(store_root)
+        clear_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
     })();
     if let Err(error) = result {
-        if !scope_receipt_is_durable(store_root, &receipt)? {
+        if !receipt_store::receipt_is_durable(
+            store_root,
+            &SCOPE_RECEIPT_STORE,
+            &receipt.receipt_digest,
+            &receipt,
+        )? {
             quarantine.rollback(&transaction.receipt.collected_scopes)?;
-            clear_scope_transaction(store_root)?;
+            clear_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)?;
         }
         return Err(error);
     }
@@ -792,8 +804,8 @@ pub fn prepare_scope_root_binding_cleanup(
             "scope binding cleanup cannot begin while filesystem recovery is pending".to_owned(),
         ));
     }
-    match load_scope_binding_cleanup_intent(store_root)? {
-        None => persist_scope_binding_cleanup_intent(store_root, &intent),
+    match load_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)? {
+        None => persist_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL, &intent),
         Some(existing) if existing == intent => Ok(()),
         Some(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "a different scope binding cleanup intent is already pending".to_owned(),
@@ -816,11 +828,16 @@ pub fn recover_scope_root_binding_cleanup(
             "scope binding cleanup requires filesystem transaction recovery first".to_owned(),
         ));
     }
-    let Some(intent) = load_scope_binding_cleanup_intent(store_root)? else {
+    let Some(intent) = load_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)? else {
         return Ok(None);
     };
     let source_exists = scope_directory_exists(&scope_root_path(store_root, &intent.scope_hash)?)?;
-    if scope_receipt_is_durable(store_root, &intent.receipt)? {
+    if receipt_store::receipt_is_durable(
+        store_root,
+        &SCOPE_RECEIPT_STORE,
+        &intent.receipt.receipt_digest,
+        &intent.receipt,
+    )? {
         if source_exists {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
                 "scope binding cleanup receipt is durable but its source scope remains".to_owned(),
@@ -833,7 +850,7 @@ pub fn recover_scope_root_binding_cleanup(
         }));
     }
     if source_exists {
-        clear_scope_binding_cleanup_intent(store_root)?;
+        clear_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)?;
         return Ok(None);
     }
     Err(CodeGenerationRetentionErrorV1::UnsafeState(
@@ -853,11 +870,12 @@ pub fn complete_scope_root_binding_cleanup(
             "scope binding cleanup cannot complete while filesystem recovery is pending".to_owned(),
         ));
     }
-    let intent = load_scope_binding_cleanup_intent(store_root)?.ok_or_else(|| {
-        CodeGenerationRetentionErrorV1::UnsafeState(
-            "scope binding cleanup completion has no pending intent".to_owned(),
-        )
-    })?;
+    let intent =
+        load_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)?.ok_or_else(|| {
+            CodeGenerationRetentionErrorV1::UnsafeState(
+                "scope binding cleanup completion has no pending intent".to_owned(),
+            )
+        })?;
     if intent.scope_hash != replay.scope_hash
         || intent.source_scope != replay.source_scope
         || intent.liveness_proof != replay.liveness_proof
@@ -866,7 +884,12 @@ pub fn complete_scope_root_binding_cleanup(
             "scope binding cleanup completion does not match its pending intent".to_owned(),
         ));
     }
-    if !scope_receipt_is_durable(store_root, &intent.receipt)? {
+    if !receipt_store::receipt_is_durable(
+        store_root,
+        &SCOPE_RECEIPT_STORE,
+        &intent.receipt.receipt_digest,
+        &intent.receipt,
+    )? {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "scope binding cleanup completion has no durable filesystem receipt".to_owned(),
         ));
@@ -876,13 +899,13 @@ pub fn complete_scope_root_binding_cleanup(
             "scope binding cleanup completion found its source scope present".to_owned(),
         ));
     }
-    clear_scope_binding_cleanup_intent(store_root)
+    clear_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)
 }
 
 pub(super) fn recover_pending_scope_transaction_unlocked(
     store_root: &Path,
 ) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let Some(transaction) = load_scope_transaction(store_root)? else {
+    let Some(transaction) = load_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)? else {
         return Ok(());
     };
     let mut quarantine = ScopeQuarantineAuthority::recover(
@@ -890,12 +913,17 @@ pub(super) fn recover_pending_scope_transaction_unlocked(
         &transaction.receipt.receipt_digest,
         transaction.scope_identities.clone(),
     )?;
-    if scope_receipt_is_durable(store_root, &transaction.receipt)? {
+    if receipt_store::receipt_is_durable(
+        store_root,
+        &SCOPE_RECEIPT_STORE,
+        &transaction.receipt.receipt_digest,
+        &transaction.receipt,
+    )? {
         quarantine.cleanup_committed(&transaction.receipt.collected_scopes)?;
     } else {
         quarantine.rollback(&transaction.receipt.collected_scopes)?;
     }
-    clear_scope_transaction(store_root)
+    clear_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
 }
 
 pub(super) fn scope_transaction_path(store_root: &Path) -> PathBuf {
@@ -944,7 +972,7 @@ pub(super) fn is_code_index_scope_hash(value: &str) -> bool {
 /// Retention lock files and the scope root's own directory mtime are excluded
 /// deliberately: acquiring the scope lock creates that file and stamps that
 /// directory, so including them would make the execution-time "nothing changed
-/// since the mark phase" fence unsatisfiable. Symlinks are refused outright —
+/// since the mark phase" fence unsatisfiable. Symlinks are refused outright,
 /// nothing in a code-index scope creates them, and a tree that is about to be
 /// renamed and unlinked is the wrong place to start interpreting them.
 pub(super) fn measure_scope_tree(
@@ -1277,68 +1305,6 @@ pub(super) fn validate_scope_binding_cleanup_intent(
         ));
     }
     Ok(())
-}
-
-pub(super) fn persist_scope_transaction(
-    store_root: &Path,
-    transaction: &ScopeRootRetentionTransactionV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    persist_journal(store_root, &SCOPE_TRANSACTION_JOURNAL, transaction)
-}
-
-pub(super) fn load_scope_transaction(
-    store_root: &Path,
-) -> Result<Option<ScopeRootRetentionTransactionV1>, CodeGenerationRetentionErrorV1> {
-    load_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
-}
-
-pub(super) fn clear_scope_transaction(
-    store_root: &Path,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    clear_journal(store_root, &SCOPE_TRANSACTION_JOURNAL)
-}
-
-pub(super) fn persist_scope_binding_cleanup_intent(
-    store_root: &Path,
-    intent: &ScopeRootBindingCleanupIntentV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    persist_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL, intent)
-}
-
-pub(super) fn load_scope_binding_cleanup_intent(
-    store_root: &Path,
-) -> Result<Option<ScopeRootBindingCleanupIntentV1>, CodeGenerationRetentionErrorV1> {
-    load_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)
-}
-
-pub(super) fn clear_scope_binding_cleanup_intent(
-    store_root: &Path,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    clear_journal(store_root, &SCOPE_BINDING_CLEANUP_INTENT_JOURNAL)
-}
-
-pub(super) fn scope_receipt_is_durable(
-    store_root: &Path,
-    receipt: &ScopeRootRetentionReceiptV1,
-) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    receipt_store::receipt_is_durable(
-        store_root,
-        &SCOPE_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
-}
-
-pub(super) fn write_scope_receipt(
-    store_root: &Path,
-    receipt: &ScopeRootRetentionReceiptV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    receipt_store::write_receipt(
-        store_root,
-        &SCOPE_RECEIPT_STORE,
-        &receipt.receipt_digest,
-        receipt,
-    )
 }
 
 pub(super) fn scope_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {

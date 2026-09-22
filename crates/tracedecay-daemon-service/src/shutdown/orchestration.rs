@@ -264,9 +264,12 @@ fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
 }
 
 #[hotpath::measure(label = "daemon.shutdown.coordinate", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Shutdown coordination is one receipt-and-join of the running stop plan."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Shutdown coordination is one receipt-and-join of the running stop plan."
+    )
 )]
 pub async fn coordinate_daemon_shutdown<Prepare>(
     lifecycle: &DaemonLifecycle,
@@ -398,9 +401,12 @@ where
 }
 
 #[hotpath::measure(label = "daemon.shutdown.run", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Daemon shutdown is one ordered client-drain then owner-phase list."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Daemon shutdown is one ordered client-drain then owner-phase list."
+    )
 )]
 async fn run_daemon_shutdown(
     lifecycle: DaemonLifecycle,
@@ -566,8 +572,8 @@ async fn run_daemon_shutdown(
         project_servers,
     };
     // Graceful means every lane drained cooperatively inside its budget;
-    // anything else — a timed-out owner, a forced client abort, a failed or
-    // timed-out project server — makes this attempt a forced shutdown.
+    // anything else, a timed-out owner, a forced client abort, a failed or
+    // timed-out project server, makes this attempt a forced shutdown.
     if receipt.in_flight.is_clean()
         && receipt.clients.is_clean()
         && receipt.background.unfinished().is_empty()
@@ -707,7 +713,7 @@ mod tests {
         );
         // Past the reserve boundary an overrun phase still gets a deadline it
         // can report a named timeout against, rather than being dropped from
-        // the sequence — and store close still gets the rest.
+        // the sequence, and store close still gets the rest.
         tokio::time::advance(tokio::time::Duration::from_secs(15)).await;
         assert_eq!(budget.project_servers(), tokio::time::Instant::now());
         assert_eq!(budget.store_close(), overall);
@@ -868,7 +874,14 @@ mod tests {
         let duplicate_prepares = Arc::new(AtomicUsize::new(0));
         let owner_cancelled = Arc::new(tokio::sync::Notify::new());
         let release_owner = Arc::new(tokio::sync::Notify::new());
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        // This owner is released by the test rather than resolving on its own,
+        // so it is the one case here that needs a *real* background budget. A
+        // deadline shorter than the reserves behind that phase floors its
+        // deadline at `now` (`DaemonShutdownBudget::phase`), and the owner then
+        // reports `TimedOut` whenever its first poll precedes the release by a
+        // timer tick. That makes the receipt retryable, which legitimately
+        // re-prepares shutdown and hides the ownership contract under test.
+        let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
 
         let first_lifecycle = lifecycle.clone();
         let first_cancellations = Arc::clone(&cancellations);

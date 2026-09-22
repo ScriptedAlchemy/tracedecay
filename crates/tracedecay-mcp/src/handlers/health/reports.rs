@@ -119,7 +119,7 @@ fn verified_gini_values(
                 "verified Gini symbol is missing lineage metadata",
             )
         })?;
-        if tracedecay_runtime_core::path_scope::path_matches_scope(path, path_prefix) {
+        if tracedecay_domain::path_matches_scope(path, path_prefix) {
             symbols.push((symbol.occurrence, path.clone(), metadata.clone()));
         }
     }
@@ -199,8 +199,8 @@ fn verified_gini_fan_values(
         .collect::<HashMap<_, _>>();
     for edge in edges {
         let (Some(source), Some(target)) = (
-            paths.get(&edge.edge.from_occurrence),
-            paths.get(&edge.edge.to_occurrence),
+            paths.get(&edge.from_occurrence),
+            paths.get(&edge.to_occurrence),
         ) else {
             return Err(TraceDecayError::project_route(
                 "code-graph-corrupt",
@@ -243,7 +243,7 @@ fn verified_gini_member_values(
     )?;
     let mut members = containers;
     for edge in edges {
-        if let Some((_, count)) = members.get_mut(&edge.edge.from_occurrence) {
+        if let Some((_, count)) = members.get_mut(&edge.from_occurrence) {
             *count += 1.0;
         }
     }

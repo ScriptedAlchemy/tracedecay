@@ -27,7 +27,6 @@ test-transport = [
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-fs2 = "0.4"
 same-file = "1.0.6"
 getrandom = "0.2"
 hex = "0.4"
@@ -39,7 +38,7 @@ shell-words = "1.1"
 thiserror = "2"
 tiktoken-rs = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"] }
-gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"
@@ -78,4 +77,3 @@ tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", version = "0.1.0", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }

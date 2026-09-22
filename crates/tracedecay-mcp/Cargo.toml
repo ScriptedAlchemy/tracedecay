@@ -15,11 +15,11 @@ doctest = false
 # `hotpath/hotpath` backend (cargo unifies the proc-macro's features), so this
 # feature exists only for the `cfg(feature = "hotpath")` sites in this crate
 # that change compiled behaviour under profiling. It forwards nowhere else.
-# Type-coupled: `transport::ProfiledStdin`/`ProfiledStdout` name the on-mode
-# `hotpath::io::InstrumentedIo` (hotpath 0.24 has no mode-agnostic `wrap`
-# alias for I/O), so any build that selects the backend with this crate in
-# its graph must select this feature too.
-hotpath = ["hotpath/hotpath"]
+# `transport::ProfiledStdin`/`ProfiledStdout` erase the stdio halves behind a
+# trait object, so no type here names hotpath's on-mode `InstrumentedIo` and
+# selecting the backend without this feature still compiles. `hotpath/tokio`
+# supplies the async I/O impls the instrumented halves are stored as.
+hotpath = ["hotpath/hotpath", "hotpath/tokio"]
 # Gates in-memory ChannelTransport. ReplayTransport stays on the default
 # graph because production initialize-root replay uses it.
 test-transport = []
@@ -41,7 +41,6 @@ hotpath.workspace = true
 libc = "0.2"
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 # The multi-root execute tool derives its input schema from the contracts DTO.
-schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

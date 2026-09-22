@@ -50,7 +50,7 @@ function defaultSizeOf<TPayload>(event: SseEventEnvelope<TPayload>): number {
 
 /**
  * One place maps a settled transaction to its observable phase, so the phase can
- * never disagree with the outcome — a failure cannot be reported as a commit.
+ * never disagree with the outcome, a failure cannot be reported as a commit.
  * `null` means "no transition": a stale token settled a transaction that is no
  * longer the active one, which must not disturb the live phase.
  */
@@ -101,7 +101,7 @@ export function createSseReducer<TPayload = unknown>(
 
   // The canonical signal has two halves. `refetchRequested` is edge-triggered:
   // `takeBatch()` clears it, because the render layer only needs to be told
-  // once. `canonicalEpoch` is the durable half — it only ever counts up, so a
+  // once. `canonicalEpoch` is the durable half, it only ever counts up, so a
   // signal raised while a refresh is in flight is still visible after the drain
   // that cleared the boolean, and the refresh cannot claim to have covered it.
   let canonicalEpoch = 0;
@@ -129,8 +129,8 @@ export function createSseReducer<TPayload = unknown>(
 
   /**
    * Remember an accepted event's identity, capped. `Set` iterates in insertion
-   * order, so evicting the front is FIFO: the newest identities — the only ones
-   * a redelivery can still be above its stream watermark for — are the ones
+   * order, so evicting the front is FIFO: the newest identities, the only ones
+   * a redelivery can still be above its stream watermark for, are the ones
    * kept. See {@link MAX_OBSERVED_IDENTITIES} for why the memory is bounded
    * this way rather than cleared.
    */
@@ -175,7 +175,7 @@ export function createSseReducer<TPayload = unknown>(
     const lastRev = mark ? mark.lastEventRevision : null;
 
     // Out-of-order / superseded within this stream: an unseen event whose
-    // revision is not newer than the stream watermark. Drop it — the monotone
+    // revision is not newer than the stream watermark. Drop it, the monotone
     // sequence has moved past it.
     if (lastRev !== null && rev <= lastRev) return false;
 
@@ -240,7 +240,7 @@ export function createSseReducer<TPayload = unknown>(
    * True when a canonical refresh is owed and can be started now: some signal
    * has been raised that no successful refresh has superseded, nothing is
    * already in flight, and the newest signal is not one whose refresh already
-   * failed. That last clause is what keeps a failure from becoming a storm —
+   * failed. That last clause is what keeps a failure from becoming a storm,
    * retrying the identical refresh on every 100 ms tick would hammer the daemon
    * exactly when it is least able to answer. The failure stays visible in
    * {@link stats} instead, and any newer signal is attempted normally.
@@ -284,7 +284,7 @@ export function createSseReducer<TPayload = unknown>(
       return { status: "superseded", epoch: token.epoch, outstandingEpoch: canonicalEpoch };
     }
 
-    // Success, and nothing newer arrived — so clear exactly what this refresh
+    // Success, and nothing newer arrived, so clear exactly what this refresh
     // superseded, which is the staleness the signal raised and nothing else.
     // The queue holds events that arrived after the refresh was issued and are
     // therefore not in its result; per-stream watermarks are the only reason the

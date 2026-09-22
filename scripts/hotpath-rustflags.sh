@@ -17,7 +17,7 @@
 #   eval "$(scripts/hotpath-rustflags.sh)"
 #
 # These flags are what the workspace considers canonical for a hotpath
-# lane on Linux gnu targets — not a live parse of cargo config. Machine
+# lane on Linux gnu targets, not a live parse of cargo config. Machine
 # config can change (split-debuginfo landed in ~/.cargo/config.toml
 # overnight); do not invent a parser. Update this export when the
 # workspace's intended hotpath flag set changes.

@@ -1,7 +1,8 @@
 name: SDK conformance
 
 on:
-  pull_request:
+  push:
+    branches: [master]
     paths:
       - ".github/workflows/**"
       - ".github/release-targets.json"
@@ -22,8 +23,7 @@ on:
       - "scripts/plan-release-recovery.py"
       - "scripts/test-plan-release-recovery.py"
       - "tests/release_safety_test.sh"
-  push:
-    branches: [master]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -106,11 +106,13 @@ jobs:
       - run: npm run build
         working-directory: dashboard
       - run: cargo build -p tracedecay-cli --bin tracedecay
+      # This job owns every sdk_suite test that needs the production daemon.
+      # It is the only job that builds one, so an unfiltered run is what keeps
+      # a daemon-backed test from silently never executing anywhere.
       - run: >-
           cargo nextest run
           --manifest-path crates/tracedecay-sdk/Cargo.toml
           --test sdk_suite
-          -E 'test(/^production_daemon::/)'
           --run-ignored all
           --no-tests=fail
       - run: npm ci

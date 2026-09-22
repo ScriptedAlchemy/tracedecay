@@ -31,7 +31,7 @@ import {
  * Three dimensions have a mounted read behind them (concurrency and blocked
  * effort off the work-product graph; reruns and duplicate effects off the
  * attempt page), and the conflict matrices are built here too because their
- * shape — every predicted/observed cell kept separate — is the point of the
+ * shape, every predicted/observed cell kept separate, is the point of the
  * card rather than a rendering detail. The other seven dimensions never reach
  * this module; the assembler builds them straight from `unavailableCard`.
  *
@@ -112,7 +112,7 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
       channel: metricsGap(
         dimension,
         'the Plan 32-admitted width',
-        'The attempt page counts attempts admitted, which is a count and not a width — a width is a quantity over an interval and no read here carries an interval.',
+        'The attempt page counts attempts admitted, which is a count and not a width, a width is a quantity over an interval and no read here carries an interval.',
       ),
     },
     { key: 'active', label: 'Active width', channel: active },
@@ -140,7 +140,7 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
     contradictions.push({
       key: 'over_admission',
       state: 'conflicting',
-      detail: `active width ${active.value.value} exceeds requested width ${requested.value.value} under one graph version — the two figures disagree and neither is clamped to the other`,
+      detail: `active width ${active.value.value} exceeds requested width ${requested.value.value} under one graph version, the two figures disagree and neither is clamped to the other`,
     });
   }
 
@@ -150,7 +150,7 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
       : requested.available && active.available
       ? {
           available: true,
-          value: `requested ${requested.value.value} · active ${active.value.value} — three of the mandate's five rungs are unavailable`,
+          value: `requested ${requested.value.value} · active ${active.value.value}, three of the mandate's five rungs are unavailable`,
         }
       : requested.available || active.available
         ? {
@@ -183,7 +183,7 @@ export function concurrencyCard(graph: WorkGraphReading): WorkAccountingCard {
                 unit: 'attempts',
                 note:
                   runtimeCoverage?.coverage === 'partial'
-                    ? 'attempts the partial runtime projection carried — a floor, not the complete population'
+                    ? 'attempts the partial runtime projection carried, a floor, not the complete population'
                     : 'attempts the runtime projection carried under this graph version',
               },
             },
@@ -315,7 +315,7 @@ export function rerunCard(
             unit: 'attempts',
             note:
               pageFloor
-                ? `${note === undefined ? 'count on the capped attempt page' : note} — a floor, not a total`
+                ? `${note === undefined ? 'count on the capped attempt page' : note}, a floor, not a total`
                 : note,
           };
     return { available: true, value: figure };
@@ -370,7 +370,7 @@ export function rerunCard(
     contradictions.push({
       key: 'recovery_disagreement',
       state: 'conflicting',
-      detail: `${census.recoveryDisagreements} ${census.recoveryDisagreements === 1 ? 'attempt states' : 'attempts state'} recovery_required in exactly one of the two typed fields that record it — the attempt state and the recovery record disagree, and neither is taken as the authority over the other`,
+      detail: `${census.recoveryDisagreements} ${census.recoveryDisagreements === 1 ? 'attempt states' : 'attempts state'} recovery_required in exactly one of the two typed fields that record it, the attempt state and the recovery record disagree, and neither is taken as the authority over the other`,
     });
   }
   if (census !== null && census.terminalWhileRunning > 0) {
@@ -429,7 +429,7 @@ export function duplicateEffectCard(
               unit: 'attempts',
               note:
                 pageRead?.coverage.coverage === 'capped'
-                  ? 'the only class in which an effect could be duplicated — count on a capped page, a floor not a total'
+                  ? 'the only class in which an effect could be duplicated, count on a capped page, a floor not a total'
                   : 'the only class in which an effect could be duplicated',
             }
           : {
@@ -437,7 +437,7 @@ export function duplicateEffectCard(
               unit: 'attempts',
               note:
                 pageRead?.coverage.coverage === 'capped'
-                  ? 'count on a capped attempt page — a floor, not a total'
+                  ? 'count on a capped attempt page, a floor, not a total'
                   : undefined,
             };
       channel = { available: true, value: figure };
@@ -478,7 +478,7 @@ export function duplicateEffectCard(
           value: {
             value: census.effects.compound_non_repeatable,
             unit: 'attempts',
-            note: 'attempts admitted under a compound non-repeatable effect — the eligible set a duplicate-effect adjudication would run over',
+            note: 'attempts admitted under a compound non-repeatable effect, the eligible set a duplicate-effect adjudication would run over',
           },
         };
 
@@ -543,7 +543,7 @@ export function blockedTimeCard(graph: WorkGraphReading): WorkAccountingCard {
     },
     {
       key: 'blocked_effort',
-      label: 'Declared blocked effort — a different measure',
+      label: 'Declared blocked effort, a different measure',
       channel:
         entry === null
           ? graphAbsence(graph, 'declared blocked effort')
@@ -559,7 +559,7 @@ export function blockedTimeCard(graph: WorkGraphReading): WorkAccountingCard {
                 value: {
                   value: blockedEffort,
                   unit: 'effort',
-                  note: 'declared effort sitting behind a gate — NOT time, and never substituted for the two rows above',
+                  note: 'declared effort sitting behind a gate, NOT time, and never substituted for the two rows above',
                 },
               },
     },

@@ -1,11 +1,5 @@
 use tracedecay_domain::CoverageStateV1;
 
-use crate::observability::{
-    MetricCohortV1, MetricCoverageV1, MetricEvidenceClassV1, MetricProvenanceV1, MetricSourceV1,
-    MetricTemporalV1, MetricUncertaintyV1, MetricValueV1, ObservabilityHorizonV1,
-};
-use crate::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
-
 use super::projection::ProjectionContext;
 use super::{
     CONFLICT_MIN_ADJUDICATED_CASES_V1, EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1,
@@ -13,6 +7,10 @@ use super::{
     ExecutionTopologyDimensionV1, ExecutionTopologyMeasurementV1, ExecutionTopologyMetricsV1,
     MAX_CENSORING_RATIO_V1, MAX_METRIC_DIMENSIONS_V1, MIN_COVERAGE_RATIO_V1,
     RATE_MIN_ELIGIBLE_CASES_V1,
+};
+use crate::observability::{
+    MetricCohortV1, MetricCoverageV1, MetricEvidenceClassV1, MetricProvenanceV1, MetricSourceV1,
+    MetricTemporalV1, MetricUncertaintyV1, MetricValueV1, ObservabilityHorizonV1,
 };
 
 const SOURCE_REVISION_V1: &str = "observability-envelope.v1";
@@ -491,17 +489,6 @@ pub(super) fn union_micros(intervals: &mut [(i64, i64)]) -> u64 {
 
 fn span(start: i64, end: i64) -> u64 {
     end.abs_diff(start)
-}
-
-pub(super) fn invalid_problem(code: &str, message: &str) -> ApplicationProblem {
-    ApplicationProblem::InvalidRequest {
-        diagnostic: SafeDiagnostic {
-            code: code.to_owned(),
-            message: message.to_owned(),
-        },
-        retry: RetryDirective::Never,
-        legal_actions: vec![LegalAction::CorrectRequest],
-    }
 }
 
 #[cfg(test)]

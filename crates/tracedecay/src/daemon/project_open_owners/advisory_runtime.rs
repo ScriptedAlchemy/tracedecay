@@ -874,7 +874,7 @@ fn log_scout_producer_outcome(project_root: &Path, outcome: &str) {
 }
 
 /// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
-/// advisory/hook-notice run, then the Scout producer tail —
+/// advisory/hook-notice run, then the Scout producer tail,
 /// canonical input assembly from the latest committed publication, daemon-side
 /// delivery selection, `prepare_configured`, and a claim-authority mount for
 /// the enqueued generation. Every early return is a typed fail-closed state;
@@ -1295,9 +1295,12 @@ async fn refresh_project_open_feedback_configuration(
 
 /// Registers owners whose exact authority depends on a mounted code index.
 #[hotpath::measure(label = "daemon.project.owners.dependent", future = true)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Dependent-owner registration is one follow-on bind after production owners exist."
+#[cfg_attr(
+    not(feature = "hotpath"),
+    expect(
+        clippy::too_many_lines,
+        reason = "Dependent-owner registration is one follow-on bind after production owners exist."
+    )
 )]
 pub(in crate::daemon) async fn register_project_open_dependent_owners(
     invocation: &DaemonInvocationState,
@@ -1334,7 +1337,7 @@ pub(in crate::daemon) async fn register_project_open_dependent_owners(
     register_project_delivery_read_authority(invocation, project_root, &state).await?;
     // Proximity is a typed read over session/git correlation and the current
     // code graph. Like Delivery, it must be available before a sealed
-    // generation mounts the full advisory cycle — otherwise HTTP
+    // generation mounts the full advisory cycle, otherwise HTTP
     // `/api/feedback/proximity` answers `feedback.proximity.unavailable`
     // while Work/application are already serving.
     register_project_proximity_read_authority(invocation, project_root, &state).await?;
@@ -2251,7 +2254,7 @@ async fn resolve_production_github_provider_config(
 }
 
 /// Mounts the canonical Observatory lane for GitHub stack observations.
-/// Telemetry mounting failure is logged and yields `None` — the review
+/// Telemetry mounting failure is logged and yields `None`, the review
 /// refresh owner keeps its product path either way.
 async fn resolve_github_stack_observability(
     invocation: &DaemonInvocationState,

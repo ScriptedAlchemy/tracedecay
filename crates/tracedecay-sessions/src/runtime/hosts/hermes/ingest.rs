@@ -26,6 +26,38 @@ fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
     IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_HERMES_SWEEP_BYTES))
 }
 
+/// Whether this sweep pass should report a source outcome, given what the last
+/// pass reported for the same `state.db`.
+///
+/// A source that cannot be admitted stays unadmittable until something about
+/// the store or the file changes, and the sweep runs every few seconds. Logging
+/// the identical line each pass buried every other daemon warning without
+/// telling an operator anything the first line did not. Report a failure when
+/// it is new or its reason changed; `None` records a recovered source so its
+/// next failure is reported again. The map is keyed by discovered Hermes
+/// profile, so it is bounded by the number of profiles on disk.
+fn hermes_source_outcome_is_new(state_db: &Path, error: Option<&str>) -> bool {
+    use std::collections::BTreeMap;
+    use std::sync::{LazyLock, Mutex, PoisonError};
+
+    static REPORTED: LazyLock<Mutex<BTreeMap<PathBuf, String>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    let mut reported = REPORTED.lock().unwrap_or_else(PoisonError::into_inner);
+    match error {
+        Some(error) => {
+            if reported.get(state_db).is_some_and(|last| last == error) {
+                return false;
+            }
+            reported.insert(state_db.to_path_buf(), error.to_owned());
+            true
+        }
+        None => {
+            reported.remove(state_db);
+            false
+        }
+    }
+}
+
 /// Default Hermes profile homes under the resolved user home.
 ///
 /// Missing home is a typed absence (`None`), never an empty successful sweep.
@@ -198,7 +230,7 @@ pub async fn ingest_homes_for_projects(
     stats
 }
 
-/// [`ingest_for_project`] with explicit Hermes home directories — the test
+/// [`ingest_for_project`] with explicit Hermes home directories, the test
 /// seam for pointing the sweep at a temporary home instead of the real
 /// `~/.hermes`.
 pub async fn ingest_homes(
@@ -283,14 +315,19 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
         )
         .await
         {
-            Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
+            Ok(source_stats) => {
+                hermes_source_outcome_is_new(&source.state_db, None);
+                outcome.stats = outcome.stats.merge(source_stats);
+            }
             Err(error) => {
                 outcome.source_failures = outcome.source_failures.saturating_add(1);
-                tracing::warn!(
-                    state_db = %source.state_db.display(),
-                    error,
-                    "skipping Hermes transcript source"
-                );
+                if hermes_source_outcome_is_new(&source.state_db, Some(&error)) {
+                    tracing::warn!(
+                        state_db = %source.state_db.display(),
+                        error,
+                        "skipping Hermes transcript source"
+                    );
+                }
             }
         }
     }
@@ -403,14 +440,19 @@ async fn ingest_user_homes_capped_with_admission(
         )
         .await
         {
-            Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
+            Ok(source_stats) => {
+                hermes_source_outcome_is_new(&source.state_db, None);
+                outcome.stats = outcome.stats.merge(source_stats);
+            }
             Err(error) => {
                 outcome.source_failures = outcome.source_failures.saturating_add(1);
-                tracing::warn!(
-                    state_db = %source.state_db.display(),
-                    error,
-                    "skipping projectless Hermes transcript source"
-                );
+                if hermes_source_outcome_is_new(&source.state_db, Some(&error)) {
+                    tracing::warn!(
+                        state_db = %source.state_db.display(),
+                        error,
+                        "skipping projectless Hermes transcript source"
+                    );
+                }
             }
         }
     }

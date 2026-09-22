@@ -12,13 +12,13 @@
 //! `~/.codex/config.toml`; TraceDecay never writes those. Hook trust is
 //! different: `codex plugin add` does not record `[hooks.state]` hashes and
 //! `/hooks` is interactive-only, so activation records trust for TraceDecay's
-//! own managed hooks ([`sync_codex_hook_trust`]) and deactivation prunes those
-//! records again ([`prune_codex_hook_trust_records`]) — both inside the
+//! own managed hooks (`sync_codex_hook_trust`) and deactivation prunes those
+//! records again (`prune_codex_hook_trust_records`), both inside the
 //! component transaction's rollback boundary. Trust is recorded only for hooks
 //! whose installed command is byte-for-byte a generated tracedecay command
-//! ([`codex_hook_command_invokes_tracedecay`]); anything else keeps the manual
-//! `/hooks` review. See [`plugin_registry`] for the plugin adoption and
-//! [`mcp_registry`] for the MCP-only (non-plugin) registry.
+//! (`codex_hook_command_invokes_tracedecay`); anything else keeps the manual
+//! `/hooks` review. See `plugin_registry` for the plugin adoption and
+//! `mcp_registry` for the MCP-only (non-plugin) registry.
 //!
 //! Codex's **MCP registry** remains the path for an MCP-only component set
 //! (`codex mcp add`/`remove`). A `Core`-bearing set must not also register a
@@ -265,7 +265,7 @@ impl AgentIntegration for CodexIntegration {
                 && codex_plugin_cached_install_dirs(&ctx.home).is_empty()
             {
                 dc.warn(
-                    "repo-local Codex bundles ship no lifecycle hooks — run `tracedecay install --agent codex` to add the personal plugin (session hooks, transcript ingest)",
+                    "repo-local Codex bundles ship no lifecycle hooks, run `tracedecay install --agent codex` to add the personal plugin (session hooks, transcript ingest)",
                 );
             }
         } else {
@@ -393,7 +393,7 @@ impl AgentIntegration for CodexIntegration {
         // `~/.codex/agents` is registration surface, not deployed component
         // assets: `host_component_registration_paths` declares every generated
         // export plus the ownership manifest for Core. Activation must refresh
-        // current exports and retire previous-bundle stale ones — otherwise
+        // current exports and retire previous-bundle stale ones, otherwise
         // Core install through the receipt-backed lifecycle never writes them
         // and never retires them (byte-for-byte rollback then fails).
         tracedecay_automation_runtime::automation::agent_targets::install_codex_managed_agents(
@@ -455,13 +455,13 @@ impl AgentIntegration for CodexIntegration {
 
     /// Split by component: the MCP-only set is driven through Codex's own
     /// non-interactive MCP registry; a `Core`-bearing set drives
-    /// `codex plugin add` / `remove` through [`plugin_registry`].
+    /// `codex plugin add` / `remove` through `plugin_registry`.
     ///
     /// That split is deliberate: a plugin install already carries the MCP route
     /// inside its bundled `.mcp.json`, and adding a standalone server beside it
     /// would give the operator two identical tracedecay servers, one of them
-    /// outside `codex plugin` management. See [`mcp_registry`] and
-    /// [`plugin_registry`] for the full rulings.
+    /// outside `codex plugin` management. See `mcp_registry` and
+    /// `plugin_registry` for the full rulings.
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle::HostComponentV1],
@@ -552,7 +552,7 @@ fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
 /// cache. `codex plugin add`/`remove` create or delete those files outside
 /// [`super::safe_write_text_file`], and without a recorded intent
 /// `restore_registration` treats the live cache as foreign drift (`StalePreview`)
-/// and aborts before restoring any other registration path — including the
+/// and aborts before restoring any other registration path, including the
 /// managed-agent ownership manifest that byte-for-byte rollback demands.
 fn record_codex_cached_plugin_registration_intents(home: &Path) -> Result<()> {
     let cache_dir = codex_plugin_current_cached_install_dir(home);
@@ -805,7 +805,7 @@ impl CodexBundlePolicy {
         }
     }
 
-    /// Where Codex records trust for this bundle's hooks — `None` for scopes
+    /// Where Codex records trust for this bundle's hooks, `None` for scopes
     /// that ship no hooks and therefore have no trust surface.
     fn hook_trust_config_path(self, home: &Path) -> Option<PathBuf> {
         self.include_hooks().then(|| codex_config_path(home))
@@ -886,8 +886,8 @@ fn write_codex_plugin_files(
 }
 
 /// Canonical rendered global Codex plugin inventory. The registration probe
-/// inspects `.codex/plugins/tracedecay` — the directory the receipt-backed
-/// first-party host-bundle catalog owns — and requires the managed lifecycle
+/// inspects `.codex/plugins/tracedecay`, the directory the receipt-backed
+/// first-party host-bundle catalog owns, and requires the managed lifecycle
 /// hooks to be present, so the catalog must deploy the same rendered content
 /// the installer produces instead of the raw templates (whose `hooks.json`
 /// is an empty scaffold rendered only at install time).
@@ -1269,7 +1269,7 @@ fn codex_installed_hook_trust_entries(home: &Path) -> Result<(String, Vec<CodexH
 
 /// Safety valve: only auto-trust a hook whose command is byte-for-byte one of
 /// the commands the generator emits for our own managed lifecycle hooks. A
-/// prefix match is unsafe — `<quoted tracedecay> hook-codex-session-start &&
+/// prefix match is unsafe. `<quoted tracedecay> hook-codex-session-start &&
 /// rm -rf ~` starts with our binary token yet smuggles an arbitrary command, so
 /// it would get silently auto-trusted. Requiring full equality with a generated
 /// command (`hook_command(bin, subcommand)` for each known subcommand) rejects
@@ -1351,7 +1351,7 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
 
         let outcome = CodexHookTrustSyncOutcome { trusted, skipped };
         // A truthful all-skip (or empty hook payload) leaves no trust records.
-        // That is not a serializer failure — announce treats it as Ok + guidance.
+        // That is not a serializer failure, announce treats it as Ok + guidance.
         // Drop hollow `[hooks.state]`/`[hooks]` tables the same way prune does.
         if state.is_empty() {
             if let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut) {
@@ -1367,7 +1367,7 @@ fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookT
         let contents = render_codex_config(&config_path, &config)?;
         // Child trust records exist: Codex requires an explicit `[hooks.state]`
         // parent. Missing child headers here means the serializer dropped
-        // entries we just inserted — a real contract breach.
+        // entries we just inserted, a real contract breach.
         let Some(updated) = with_explicit_hooks_state_parent(&contents) else {
             return Err(TraceDecayError::Config {
                 message: "Codex hook trust state serialized without hook entries".to_string(),
@@ -1388,7 +1388,7 @@ fn render_codex_config(config_path: &Path, config: &toml::Value) -> Result<Strin
 /// Codex's hook loader requires the parent table to be explicit on disk. The
 /// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
 /// which parses equivalently but still triggers Codex's hook-review prompt.
-/// Returns `None` when no hook trust child tables are present — callers that
+/// Returns `None` when no hook trust child tables are present, callers that
 /// just inserted records treat that as a serializer contract breach; callers
 /// that intentionally cleared state (prune / all-skip) fall back to the
 /// unshaped document.
@@ -1759,7 +1759,7 @@ fn codex_plugin_hook_trust_state(
     config: &toml::Value,
     entries: &[CodexHookTrustEntry],
 ) -> CodexHookTrustState {
-    // A missing [hooks.state] table is just "nothing trusted yet" — treat it
+    // A missing [hooks.state] table is just "nothing trusted yet", treat it
     // as empty so one pipeline produces the missing list either way.
     let empty = toml::value::Table::new();
     let state = config
@@ -2176,7 +2176,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     let manifest_path = plugin_dir.join(".codex-plugin/plugin.json");
     if !manifest_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent codex` or `tracedecay update-plugin` to install the Codex plugin bundle",
+            "{} not found, run `tracedecay install --agent codex` or `tracedecay update-plugin` to install the Codex plugin bundle",
             manifest_path.display()
         ));
         return;
@@ -2195,7 +2195,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
 
 /// Codex's own readback of "installed and enabled": the
 /// `[plugins."tracedecay@…"] enabled = true` activation record in
-/// `config.toml` — the state `codex plugin list` reports. Staged source and a
+/// `config.toml`, the state `codex plugin list` reports. Staged source and a
 /// marketplace entry alone never load the plugin's MCP server, skills, or
 /// hooks, so their presence must not read as an installed integration.
 fn doctor_check_native_activation(dc: &mut DoctorCounters, home: &Path) {
@@ -2207,7 +2207,7 @@ fn doctor_check_native_activation(dc: &mut DoctorCounters, home: &Path) {
             config_path.display()
         )),
         Ok(false) => dc.fail(&format!(
-            "Codex reports tracedecay@{marketplace_name} not installed — {} has no \
+            "Codex reports tracedecay@{marketplace_name} not installed. {} has no \
              `[plugins.\"tracedecay@{marketplace_name}\"] enabled = true`, so the MCP server, \
              skills, and hooks never load. Run `tracedecay install --agent codex` (drives \
              `codex plugin add tracedecay@{marketplace_name}` and auto-trusts the managed hooks)",
@@ -2222,7 +2222,7 @@ fn doctor_check_native_activation(dc: &mut DoctorCounters, home: &Path) {
 }
 
 /// Install and update-plugin auto-trust the managed hooks
-/// ([`sync_codex_hook_trust`]), but the safety valve skips tampered commands
+/// (`sync_codex_hook_trust`), but the safety valve skips tampered commands
 /// and an unwritable config leaves trust unrecorded. Returns follow-up
 /// guidance while any managed hook is untrusted or stale, and `None` once
 /// explicit, current trust exists for every managed hook.
@@ -2285,7 +2285,7 @@ fn doctor_check_marketplace_entry(
         ));
     } else {
         dc.warn(&format!(
-            "Codex {label} missing tracedecay in {} — run `{install_command}`",
+            "Codex {label} missing tracedecay in {}, run `{install_command}`",
             marketplace_path.display()
         ));
     }
@@ -2313,7 +2313,7 @@ fn doctor_check_plugin_dir(
     match manifest.get("version").and_then(|value| value.as_str()) {
         Some(crate::PRODUCT_VERSION) => dc.pass("Codex plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
-            "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
+            "Codex plugin version {version} does not match tracedecay {}, run `tracedecay update-plugin`",
             crate::PRODUCT_VERSION
         )),
         None => dc.warn("Codex plugin manifest does not contain a version"),
@@ -2328,7 +2328,7 @@ fn doctor_check_plugin_dir(
         ));
     } else {
         dc.fail(&format!(
-            "Codex plugin MCP server missing or has stale timeouts in {} — run `tracedecay update-plugin`",
+            "Codex plugin MCP server missing or has stale timeouts in {}, run `tracedecay update-plugin`",
             mcp_path.display()
         ));
     }
@@ -2344,7 +2344,7 @@ fn doctor_check_plugin_dir(
         }
     } else if hooks_path.exists() {
         dc.warn(&format!(
-            "repo-local Codex bundle unexpectedly ships lifecycle hooks in {} — run `tracedecay install --local --agent codex` to refresh it",
+            "repo-local Codex bundle unexpectedly ships lifecycle hooks in {}, run `tracedecay install --local --agent codex` to refresh it",
             hooks_path.display()
         ));
     }
@@ -2358,7 +2358,7 @@ fn doctor_check_hooks(
 ) {
     if !hooks_path.exists() {
         dc.warn(&format!(
-            "{} not found — run `tracedecay install --agent codex` to add lifecycle hooks",
+            "{} not found, run `tracedecay install --agent codex` to add lifecycle hooks",
             hooks_path.display()
         ));
         return;
@@ -2372,7 +2372,7 @@ fn doctor_check_hooks(
         .collect();
     if !missing.is_empty() {
         dc.warn(&format!(
-            "tracedecay hook(s) missing for {} in {} — run `tracedecay install --agent codex`",
+            "tracedecay hook(s) missing for {} in {}, run `tracedecay install --agent codex`",
             missing.join(", "),
             hooks_path.display(),
         ));
@@ -2411,18 +2411,18 @@ fn doctor_check_hooks(
                 config_path.display()
             )),
             CodexHookTrustState::Missing(missing) => dc.info(&format!(
-                "Codex skips untrusted command hooks — missing trust for {} in {}; use `/hooks` in Codex to trust the tracedecay hooks",
+                "Codex skips untrusted command hooks, missing trust for {} in {}; use `/hooks` in Codex to trust the tracedecay hooks",
                 missing.join(", "),
                 config_path.display()
             )),
             CodexHookTrustState::Modified(modified) => dc.warn(&format!(
-                "Codex hook trust is stale for {} in {} — the hook content changed since it was trusted, so Codex now skips it; use `/hooks` in Codex to re-trust the tracedecay hooks",
+                "Codex hook trust is stale for {} in {}, the hook content changed since it was trusted, so Codex now skips it; use `/hooks` in Codex to re-trust the tracedecay hooks",
                 modified.join(", "),
                 config_path.display()
             )),
         },
         Err(_) => dc.info(
-            "Codex skips untrusted command hooks — use `/hooks` in Codex to trust the tracedecay hooks",
+            "Codex skips untrusted command hooks, use `/hooks` in Codex to trust the tracedecay hooks",
         ),
     }
 }
@@ -2431,7 +2431,7 @@ fn doctor_check_hooks(
 /// fact-store injection is active, so the model does not receive two parallel
 /// memory systems built from the same sessions. This is advisory only: the
 /// user's `config.toml` is never edited, and tracedecay never writes into
-/// `~/.codex/memories/` — the holographic fact store stays the single source
+/// `~/.codex/memories/`, the holographic fact store stays the single source
 /// of truth and delivery is rendered prompt context only.
 fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, home: &Path) {
     if !crate::hooks::memory_inject::memory_injection_enabled() {

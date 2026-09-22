@@ -3,16 +3,16 @@
 //! typed availability states that refuse to spawn at all.
 //!
 //! Framing note: the `(backend, protocol)` pair selects argv and the single
-//! provider-owned session-start event whose identity is sealed into Work —
+//! provider-owned session-start event whose identity is sealed into Work,
 //! `--print --output-format stream-json --verbose` for `ClaudeStreamJson`,
-//! `exec --json -` for `CodexExecJson` — the attempt instructions are written
+//! `exec --json -` for `CodexExecJson`, the attempt instructions are written
 //! to the child's stdin, and both streams are captured as bounded opaque bytes
 //! summarized by true byte length plus the sha256 of the retained prefix. No
 //! assistant content is parsed or reinterpreted.
 //!
 //! Gate note: the app-server preference gate is exercised against a *real*
 //! `PinnedWorkExecutableBindingResolver` over real on-disk executables, not a
-//! stub. That is deliberate — the gate's availability detection is exactly the
+//! stub. That is deliberate, the gate's availability detection is exactly the
 //! binding probe (capability admission, path canonicalization, byte-exact
 //! digest match), so a stubbed resolver would prove nothing about whether the
 //! detection is truthful.
@@ -73,17 +73,9 @@ const CODEX_EXEC_JSON_ARGV: [&str; 3] = ["exec", "--json", "-"];
 // In-memory attempt authority
 // ---------------------------------------------------------------------------
 
-fn id<T>(value: &str) -> T
-where
-    T: TryFrom<String>,
-    T::Error: std::fmt::Debug,
-{
-    T::try_from(value.to_owned()).unwrap()
-}
+use tracedecay_domain::test_fixtures::id;
 
-fn digest(byte: char) -> ManifestDigest {
-    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
-}
+use tracedecay_domain::test_fixtures::digest;
 
 fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()
@@ -661,7 +653,7 @@ fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShap
 
 /// Writes an executable shell script into an isolated temp directory. The
 /// script text carries absolute marker paths because the spawn path calls
-/// `env_clear()` — nothing but the allowlist survives into the child.
+/// `env_clear()`, nothing but the allowlist survives into the child.
 #[cfg(unix)]
 fn fake_executable(directory: &Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -1182,7 +1174,7 @@ fn overflow_classification_names_the_channel_and_yields_to_cancellation() {
 /// The fake provider parks on a writerless FIFO instead of a sleep loop:
 /// the group `SIGINT` kills the blocked `cat`, the trap records the rung,
 /// and the loop parks again with no polling until the group kill lands.
-/// This test spends the real `CANCELLATION_GRACE` window on purpose — a
+/// This test spends the real `CANCELLATION_GRACE` window on purpose, a
 /// virtual clock would let the grace expire without proving the child
 /// actually survived it.
 #[cfg(unix)]
@@ -1300,7 +1292,7 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
 /// owner fact through the mounted producer: the pinned topology-policy digest,
 /// a positive armed budget, a measured stall at least that budget, a provably
 /// zero frontier, no remaining run budget, the kill escalation, and an unknown
-/// effect outcome. This test spends the real two-second wall on purpose — the
+/// effect outcome. This test spends the real two-second wall on purpose, the
 /// stall must be a monotonic measurement, not a virtual-clock artifact.
 #[cfg(unix)]
 #[tokio::test]
@@ -1512,7 +1504,7 @@ fn a_resolvable_app_server_is_preferred_over_an_equally_resolvable_codex_cli() {
 /// fallback. The fallback must be reported rather than hidden.
 ///
 /// Here the app-server executable exists on disk but its bytes no longer match
-/// the pinned digest — the probe is a real file read, so this is a
+/// the pinned digest, the probe is a real file read, so this is a
 /// `DigestMismatch`, not a configuration guess. The CLI takes over and the
 /// handover survives all the way into the sealed terminal evidence.
 #[cfg(unix)]
@@ -1644,7 +1636,7 @@ fn a_disabled_topology_denies_instead_of_inventing_a_codex_cli_route() {
     let root = directory.path();
     let (app_server, _) =
         pinned_executable(root, "codex-app-server", "codex.app-server", CLEAN_PROVIDER);
-    // A perfectly usable Codex CLI is configured and resolvable — and still
+    // A perfectly usable Codex CLI is configured and resolvable, and still
     // unreachable, because this snapshot never named it.
     let (cli, cli_path) = pinned_executable(root, "codex-cli", "codex.cli", CLEAN_PROVIDER);
     let resolver = resolver_over(

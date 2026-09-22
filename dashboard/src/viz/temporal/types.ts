@@ -37,7 +37,7 @@ export type SourceClass =
   | 'proximity';
 
 /* -------------------------------------------------------------------------
- * Journey projection — the joined input
+ * Journey projection, the joined input
  * ---------------------------------------------------------------------- */
 
 /** How a lane's right edge was measured. `null` means the extent is unknown. */
@@ -45,7 +45,7 @@ export type LaneEndSource = 'session_end' | 'last_message' | null;
 
 /** One session as a lane. The provider-qualified `id` is the selection key. */
 export interface JourneyLane {
-  /** `JSON.stringify([provider, session_id])` — the identity the rest of the
+  /** `JSON.stringify([provider, session_id])`, the identity the rest of the
    * Loom already selects by. */
   readonly id: string;
   readonly sessionId: string;
@@ -252,7 +252,7 @@ export interface LayoutOptions {
 }
 
 /* -------------------------------------------------------------------------
- * TemporalSceneModel — the layout output
+ * TemporalSceneModel, the layout output
  * ---------------------------------------------------------------------- */
 
 export type XBasis = 'time' | 'sequence';

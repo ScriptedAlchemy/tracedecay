@@ -23,9 +23,7 @@ fn session_id() -> SessionId {
     serde_json::from_str("\"session-1\"").expect("valid session id")
 }
 
-fn digest(byte: char) -> String {
-    format!("sha256:{}", byte.to_string().repeat(64))
-}
+use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn participant(session: &str, source: &str, generation: u64) -> TemporalParticipantGeneration {
     TemporalParticipantGeneration::new(
@@ -806,7 +804,7 @@ fn summary_record(anchor_id: &str) -> TemporalRecord {
 }
 
 /// Producer that always reports More after filling at most one item, with a
-/// stable continuation — used to prove caps cannot downgrade More → Complete.
+/// stable continuation, used to prove caps cannot downgrade More → Complete.
 struct AlwaysMorePort {
     candidate_ids: Vec<&'static str>,
     record_anchors: Vec<&'static str>,
@@ -946,7 +944,7 @@ impl TemporalReadPort for OversizedRecordPort {
 
 /// A candidate cohort is a bounded window over storage order, so filling the
 /// item cap while the producer still holds rows yields the window plus the key
-/// the next window resumes from — never a refusal that hides the remainder.
+/// the next window resumes from, never a refusal that hides the remainder.
 #[test]
 fn candidate_item_cap_with_producer_more_is_a_resumable_window() {
     block_on(async {
@@ -1162,7 +1160,7 @@ fn exhausted_caps_never_synthesize_complete_or_silently_drop_unread_work() {
         assert_eq!(candidate_window.status(), PageStatus::More);
         assert!(candidate_state.is_exhausted());
         // The window is closed: a follow-up pull on the same exhausted state
-        // must keep failing closed — never an empty Complete that would drop
+        // must keep failing closed, never an empty Complete that would drop
         // the rows the continuation key still owes.
         let candidate_follow_up = pull_candidate_page(
             &port,

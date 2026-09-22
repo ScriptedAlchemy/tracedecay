@@ -2,7 +2,7 @@
 //!
 //! This module owns capacity: how many workers exist per lane, who is holding
 //! one, and when an idle one retires. The siblings own the two things that hang
-//! off it — [`lease`] the RAII checkout that always returns a worker, and
+//! off it, [`lease`] the RAII checkout that always returns a worker, and
 //! [`outcome`] the result vocabulary an acquisition reports in.
 
 use std::{
@@ -21,8 +21,8 @@ use tracedecay_store::{
 use super::{ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, worker};
 use crate::checkpoint::CheckpointBlockerSource;
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement, MemoryReleaseNoOpReason,
-    MemoryReleaseOutcome,
+    ExactSqlError, ExactSqlReadSnapshot, ExactSqlReaderRefusalV1, ExactSqlRows, ExactSqlStatement,
+    MemoryReleaseNoOpReason, MemoryReleaseOutcome,
 };
 use crate::telemetry::{ReaderAdmissionRecorder, ReaderAdmissionSnapshot};
 use crate::{CheckpointBlocker, CheckpointBlockers, CheckpointPressure};
@@ -33,6 +33,27 @@ mod outcome;
 pub use lease::{ReaderLease, SnapshotLease};
 pub use outcome::{ReaderAcquireError, ReaderPoolSnapshot, ReaderPoolState};
 use outcome::{interruption, validate_probe};
+
+/// Classifies a lane acquisition failure for the exact-SQL entry points.
+///
+/// `acquire_lane` answers two different kinds of question. The lane can
+/// decline to admit this request, which says nothing about the store, or a
+/// reader can fail, which says the store cannot be read here. Reporting both
+/// as [`ExactSqlError::ReaderUnavailable`] left the difference legible only in
+/// the `Display` text, so a caller that wanted to route a declined request
+/// onto another lane had to either match that text or route around every
+/// failure, including a reader that had actually broken.
+fn map_reader_acquire_error(error: ReaderAcquireError) -> ExactSqlError {
+    match error {
+        ReaderAcquireError::Saturated { .. } => {
+            ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Saturated)
+        }
+        ReaderAcquireError::Interrupted {
+            reason: UnavailableReasonV1::Draining,
+        } => ExactSqlError::ReaderRefused(ExactSqlReaderRefusalV1::Draining),
+        error => ExactSqlError::ReaderUnavailable(error.to_string()),
+    }
+}
 
 pub(super) const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 pub(super) const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
@@ -167,7 +188,7 @@ pub(super) struct PoolState {
     /// Workers whose snapshot end outran [`SNAPSHOT_END_GRACE`].
     ///
     /// Their lease has ended but the worker has not confirmed its rollback, so
-    /// it is neither available nor leased. It is still counted here — a limbo
+    /// it is neither available nor leased. It is still counted here, a limbo
     /// worker that vanished from the accounting would silently shrink the lane
     /// and let a shutdown declare quiescence with work still in flight.
     pub(super) limbo_general: u16,
@@ -489,7 +510,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     ) -> Result<ExactSqlRows, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.execute_exact_sql_query(statement)
     }
 
@@ -500,7 +521,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.begin_exact_sql_snapshot()?;
         self.record_snapshot_admission();
         Ok(ExactSqlReadSnapshot::new(move |statement| {
@@ -518,7 +539,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 max_wait,
                 || None,
             )
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(map_reader_acquire_error)?;
         lease.retire_after_snapshot();
         lease.begin_exact_sql_snapshot()?;
         self.record_snapshot_admission();
@@ -817,7 +838,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         // Retiring burst workers walks and rebuilds the idle deque under the
         // state lock; it only has anything to do when the idle set has actually
         // changed. Run it on entry and after a notified wake, never on every
-        // bounded poll tick — a timed-out wait leaves the idle set untouched, so
+        // bounded poll tick, a timed-out wait leaves the idle set untouched, so
         // repeating the scan each 5ms merely adds lock traffic to the hot path.
         let mut retire_pending = true;
 
@@ -872,8 +893,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             }
             // Foreground reservation. A background acquisition holding fewer
             // than `lease_ceiling` leases may take or grow a worker; at the
-            // ceiling it waits here instead, leaving the rest of the lane —
-            // both idle workers and unspawned headroom — for interactive
+            // ceiling it waits here instead, leaving the rest of the lane,
+            // both idle workers and unspawned headroom, for interactive
             // reads. Foreground acquisitions see the whole lane.
             let leased = match lane {
                 ReaderLane::General => state.leased_general,
@@ -1072,7 +1093,7 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
 
 /// Folds per-worker release results into one truthful pool outcome.
 ///
-/// A worker fault — the pragma itself reporting a SQLite error — propagates
+/// A worker fault, the pragma itself reporting a SQLite error, propagates
 /// as `Err` carrying the partial-release count, so the caller's degraded log
 /// fires instead of the failure vanishing into a "pool closed" no-op. Workers
 /// that were skipped (terminated, or busy inside a retained snapshot) are not

@@ -114,7 +114,7 @@ impl WorktreeChangeClassificationV1 {
             let path = item.location().to_str_lossy().into_owned();
             // TraceDecay's own project-local private store is daemon-written
             // state, never checkout content. Counting it as a worktree change
-            // would make every enrolled checkout permanently "dirty" — see
+            // would make every enrolled checkout permanently "dirty", see
             // [`is_tracedecay_owned_state_path`].
             if is_tracedecay_owned_state_path(&path) {
                 continue;
@@ -309,13 +309,14 @@ mod tests {
 
     /// Enrolling a project writes `.tracedecay/enrollment.json` into the
     /// checkout. That is `TraceDecay`'s own state, so a checkout that is
-    /// otherwise clean must stay classified clean — otherwise no capture can
+    /// otherwise clean must stay classified clean, otherwise no capture can
     /// seal an exact HEAD tree and exact-scope admission refuses forever with
     /// `lsp-code-index-source-revision-unavailable`.
     #[test]
     fn enrollment_state_does_not_make_a_committed_checkout_dirty() {
         let repo = committed_repo();
-        let repository = gix::open(repo.path()).expect("open repository");
+        let repository =
+            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
         assert!(
             WorktreeChangeClassificationV1::classify(&repository)
                 .expect("classify committed checkout")
@@ -356,7 +357,8 @@ mod tests {
         std::fs::write(repo.path().join(".tracedecay/enrollment.json"), "{}\n").unwrap();
         std::fs::write(repo.path().join("src/extra.rs"), "pub fn b() {}\n").unwrap();
 
-        let repository = gix::open(repo.path()).expect("open repository");
+        let repository =
+            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
         let classification =
             WorktreeChangeClassificationV1::classify(&repository).expect("classify");
         assert_eq!(
