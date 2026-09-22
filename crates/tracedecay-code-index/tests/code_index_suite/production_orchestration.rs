@@ -4764,13 +4764,13 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     /// Alternating paged/legacy rounds behind the discarded warm-up.
     const RSS_ROUNDS: usize = 4;
 
-    // VmHWM and `clear_refs` are Linux-only. The read-shape guard needs
-    // neither, so run it alone elsewhere rather than skipping the test.
-    let rss_readable = rss_proc_kib("VmHWM").is_some() && rss_reset_peak();
+    // VmHWM and `clear_refs` are Linux-only and mandatory there. The
+    // read-shape guard needs neither, so run it alone on other platforms.
+    let measure_rss = cfg!(target_os = "linux");
 
     // VmHWM is process-wide, so the reading only means anything while nothing
     // else is allocating: take it in a child that runs this test alone.
-    if rss_readable && std::env::var_os(RSS_CHILD).is_none() {
+    if measure_rss && std::env::var_os(RSS_CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([RSS_TEST, "--exact", "--nocapture", "--test-threads=1"])
             .env(RSS_CHILD, "1")
@@ -4794,14 +4794,14 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
         &fixture.paged_manifest,
         &fixture.segments,
         &fixture.evidence_digest,
-        rss_readable,
+        measure_rss,
     );
     let legacy = rss_measure_decode(
         "legacy",
         &fixture.legacy_manifest,
         &fixture.segments,
         &fixture.evidence_digest,
-        rss_readable,
+        measure_rss,
     );
 
     // --- Guard 1: the read shape, exact. ------------------------------------
@@ -4842,7 +4842,7 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     );
 
     // --- Guard 2: peak RSS, noise-tolerant. ---------------------------------
-    if !rss_readable {
+    if !measure_rss {
         return;
     }
     // The first restore in a process pays a cold-start cost (the arena a
@@ -4858,7 +4858,7 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
                 &fixture.paged_manifest,
                 &fixture.segments,
                 &fixture.evidence_digest,
-                rss_readable,
+                measure_rss,
             )
             .hwm_delta_kib
             .expect("Linux VmHWM measurement"),
@@ -4869,7 +4869,7 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
                 &fixture.legacy_manifest,
                 &fixture.segments,
                 &fixture.evidence_digest,
-                rss_readable,
+                measure_rss,
             )
             .hwm_delta_kib
             .expect("Linux VmHWM measurement"),
