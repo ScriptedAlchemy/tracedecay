@@ -409,7 +409,7 @@ impl GitRepositoryAuthority {
     ///
     /// Live defect this exists for: the topology memo only short-circuited
     /// `repository_topology`. Every HEAD read, one per route resolution, from
-    /// `current_branch`, still ran a complete `gix::discover`, so on a slow
+    /// `current_branch`, still ran a complete repository discovery, so on a slow
     /// volume a deferred route never converged: the memo was warm and the next
     /// request paid the whole walk again anyway.
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
@@ -426,7 +426,7 @@ impl GitRepositoryAuthority {
     fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {
         let repository = hotpath::measure_block!(
             "runtime_core.git.repository_open_retained",
-            gix::open_opts(&topology.git_dir, repository_open_options())
+            crate::git_open::open(&topology.git_dir)
         )
         .ok()?;
         Some(Self {
@@ -450,11 +450,7 @@ impl GitRepositoryAuthority {
         }
         let repository = hotpath::measure_block!(
             "runtime_core.git.repository_discover.walk",
-            gix::discover_opts(
-                path,
-                gix::discover::upwards::Options::default(),
-                repository_open_options(),
-            )
+            crate::git_open::discover(path)
         )
         .map_err(|error| match error {
             gix::discover::Error::Discover(gix::discover::upwards::Error::NoGitRepository {
@@ -953,16 +949,6 @@ impl TrackedStatusBuilder {
             submodule: self.submodule,
         }
     }
-}
-
-/// Preserve the repository's normal configuration and attribute semantics
-/// while rejecting `GIT_*` redirection from the daemon environment.
-fn repository_open_options() -> gix::open::Options {
-    let mut permissions = gix::open::Permissions::secure();
-    permissions.env.git_prefix = gix::sec::Permission::Deny;
-    permissions.env.objects = gix::sec::Permission::Deny;
-    permissions.config.env = false;
-    gix::open::Options::default().permissions(permissions)
 }
 
 fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepositoryError> {

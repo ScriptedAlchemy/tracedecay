@@ -15,7 +15,7 @@ pub fn local_branch_exists(project_root: &Path, branch: &str) -> bool {
         return false;
     }
     let refname = format!("refs/heads/{branch}");
-    if let Ok(repo) = gix::open(project_root) {
+    if let Ok(repo) = crate::git_open::open(project_root) {
         // gix reads loose and packed refs, the same sources `git show-ref`
         // consults; trust its answer instead of paying a subprocess spawn
         // to re-ask git.
@@ -124,7 +124,7 @@ pub fn find_nearest_tracked_ancestor(
     branch: &str,
     meta: &BranchMeta,
 ) -> Option<String> {
-    let repo = gix::open(project_root).ok()?;
+    let repo = crate::git_open::open(project_root).ok()?;
 
     let branch_ref = format!("refs/heads/{branch}");
     let branch_commit = repo

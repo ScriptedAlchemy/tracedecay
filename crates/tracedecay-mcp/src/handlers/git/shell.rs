@@ -7,7 +7,7 @@ const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
 
 /// Opens the project repository for one git-backed tool call.
 ///
-/// `gix::open` leniently admits a plain directory as a bare git dir; every
+/// `git_open::open` leniently admits a plain directory as a bare git dir; every
 /// later read then fails with a confusing ref-resolution error instead of
 /// naming the real problem. Require a HEAD reference (present even in a
 /// freshly initialized repository with no commits) so a non-repository
@@ -15,7 +15,8 @@ const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
 fn open_project_repository(
     project_root: &std::path::Path,
 ) -> std::result::Result<gix::Repository, String> {
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    let repo = tracedecay_runtime_core::git_open::open(project_root)
+        .map_err(|e| format!("failed to open git repo: {e}"))?;
     if repo.head().is_err() {
         return Err(format!(
             "failed to open git repo: '{}' has no HEAD reference and is not a git repository",

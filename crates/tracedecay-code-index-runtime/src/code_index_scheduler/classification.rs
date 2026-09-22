@@ -315,7 +315,8 @@ mod tests {
     #[test]
     fn enrollment_state_does_not_make_a_committed_checkout_dirty() {
         let repo = committed_repo();
-        let repository = gix::open(repo.path()).expect("open repository");
+        let repository =
+            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
         assert!(
             WorktreeChangeClassificationV1::classify(&repository)
                 .expect("classify committed checkout")
@@ -356,7 +357,8 @@ mod tests {
         std::fs::write(repo.path().join(".tracedecay/enrollment.json"), "{}\n").unwrap();
         std::fs::write(repo.path().join("src/extra.rs"), "pub fn b() {}\n").unwrap();
 
-        let repository = gix::open(repo.path()).expect("open repository");
+        let repository =
+            tracedecay_runtime_core::git_open::open(repo.path()).expect("open repository");
         let classification =
             WorktreeChangeClassificationV1::classify(&repository).expect("classify");
         assert_eq!(

@@ -877,12 +877,11 @@ fn main() {
 }
 RS
 
-# A fresh manifest resolves from scratch, and offline resolution refuses a
-# version that has since been yanked even when the workspace lockfile pins
-# it (bisync 0.3.0 under gix-protocol). Seed the consumer with that
-# lockfile, as the extracted packages are, so it resolves what the product
-# resolves.
-cp -- "$staged/Cargo.lock" "$consumer/Cargo.lock"
+# Deliberately no lockfile. Unlike the extracted packages, which are each
+# their own Cargo root and need the release resolution, this consumer is a
+# downstream crate that has never seen our lockfile. Letting it resolve from
+# scratch is the only check that the published dependency set is resolvable
+# at all, which is what caught the yanked bisync 0.3.0 under gix-protocol.
 echo "distribution acceptance: calling packaged catalog and host bundles"
 CARGO_NET_OFFLINE=true cargo run \
   --manifest-path "$consumer/Cargo.toml" \

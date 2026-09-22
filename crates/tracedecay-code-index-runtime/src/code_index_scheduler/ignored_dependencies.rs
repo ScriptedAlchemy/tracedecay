@@ -779,8 +779,8 @@ fn logical_path_for(root: &Path, path: &Path) -> Result<String, CodeIndexSchedul
 }
 
 fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSchedulerErrorV1> {
-    let repository =
-        gix::open(root).map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let repository = tracedecay_runtime_core::git_open::open(root)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let index = repository
         .index_or_empty()
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;

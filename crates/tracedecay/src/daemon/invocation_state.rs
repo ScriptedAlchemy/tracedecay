@@ -356,7 +356,7 @@ impl DaemonInvocationState {
         graph_publication_database: Arc<tracedecay_runtime_core::db::Database>,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git
-        // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the
+        // repository (`IndexingIdentityV1::resolve` uses `git_open::open` on the
         // root, no upward discovery). A non-git project has no code-index
         // identity by design: skip mounting instead of failing project open,
         // every non-code-index surface stays available.

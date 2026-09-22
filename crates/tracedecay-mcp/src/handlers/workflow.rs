@@ -772,7 +772,7 @@ async fn managed_test_document_content_digests(
 }
 
 fn current_head_commit_id(root: &Path) -> Option<CommitId> {
-    let repository = gix::open(root).ok()?;
+    let repository = tracedecay_runtime_core::git_open::open(root).ok()?;
     let commit = repository.head_commit().ok()?;
     CommitId::new(commit.id().to_hex().to_string()).ok()
 }
