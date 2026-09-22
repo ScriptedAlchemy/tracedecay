@@ -487,7 +487,9 @@ pub(super) struct StoreAdministration {
     remote_account_deletion_tombstone_persist:
         Arc<tokio::sync::watch::Sender<Option<tracedecay_global_db::RemoteDeletionTombstone>>>,
     /// How often this daemon may run a global-database retention pass, shared
-    /// by every project scheduler loop that clones this handle.
+    /// by every project scheduler loop that clones this handle. The cadence
+    /// type lives in the unix scheduler, which is the only caller.
+    #[cfg(unix)]
     global_retention_cadence: super::scheduler::SharedGlobalRetentionCadence,
 }
 
@@ -607,6 +609,7 @@ impl Default for StoreAdministration {
                 let (sender, _) = tokio::sync::watch::channel(None);
                 sender
             }),
+            #[cfg(unix)]
             global_retention_cadence: Arc::default(),
         }
     }
@@ -614,6 +617,7 @@ impl Default for StoreAdministration {
 
 impl StoreAdministration {
     /// This daemon's global-database retention cadence.
+    #[cfg(unix)]
     pub(super) fn global_retention_cadence(
         &self,
     ) -> &super::scheduler::SharedGlobalRetentionCadence {
