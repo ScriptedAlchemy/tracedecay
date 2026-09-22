@@ -102,9 +102,11 @@ graph (`cargo package`, extracted-crate rebuilds, nextest, MCP inspector).
 That is not required to stamp the binary assets. The battery runs on demand
 only, on one free `ubuntu-latest` runner:
 `gh workflow run distribution-acceptance.yml --ref master`. Nothing in this
-repository runs on a timer. It reuses the just-built production binary
-(`--reuse-release-binary`) so it does not compile a second workspace into
-implicit `target/release`.
+repository runs on a timer. The battery's production binary is the CLI it
+release-builds from the extracted package; it does not release-build the
+source tree first (that compile is `shipped-cli` in `ci.yml`). A caller that
+already holds a source-tree production binary may pass
+`--reuse-release-binary` to prove that binary reports the same commit.
 
 Host install, update, and uninstall journeys, and recorded native host
 events as historical-ingestion evidence, stay product contracts. They do

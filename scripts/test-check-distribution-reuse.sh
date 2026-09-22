@@ -181,6 +181,31 @@ if [[ -s $state/cargo.log ]]; then
   exit 1
 fi
 
+# Without a handed-in binary the gate goes straight to packaging: the
+# packaged CLI it builds later is the production binary under test, so a
+# source-tree workspace release build here would be a second compile of the
+# same graph that nothing reads.
+: >"$state/cargo.log"
+status=$(run_gate "$output")
+[[ $status -eq 77 ]] || {
+  cat "$output" >&2
+  echo "default path did not stop at the controlled cargo package boundary" >&2
+  exit 1
+}
+if grep -Fxq "workspace-rebuild" "$state/cargo.log"; then
+  echo "default path invoked a source-tree workspace release build" >&2
+  exit 1
+fi
+if grep -Eq '^build( |$)' "$state/cargo.log"; then
+  echo "default path invoked cargo build before packaging" >&2
+  exit 1
+fi
+if grep -Fq "reusing the just-built production binary" "$output"; then
+  cat "$output" >&2
+  echo "default path claimed to reuse a binary it was never given" >&2
+  exit 1
+fi
+
 : >"$state/cargo.log"
 status=$(run_gate "$output" --reuse-release-binary "$bin/tracedecay")
 [[ $status -eq 77 ]] || {

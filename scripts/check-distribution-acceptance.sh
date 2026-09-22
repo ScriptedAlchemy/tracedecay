@@ -11,18 +11,21 @@ usage() {
   cat <<'EOF'
 Usage: scripts/check-distribution-acceptance.sh [OPTIONS]
 
-Build and exercise the release distribution with every Cargo feature enabled.
-The gate packages every workspace crate, extracts the produced .crate archives
-into an isolated temporary directory, and tests the packaged library and CLI.
+Package and exercise the release distribution. The gate packages every
+workspace crate, extracts the produced .crate archives into an isolated
+temporary directory, release-builds the packaged CLI, and tests the packaged
+library and that CLI. The production binary this gate proves is the one it
+builds from the extracted package; it never release-builds the source tree.
 
 Options:
   --repo PATH                      Repository root (default: parent of this script)
   --keep-temp                      Preserve the isolated package/install directory
-  --reuse-release-binary PATH      Skip the workspace release rebuild; prove this
-                                   already-built production binary instead
+  --reuse-release-binary PATH      Also prove this already-built production
+                                   binary reports the staged source commit
   --skip-packaged-runtime-battery  After packaging and manifest checks, skip
                                    extracted-crate rebuilds, nextest, cargo
-                                   install, and MCP inspector dogfood
+                                   install, and MCP inspector dogfood; requires
+                                   --reuse-release-binary as the smoked binary
   -h, --help                       Show this help
 EOF
 }
@@ -319,6 +322,11 @@ release_cli_cargo_args=(
   --features "$release_cargo_features"
 )
 
+# No source-tree release build here. The packaged CLI compiled from the
+# extracted package below is the production binary this gate proves, and the
+# source-tree production compile is `shipped-cli` in ci.yml. A caller that
+# already holds a source-tree production binary may hand it in to prove it
+# was built from this exact commit; nothing else in the battery reads it.
 if [[ -n $reuse_release_binary ]]; then
   echo "distribution acceptance: reusing the just-built production binary"
   assert_binary_source_sha \
@@ -326,16 +334,6 @@ if [[ -n $reuse_release_binary ]]; then
     "$product_version" \
     "$source_git_sha" \
     "reused-release"
-else
-  echo "distribution acceptance: release-building the production feature set"
-  cargo build \
-    --manifest-path "$repo/Cargo.toml" \
-    --workspace \
-    --release \
-    --no-default-features \
-    --features tracedecay/production \
-    --lib \
-    --bins
 fi
 
 echo "distribution acceptance: staging the product package tree"
