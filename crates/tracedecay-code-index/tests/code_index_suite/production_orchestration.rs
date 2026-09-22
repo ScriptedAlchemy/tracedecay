@@ -4552,7 +4552,7 @@ fn rss_scaled_request(file_count: usize) -> CodeIndexBuildRequestV1 {
 /// the restore issued, and the peak RSS it grew over a freshly reset high
 /// water mark.
 struct RssDecodeProbeV1 {
-    hwm_delta_kib: u64,
+    hwm_delta_kib: Option<u64>,
     evidence_reads: usize,
     evidence_read_whole: bool,
     largest_evidence_read: u64,
@@ -4566,13 +4566,16 @@ fn rss_measure_decode(
     manifest: &[u8],
     segments: &BTreeMap<String, Vec<u8>>,
     evidence_digest: &str,
+    measure_rss: bool,
 ) -> RssDecodeProbeV1 {
-    assert!(rss_reset_peak(), "reset VmHWM");
-    let hwm_before = rss_proc_kib("VmHWM").expect("VmHWM");
+    let hwm_before = measure_rss.then(|| {
+        assert!(rss_reset_peak(), "reset VmHWM");
+        rss_proc_kib("VmHWM").expect("VmHWM")
+    });
     let mut whole_reads = 0_usize;
     let mut ranged_reads = 0_usize;
     let mut probe = RssDecodeProbeV1 {
-        hwm_delta_kib: 0,
+        hwm_delta_kib: None,
         evidence_reads: 0,
         evidence_read_whole: false,
         largest_evidence_read: 0,
@@ -4618,15 +4621,17 @@ fn rss_measure_decode(
         })
         .expect("measured manifest decodes")
         .expect("measured manifest is the current partitioned revision");
-    let hwm_after = rss_proc_kib("VmHWM").expect("VmHWM");
+    let hwm_after = hwm_before.map(|_| rss_proc_kib("VmHWM").expect("VmHWM"));
     let file_count = restored.snapshot().files.len();
     drop(restored);
-    probe.hwm_delta_kib = hwm_after.saturating_sub(hwm_before);
+    probe.hwm_delta_kib = hwm_before
+        .zip(hwm_after)
+        .map(|(before, after)| after.saturating_sub(before));
     println!(
         "rss_probe form={label} files={file_count} whole_reads={whole_reads} \
 ranged_reads={ranged_reads} evidence_reads={} evidence_read_whole={} \
-largest_evidence_read={} largest_evidence_buffer={} hwm_before_kib={hwm_before} \
-hwm_after_kib={hwm_after} hwm_delta_kib={}",
+largest_evidence_read={} largest_evidence_buffer={} hwm_before_kib={hwm_before:?} \
+hwm_after_kib={hwm_after:?} hwm_delta_kib={:?}",
         probe.evidence_reads,
         probe.evidence_read_whole,
         probe.largest_evidence_read,
@@ -4789,12 +4794,14 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
         &fixture.paged_manifest,
         &fixture.segments,
         &fixture.evidence_digest,
+        rss_readable,
     );
     let legacy = rss_measure_decode(
         "legacy",
         &fixture.legacy_manifest,
         &fixture.segments,
         &fixture.evidence_digest,
+        rss_readable,
     );
 
     // --- Guard 1: the read shape, exact. ------------------------------------
@@ -4851,8 +4858,10 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
                 &fixture.paged_manifest,
                 &fixture.segments,
                 &fixture.evidence_digest,
+                rss_readable,
             )
-            .hwm_delta_kib,
+            .hwm_delta_kib
+            .expect("Linux VmHWM measurement"),
         );
         legacy_hwm = legacy_hwm.min(
             rss_measure_decode(
@@ -4860,8 +4869,10 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
                 &fixture.legacy_manifest,
                 &fixture.segments,
                 &fixture.evidence_digest,
+                rss_readable,
             )
-            .hwm_delta_kib,
+            .hwm_delta_kib
+            .expect("Linux VmHWM measurement"),
         );
     }
     // The paged decode of the same generation is the control, not a warm-up:
