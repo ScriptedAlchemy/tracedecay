@@ -31,10 +31,10 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, AuthorityReceipt,
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, LegalAction, Omission,
-    OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination,
-    PageCursor, PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext,
-    RequestId, ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
+    EvidenceCoverage, EvidenceDomain, EvidencePacket, FreshnessState, Omission, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor,
+    PageRequest, PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId,
+    ResolvedScope, RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
