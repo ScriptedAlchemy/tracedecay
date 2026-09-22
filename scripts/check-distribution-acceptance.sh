@@ -11,7 +11,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/check-distribution-acceptance.sh [OPTIONS]
 
-Build and exercise the release distribution with every Cargo feature enabled.
+Build and exercise the release distribution from packaged crate archives.
 The gate packages every workspace crate, extracts the produced .crate archives
 into an isolated temporary directory, and tests the packaged library and CLI.
 
@@ -363,12 +363,6 @@ tar -C "$repo" \
   --exclude='./node_modules' \
   -cf - . | tar -xf - -C "$staged"
 resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
-# The asset staging below rewrites package-local directories inside `$staged`
-# (its `crates/tracedecay/tests/fixtures` becomes the root fixtures), so the
-# integration suites that read package-local fixtures run from this untouched
-# copy of the same snapshot.
-source_snapshot="$work/source"
-cp -a -- "$staged" "$source_snapshot"
 
 staged_product="$staged/crates/tracedecay"
 [[ -f "$staged_product/Cargo.toml" ]] ||
@@ -586,21 +580,17 @@ for required_package in \
   tracedecay-contracts \
   tracedecay-api \
   tracedecay-tool-catalog \
-  tracedecay-lsp \
   tracedecay-code-index \
   tracedecay-code-index-runtime \
-  tracedecay-code-extraction \
-  tracedecay-query; do
+  tracedecay-code-extraction; do
   [[ -n ${package_dirs[$required_package]:-} ]] ||
     die "workspace package required by the distribution gate was not produced: $required_package"
 done
 root_package=${package_dirs[tracedecay]}
 cli_package=${package_dirs[tracedecay-cli]}
 agent_hosts_package=${package_dirs[tracedecay-agent-hosts]}
-lsp_package=${package_dirs[tracedecay-lsp]}
 code_index_package=${package_dirs[tracedecay-code-index]}
 code_extraction_package=${package_dirs[tracedecay-code-extraction]}
-query_package=${package_dirs[tracedecay-query]}
 catalog_package=${package_dirs[tracedecay-tool-catalog]}
 contracts_package=${package_dirs[tracedecay-contracts]}
 
@@ -700,60 +690,26 @@ cargo nextest run \
   -E 'test(/^rust::/)' \
   --no-tests=fail
 
-echo "distribution acceptance: compiling packaged library with production features"
-cargo check \
-  --manifest-path "$root_package/Cargo.toml" \
-  --release \
-  --no-default-features \
-  --features production \
-  --lib \
-  --config "$patch_config"
-
-echo "distribution acceptance: checking extracted query library behavior"
-CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$query_package/Cargo.toml" \
-  --release \
-  --all-features \
-  --lib \
-  --config "$patch_config" \
-  --no-tests=fail
-
-echo "distribution acceptance: checking extracted root library behavior with production features"
-CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$root_package/Cargo.toml" \
-  --release \
-  --no-default-features \
-  --features production \
-  --lib \
-  --config "$patch_config" \
-  --no-tests=fail
-
-echo "distribution acceptance: checking extracted LSP framing and protocol behavior"
-CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$lsp_package/Cargo.toml" \
-  --release \
-  --all-features \
-  --lib \
-  --config "$patch_config" \
-  --no-tests=fail
-
-# `cargo package` publishes no integration tests (the root crate's `include`
-# whitelist carries only fixtures), and `mcp_suite` requires the
-# `test-transport` feature the production graph excludes, so the extracted
-# package cannot run this suite. Run it from the untouched source snapshot
-# under the `root-transport` CI lens instead, with the packaged CLI as the
-# binary the suite spawns.
-echo "distribution acceptance: checking packaged MCP tool behavior"
+# The extracted CLI build above compiles the complete packaged production
+# graph. Query, root-library, and LSP source suites run in exhaustive Linux CI;
+# rerunning them here added no archive assertion. The MCP harness stays focused
+# on the modules that spawn TRACEDECAY_TEST_BIN, so it proves the packaged CLI
+# without rerunning all 573 source-library tests. Run it from the verified
+# checkout so unchanged source-graph units retain their original Cargo paths.
+echo "distribution acceptance: checking packaged CLI integration behavior"
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
   CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$source_snapshot/Cargo.toml" \
+  --manifest-path "$repo/Cargo.toml" \
   --release \
   -p tracedecay \
   --test mcp_suite \
   --features tracedecay/test-transport \
   --no-fail-fast \
   --retries 2 \
+  -E 'test(/^mcp_cli_serve_test::/) | test(/^serve_template_path_test::/) | test(=mcp_handler_test::lcm_test::lcm_status_cli_bridge_accepts_json_args)' \
   --no-tests=fail
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 
 install_root="$work/install"
 echo "distribution acceptance: staging the packaged CLI as the installed binary"

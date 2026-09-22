@@ -26,8 +26,6 @@ jobs:
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    env:
-      TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,40 +66,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
         with:
           toolchain: ${{ steps.pin.outputs.toolchain }}
-          targets: ${{ env.TARGET }}
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: release-beta-${{ env.TARGET }}
+          shared-key: release-beta-x86_64-unknown-linux-gnu
           cache-workspace-crates: "false"
           cache-on-failure: true
 
-      - name: Install mold
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-        with:
-          mold-version: 2.41.0
-          make-default: true
-
-      # The acceptance script runs the packaged suites through nextest, and
-      # the MCP suite's structural-rewrite proof shells out to ast-grep.
+      # The acceptance script runs the packaged Rust-grammar proof and the
+      # focused packaged-CLI integration journeys through nextest.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: "0.44.0"
-
       - name: Build release binary for packaging
-        run: cargo build --package tracedecay-cli --bin tracedecay --release --target ${{ env.TARGET }} --no-default-features --features production --locked
+        run: cargo build --package tracedecay-cli --bin tracedecay --release --no-default-features --features production --locked
 
       - name: Run distribution acceptance
         run: |
           set -euo pipefail
-          cargo fetch --locked --target ${{ env.TARGET }}
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
           lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          binary="target/${TARGET}/release/tracedecay"
+          binary="target/release/tracedecay"
           test -f "$binary"
           CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh \
             --reuse-release-binary "$binary"
