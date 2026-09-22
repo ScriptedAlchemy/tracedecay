@@ -13,16 +13,20 @@ Usage: scripts/check-distribution-acceptance.sh [OPTIONS]
 
 Build and exercise the release distribution from packaged crate archives.
 The gate packages every workspace crate, extracts the produced .crate archives
-into an isolated temporary directory, and tests the packaged library and CLI.
+into an isolated temporary directory, release-builds the packaged CLI, and
+tests the packaged library and that CLI. The production binary this gate
+proves is the one it builds from the extracted package; it never
+release-builds the source tree.
 
 Options:
   --repo PATH                      Repository root (default: parent of this script)
   --keep-temp                      Preserve the isolated package/install directory
-  --reuse-release-binary PATH      Skip the workspace release rebuild; prove this
-                                   already-built production binary instead
+  --reuse-release-binary PATH      Also prove this already-built production
+                                   binary reports the staged source commit
   --skip-packaged-runtime-battery  After packaging and manifest checks, skip
                                    extracted-crate rebuilds, nextest, cargo
-                                   install, and MCP inspector dogfood
+                                   install, and MCP inspector dogfood; requires
+                                   --reuse-release-binary as the smoked binary
   -h, --help                       Show this help
 EOF
 }
@@ -319,6 +323,11 @@ release_cli_cargo_args=(
   --features "$release_cargo_features"
 )
 
+# No source-tree release build here. The packaged CLI compiled from the
+# extracted package below is the production binary this gate proves, and the
+# source-tree production compile is `shipped-cli` in ci.yml. A caller that
+# already holds a source-tree production binary may hand it in to prove it
+# was built from this exact commit; nothing else in the battery reads it.
 if [[ -n $reuse_release_binary ]]; then
   echo "distribution acceptance: reusing the just-built production binary"
   assert_binary_source_sha \
@@ -326,16 +335,6 @@ if [[ -n $reuse_release_binary ]]; then
     "$product_version" \
     "$source_git_sha" \
     "reused-release"
-else
-  echo "distribution acceptance: release-building the production feature set"
-  cargo build \
-    --manifest-path "$repo/Cargo.toml" \
-    --workspace \
-    --release \
-    --no-default-features \
-    --features tracedecay/production \
-    --lib \
-    --bins
 fi
 
 echo "distribution acceptance: staging the product package tree"
@@ -735,10 +734,21 @@ with Path(sys.argv[1]).open("rb") as handle:
     manifest = tomllib.load(handle)
 if "production" not in manifest.get("features", {}):
     raise SystemExit("packaged tracedecay manifest omitted the production feature")
+# The consumer proves the packaged catalog composes and the host bundles
+# verify; neither depends on optimization. Its feature unification differs
+# from the packaged CLI's (the CLI's own dependencies light extra features on
+# mio, hyper, tower, ...), so under --release it recompiled the whole
+# workspace spine: 18m measured on ubuntu-latest for a crate that itself
+# compiles in seconds. Unoptimized and without debuginfo the same graph
+# compiles in ~3m on the same hardware.
 print("""[package]
 name = "tracedecay-distribution-consumer"
 version = "0.0.0"
 edition = "2024"
+
+[profile.dev]
+opt-level = 0
+debug = 0
 
 [dependencies]""")
 print(
@@ -841,7 +851,6 @@ RS
 echo "distribution acceptance: calling packaged catalog and host bundles"
 CARGO_NET_OFFLINE=true cargo run \
   --manifest-path "$consumer/Cargo.toml" \
-  --release \
   --bin tracedecay-distribution-consumer \
   --config "$patch_config"
 
@@ -866,8 +875,14 @@ RS
 cp -- "$staged/Cargo.lock" "$test_api_probe/Cargo.lock"
 echo "distribution acceptance: proving production package omits test APIs"
 test_api_stderr="$work/test-api-probe.stderr"
+# Same production features and lockfile as the packaged CLI release build,
+# which already compiled this graph into the shared release directory (repo
+# `target-dir`). Only the probe itself is compiled. A dev-profile check paid
+# a second metadata compile of the whole graph. The expected refusal is still
+# E0599 on the test-only associated item.
 if CARGO_NET_OFFLINE=true cargo check \
   --manifest-path "$test_api_probe/Cargo.toml" \
+  --release \
   --config "$patch_config" \
   2>"$test_api_stderr"; then
   die "production package exposed test-transport APIs"
