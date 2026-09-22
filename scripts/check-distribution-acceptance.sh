@@ -908,8 +908,13 @@ RS
 cp -- "$staged/Cargo.lock" "$test_api_probe/Cargo.lock"
 echo "distribution acceptance: proving production package omits test APIs"
 test_api_stderr="$work/test-api-probe.stderr"
+# Same graph, features, and lockfile as the `cargo check --release` of the
+# packaged root library above, so every dependency's metadata is already in
+# the release directory and only the probe itself is compiled. Under the dev
+# profile this check paid a second metadata compile of the whole graph.
 if CARGO_NET_OFFLINE=true cargo check \
   --manifest-path "$test_api_probe/Cargo.toml" \
+  --release \
   --config "$patch_config" \
   2>"$test_api_stderr"; then
   die "production package exposed test-transport APIs"
