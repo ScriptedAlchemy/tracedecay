@@ -777,10 +777,21 @@ with Path(sys.argv[1]).open("rb") as handle:
     manifest = tomllib.load(handle)
 if "production" not in manifest.get("features", {}):
     raise SystemExit("packaged tracedecay manifest omitted the production feature")
+# The consumer proves the packaged catalog composes and the host bundles
+# verify; neither depends on optimization. Its feature unification differs
+# from the packaged CLI's (the CLI's own dependencies light extra features on
+# mio, hyper, tower, ...), so under --release it recompiled the whole
+# workspace spine: 18m measured on ubuntu-latest for a crate that itself
+# compiles in seconds. Unoptimized and without debuginfo the same graph
+# compiles in ~3m on the same hardware.
 print("""[package]
 name = "tracedecay-distribution-consumer"
 version = "0.0.0"
 edition = "2024"
+
+[profile.dev]
+opt-level = 0
+debug = 0
 
 [dependencies]""")
 print(
@@ -883,7 +894,6 @@ RS
 echo "distribution acceptance: calling packaged catalog and host bundles"
 CARGO_NET_OFFLINE=true cargo run \
   --manifest-path "$consumer/Cargo.toml" \
-  --release \
   --bin tracedecay-distribution-consumer \
   --config "$patch_config"
 
