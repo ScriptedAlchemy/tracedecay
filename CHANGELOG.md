@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-beta.49](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.48...v0.1.0-beta.49) (2026-09-22)
+
+
+### Bug Fixes
+
+* **deps:** pin find-msvc-tools 0.1.12 for Windows cc ([09fdd74](https://github.com/ScriptedAlchemy/tracedecay/commit/09fdd74279d7b4f62ae2db29bc627ea72a0b065f))
+* **deps:** pin find-msvc-tools 0.1.12 for Windows release builds ([9f90cb3](https://github.com/ScriptedAlchemy/tracedecay/commit/9f90cb37cdbb80e48a9dcb9cb8ecf77b5975c550))
+* **sdk:** sync AuthorizedScopeSet description link ([1955e56](https://github.com/ScriptedAlchemy/tracedecay/commit/1955e5691e1066b82c12922aed2068cfdc6abdb0))
+* **sdk:** sync AuthorizedScopeSet description link ([aca8add](https://github.com/ScriptedAlchemy/tracedecay/commit/aca8add400398bf9a54334c354cca07fa688ddc4))
+
 ## [0.1.0-beta.48](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.1.0-beta.47...v0.1.0-beta.48) (2026-09-21)
 
 
