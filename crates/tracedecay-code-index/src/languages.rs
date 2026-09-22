@@ -216,9 +216,11 @@ impl StaticLanguageRegistry {
             // caller, and types `self` through the enclosing impl or trait.
             // Rust v12 resolves a receiver whose type is a type parameter with
             // one trait bound to `Trait::method`, so that call now has a
-            // callee. Only re-extraction removes the poisoned record.
+            // callee. Only re-extraction removes the poisoned record. Rust v13
+            // retains unresolved receiver-call evidence at the parser's member
+            // token; re-extracting Rust does not perturb other languages' rows.
             let extractor_revision = if language == "rust" {
-                12
+                13
             } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
                 6
             } else {
@@ -423,7 +425,7 @@ mod tests {
         assert!(rust.stable_member_spans);
         assert!(rust.capabilities.extraction);
         assert_eq!(rust.root_markers, vec!["Cargo.toml".to_owned()]);
-        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v12");
+        assert_eq!(rust.extractor_revision.as_str(), "extractor.rust.v13");
 
         assert_eq!(
             registry

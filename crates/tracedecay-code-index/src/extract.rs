@@ -771,13 +771,13 @@ mod tests {
         // initializers; v9 adds the clone-body token bound and v10 the byte
         // bound; v11 drops the bare method name of a dotted call and types
         // `self` from the enclosing impl or trait; v12 binds a receiver typed
-        // by a type parameter with one trait bound to `Trait::method`. The
-        // revision is part of the batch identity, so the pinned digest moves
-        // with it.
-        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v12");
+        // by a type parameter with one trait bound to `Trait::method`; v13
+        // retains parser-positioned receiver-call evidence. The revision is
+        // part of the batch identity, so the pinned digest moves with it.
+        assert_eq!(descriptor.extractor_revision.as_str(), "extractor.rust.v13");
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:4e483806dfce308dfc97ec460c65f674b28f2dc8bad0e57c28a3b1519c8e495c"
+            "sha256:e6f69e1ee3d2f96f61ac6ea937b1557f6ef2a8ed770b8f08365e0f7570f639dc"
         );
     }
 
