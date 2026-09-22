@@ -691,12 +691,25 @@ cargo nextest run \
   --no-tests=fail
 
 # The extracted CLI build above compiles the complete packaged production
-# graph. Query, root-library, LSP, and MCP source suites run in exhaustive
-# Linux CI. Rerunning them here adds no archive assertion: only one of the 573
-# MCP tests reads TRACEDECAY_TEST_BIN, while the Inspector smoke below drives
-# the packaged binary through a broader production MCP journey. The removed
-# source suites and redundant production check consumed 63 minutes of compile
-# and test wall on run 35669946219.
+# graph. Query, root-library, and LSP source suites run in exhaustive Linux CI;
+# rerunning them here added no archive assertion. The MCP harness stays focused
+# on the modules that spawn TRACEDECAY_TEST_BIN, so it proves the packaged CLI
+# without rerunning all 573 source-library tests. Run it from the verified
+# checkout so unchanged source-graph units retain their original Cargo paths.
+echo "distribution acceptance: checking packaged CLI integration behavior"
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
+TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
+  CARGO_NET_OFFLINE=true cargo nextest run \
+  --manifest-path "$repo/Cargo.toml" \
+  --release \
+  -p tracedecay \
+  --test mcp_suite \
+  --features tracedecay/test-transport \
+  --no-fail-fast \
+  --retries 2 \
+  -E 'test(/^mcp_cli_serve_test::/) | test(/^serve_template_path_test::/) | test(=mcp_handler_test::lcm_test::lcm_status_cli_bridge_accepts_json_args)' \
+  --no-tests=fail
+resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
 
 install_root="$work/install"
 echo "distribution acceptance: staging the packaged CLI as the installed binary"

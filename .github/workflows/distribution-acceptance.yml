@@ -74,8 +74,8 @@ jobs:
           cache-workspace-crates: "false"
           cache-on-failure: true
 
-      # The acceptance script runs the packaged Rust-grammar proof through
-      # nextest. MCP/LSP acceptance drives the packaged binary directly.
+      # The acceptance script runs the packaged Rust-grammar proof and the
+      # focused packaged-CLI integration journeys through nextest.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
