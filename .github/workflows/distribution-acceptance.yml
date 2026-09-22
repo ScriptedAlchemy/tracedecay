@@ -6,6 +6,13 @@
 # graph, not those assets. Beta.40 run 35271070760 spent ~24m of the aarch64
 # ship job on that battery and then failed before MCPB. This workflow runs
 # the battery on one free ubuntu-latest runner when someone dispatches it.
+#
+# The battery's production binary is the CLI it release-builds from the
+# extracted package. This job does not release-build the source tree first:
+# that compile is `shipped-cli` in ci.yml, and the script only compared the
+# extra binary's `--version` string. Packaged builds use the host
+# `target/release` layout, so that source-tree binary was not an input they
+# read.
 name: Distribution acceptance
 
 # On demand only. Nothing in this repository runs on a timer: a scheduled
@@ -26,6 +33,8 @@ jobs:
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    env:
+      TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,11 +75,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # 1.97.1 pin
         with:
           toolchain: ${{ steps.pin.outputs.toolchain }}
+          targets: ${{ env.TARGET }}
 
+      # Own lineage. release-beta stores the `--target` layout. This battery
+      # compiles into the host layout (`target/release`, `target/debug`), so
+      # that shared key restored nothing this job reads, and an exact-key hit
+      # would have skipped saving this job's artifacts. Dependency artifacts
+      # only: extracted packages live under a fresh temporary path every run.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: release-beta-x86_64-unknown-linux-gnu
+          shared-key: distribution-acceptance-${{ env.TARGET }}
           cache-workspace-crates: "false"
           cache-on-failure: true
 
@@ -79,17 +94,11 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Build release binary for packaging
-        run: cargo build --package tracedecay-cli --bin tracedecay --release --no-default-features --features production --locked
-
       - name: Run distribution acceptance
         run: |
           set -euo pipefail
-          cargo fetch --locked --target x86_64-unknown-linux-gnu
+          cargo fetch --locked --target ${{ env.TARGET }}
           lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
-          binary="target/release/tracedecay"
-          test -f "$binary"
-          CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh \
-            --reuse-release-binary "$binary"
+          CARGO_NET_OFFLINE=true bash scripts/check-distribution-acceptance.sh
           actual_lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
           test "$actual_lockfile_sha" = "$lockfile_sha"
