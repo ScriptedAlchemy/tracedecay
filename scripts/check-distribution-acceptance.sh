@@ -691,32 +691,12 @@ cargo nextest run \
   --no-tests=fail
 
 # The extracted CLI build above compiles the complete packaged production
-# graph. Query, root-library, and LSP unit suites run from source in the
-# exhaustive Linux CI lane; rerunning all of them here adds no archive or
-# executable assertion and used 33 minutes of compilation for 4.5 minutes of
-# tests on run 35669946219. Distribution-specific behavior remains below.
-
-# `cargo package` publishes no integration tests (the root crate's `include`
-# whitelist carries only fixtures), and `mcp_suite` requires the
-# `test-transport` feature the production graph excludes, so the extracted
-# package cannot run this suite. Run its harness from the clean source checkout
-# under the `root-transport` CI lens instead, with the packaged CLI as the
-# binary the suite spawns. The source checkout is also where the workflow built
-# the release binary, so Cargo can reuse unchanged source-graph units instead
-# of recompiling an identical copied tree under a new absolute path.
-echo "distribution acceptance: checking packaged MCP tool behavior"
-resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
-TRACEDECAY_TEST_BIN="$packaged_cli_bin" \
-  CARGO_NET_OFFLINE=true cargo nextest run \
-  --manifest-path "$repo/Cargo.toml" \
-  --release \
-  -p tracedecay \
-  --test mcp_suite \
-  --features tracedecay/test-transport \
-  --no-fail-fast \
-  --retries 2 \
-  --no-tests=fail
-resolve_clean_source_head "$repo" "$source_git_sha" >/dev/null
+# graph. Query, root-library, LSP, and MCP source suites run in exhaustive
+# Linux CI. Rerunning them here adds no archive assertion: only one of the 573
+# MCP tests reads TRACEDECAY_TEST_BIN, while the Inspector smoke below drives
+# the packaged binary through a broader production MCP journey. The removed
+# source suites and redundant production check consumed 63 minutes of compile
+# and test wall on run 35669946219.
 
 install_root="$work/install"
 echo "distribution acceptance: staging the packaged CLI as the installed binary"

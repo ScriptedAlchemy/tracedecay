@@ -74,15 +74,10 @@ jobs:
           cache-workspace-crates: "false"
           cache-on-failure: true
 
-      # The acceptance script runs the packaged suites through nextest, and
-      # the MCP suite's structural-rewrite proof shells out to ast-grep.
+      # The acceptance script runs the packaged Rust-grammar proof through
+      # nextest. MCP/LSP acceptance drives the packaged binary directly.
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-
-      - name: Install ast-grep
-        uses: ./.github/actions/install-ast-grep
-        with:
-          version: "0.44.0"
 
       - name: Build release binary for packaging
         run: cargo build --package tracedecay-cli --bin tracedecay --release --no-default-features --features production --locked
