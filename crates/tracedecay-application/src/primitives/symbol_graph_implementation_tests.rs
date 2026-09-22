@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use serde::Serialize;
+use tracedecay_code_index::chunks::CodeIndexUnresolvedReferenceV1;
 use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore, CodeGraphSymbolBindingV1,
     build_code_graph_manifest, code_graph_projection_identity,
@@ -187,6 +188,7 @@ fn store(with_scope_pressure: bool) -> CodeGraphProjectionStore {
                         language_descriptor_revision: id("language.rust.v1"),
                     }),
                     metadata: Some(symbol.clone()),
+                    unresolved_calls: Vec::new(),
                 })
                 .expect("symbol record"),
             ),
@@ -293,4 +295,5 @@ struct SymbolRecordFixture {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_code_index::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use tracedecay_code_index::graph_projection::{
     CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore, CodeGraphSymbolBindingV1,
     build_code_graph_manifest, code_graph_projection_identity,
@@ -758,6 +758,7 @@ struct SymbolRecordFixture {
     occurrence: SymbolOccurrenceId,
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
+    unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -805,6 +806,7 @@ fn symbol_entity(
             file_identity: digest::<FileIdentityDigest>('f'),
             content_digest: digest::<ContentDigest>(content_byte),
         }),
+        unresolved_calls: Vec::new(),
     };
     GraphEntity::new(
         GraphEntityId::new(stable_identity("symbol", occurrence.as_str()))
