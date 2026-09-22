@@ -6204,7 +6204,7 @@ fn classification_distinguishes_staged_unstaged_untracked_and_deleted() {
     // Unstaged deletion.
     std::fs::remove_file(fixture.path().join("src/d.rs")).expect("remove d");
 
-    let repository = gix::open(fixture.path()).expect("open gix");
+    let repository = tracedecay_runtime_core::git_open::open(fixture.path()).expect("open gix");
     let classification = WorktreeChangeClassificationV1::classify(&repository).expect("classify");
 
     assert_eq!(
@@ -6262,9 +6262,10 @@ fn rename_reconciliation_matches_clean_scan() {
         fixture.path().join("src/new.rs"),
     )
     .expect("rename source file");
-    let classification =
-        WorktreeChangeClassificationV1::classify(&gix::open(fixture.path()).expect("open gix"))
-            .expect("classify rename");
+    let classification = WorktreeChangeClassificationV1::classify(
+        &tracedecay_runtime_core::git_open::open(fixture.path()).expect("open gix"),
+    )
+    .expect("classify rename");
     assert_eq!(
         classification.class_of("src/old.rs"),
         Some(WorktreeChangeClassV1::UnstagedDeleted)
@@ -6330,9 +6331,10 @@ fn index_only_reconciliation_matches_clean_scan() {
 
     fixture.edit("src/lib.rs", "pub fn staged_symbol() -> u32 { 10 }\n");
     git(fixture.path(), &["add", "src/lib.rs"]);
-    let classification =
-        WorktreeChangeClassificationV1::classify(&gix::open(fixture.path()).expect("open gix"))
-            .expect("classify staged-only edit");
+    let classification = WorktreeChangeClassificationV1::classify(
+        &tracedecay_runtime_core::git_open::open(fixture.path()).expect("open gix"),
+    )
+    .expect("classify staged-only edit");
     assert_eq!(
         classification.class_of("src/lib.rs"),
         Some(WorktreeChangeClassV1::StagedModified)

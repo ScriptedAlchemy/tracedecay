@@ -34,7 +34,7 @@ tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 
 getrandom = "0.2"
-gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
 reflink-copy = "0.1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }

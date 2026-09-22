@@ -19,8 +19,8 @@ pub fn local_branch_revision_controlled(
     control: &LocalBranchReadControlV1,
 ) -> Result<LocalBranchRevisionV1, LocalBranchSnapshotErrorV1> {
     control.termination().map_or(Ok(()), Err)?;
-    let repo =
-        gix::open(project_root).map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
+    let repo = tracedecay_runtime_core::git_open::open(project_root)
+        .map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
     local_branch_revision_in_repository(&repo, branch, control)
 }
 
@@ -88,8 +88,8 @@ pub fn local_branch_snapshots_controlled(
         })?;
     }
     control.termination().map_or(Ok(()), Err)?;
-    let repo =
-        gix::open(project_root).map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
+    let repo = tracedecay_runtime_core::git_open::open(project_root)
+        .map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
     let references = repo
         .references()
         .map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?;

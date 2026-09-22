@@ -58,7 +58,7 @@ pub fn worktree_stat_sweep(
     project_root: &Path,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
 ) -> Result<WorktreeStatSweepV1, CodeIndexSchedulerErrorV1> {
-    let repository = gix::open(project_root)
+    let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
@@ -258,7 +258,7 @@ fn tracked_files_match_after_clean_filters(
     disputed: &[&StatCandidateV1],
     manifest: &SourceContentManifestV1,
 ) -> bool {
-    let Ok(repository) = gix::open(project_root) else {
+    let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
         return false;
     };
     let Ok((mut pipeline, index)) = repository.filter_pipeline(None) else {

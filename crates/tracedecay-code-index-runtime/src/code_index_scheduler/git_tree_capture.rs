@@ -277,7 +277,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let Some(reference) = generation.snapshot().reference.as_ref() else {
             return Ok(None);
         };
-        let repository = gix::open(&self.project_root).map_err(Self::unavailable)?;
+        let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
+            .map_err(Self::unavailable)?;
         let identity =
             identity::IndexingIdentityV1::resolve(&self.project_root).map_err(Self::unavailable)?;
         if generation.snapshot().repository != *identity.repository_id()
@@ -324,7 +325,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         revision: &str,
         expected_tree: &str,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let repository = gix::open(&self.project_root).map_err(Self::unavailable)?;
+        let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
+            .map_err(Self::unavailable)?;
         let object_id =
             gix::hash::ObjectId::from_hex(revision.as_bytes()).map_err(Self::unavailable)?;
         let commit = repository
@@ -333,7 +335,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .try_into_commit()
             .map_err(Self::unavailable)?;
         let actual_tree = commit.tree_id().map_err(Self::unavailable)?;
-        if actual_tree.to_string() != expected_tree {
+        if actual_tree != expected_tree {
             return Err(Self::unavailable(
                 "durable code-generation index commit tree does not match Git",
             ));
@@ -440,7 +442,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         control.termination().map_or(Ok(()), Err)?;
-        let repository = gix::open(&self.project_root)
+        let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
         if repository
             .try_find_reference(source.reference.as_str())
@@ -459,7 +461,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let tree = commit
             .tree()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-        if tree.id().to_string() != source.tree.as_str() {
+        if tree.id() != source.tree.as_str() {
             return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
         let mut entries = tree

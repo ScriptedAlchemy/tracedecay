@@ -223,7 +223,8 @@ pub fn code_index_store_root(data_root: &Path, project_root: &Path) -> PathBuf {
 pub fn git_worktree_scope_root_inventory(
     project_root: &Path,
 ) -> Result<(BTreeSet<PathBuf>, ScopeRootAuthorityReceiptV1), &'static str> {
-    let repository = gix::open(project_root).map_err(|_| "git_repository_unavailable")?;
+    let repository = tracedecay_runtime_core::git_open::open(project_root)
+        .map_err(|_| "git_repository_unavailable")?;
     let linked = repository
         .worktrees()
         .map_err(|_| "git_worktree_inventory_unavailable")?;

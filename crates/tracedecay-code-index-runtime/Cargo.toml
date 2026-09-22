@@ -35,7 +35,7 @@ test-helpers = [
 
 [dependencies]
 futures-util = "0.3.33"
-gix = { version = "=0.86.0", default-features = false, features = [
+gix = { version = "=0.87.1", default-features = false, features = [
     "revision",
     "blob-diff",
     "parallel",

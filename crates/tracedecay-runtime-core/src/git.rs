@@ -484,7 +484,7 @@ pub fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
 /// falls back to a bounded `git config --get` when gix cannot discover
 /// the repository but git still may.
 pub fn git_remote_url(project_root: &Path) -> Option<String> {
-    if let Ok(repo) = gix::discover(project_root) {
+    if let Ok(repo) = crate::git_open::discover(project_root) {
         let url = repo
             .config_snapshot()
             .string("remote.origin.url")?

@@ -677,3 +677,127 @@ fn authority_reports_shallow_history_as_truncated_evidence() {
     assert!(history.truncated);
     assert_eq!(history.termination, GitHistoryTermination::ShallowBoundary);
 }
+
+/// Git exports `GIT_DIR`, `GIT_INDEX_FILE`, and sometimes `GIT_WORK_TREE` to
+/// every hook process, and TraceDecay ships an optional global post-commit
+/// hook that runs `tracedecay sync`. Under gix 0.87 a default-permission open
+/// honours all three, so a sync launched from a hook in one repository would
+/// read another repository's index while claiming to read the root it was
+/// asked for. The raw-`gix` half of this test pins that hazard; the authority
+/// half pins the guarantee that closes it.
+#[test]
+fn git_open_resolves_the_requested_root_under_a_hook_git_environment() {
+    const CHILD_ROOT: &str = "TRACEDECAY_GIT_OPEN_CHILD_ROOT";
+    const CHILD_DECOY: &str = "TRACEDECAY_GIT_OPEN_CHILD_DECOY";
+    if let (Some(root), Some(decoy)) = (std::env::var_os(CHILD_ROOT), std::env::var_os(CHILD_DECOY))
+    {
+        let root = Path::new(&root);
+        let decoy = Path::new(&decoy);
+
+        let hazard = gix::open(root).expect("raw open");
+        assert_eq!(
+            hazard.index_path(),
+            decoy.join(".git/index"),
+            "raw gix::open no longer honours GIT_INDEX_FILE; re-read git_open's invariant"
+        );
+
+        let repository = tracedecay_runtime_core::git_open::open(root).expect("authority open");
+        assert_eq!(repository.index_path(), root.join(".git/index"));
+        assert_eq!(repository.git_dir(), root.join(".git"));
+        assert_eq!(repository.workdir(), Some(root));
+
+        let discovered = tracedecay_runtime_core::git_open::discover(&root.join("nested"))
+            .expect("authority discover");
+        assert_eq!(discovered.index_path(), root.join(".git/index"));
+        assert_eq!(discovered.git_dir(), root.join(".git"));
+        return;
+    }
+
+    let fixture = Fixture::init("sha1");
+    fixture.write("nested/README.md", "requested\n");
+    fixture.commit("initial");
+    let decoy = Fixture::init("sha1");
+    decoy.write("README.md", "decoy\n");
+    decoy.commit("decoy");
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "git_open_resolves_the_requested_root_under_a_hook_git_environment",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, fixture.path())
+        .env(CHILD_DECOY, decoy.path())
+        .env("GIT_DIR", decoy.path().join(".git"))
+        .env("GIT_WORK_TREE", decoy.path())
+        .env("GIT_INDEX_FILE", decoy.path().join(".git/index"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The authority is only an authority while it is the sole opener.
+///
+/// A source grep, not a type-level ban: `gix` is a normal dependency of ten
+/// crates, so nothing but this check stops the next call site from taking
+/// `gix::open` and its environment-honouring defaults.
+#[test]
+fn every_gix_repository_open_routes_through_the_authority() {
+    const EXEMPT: [&str; 2] = [
+        "crates/tracedecay-runtime-core/src/git_open.rs",
+        "crates/tracedecay-runtime-core/tests/git_repository_authority.rs",
+    ];
+    const BANNED: [&str; 4] = [
+        "gix::open(",
+        "gix::open_opts(",
+        "gix::discover(",
+        "gix::discover_opts(",
+    ];
+
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let crates = workspace.join("crates");
+    assert!(crates.is_dir(), "missing workspace crate sources");
+
+    let mut pending = vec![crates.clone()];
+    let mut offenders = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read crate directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                let name = path.file_name().unwrap_or_default();
+                if name != "target" && name != "fixtures" {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(&workspace)
+                .expect("path under workspace")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if EXEMPT.contains(&relative.as_str()) {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source file");
+            for (number, line) in source.lines().enumerate() {
+                if BANNED.iter().any(|banned| line.contains(banned)) {
+                    offenders.push(format!("{relative}:{}", number + 1));
+                }
+            }
+        }
+    }
+
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "open repositories through tracedecay_runtime_core::git_open, not raw gix:\n  {}",
+        offenders.join("\n  ")
+    );
+}
