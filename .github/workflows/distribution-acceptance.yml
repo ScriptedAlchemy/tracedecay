@@ -90,7 +90,7 @@ jobs:
       - name: Run distribution acceptance
         run: |
           set -euo pipefail
-          cargo fetch --locked
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
           lockfile_sha="$(python3 -c 'import hashlib; print(hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())')"
           binary="target/release/tracedecay"
           test -f "$binary"
