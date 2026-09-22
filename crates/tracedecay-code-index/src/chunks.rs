@@ -2366,14 +2366,28 @@ fn resolve_file_references(
             _ => {}
         }
     }
+    // The parser may describe one invocation both as a receiver expression
+    // and as a type-qualified call. A proved edge covers that exact call site;
+    // keeping the receiver form would falsely report a missing caller there.
+    let resolved_sites = resolved
+        .iter()
+        .map(|edge| (edge.from_occurrence.clone(), edge.kind, edge.evidence_span))
+        .collect::<BTreeSet<_>>();
+    retained.retain(|reference| {
+        !resolved_sites.contains(&(
+            reference.from_occurrence.clone(),
+            reference.kind,
+            reference.evidence_span,
+        ))
+    });
     (resolved, retained)
 }
 
 /// The retained cross-file form of one reference the file could not bind, or
-/// `None` when the reference can never bind cross-file: receiver-dotted
-/// paths (unknown receiver type), blocklisted ubiquitous names, relation
-/// kinds outside the canonical graph contract, and references whose
-/// enclosing symbol is not uniquely identified.
+/// `None` when the reference can never bind cross-file: blocklisted names,
+/// relation kinds outside the canonical graph contract, and references whose
+/// enclosing symbol is not uniquely identified. Rust receiver calls remain as
+/// limitation evidence; a dotted name never grants edge authority.
 fn cross_file_reference_candidate(
     source: &str,
     offsets: &[u64],
@@ -2381,8 +2395,12 @@ fn cross_file_reference_candidate(
     reference: &UnresolvedRef,
     by_node_id: &BTreeMap<&str, Option<&SymbolRow>>,
 ) -> Option<CodeIndexUnresolvedReferenceV1> {
-    if reference.reference_name.contains('.')
-        || cross_file_reference_name_is_blocklisted(&reference.reference_name)
+    let receiver_call = reference.reference_kind == EdgeKind::Calls
+        && reference.file_path.ends_with(".rs")
+        && reference.reference_name.contains('.');
+    if !receiver_call
+        && (reference.reference_name.contains('.')
+            || cross_file_reference_name_is_blocklisted(&reference.reference_name))
     {
         return None;
     }

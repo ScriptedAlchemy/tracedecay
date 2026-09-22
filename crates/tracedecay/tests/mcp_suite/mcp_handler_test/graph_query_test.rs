@@ -1,5 +1,7 @@
 #![cfg(feature = "test-transport")]
 
+mod callers_coverage;
+
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;

@@ -53,7 +53,7 @@ async fn callers_report_unsupported_temporary_receivers_without_inventing_edges(
         ("spaced", "partial", Vec::new()),
         ("commented", "partial", Vec::new()),
         ("read", "complete", vec!["known"]),
-        ("bound", "partial", vec!["known"]),
+        ("bound", "complete", vec!["known"]),
         ("repeat", "partial", vec!["nested"]),
         ("shadowed", "partial", Vec::new()),
         ("finish", "partial", Vec::new()),
