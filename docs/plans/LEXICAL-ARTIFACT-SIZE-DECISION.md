@@ -1,6 +1,6 @@
 # Lexical artifact size decision
 
-Status: decided. Revision 25 replaces every earlier revision. Older
+Status: decided. Revision 26 replaces every earlier revision. Older
 artifacts are refused as incompatible and rebuilt from the sealed
 generation; there is no migration.
 
@@ -170,8 +170,30 @@ Same journey, HEAD `37d94657c0`:
 | **File** | **672,530,432** | **639,401,984** |
 | second worktree, same tree | builds (~255 s), publication dedupes | adopts after its generation seals, no text build |
 
+Revision 26 stores only case-sensitive windows in the case-preserving
+n-gram kind. Normalized text is the ASCII-lowercased raw text at the same
+byte offsets, so a raw window without an ASCII uppercase byte is already the
+normalized window there. A case-sensitive quoted, diagnostic, or error literal
+looks up each of its windows in the kind that holds it: uppercase windows in
+the raw kind, the rest in the normalized kind. A literal with no uppercase
+window skips the raw lookup, because the normalized query already admits
+every raw match. The exact lane still confirms every candidate against the
+row text, so results are unchanged.
+
+The production build path (`build_and_publish` and then
+`rebuild_and_finalize`) ran over the checkout's 5,531 tracked source files
+(371,338 documents), once with the filter and once without:
+
+| | Revision 25 | Revision 26 |
+| --- | ---: | ---: |
+| raw-kind lists (unigram / bigram / trigram) | 179 / 8,371 / 104,142 | 26 / 3,127 / 35,562 |
+| raw-kind list bytes | 86,539,591 | 14,393,285 |
+| `ngram_postings` | 244,899,840 | 155,242,496 |
+| **File** | **656,666,624** | **566,894,592** |
+
 ## Remaining levers
 
-- `ngram_postings` (234 MB) is now over a third of the file.
+- `ngram_postings` (155 MB) is still the largest table. Normalized
+  unigram and bigram lists (35 MB) serve only one- and two-byte literals.
 - `clone_fingerprint_postings` (48 MB) and `clone_body_payloads` (54 MB)
   are now the bulk of the clone index.
