@@ -168,7 +168,6 @@ fn assert_empty_note(output: &Value, note: &str) {
 
 #[tokio::test]
 async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() {
-    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let fixture = production_composition_fixture_with_sources(write_affected_fixture).await;
     let server = fixture
         .harness

@@ -163,7 +163,6 @@ fn ordered_chain() -> Value {
 
 #[tokio::test]
 async fn port_order_ports_leaves_first_and_reports_one_scc() {
-    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let fixture = open_port_order_project().await;
 
     // `mid` calls `leaf`; `top` calls `mid`. Leaves share level 0 in source order.
@@ -301,7 +300,6 @@ async fn port_order_ports_leaves_first_and_reports_one_scc() {
 
 #[tokio::test]
 async fn port_order_rejects_unknown_kinds_and_missing_source_dir() {
-    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let fixture = open_port_order_project().await;
 
     let unknown_kind = tool_error(
