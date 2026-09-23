@@ -22,6 +22,26 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+const TEST_AUTH_TOKEN: &str = "controlled-invocation-test-token";
+
+/// Wraps a fake daemon's reader after consuming the auth preface every client
+/// writes first. A peer that closes before writing one (a liveness probe)
+/// yields lines already at EOF.
+async fn authenticated_lines<R: tokio::io::AsyncRead + Unpin>(
+    reader: R,
+) -> tokio::io::Lines<BufReader<R>> {
+    let mut lines = BufReader::new(reader).lines();
+    if let Ok(Some(preface)) = lines.next_line().await {
+        assert!(
+            crate::transport::DaemonAuthPreface::from_line(&preface)
+                .expect("auth preface")
+                .authenticate(TEST_AUTH_TOKEN),
+            "client must present the connection token"
+        );
+    }
+    lines
+}
+
 fn now_micros() -> UtcMicros {
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,7 +87,7 @@ fn invocation_client(
     instance_id: &str,
 ) -> DaemonInvocationClient {
     invocation_client_for(
-        DaemonConnection::unauthenticated_for_test(endpoint),
+        DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
         instance_id,
     )
 }
@@ -150,7 +170,7 @@ fn rotating_authority_client(
     });
     let probe: Arc<dyn crate::connection::DaemonLivenessProbe> = authority.clone();
     let client = invocation_client_for(
-        DaemonConnection::unauthenticated_for_test(endpoint).with_liveness(probe),
+        DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()).with_liveness(probe),
         instance_id,
     );
     (client, authority)
@@ -197,7 +217,7 @@ async fn measure_parallel_invocation_workload(
             let delayed_admitted = Arc::clone(&delayed_admitted);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.into_split();
-                let mut lines = BufReader::new(reader).lines();
+                let mut lines = authenticated_lines(reader).await;
                 lines
                     .next_line()
                     .await
@@ -307,7 +327,7 @@ async fn delayed_response_opens_no_periodic_probe_connections() {
             server_accepts.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.into_split();
-                let mut lines = BufReader::new(reader).lines();
+                let mut lines = authenticated_lines(reader).await;
                 let Some(_handshake) = lines.next_line().await.expect("read handshake") else {
                     return;
                 };
@@ -349,7 +369,7 @@ async fn work_delivery_ack_uses_the_response_connection() {
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept Work invocation");
         let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
+        let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
             .await
@@ -414,7 +434,7 @@ async fn dropping_unacknowledged_work_delivery_closes_its_connection() {
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept Work invocation");
         let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
+        let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
             .await
@@ -464,7 +484,7 @@ async fn lsp_session_pins_one_connection_through_detach() {
         let stream = listener.accept().await.expect("accept LSP session");
         server_accepts.fetch_add(1, Ordering::SeqCst);
         let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
+        let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
             .await
@@ -588,7 +608,7 @@ async fn two_hundred_invocations_use_at_most_eight_connections_without_leaks() {
                     server_accepts.fetch_add(1, Ordering::SeqCst);
                     handlers.spawn(async move {
                         let (reader, mut writer) = stream.into_split();
-                        let mut lines = BufReader::new(reader).lines();
+                        let mut lines = authenticated_lines(reader).await;
                         lines
                             .next_line()
                             .await
@@ -664,7 +684,7 @@ async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_re
             .expect("accept first warm connection");
         server_accepts.fetch_add(1, Ordering::SeqCst);
         let (first_reader, mut first_writer) = first_stream.into_split();
-        let mut first_lines = BufReader::new(first_reader).lines();
+        let mut first_lines = authenticated_lines(first_reader).await;
         first_lines
             .next_line()
             .await
@@ -682,7 +702,7 @@ async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_re
             .expect("accept second warm connection");
         server_accepts.fetch_add(1, Ordering::SeqCst);
         let (second_reader, mut second_writer) = second_stream.into_split();
-        let mut second_lines = BufReader::new(second_reader).lines();
+        let mut second_lines = authenticated_lines(second_reader).await;
         second_lines
             .next_line()
             .await
@@ -716,7 +736,7 @@ async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_re
             .expect("accept recovered connection");
         server_accepts.fetch_add(1, Ordering::SeqCst);
         let (recovered_reader, mut recovered_writer) = recovered_stream.into_split();
-        let mut recovered_lines = BufReader::new(recovered_reader).lines();
+        let mut recovered_lines = authenticated_lines(recovered_reader).await;
         recovered_lines
             .next_line()
             .await
@@ -802,7 +822,7 @@ async fn concurrent_invocations_report_parallel_activity() {
             .await
             .expect("accept invocation connection");
         let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
+        let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
             .await
@@ -825,7 +845,7 @@ async fn concurrent_invocations_report_parallel_activity() {
             .await
             .expect("accept second invocation connection");
         let (second_reader, mut second_writer) = second_stream.into_split();
-        let mut second_lines = BufReader::new(second_reader).lines();
+        let mut second_lines = authenticated_lines(second_reader).await;
         second_lines
             .next_line()
             .await
@@ -899,7 +919,7 @@ async fn controlled_client(
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
         let (invocation_reader, mut invocation_writer) = invocation_stream.into_split();
-        let mut invocation_lines = BufReader::new(invocation_reader).lines();
+        let mut invocation_lines = authenticated_lines(invocation_reader).await;
         invocation_lines
             .next_line()
             .await
@@ -917,7 +937,7 @@ async fn controlled_client(
 
         let control_stream = listener.accept().await.expect("accept cancellation");
         let (control_reader, _control_writer) = control_stream.into_split();
-        let mut control_lines = BufReader::new(control_reader).lines();
+        let mut control_lines = authenticated_lines(control_reader).await;
         control_lines
             .next_line()
             .await
@@ -971,7 +991,7 @@ async fn controlled_client(
     };
     (
         DaemonInvocationClient::for_connection_for_test(
-            DaemonConnection::unauthenticated_for_test(endpoint),
+            DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
             handshake,
         ),
         admitted,
@@ -1033,7 +1053,7 @@ async fn reset_then_reconnect_client(
     let server = tokio::spawn(async move {
         let first_stream = listener.accept().await.expect("accept first invocation");
         let (first_reader, _first_writer) = first_stream.into_split();
-        let mut first_lines = BufReader::new(first_reader).lines();
+        let mut first_lines = authenticated_lines(first_reader).await;
         first_lines
             .next_line()
             .await
@@ -1051,7 +1071,7 @@ async fn reset_then_reconnect_client(
 
         let control_stream = listener.accept().await.expect("accept cancellation");
         let (control_reader, _control_writer) = control_stream.into_split();
-        let mut control_lines = BufReader::new(control_reader).lines();
+        let mut control_lines = authenticated_lines(control_reader).await;
         control_lines
             .next_line()
             .await
@@ -1072,7 +1092,7 @@ async fn reset_then_reconnect_client(
         let (mut second_lines, mut second_writer) = loop {
             let second_stream = listener.accept().await.expect("accept second invocation");
             let (second_reader, second_writer) = second_stream.into_split();
-            let mut second_lines = BufReader::new(second_reader).lines();
+            let mut second_lines = authenticated_lines(second_reader).await;
             if let Ok(Some(_handshake)) = second_lines.next_line().await {
                 break (second_lines, second_writer);
             }
@@ -1123,7 +1143,7 @@ async fn reset_then_reconnect_client(
     };
     (
         DaemonInvocationClient::for_connection_for_test(
-            DaemonConnection::unauthenticated_for_test(endpoint),
+            DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
             handshake,
         ),
         admitted,
@@ -1150,7 +1170,7 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
         let (invocation_reader, invocation_writer) = invocation_stream.into_split();
-        let mut invocation_lines = BufReader::new(invocation_reader).lines();
+        let mut invocation_lines = authenticated_lines(invocation_reader).await;
         invocation_lines
             .next_line()
             .await
@@ -1170,7 +1190,7 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
                 let _ = request_admitted.send(());
                 let control_stream = listener.accept().await.expect("accept cancellation");
                 let (control_reader, control_writer) = control_stream.into_split();
-                let mut control_lines = BufReader::new(control_reader).lines();
+                let mut control_lines = authenticated_lines(control_reader).await;
                 control_lines
                     .next_line()
                     .await
@@ -1224,7 +1244,7 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
     };
     UnsettledDaemon {
         client: DaemonInvocationClient::for_connection_for_test(
-            DaemonConnection::unauthenticated_for_test(endpoint),
+            DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
             handshake,
         ),
         admitted,
@@ -1467,7 +1487,7 @@ fn spawn_pool_daemon(
             let warm_up = Arc::clone(&warm_up);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.into_split();
-                let mut lines = BufReader::new(reader).lines();
+                let mut lines = authenticated_lines(reader).await;
                 lines
                     .next_line()
                     .await

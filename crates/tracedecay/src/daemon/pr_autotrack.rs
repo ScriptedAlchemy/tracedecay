@@ -77,14 +77,14 @@ pub(super) use runtime::spawn_with_administration;
 #[derive(Clone, Copy)]
 struct PrStoreAdministration<'a> {
     schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
-    graph: Option<&'a Arc<crate::project::TraceDecay>>,
+    graph: Option<&'a Arc<tracedecay_project::project::TraceDecay>>,
     command_control: &'a PrCommandControl,
 }
 
 impl<'a> PrStoreAdministration<'a> {
     fn with_control(
         schedulers: &'a CodeIndexSchedulerRegistryV1,
-        graph: &'a Arc<crate::project::TraceDecay>,
+        graph: &'a Arc<tracedecay_project::project::TraceDecay>,
         command_control: &'a PrCommandControl,
     ) -> Self {
         Self {
@@ -136,7 +136,7 @@ fn log_pr_skip(repo_root: &Path, branch_label: Option<&str>, pr: Option<u64>, re
 #[cfg(test)]
 pub(crate) async fn activate_manual_branch_head(
     repo_root: &Path,
-    graph: &Arc<crate::project::TraceDecay>,
+    graph: &Arc<tracedecay_project::project::TraceDecay>,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     branch: &str,
 ) -> std::result::Result<ManualBranchActivation, ManualBranchActivationError> {
@@ -160,7 +160,7 @@ pub(crate) async fn activate_manual_branch_head(
 #[hotpath::measure(label = "daemon.pr_autotrack.activate", future = true)]
 pub(crate) async fn activate_manual_branch_head_with_lifecycle(
     repo_root: &Path,
-    graph: &Arc<crate::project::TraceDecay>,
+    graph: &Arc<tracedecay_project::project::TraceDecay>,
     schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     branch: &str,
     lifecycle: &ManualBranchLifecycleLeaseV1,
@@ -839,7 +839,7 @@ async fn track_pr(
 #[hotpath::measure(label = "daemon.pr_autotrack.activate_worktree", future = true)]
 async fn activate_linked_worktree(
     schedulers: &CodeIndexSchedulerRegistryV1,
-    graph: &crate::project::TraceDecay,
+    graph: &tracedecay_project::project::TraceDecay,
     worktree: &Path,
 ) -> std::result::Result<(), String> {
     let project_id = graph
@@ -909,7 +909,6 @@ async fn remove_pr_store(
 fn pr_number_from_label(label: &str) -> Option<u64> {
     label
         .strip_prefix("tracedecay/autotrack/pr/")
-        .or_else(|| label.strip_prefix("pr/"))
         .and_then(|number| number.parse().ok())
 }
 
@@ -931,7 +930,6 @@ async fn cleanup_failed_track(
                 data_root,
                 pr,
                 head_sha,
-                true,
                 administration.command_control.clone(),
             )
             .await
@@ -957,14 +955,11 @@ async fn untrack_pr(
     managed: &ManagedPr,
     administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<(), String> {
-    let expected_label = pr_label(managed.pr);
-    let legacy_label = format!("pr/{}", managed.pr);
-    let is_legacy = label == legacy_label;
     let expected_worktree = data_root
         .join("pr-worktrees")
         .join(format!("pr-{}", managed.pr));
     let expected_ref = pr_tracking_ref(managed.pr);
-    if (label != expected_label && !is_legacy)
+    if label != pr_label(managed.pr)
         || managed.worktree != expected_worktree
         || managed.tracking_ref != expected_ref
     {
@@ -976,7 +971,6 @@ async fn untrack_pr(
         data_root,
         managed.pr,
         &managed.head_sha,
-        !is_legacy,
         administration.command_control.clone(),
     )
     .await
@@ -1039,7 +1033,6 @@ async fn sweep_orphan_pr_worktrees(
                     data_root,
                     number,
                     "",
-                    true,
                     administration.command_control.clone(),
                 )
                 .await

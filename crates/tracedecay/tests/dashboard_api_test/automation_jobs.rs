@@ -36,7 +36,7 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
@@ -120,7 +120,7 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
@@ -289,7 +289,7 @@ for line in sys.stdin:
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;

@@ -115,16 +115,6 @@ pub struct NodeDepthSurfaceRequestV1 {
     pub max_depth: Option<u32>,
 }
 
-pub type ImpactSurfaceRequestV1 = NodeDepthSurfaceRequestV1;
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CalleesSurfaceRequestV1 {
-    pub node_id: String,
-    pub max_depth: Option<u32>,
-    pub resolve_dispatch: Option<bool>,
-}
-
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeSurfaceRequestV1 {
@@ -356,24 +346,6 @@ impl ContextResultV1 {
         self.memory_graph_coverage
     }
 }
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CalleeV1 {
-    pub node_id: String,
-    pub name: String,
-    pub kind: String,
-    pub file: String,
-    pub line: u32,
-    pub edge_kind: String,
-    pub dispatch_via_trait: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub depth: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dispatch_from: Option<String>,
-}
-
-pub type CalleesResultV1 = Vec<CalleeV1>;
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]

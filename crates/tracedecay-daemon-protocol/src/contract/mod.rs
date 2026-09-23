@@ -618,6 +618,8 @@ pub enum DaemonInvocationPayload {
     PrimitiveRead {
         surface_operation: ApplicationSurfaceOperation,
         request: PrimitiveRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -626,6 +628,8 @@ pub enum DaemonInvocationPayload {
         surface_operation: ApplicationSurfaceOperation,
         request: tracedecay_contracts::PrimitiveCodeSurfaceRequest,
         page: PageRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -634,6 +638,8 @@ pub enum DaemonInvocationPayload {
         surface_operation: ApplicationSurfaceOperation,
         request: tracedecay_contracts::CallableCodeSurfaceRequest,
         page: PageRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_scope: Option<ResolvedScope>,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -921,6 +927,47 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::ContextScoutFeedback => {
                 unreachable!("Context Scout operations use their typed constructor")
             }
+            ApplicationSurfaceOperation::StrReplace
+            | ApplicationSurfaceOperation::MultiStrReplace
+            | ApplicationSurfaceOperation::InsertAt
+            | ApplicationSurfaceOperation::AstGrepRewrite
+            | ApplicationSurfaceOperation::ReplaceSymbol
+            | ApplicationSurfaceOperation::InsertAtSymbol
+            | ApplicationSurfaceOperation::MoveSymbol
+            | ApplicationSurfaceOperation::RenameSymbol
+            | ApplicationSurfaceOperation::SourceEditReconcile
+            | ApplicationSurfaceOperation::SourceEditRollback => {
+                unreachable!("source-edit operations use their typed constructors")
+            }
+            ApplicationSurfaceOperation::FactStoreCurate
+            | ApplicationSurfaceOperation::FactStoreAdd
+            | ApplicationSurfaceOperation::FactStoreSearch
+            | ApplicationSurfaceOperation::FactStoreProbe
+            | ApplicationSurfaceOperation::FactStoreRelated
+            | ApplicationSurfaceOperation::FactStoreReason
+            | ApplicationSurfaceOperation::FactStoreContradict
+            | ApplicationSurfaceOperation::FactStoreGet
+            | ApplicationSurfaceOperation::FactStoreUpdate
+            | ApplicationSurfaceOperation::FactStoreRemove
+            | ApplicationSurfaceOperation::FactStoreSupersede
+            | ApplicationSurfaceOperation::FactStoreList
+            | ApplicationSurfaceOperation::FactFeedback
+            | ApplicationSurfaceOperation::MemoryStatus
+            | ApplicationSurfaceOperation::SessionRefreshStatus
+            | ApplicationSurfaceOperation::SessionRefreshCancel
+            | ApplicationSurfaceOperation::SessionRefreshBegin
+            | ApplicationSurfaceOperation::MessageSearch
+            | ApplicationSurfaceOperation::SessionsFor
+            | ApplicationSurfaceOperation::Workflows
+            | ApplicationSurfaceOperation::LcmStatus
+            | ApplicationSurfaceOperation::LcmDoctor
+            | ApplicationSurfaceOperation::LcmLoadSession
+            | ApplicationSurfaceOperation::LcmGrep
+            | ApplicationSurfaceOperation::LcmDescribe
+            | ApplicationSurfaceOperation::LcmExpand
+            | ApplicationSurfaceOperation::LcmExpandQuery => {
+                unreachable!("retained operations use their typed constructor")
+            }
         };
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -1075,6 +1122,7 @@ impl DaemonInvocationRequest {
             ) => DaemonInvocationPayload::PrimitiveRead {
                 surface_operation,
                 request,
+                resolved_scope: None,
                 observed_at,
                 deadline,
                 cancellation,
@@ -1352,6 +1400,7 @@ impl DaemonInvocationRequest {
                 surface_operation,
                 request,
                 page,
+                resolved_scope: None,
                 observed_at,
                 deadline,
                 cancellation,
@@ -1377,6 +1426,7 @@ impl DaemonInvocationRequest {
                 surface_operation,
                 request,
                 page,
+                resolved_scope: None,
                 observed_at,
                 deadline,
                 cancellation,
@@ -1524,7 +1574,10 @@ impl DaemonInvocationRequest {
             (
                 DaemonInvocationPayload::FeedbackGet { resolved_scope, .. }
                 | DaemonInvocationPayload::Configuration { resolved_scope, .. }
-                | DaemonInvocationPayload::ObservatoryRead { resolved_scope, .. },
+                | DaemonInvocationPayload::ObservatoryRead { resolved_scope, .. }
+                | DaemonInvocationPayload::PrimitiveRead { resolved_scope, .. }
+                | DaemonInvocationPayload::PrimitiveCode { resolved_scope, .. }
+                | DaemonInvocationPayload::CallableCode { resolved_scope, .. },
                 scope,
             ) => {
                 *resolved_scope = scope;
@@ -2057,6 +2110,7 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             } => {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
@@ -2095,6 +2149,7 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             } => {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0

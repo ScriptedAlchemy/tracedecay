@@ -2,8 +2,7 @@
 //!
 //! The runtime itself, registered databases, session registry, and the
 //! project-graph opens through it, lives in `tracedecay-project`; this
-//! module keeps its historical path and adds the pieces that need the root's
-//! MCP server: tool calls through the registry-aware dispatcher and direct
+//! module adds the pieces that need the root's MCP server: tool calls through the registry-aware dispatcher and direct
 //! server construction contexts.
 
 #[cfg(any(test, feature = "test-transport"))]
@@ -14,15 +13,10 @@ use tracedecay_domain::errors::Result;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
-pub use tracedecay_project::test_support::host_admission::{
-    HostAdmissionDatabaseIdentityV1, HostAdmissionTestRuntimeV1,
-    LcmExternalPayloadManifestTestRecord, LcmLineageCountsForTest, LcmLineageFaultForTest,
-    ProjectScopedTestRuntimeV1, SessionTemporalFixtureCountV1, await_bound_graph_runtime,
-    ensure_process_background_cpu_authority,
-};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
-use crate::project::TraceDecay;
 use tracedecay_mcp::handlers::mcp_session_authorities;
+use tracedecay_project::project::TraceDecay;
 
 /// Calls one MCP tool through the registry-aware dispatcher with this
 /// runtime's registered databases as the tool's authorities.

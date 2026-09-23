@@ -106,6 +106,15 @@ impl CanonicalHumanView {
                     view.code("Receipt outcome", scalar(&effect.receipt.outcome)?);
                     view.code("Receipt actor", scalar(&effect.receipt.actor)?);
                 }
+                ApplicationOutcome::Result(payload) => {
+                    view.block("Payload", payload_preview(operation, Some(payload))?);
+                    view.code("Status", "success");
+                    view.code("Operation", operation);
+                    view.code("Binding", binding_id.as_str());
+                    view.code("Request", envelope.request_id.as_str());
+                    view.push_scope(&envelope.scope)?;
+                    view.code("Outcome", "result");
+                }
             },
             Err(envelope) => {
                 view.code("Operation", operation);
@@ -390,6 +399,8 @@ fn payload_preview(operation: &str, payload: Option<&Value>) -> serde_json::Resu
             fields.get("body").and_then(Value::as_str),
         ) {
         format!("{file}:{start_line}-{end_line}\n{body}")
+    } else if let Some(rendered) = code_graph_page_preview(operation, payload) {
+        rendered
     } else {
         match payload {
             Value::String(value) => value.clone(),
@@ -397,6 +408,132 @@ fn payload_preview(operation: &str, payload: Option<&Value>) -> serde_json::Resu
         }
     };
     Ok(bounded_payload(rendered))
+}
+
+/// One line per symbol for the code-graph navigation pages, with the type
+/// hierarchy drawn as its implements/extends tree. `None` falls back to the
+/// JSON payload, so an unexpected shape is never hidden.
+fn code_graph_page_preview(operation: &str, payload: &Value) -> Option<String> {
+    if !matches!(
+        operation,
+        "code_callers"
+            | "code_callees"
+            | "code_implementations"
+            | "code_type_hierarchy"
+            | "code_signature_search"
+    ) {
+        return None;
+    }
+    let items = payload.get("items")?.as_array()?;
+    let mut rendered = String::new();
+    if items.is_empty() {
+        rendered.push_str("no matches\n");
+    } else if operation == "code_type_hierarchy" {
+        push_hierarchy_roots(items, &mut rendered)?;
+    } else {
+        for item in items {
+            push_symbol_entry(item, &mut rendered)?;
+        }
+    }
+    push_page_trailer(payload, &mut rendered)?;
+    Some(rendered.trim_end().to_owned())
+}
+
+/// Starts a subtree at every entry whose parent is itself (the root) or is not
+/// on this page, so a continuation page still renders every entry.
+fn push_hierarchy_roots(items: &[Value], rendered: &mut String) -> Option<()> {
+    let page_ids = items.iter().filter_map(item_node_id).collect::<Vec<_>>();
+    for item in items {
+        let parent = item.get("parent_node_id").and_then(Value::as_str);
+        if parent == item_node_id(item) || parent.is_none_or(|parent| !page_ids.contains(&parent)) {
+            push_hierarchy_subtree(items, item, 0, rendered)?;
+        }
+    }
+    Some(())
+}
+
+/// One relation, implementation, or signature match: its symbol line, the
+/// traversal annotations, then its signature and body when present.
+fn push_symbol_entry(item: &Value, rendered: &mut String) -> Option<()> {
+    let symbol = item.get("symbol").unwrap_or(item);
+    rendered.push_str(&symbol_line(symbol)?);
+    if let Some(depth) = item.get("depth").and_then(Value::as_u64) {
+        rendered.push_str(&format!(" depth={depth}"));
+    }
+    if item.get("dispatch_via_trait").and_then(Value::as_bool) == Some(true)
+        && let Some(from) = item.get("dispatch_from").and_then(Value::as_str)
+    {
+        rendered.push_str(&format!(" via trait {from}"));
+    }
+    rendered.push('\n');
+    if let Some(signature) = symbol.get("signature").and_then(Value::as_str) {
+        rendered.push_str(&format!("  {signature}\n"));
+    }
+    for line in item
+        .get("body")
+        .and_then(Value::as_str)
+        .into_iter()
+        .flat_map(str::lines)
+    {
+        rendered.push_str(&format!("  | {line}\n"));
+    }
+    Some(())
+}
+
+fn push_page_trailer(payload: &Value, rendered: &mut String) -> Option<()> {
+    for gap in payload
+        .get("support_gaps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let reason = gap.get("reason").and_then(Value::as_str)?;
+        rendered.push_str(&format!("support gap: {reason}\n"));
+    }
+    if let Some(cursor) = payload.get("next_cursor").and_then(Value::as_str) {
+        rendered.push_str(&format!("next_cursor: {cursor}\n"));
+    }
+    Some(())
+}
+
+fn push_hierarchy_subtree(
+    items: &[Value],
+    item: &Value,
+    depth: usize,
+    rendered: &mut String,
+) -> Option<()> {
+    let symbol = item.get("symbol")?;
+    let node_id = symbol.get("node_id").and_then(Value::as_str)?;
+    let line = symbol_line(symbol)?;
+    if depth == 0 {
+        rendered.push_str(&format!("{line}\n"));
+    } else {
+        let relation = item.get("edge_kind").and_then(Value::as_str)?;
+        let pad = "  ".repeat(depth - 1);
+        rendered.push_str(&format!("{pad}|- {relation} {line}\n"));
+    }
+    for child in items.iter().filter(|child| {
+        child.get("parent_node_id").and_then(Value::as_str) == Some(node_id)
+            && item_node_id(child) != Some(node_id)
+    }) {
+        push_hierarchy_subtree(items, child, depth + 1, rendered)?;
+    }
+    Some(())
+}
+
+fn item_node_id(item: &Value) -> Option<&str> {
+    item.pointer("/symbol/node_id").and_then(Value::as_str)
+}
+
+fn symbol_line(symbol: &Value) -> Option<String> {
+    Some(format!(
+        "{} ({}) {}:{} node_id={}",
+        symbol.get("qualified_name").and_then(Value::as_str)?,
+        symbol.get("kind").and_then(Value::as_str)?,
+        symbol.get("file").and_then(Value::as_str)?,
+        symbol.get("line").and_then(Value::as_u64)?,
+        symbol.get("node_id").and_then(Value::as_str)?,
+    ))
 }
 
 fn bounded_payload(rendered: String) -> String {
@@ -520,5 +657,68 @@ mod tests {
         .unwrap();
 
         assert_eq!(preview, "src/lib.rs:7-9\npub fn answer() {\n    42\n}");
+    }
+
+    fn symbol(node_id: &str, name: &str, kind: &str, line: u32) -> serde_json::Value {
+        json!({
+            "node_id": node_id,
+            "name": name,
+            "qualified_name": format!("src/lib.rs::{name}"),
+            "kind": kind,
+            "file": "src/lib.rs",
+            "line": line,
+            "end_line": line,
+            "signature": null,
+            "is_async": false,
+            "score": null,
+        })
+    }
+
+    #[test]
+    fn type_hierarchy_preview_draws_the_implements_tree() {
+        let preview = payload_preview(
+            "code_type_hierarchy",
+            Some(&json!({
+                "items": [
+                    {"symbol": symbol("t", "Shape", "trait", 1), "parent_node_id": "t", "edge_kind": "root", "depth": 0},
+                    {"symbol": symbol("b", "Base", "struct", 5), "parent_node_id": "t", "edge_kind": "implements", "depth": 1},
+                    {"symbol": symbol("d", "Derived", "class", 9), "parent_node_id": "b", "edge_kind": "extends", "depth": 2},
+                ],
+                "support_gaps": [],
+                "next_cursor": null,
+            })),
+        )
+        .unwrap();
+
+        assert_eq!(
+            preview,
+            "src/lib.rs::Shape (trait) src/lib.rs:1 node_id=t\n\
+             |- implements src/lib.rs::Base (struct) src/lib.rs:5 node_id=b\n  \
+             |- extends src/lib.rs::Derived (class) src/lib.rs:9 node_id=d"
+        );
+    }
+
+    #[test]
+    fn implementation_preview_carries_each_body_and_the_continuation() {
+        let preview = payload_preview(
+            "code_implementations",
+            Some(&json!({
+                "items": [{
+                    "symbol": symbol("m", "area", "method", 3),
+                    "edge_kind": "implementation",
+                    "dispatch_from": null,
+                    "body": "fn area() {\n    1\n}",
+                }],
+                "support_gaps": [{"provider": null, "language": null, "reason": "partial"}],
+                "next_cursor": "cursor.next",
+            })),
+        )
+        .unwrap();
+
+        assert_eq!(
+            preview,
+            "src/lib.rs::area (method) src/lib.rs:3 node_id=m\n  | fn area() {\n  |     1\n  | }\n\
+             support gap: partial\nnext_cursor: cursor.next"
+        );
     }
 }

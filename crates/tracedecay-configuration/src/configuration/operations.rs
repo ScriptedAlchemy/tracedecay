@@ -13,7 +13,7 @@ use crate::config::scope_control::{
     ProtectedChangePlanDraftV1, plan_protected_change, validate_apply_binding,
 };
 use tracedecay_global_db::configuration::contracts::ports::{
-    ConfigurationClock, ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
+    ConfigurationControlStore, ConfigurationMutationAuthorizationPort,
     ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
     ScopeRevalidationEvidenceV1,
 };
@@ -80,23 +80,23 @@ pub trait ConfigurationControlPlane: Sync {
     ) -> ConfigurationOperationFuture<'_, ConfigurationAuditPage>;
 }
 
-pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization, Clock> {
+pub struct ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization> {
     registry: &'a ConfigurationRegistry,
     store: &'a Store,
     scopes: &'a Scopes,
     authorization: &'a Authorization,
-    clock: &'a Clock,
+    clock: fn() -> UtcMicros,
 }
 
-impl<'a, Store, Scopes, Authorization, Clock>
-    ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization, Clock>
+impl<'a, Store, Scopes, Authorization>
+    ConfigurationControlPlaneOperations<'a, Store, Scopes, Authorization>
 {
     pub fn new(
         registry: &'a ConfigurationRegistry,
         store: &'a Store,
         scopes: &'a Scopes,
         authorization: &'a Authorization,
-        clock: &'a Clock,
+        clock: fn() -> UtcMicros,
     ) -> Self {
         Self {
             registry,
@@ -108,13 +108,12 @@ impl<'a, Store, Scopes, Authorization, Clock>
     }
 }
 
-impl<Store, Scopes, Authorization, Clock> ConfigurationControlPlane
-    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization, Clock>
+impl<Store, Scopes, Authorization> ConfigurationControlPlane
+    for ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
     Authorization: ConfigurationMutationAuthorizationPort,
-    Clock: ConfigurationClock,
 {
     fn list(
         &self,
@@ -250,7 +249,7 @@ where
                 .resolve_protected_change(&actor, &change)
                 .await?;
             validate_authorization_evidence(&current_authorization, &evidence)?;
-            let now = self.clock.now();
+            let now = (self.clock)();
             let operation_digest = change
                 .compute_digest()
                 .map_err(ConfigurationError::validation)?;
@@ -347,7 +346,7 @@ where
             )
             .await?;
             self.store
-                .dry_run_rollback(&authority, &rollback, self.clock.now())
+                .dry_run_rollback(&authority, &rollback, (self.clock)())
                 .await
         })
     }
@@ -406,13 +405,12 @@ where
     }
 }
 
-impl<Store, Scopes, Authorization, Clock>
-    ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization, Clock>
+impl<Store, Scopes, Authorization>
+    ConfigurationControlPlaneOperations<'_, Store, Scopes, Authorization>
 where
     Store: ConfigurationControlStore,
     Scopes: ScopeResolutionPort,
     Authorization: ConfigurationMutationAuthorizationPort,
-    Clock: ConfigurationClock,
 {
     fn apply_plan(
         &self,
@@ -447,7 +445,7 @@ where
             {
                 return Ok(receipt);
             }
-            let now = self.clock.now();
+            let now = (self.clock)();
             if plan.is_expired_at(now) {
                 return Err(ConfigurationError::PlanExpired);
             }
@@ -480,7 +478,7 @@ where
         effect: ConfigurationMutationEffectV1,
     ) -> Result<CurrentConfigurationMutationAuthorizationV1, ConfigurationError> {
         authority.validate_integrity()?;
-        let now = self.clock.now();
+        let now = (self.clock)();
         let current = self
             .authorization
             .recheck(
@@ -803,20 +801,8 @@ mod tests {
         }
     }
 
-    struct Clock;
-
-    impl ConfigurationClock for Clock {
-        fn now(&self) -> UtcMicros {
-            UtcMicros(10)
-        }
-    }
-
-    struct AdvancedClock(UtcMicros);
-
-    impl ConfigurationClock for AdvancedClock {
-        fn now(&self) -> UtcMicros {
-            self.0
-        }
+    fn clock() -> UtcMicros {
+        UtcMicros(10)
     }
 
     #[test]
@@ -898,13 +884,12 @@ mod tests {
                 policy_epoch: 7,
             },
         };
-        let clock = Clock;
         let operations = ConfigurationControlPlaneOperations::new(
             &registry,
             &store,
             &scope,
             &authorization,
-            &clock,
+            clock,
         );
 
         let key =
@@ -987,13 +972,12 @@ mod tests {
         );
         let registry = ConfigurationRegistry::core().unwrap();
         let scope = Scope { evidence };
-        let clock = Clock;
         let operations = ConfigurationControlPlaneOperations::new(
             &registry,
             &store,
             &scope,
             &authorization,
-            &clock,
+            clock,
         );
 
         let plan = operations
@@ -1116,14 +1100,13 @@ mod tests {
         };
         let registry = ConfigurationRegistry::core().unwrap();
         let scope = Scope { evidence };
-        let clock = AdvancedClock(UtcMicros(10));
 
         let restarted = ConfigurationControlPlaneOperations::new(
             &registry,
             &store,
             &scope,
             &authorization,
-            &clock,
+            clock,
         );
 
         assert_eq!(

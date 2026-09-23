@@ -30,6 +30,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_store_runtime::ShutdownStatus;
 
 use super::*;
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod project_invocation;
@@ -105,10 +106,11 @@ impl DaemonInvocationState {
         database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
         profile_id: &tracedecay_domain::configuration::UserProfileId,
     ) -> Result<tracedecay_code_index::parallelism::InstalledCodeIndexWorkerPlanV1> {
-        let configured = crate::config::read_or_initialize_profile_code_index_worker_selection(
-            database, profile_id,
-        )
-        .await?;
+        let configured =
+            tracedecay_project::config::read_or_initialize_profile_code_index_worker_selection(
+                database, profile_id,
+            )
+            .await?;
         self.install_worker_selection(store_administration, configured)
     }
 
@@ -1088,7 +1090,7 @@ impl DaemonInvocationState {
         // unwinding. The registry retains its worker until a retry joins it;
         // an incomplete sweep must keep the outer shutdown receipt unclean.
         let schedulers_timed_out = tokio::time::timeout(
-            super::DAEMON_TASK_ABORT_DEADLINE,
+            DAEMON_TASK_ABORT_DEADLINE,
             self.code_index_schedulers.shutdown(),
         )
         .await

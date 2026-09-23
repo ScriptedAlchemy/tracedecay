@@ -683,7 +683,7 @@ fn context_graph_projection(
                 file: file_path.to_owned(),
                 start_line: user_line(metadata.start_line),
                 end_line: user_line(graph_symbol_end_line(metadata)?),
-                code: crate::handlers::info::extract_lines(
+                code: extract_lines(
                     source,
                     metadata.start_line,
                     graph_symbol_end_line(metadata)?,
@@ -697,6 +697,29 @@ fn context_graph_projection(
         code_blocks,
         touched_files,
     })
+}
+
+/// Extract the source spanning tree-sitter rows `start_line..=end_line`
+/// (0-based, inclusive) from `source`. Node line fields are stored as the
+/// raw tree-sitter row index, so the caller passes them through unchanged.
+/// Returns the empty string if the range is out of bounds.
+fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
+    let start = start_line as usize;
+    let end_exclusive = (end_line as usize).saturating_add(1);
+    if start >= end_exclusive {
+        return String::new();
+    }
+    let mut selected = source.lines().skip(start).take(end_exclusive - start);
+    let Some(first) = selected.next() else {
+        return String::new();
+    };
+    let mut body = String::with_capacity(first.len());
+    body.push_str(first);
+    for line in selected {
+        body.push('\n');
+        body.push_str(line);
+    }
+    body
 }
 
 fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMatchV1]) {
@@ -1593,8 +1616,7 @@ mod tests {
 
         // Retired branch-local opaque tokens, never shipped on master; must
         // stay absent from the shared mapper wire (migrate-then-delete, not
-        // one-release alias). Request-schema / catalog `alias_of` for these
-        // tools lives on #1433 and is separable.
+        // one-release alias).
         const RETIRED_OPAQUE_REASON_CODES: &[&str] = &[
             "verified-code-redundancy-unavailable",
             "verified-code-similarity-unavailable",

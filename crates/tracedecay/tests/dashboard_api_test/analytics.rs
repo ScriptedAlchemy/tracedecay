@@ -494,7 +494,7 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     let cg = host_runtime
         .initialize_project_graph_for_test(
             &project_root,
-            tracedecay::project::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: Some(global_db_path),
             },
@@ -518,13 +518,15 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             authority,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            dashboard::DashboardTestEndpointV1 {
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestEndpointV1 {
                 host: "127.0.0.1",
                 port,
             },
-            tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
-            dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
+            tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
+            tracedecay_api::static_dashboard_router(std::sync::Arc::new(
+                tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
+            )),
             std::future::pending(),
         )
         .await;
@@ -939,7 +941,7 @@ fn observatory_counts_canonical_failed_outcomes() {
                 HostAdmissionScope::Profile,
                 &observability_event(
                     &project_id,
-                    tracedecay::project::current_timestamp(),
+                    tracedecay_runtime_core::tracedecay::current_timestamp(),
                     ObservabilityTerminalResultV1::Failed,
                 ),
             )
@@ -972,7 +974,7 @@ fn observatory_serves_rejected_argument_groups_from_seeded_observations() {
     runtime.block_on(async {
         let fixture = start_fixture(false).await;
         let project_id = DashboardTestRuntimeV1::canonical_project_key(&fixture.project_root);
-        let timestamp = tracedecay::project::current_timestamp();
+        let timestamp = tracedecay_runtime_core::tracedecay::current_timestamp();
         fixture
             .host_runtime
             .append_analytics_event_for_test(

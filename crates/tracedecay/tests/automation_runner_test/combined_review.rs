@@ -709,7 +709,7 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_evidence_budget_exhausted_request_candidate_bytes",
+            reason: "session_evidence_budget_exhausted",
         }
     ));
     assert_eq!(retrieval.calls(), 1);
@@ -753,7 +753,7 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
     assert!(matches!(
         dispatch,
         CombinedReviewDispatch::NotCombined {
-            reason: "session_evidence_budget_exhausted_execution_work_exhausted",
+            reason: "session_evidence_budget_exhausted",
         }
     ));
     assert_eq!(retrieval.calls(), 2);

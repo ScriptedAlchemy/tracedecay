@@ -4,11 +4,10 @@ use std::collections::BTreeSet;
 
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    ApplicationHandlerDescriptorV1, BindingId, BindingStatus, BindingSurface,
-    CatalogContributionInputV1, CatalogContributionV1, CatalogSnapshotBuilderV1,
-    CatalogValidationError, ContributionId, ExecutableSchemaAuthority, ProfileDefinition,
-    ProfileDefinitionInputV1, ProfileKind, ProtocolRevisionRange, SurfaceBindingInputV1,
-    SurfaceBindingV1, SurfaceOperationName,
+    ApplicationHandlerDescriptorV1, BindingId, BindingSurface, CatalogContributionInputV1,
+    CatalogContributionV1, CatalogSnapshotBuilderV1, CatalogValidationError, ContributionId,
+    ExecutableSchemaAuthority, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,
+    ProtocolRevisionRange, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use common::{
@@ -62,8 +61,6 @@ fn snapshot_digest_bytes_are_pinned_for_a_fixed_catalog() {
         operation: SurfaceOperationName::new("source read").unwrap(),
         protocol_revisions: ProtocolRevisionRange::new(1, 2).unwrap(),
         required_features: Vec::new(),
-        status: BindingStatus::Current,
-        alias_of: None,
     })
     .unwrap();
     let source_contribution_id = ContributionId::new("contribution.source").unwrap();
@@ -113,7 +110,7 @@ fn snapshot_digest_bytes_are_pinned_for_a_fixed_catalog() {
 
     assert_eq!(
         snapshot.digest().to_string(),
-        "sha256:1588d3f6cfa939feac2e00e953c0cd17bef681bb986515dcfefae9a53d41319a"
+        "sha256:e53f40e6f2e2260882a02a1c12b7efb682ab63c6652c2d7e27eb415f903c94a4"
     );
     assert_eq!(
         snapshot

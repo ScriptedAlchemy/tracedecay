@@ -34,10 +34,7 @@ mod definitions;
 mod project_access;
 
 pub use catalog_error::McpCatalogError;
-pub use definitions::ast_grep::{
-    AstGrepDiagnostics, ast_grep_available, ast_grep_diagnostics, ast_grep_diagnostics_json,
-    ast_grep_outline_available,
-};
+pub use definitions::ast_grep::{ast_grep_available, ast_grep_diagnostics_json};
 pub use definitions::{
     SEARCH_MAX_LEXICAL_ANCHOR_BYTES, SEARCH_MAX_LEXICAL_ANCHORS, ToolRegistryMode,
     apply_context_warming_budget, context_description, context_warming_description,

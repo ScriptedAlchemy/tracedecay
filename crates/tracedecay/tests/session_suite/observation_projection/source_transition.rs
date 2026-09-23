@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationRelationsV1, ClineTranscriptStream, DurableObservationV1, ObservationId,
@@ -9,6 +8,7 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProviderId, ProviderUsageContractDimensionV1, SessionId,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{ObservationProjectionStore, ObservationStore, ProjectionSkipReason};
 

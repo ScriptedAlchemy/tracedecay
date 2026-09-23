@@ -2,9 +2,9 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 use tracedecay_sessions::runtime::{
@@ -955,8 +955,6 @@ async fn upsert_session_message_preserves_oversized_text_losslessly() {
         .expect("raw message should exist");
     assert_eq!(raw.content, oversized);
     assert!(raw.content.ends_with("::lossless-tail"));
-    assert!(!raw.legacy_source);
-    assert!(!raw.legacy_truncated);
 }
 
 #[tokio::test]

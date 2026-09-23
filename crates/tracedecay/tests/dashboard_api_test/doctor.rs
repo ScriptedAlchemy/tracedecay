@@ -53,7 +53,7 @@ fn doctor_findings_endpoint_is_typed_unsupported_without_an_admitted_source() {
             .unwrap_or_else(|| panic!("known families should be an array: {envelope}"));
         assert_eq!(
             families.len(),
-            tracedecay_api::doctor::KNOWN_DOCTOR_FINDING_FAMILIES.len(),
+            tracedecay_contracts::doctor::DOCTOR_FINDING_FAMILIES.len(),
             "the closed family vocabulary must be advertised in full: {envelope}"
         );
 

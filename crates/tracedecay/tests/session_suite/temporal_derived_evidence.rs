@@ -3,18 +3,18 @@
 use std::collections::BTreeSet;
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorProvenanceRelationV2, CopyProofV1, LogicalCopyRecordV1, MessageOccurrenceRecordV1,
+    AnchorProvenanceRelation, CopyProofV1, LogicalCopyRecordV1, MessageOccurrenceRecordV1,
     RetrievalGrainV1, SessionId, TemporalModeV1,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     ObservationProjectionStore, ObservationStore, SessionGenerationActivationRequestV1,
     SessionRetrievalStore, SessionTemporalProjectionStore, SessionTemporalRetrievalRequestV1,
     SessionTemporalSnapshotRequestV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use crate::temporal_projection::{
     assertion, batch, begin_candidate, generation, occurrence, parent_message_copy,
@@ -63,7 +63,7 @@ where
             &session_id,
             1,
             "derived-beta pipeline",
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
             first.retrieval_anchor_id.clone(),
             None,
         )
@@ -82,7 +82,7 @@ where
             &session_id,
             2,
             "derived-alpha pipeline copied",
-            AnchorProvenanceRelationV2::CopiedFrom,
+            AnchorProvenanceRelation::CopiedFrom,
             first.retrieval_anchor_id.clone(),
             None,
         )
@@ -191,7 +191,7 @@ async fn rebuilds_are_identity_stable_across_oneshot_incremental_and_restart() {
                 &session_id,
                 1,
                 "derived-beta pipeline",
-                AnchorProvenanceRelationV2::Supersedes,
+                AnchorProvenanceRelation::Supersedes,
                 first.retrieval_anchor_id.clone(),
                 None,
             )

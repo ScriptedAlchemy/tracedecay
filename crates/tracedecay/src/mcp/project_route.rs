@@ -71,7 +71,7 @@ pub(crate) async fn resolve_registered_project_route(
     let (requested_path, scope) =
         tracedecay_mcp::scope::resolve_query_scope(&context, requested_path)
             .map_err(|error| error.into_route_failure().into_error())?;
-    let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
+    let request = tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_registered_project(
         context.clone(),
         requested_path.clone(),
     );
@@ -467,19 +467,7 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         .find_map(|value| keys.iter().find_map(|key| string_field(value, key)))
 }
 
-/// Top-level argument keys that are semantic tool arguments, owned and
-/// validated by the tool's own request schema, rather than registered-project
-/// route selectors, per tool. Route selection and its guards must skip these
-/// so a semantic field never masquerades as an unresolved route.
-pub(crate) fn semantic_route_argument_fields(tool_name: &str) -> &'static [&'static str] {
-    match tool_name {
-        "tracedecay_message_search" => &["project_path"],
-        _ => &[],
-    }
-}
-
-pub(crate) fn arguments_have_project_selector(tool_name: &str, arguments: &Value) -> bool {
-    let semantic = semantic_route_argument_fields(tool_name);
+pub(crate) fn arguments_have_project_selector(arguments: &Value) -> bool {
     [
         "project_selector",
         "project_id",
@@ -488,7 +476,7 @@ pub(crate) fn arguments_have_project_selector(tool_name: &str, arguments: &Value
         "root",
     ]
     .into_iter()
-    .any(|key| !semantic.contains(&key) && arguments.get(key).is_some())
+    .any(|key| arguments.get(key).is_some())
 }
 
 fn project_route_identity_matches(
@@ -516,7 +504,8 @@ mod tests {
     };
     use crate::daemon::ProductionProjectCompositionHarnessV1;
     use crate::mcp::server::McpServer;
-    use tracedecay_hooks::core_events::{HookAgent, HookRouteMetadata};
+    use tracedecay_domain::HostIntegrationIdV1;
+    use tracedecay_hooks::core_events::HookRouteMetadata;
     use tracedecay_mcp::hook_events::{HookEvent, HookEventKind};
 
     struct ResolvedRouteFixture {
@@ -886,7 +875,7 @@ mod tests {
 
     fn hook_event(session_id: &str, thread_id: &str, cwd: &str) -> HookEvent {
         HookEvent {
-            agent: HookAgent::Claude,
+            agent: HostIntegrationIdV1::Claude,
             kind: HookEventKind::FileEdit,
             rel_paths: Vec::new(),
             had_command: false,

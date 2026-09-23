@@ -505,24 +505,25 @@ mod tests {
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
-        crate::project::TraceDecay,
-        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
+        tracedecay_project::project::TraceDecay,
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(profile_root).expect("isolated profile root");
         std::fs::create_dir_all(project_root).expect("isolated project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
             .expect("typed project identity");
-        let runtime = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-            profile_root,
-            project_root,
-            project_id,
-        )
-        .await
-        .expect("isolated host-admission runtime");
+        let runtime =
+            tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile_root,
+                project_root,
+                project_id,
+            )
+            .await
+            .expect("isolated host-admission runtime");
         let graph = runtime
             .initialize_project_graph_for_test(
                 project_root,
-                crate::project::TraceDecayOpenOptions {
+                tracedecay_project::project::TraceDecayOpenOptions {
                     profile_root: Some(profile_root.to_path_buf()),
                     global_db_path: None,
                 },
@@ -533,13 +534,13 @@ mod tests {
     }
 
     async fn isolated_sibling_graph(
-        runtime: &crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
+        runtime: &tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
         profile_root: &std::path::Path,
         project_root: &std::path::Path,
         project_id: &str,
     ) -> (
-        crate::project::TraceDecay,
-        crate::test_support::host_admission::HostAdmissionTestRuntimeV1,
+        tracedecay_project::project::TraceDecay,
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
     ) {
         std::fs::create_dir_all(project_root).expect("isolated sibling project root");
         let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned())
@@ -551,7 +552,7 @@ mod tests {
         let graph = sibling
             .initialize_project_graph_for_test(
                 project_root,
-                crate::project::TraceDecayOpenOptions {
+                tracedecay_project::project::TraceDecayOpenOptions {
                     profile_root: Some(profile_root.to_path_buf()),
                     global_db_path: None,
                 },

@@ -8,14 +8,14 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     MAX_OBSERVATION_RECORD_BYTES, ProjectId, ProviderUsageCounterSemanticsV1,
     ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1,
 };
 use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::hermes::{
+use tracedecay_sessions::runtime::hosts::hermes::{
     ProjectIngestDestination, ingest_for_project as ingest_for_project_with_id,
     ingest_homes as ingest_homes_with_id, ingest_homes_for_projects, ingest_user_homes,
 };
@@ -108,33 +108,21 @@ fn setup(tmp: &TempDir) -> (PathBuf, PathBuf) {
     (home.join(".hermes"), project)
 }
 
-/// Writes a Hermes profile dir: a `config.yaml` optionally pinning
-/// `pinned_project` (the real `plugins.tracedecay.project_root` shape) and a
-/// `state.db` with the real Hermes schema. Unpinned profiles (the default
-/// since the installer stopped writing storage-home pins) carry only the
-/// plugin-enable block.
+/// Writes a Hermes profile dir: a `config.yaml` with the plugin-enable block
+/// and a `state.db` with the real Hermes schema whose session optionally runs
+/// in `session_cwd`, the evidence that associates it with a project.
 async fn write_hermes_profile(
     hermes_home: &Path,
     profile: &str,
-    pinned_project: Option<&Path>,
+    session_cwd: Option<&Path>,
 ) -> PathBuf {
     let profile_dir = hermes_home.join("profiles").join(profile);
     std::fs::create_dir_all(&profile_dir).unwrap();
-    let config = match pinned_project {
-        Some(pinned_project) => {
-            // The pin is JSON-encoded exactly as `tracedecay install --agent
-            // hermes` writes it, so Windows backslashes survive the
-            // double-quoted YAML scalar.
-            let pin = serde_json::to_string(pinned_project.to_string_lossy().as_ref()).unwrap();
-            format!(
-                "memory:\n  provider: tracedecay\nplugins:\n  enabled:\n    - tracedecay\n  tracedecay:\n    project_root: {pin}\n",
-            )
-        }
-        None => {
-            "memory:\n  provider: tracedecay\nplugins:\n  enabled:\n    - tracedecay\n".to_string()
-        }
-    };
-    std::fs::write(profile_dir.join("config.yaml"), config).unwrap();
+    std::fs::write(
+        profile_dir.join("config.yaml"),
+        "memory:\n  provider: tracedecay\nplugins:\n  enabled:\n    - tracedecay\n",
+    )
+    .unwrap();
 
     let state_db = profile_dir.join("state.db");
     let conn = open_state_db(&state_db);
@@ -187,10 +175,13 @@ async fn write_hermes_profile(
     conn.execute(
         "INSERT INTO sessions (id, source, model, started_at, ended_at, title,
                                input_tokens, output_tokens, cache_read_tokens,
-                               cache_write_tokens, reasoning_tokens)
+                               cache_write_tokens, reasoning_tokens, cwd)
          VALUES (?1, 'tui', 'gpt-5.5', 1780629300.0, 1780629340.0,
-                 'Billing pipeline fix', 96443, 3804, 1064960, 0, 2061)",
-        rusqlite::params![SESSION_ID],
+                 'Billing pipeline fix', 96443, 3804, 1064960, 0, 2061, ?2)",
+        rusqlite::params![
+            SESSION_ID,
+            session_cwd.map(|cwd| cwd.to_string_lossy().into_owned())
+        ],
     )
     .unwrap();
 
@@ -262,7 +253,7 @@ fn open_state_db(path: &Path) -> rusqlite::Connection {
 }
 
 #[tokio::test]
-async fn hermes_state_db_populates_projection_for_pinned_project() {
+async fn hermes_state_db_populates_projection_for_session_cwd_project() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let linked_worktree = tmp.path().join("linked-worktree");
@@ -286,7 +277,7 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
         .await;
     assert!(
         results.iter().any(|hit| hit.message.role == "user"),
-        "expected pinned-project user hit; projected session path: {:?}",
+        "expected project user hit; projected session path: {:?}",
         session.project_path
     );
     assert!(results.iter().any(|hit| hit.message.role == "assistant"));
@@ -317,7 +308,7 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
     assert_metadata_path_eq(&metadata["hermes_session_worktree"], &linked_worktree);
     assert_eq!(
         metadata["hermes_session_location_provenance"].as_str(),
-        Some("profile_pin")
+        Some("session_cwd")
     );
     // Session-cumulative token counters from the Hermes sessions table land
     // in the immutable provider-usage observation family (captured at the
@@ -371,7 +362,7 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
     assert_metadata_path_eq(&tool_metadata["hermes_session_worktree"], &linked_worktree);
     assert_eq!(
         tool_metadata["hermes_session_location_provenance"].as_str(),
-        Some("profile_pin")
+        Some("session_cwd")
     );
 
     // Projection-only: Hermes raw messages are owned by the runtime LCM
@@ -791,7 +782,7 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
 }
 
 #[tokio::test]
-async fn hermes_profile_pinned_elsewhere_is_not_ingested() {
+async fn hermes_session_elsewhere_is_not_ingested() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, project) = setup(&tmp);
     let other_project = tmp.path().join("other-project");

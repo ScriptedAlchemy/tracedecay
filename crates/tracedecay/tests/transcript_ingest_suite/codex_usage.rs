@@ -10,7 +10,7 @@ use tracedecay_domain::{
     ProviderUsageScopeV1,
 };
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 use crate::codex::write_codex_rollout_with_structured_events;
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};

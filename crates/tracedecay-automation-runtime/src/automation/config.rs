@@ -3,8 +3,8 @@
 pub use tracedecay_automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
     AutomationSchedule, AutomationTaskConfig, AutomationTaskPatch, AutomationTaskSet, CronSchedule,
-    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS,
-    DEFAULT_SCHEDULER_TICK_SECS, RetentionConfig, parse_schedule,
+    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_SCHEDULER_TICK_SECS,
+    DEFAULT_SESSION_MESSAGE_RETENTION_DAYS, RetentionConfig, parse_schedule,
 };
 
 use tracedecay_domain::configuration::{

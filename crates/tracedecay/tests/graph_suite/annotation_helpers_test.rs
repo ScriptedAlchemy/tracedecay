@@ -107,7 +107,7 @@ public class Foo {
     public void oldMethod() {}
 }
 "#;
-    let result = JavaExtractor.extract("Foo.java", source);
+    let result = JavaExtractor.extract_artifact("Foo.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Java accepts both `marker_annotation` (`@Deprecated`) and `annotation`
@@ -148,7 +148,7 @@ public class Foo {
 #[test]
 fn kotlin_extractor_emits_annotation_usage() {
     let source = "@Deprecated(\"use other\")\nfun oldFunc() {}";
-    let result = KotlinExtractor.extract("test.kt", source);
+    let result = KotlinExtractor.extract_artifact("test.kt", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Kotlin accepts only the `annotation` modifier-child kind.

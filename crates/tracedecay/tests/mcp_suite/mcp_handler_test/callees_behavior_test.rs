@@ -1,7 +1,7 @@
 //! User-visible `tracedecay_callees` behavior over a real MCP `tools/call`.
 //!
 //! The fixture is one indexed project. Assertions name the functions, files,
-//! and lines the handler returns, not the graph walk that produced them.
+//! and lines the tool returns, not the graph walk that produced them.
 //! Occurrence ids are not literals: they are content hashes. Each returned
 //! id must be the id `tracedecay_find_exact_symbol` gives for that same
 //! name, file, and line, which is how an agent chains the two tools.
@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
-use tracedecay_contracts::retrieval::CalleeV1;
 
 use crate::support::{
     ProductionCompositionFixture, extract_real_server_text, handle_real_server_tool_call,
@@ -53,7 +52,7 @@ pub fn level_11() { level_10(); }\n\
 ";
 
 /// UFCS `Processor::process` binds the trait method. Concrete `process`
-/// impls are not direct call edges; `resolve_dispatch` is what adds them.
+/// impls are not direct call edges; `resolve_trait_dispatch` adds them.
 const DISPATCH_RS: &str = "\
 pub trait Processor {\n\
     fn process(&self, input: u32) -> u32;\n\
@@ -85,37 +84,35 @@ struct ObservedCallee {
     name: String,
     kind: String,
     file: String,
-    line: u32,
-    edge_kind: String,
+    line: u64,
     dispatch_via_trait: bool,
-    depth: Option<u32>,
+    depth: Option<u64>,
     /// `name:file:line` of the trait method this concrete impl was reached
     /// through. `None` for a direct call edge.
     dispatch_from: Option<String>,
 }
 
-fn direct(name: &str, kind: &str, file: &str, line: u32, depth: u32) -> ObservedCallee {
+fn direct(name: &str, kind: &str, file: &str, line: u64, depth: u64) -> ObservedCallee {
     ObservedCallee {
         name: name.to_owned(),
         kind: kind.to_owned(),
         file: file.to_owned(),
         line,
-        edge_kind: "calls".to_owned(),
         dispatch_via_trait: false,
         depth: Some(depth),
         dispatch_from: None,
     }
 }
 
-fn trait_impl(line: u32) -> ObservedCallee {
+/// A concrete impl reached through the depth-1 trait method callee.
+fn trait_impl(line: u64) -> ObservedCallee {
     ObservedCallee {
         name: "process".to_owned(),
         kind: "method".to_owned(),
         file: "src/dispatch.rs".to_owned(),
         line,
-        edge_kind: "calls".to_owned(),
         dispatch_via_trait: true,
-        depth: None,
+        depth: Some(1),
         dispatch_from: Some("process:src/dispatch.rs:2".to_owned()),
     }
 }
@@ -141,17 +138,13 @@ fn server(fixture: &ProductionCompositionFixture) -> Arc<McpServer> {
         .expect("production MCP server for the callees fixture")
 }
 
-async fn shutdown(fixture: ProductionCompositionFixture) {
-    fixture.harness.shutdown().await;
-}
-
 async fn call_json(server: &McpServer, tool_name: &str, arguments: Value) -> Value {
     let result = handle_real_server_tool_call(server, tool_name, arguments).await;
     let text = extract_real_server_text(&result);
     serde_json::from_str(text).unwrap_or_else(|error| panic!("{tool_name} JSON ({error}): {text}"))
 }
 
-async fn symbol_id(server: &McpServer, name: &str, file: &str, line: u32) -> String {
+async fn symbol_id(server: &McpServer, name: &str, file: &str, line: u64) -> String {
     let payload = call_json(
         server,
         "tracedecay_find_exact_symbol",
@@ -161,59 +154,70 @@ async fn symbol_id(server: &McpServer, name: &str, file: &str, line: u32) -> Str
     payload["matches"]
         .as_array()
         .and_then(|matches| {
-            matches.iter().find(|item| {
-                item["name"] == name && item["file"] == file && item["line"] == u64::from(line)
-            })
+            matches
+                .iter()
+                .find(|item| item["name"] == name && item["file"] == file && item["line"] == line)
         })
         .and_then(|item| item["id"].as_str())
         .unwrap_or_else(|| panic!("exact symbol {name} at {file}:{line} missing: {payload}"))
         .to_owned()
 }
 
+fn items(payload: &Value) -> &Vec<Value> {
+    payload
+        .pointer("/outcome/value/payload/items")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("tracedecay_callees must return a callee page: {payload}"))
+}
+
 fn observe(payload: &Value) -> Vec<ObservedCallee> {
-    let items: Vec<CalleeV1> = serde_json::from_value(payload.clone()).unwrap_or_else(|error| {
-        panic!("tracedecay_callees must return CalleeV1 rows: {error}; {payload}")
-    });
-    let labels = items
+    let label = |symbol: &Value| {
+        format!(
+            "{}:{}:{}",
+            symbol["name"].as_str().unwrap(),
+            symbol["file"].as_str().unwrap(),
+            symbol["line"]
+        )
+    };
+    let labels = items(payload)
         .iter()
         .map(|item| {
             (
-                item.node_id.clone(),
-                format!("{}:{}:{}", item.name, item.file, item.line),
+                item["symbol"]["node_id"].as_str().unwrap().to_owned(),
+                label(&item["symbol"]),
             )
         })
         .collect::<HashMap<_, _>>();
-    items
+    items(payload)
         .iter()
-        .map(|item| {
-            let dispatch_from = item.dispatch_from.as_ref().map(|id| {
+        .map(|item| ObservedCallee {
+            name: item["symbol"]["name"].as_str().unwrap().to_owned(),
+            kind: item["symbol"]["kind"].as_str().unwrap().to_owned(),
+            file: item["symbol"]["file"].as_str().unwrap().to_owned(),
+            line: item["symbol"]["line"].as_u64().unwrap(),
+            dispatch_via_trait: item["dispatch_via_trait"].as_bool().unwrap(),
+            depth: item["depth"].as_u64(),
+            dispatch_from: item["dispatch_from"].as_str().map(|id| {
                 labels.get(id).cloned().unwrap_or_else(|| {
                     panic!("dispatch_from {id} is not a callee in this response: {payload}")
                 })
-            });
-            ObservedCallee {
-                name: item.name.clone(),
-                kind: item.kind.clone(),
-                file: item.file.clone(),
-                line: item.line,
-                edge_kind: item.edge_kind.clone(),
-                dispatch_via_trait: item.dispatch_via_trait,
-                depth: item.depth,
-                dispatch_from,
-            }
+            }),
         })
         .collect()
 }
 
 async fn assert_ids_are_exact_symbols(server: &McpServer, payload: &Value) {
-    let items: Vec<CalleeV1> = serde_json::from_value(payload.clone())
-        .unwrap_or_else(|error| panic!("callees rows: {error}; {payload}"));
-    for item in items {
-        let expected = symbol_id(server, &item.name, &item.file, item.line).await;
+    for item in items(payload) {
+        let symbol = &item["symbol"];
+        let (name, file, line) = (
+            symbol["name"].as_str().unwrap(),
+            symbol["file"].as_str().unwrap(),
+            symbol["line"].as_u64().unwrap(),
+        );
         assert_eq!(
-            item.node_id, expected,
-            "{} at {}:{} must be the exact-symbol id",
-            item.name, item.file, item.line
+            symbol["node_id"].as_str().unwrap(),
+            symbol_id(server, name, file, line).await,
+            "{name} at {file}:{line} must be the exact-symbol id"
         );
     }
 }
@@ -245,6 +249,21 @@ fn by_source(left: &ObservedCallee, right: &ObservedCallee) -> Ordering {
         ))
 }
 
+fn chain_from_level_11(levels: u64) -> Vec<ObservedCallee> {
+    (1..=levels)
+        .map(|depth| {
+            let level = 11 - depth;
+            direct(
+                &format!("level_{level}"),
+                "function",
+                "src/chain.rs",
+                level + 1,
+                depth,
+            )
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn tracedecay_callees_lists_direct_and_deeper_calls() {
     let fixture = open_project().await;
@@ -254,77 +273,39 @@ async fn tracedecay_callees_lists_direct_and_deeper_calls() {
     let level_0 = symbol_id(&server, "level_0", "src/chain.rs", 1).await;
     let entry = symbol_id(&server, "entry", "src/lib.rs", 7).await;
 
-    let one_hop = callees(&server, &level_11, json!({"max_depth": 1})).await;
-    assert_eq!(
-        observe(&one_hop),
-        vec![direct("level_10", "function", "src/chain.rs", 11, 1)]
-    );
+    let one_hop = callees(&server, &level_11, json!({"maximum_depth": 1})).await;
+    assert_eq!(observe(&one_hop), chain_from_level_11(1));
     assert_ids_are_exact_symbols(&server, &one_hop).await;
 
     let default_depth = callees(&server, &level_11, json!({})).await;
     assert_eq!(
         observe(&default_depth),
-        vec![
-            direct("level_10", "function", "src/chain.rs", 11, 1),
-            direct("level_9", "function", "src/chain.rs", 10, 2),
-            direct("level_8", "function", "src/chain.rs", 9, 3),
-        ]
+        chain_from_level_11(3),
+        "a bare node_id walks three levels"
     );
 
-    let clamped = callees(&server, &level_11, json!({"max_depth": 99})).await;
-    assert_eq!(
-        observe(&clamped),
-        vec![
-            direct("level_10", "function", "src/chain.rs", 11, 1),
-            direct("level_9", "function", "src/chain.rs", 10, 2),
-            direct("level_8", "function", "src/chain.rs", 9, 3),
-            direct("level_7", "function", "src/chain.rs", 8, 4),
-            direct("level_6", "function", "src/chain.rs", 7, 5),
-            direct("level_5", "function", "src/chain.rs", 6, 6),
-            direct("level_4", "function", "src/chain.rs", 5, 7),
-            direct("level_3", "function", "src/chain.rs", 4, 8),
-            direct("level_2", "function", "src/chain.rs", 3, 9),
-            direct("level_1", "function", "src/chain.rs", 2, 10),
-        ]
-    );
+    let deepest = callees(&server, &level_11, json!({"maximum_depth": 10})).await;
+    assert_eq!(observe(&deepest), chain_from_level_11(10));
 
-    let leaf = callees(&server, &level_0, json!({"max_depth": 3})).await;
-    let caller_of_leaf = callees(&server, &level_1, json!({"max_depth": 1})).await;
-    assert_eq!(
-        observe(&leaf),
-        Vec::<ObservedCallee>::new(),
+    let leaf = callees(&server, &level_0, json!({"maximum_depth": 3})).await;
+    assert!(
+        observe(&leaf).is_empty(),
         "level_0 calls nothing; got {leaf}"
     );
+    let caller_of_leaf = callees(&server, &level_1, json!({"maximum_depth": 1})).await;
     assert_eq!(
         observe(&caller_of_leaf),
         vec![direct("level_0", "function", "src/chain.rs", 1, 1)]
     );
 
-    let missing = callees(
-        &server,
-        "symbol.absent-callee",
-        json!({"max_depth": 1, "resolve_dispatch": false}),
-    )
-    .await;
-    assert_eq!(
-        observe(&missing),
-        Vec::<ObservedCallee>::new(),
-        "an unknown occurrence is empty, not an error; got {missing}"
-    );
-    assert_eq!(
-        observe(&caller_of_leaf),
-        vec![direct("level_0", "function", "src/chain.rs", 1, 1)],
-        "level_1 still calls level_0"
-    );
-
-    let imported = callees(&server, &entry, json!({"max_depth": 1})).await;
+    let imported = callees(&server, &entry, json!({"maximum_depth": 1})).await;
     assert_eq!(
         observe(&imported),
         vec![direct("helper", "function", "src/sibling.rs", 1, 1)]
     );
     assert_ids_are_exact_symbols(&server, &imported).await;
 
-    shutdown(fixture).await;
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -336,7 +317,7 @@ async fn tracedecay_callees_adds_trait_impls_unless_dispatch_is_off() {
     let direct_only = callees(
         &server,
         &via_trait,
-        json!({"max_depth": 1, "resolve_dispatch": false}),
+        json!({"maximum_depth": 1, "resolve_trait_dispatch": false}),
     )
     .await;
     assert_eq!(
@@ -350,38 +331,22 @@ async fn tracedecay_callees_adds_trait_impls_unless_dispatch_is_off() {
         trait_impl(8),
         trait_impl(16),
     ];
-    let resolved_payload = callees(
-        &server,
-        &via_trait,
-        json!({"max_depth": 1, "resolve_dispatch": true}),
-    )
-    .await;
-    let mut resolved = observe(&resolved_payload);
-    resolved.sort_by(by_source);
-    assert_eq!(resolved, expected);
-    assert_ids_are_exact_symbols(&server, &resolved_payload).await;
-
-    let mut default_resolved =
-        observe(&callees(&server, &via_trait, json!({"max_depth": 1})).await);
+    let default_payload = callees(&server, &via_trait, json!({"maximum_depth": 1})).await;
+    let mut default_resolved = observe(&default_payload);
     default_resolved.sort_by(by_source);
     assert_eq!(
         default_resolved, expected,
-        "resolve_dispatch defaults to expanding trait impls"
+        "trait dispatch resolution is on unless the caller turns it off"
     );
+    assert_ids_are_exact_symbols(&server, &default_payload).await;
 
-    shutdown(fixture).await;
+    fixture.harness.shutdown().await;
 }
 
-fn assert_refusal(response: &Value, message: &str) {
+fn assert_refused(response: &Value, context: &str) {
     assert!(
-        response["result"].is_null(),
-        "refusal must not carry a result: {response}"
-    );
-    assert_eq!(response["error"]["code"], -32603, "{response}");
-    assert_eq!(response["error"]["message"], message, "{response}");
-    assert_eq!(
-        response["error"]["data"]["tool"], "tracedecay_callees",
-        "{response}"
+        !response["error"].is_null() || response["result"]["isError"] == true,
+        "{context} must be refused, not answered: {response}"
     );
 }
 
@@ -390,58 +355,44 @@ async fn tracedecay_callees_rejects_invalid_arguments() {
     let fixture = open_project().await;
     let server = server(&fixture);
     let level_0 = symbol_id(&server, "level_0", "src/chain.rs", 1).await;
+    let refuse = |arguments: Value| {
+        let server = Arc::clone(&server);
+        async move { handle_real_server_tool_call_raw(&server, "tracedecay_callees", arguments).await }
+    };
 
-    let blank = handle_real_server_tool_call_raw(
-        &server,
-        "tracedecay_callees",
-        json!({"node_id": "   ", "format": "json"}),
-    )
-    .await;
-    assert_refusal(
-        &blank,
-        "tool execution failed: config error: invalid parameter: node_id must not be empty",
+    assert_refused(&refuse(json!({"node_id": "   "})).await, "a blank node_id");
+    assert_refused(
+        &refuse(json!({"node_id": level_0, "maximum_depth": 0})).await,
+        "maximum_depth 0",
     );
-
-    let evidence_anchor = handle_real_server_tool_call_raw(
-        &server,
-        "tracedecay_callees",
-        json!({"node_id": "code-file:not-a-symbol", "format": "json"}),
-    )
-    .await;
-    assert_refusal(
-        &evidence_anchor,
-        "tool execution failed: config error: invalid parameter: node_id `code-file:not-a-symbol` is an evidence anchor, not a graph symbol occurrence",
+    assert_refused(
+        &refuse(json!({"node_id": level_0, "maximum_depth": 11})).await,
+        "maximum_depth above the traversal bound",
     );
-
-    let zero_depth = handle_real_server_tool_call_raw(
-        &server,
-        "tracedecay_callees",
-        json!({"node_id": level_0, "max_depth": 0, "format": "json"}),
-    )
-    .await;
-    assert_refusal(
-        &zero_depth,
-        "tool execution failed: config error: invalid parameter: max_depth must be at least 1",
+    assert_refused(&refuse(json!({})).await, "a missing node_id");
+    assert_refused(
+        &refuse(json!({"node_id": level_0, "maximum_depth": "deep"})).await,
+        "a non-integer maximum_depth",
     );
-
-    let missing_node =
-        handle_real_server_tool_call_raw(&server, "tracedecay_callees", json!({"format": "json"}))
-            .await;
-    assert_refusal(
-        &missing_node,
-        "tool execution failed: config error: invalid arguments for tracedecay_callees: missing field `node_id`",
+    let unknown = refuse(json!({"node_id": "symbol.absent-callee"})).await;
+    let unknown: Value = serde_json::from_str(extract_real_server_text(&unknown["result"]))
+        .unwrap_or_else(|error| panic!("unknown-occurrence callees JSON ({error}): {unknown}"));
+    let evidence = &unknown["outcome"]["value"];
+    assert_eq!(
+        (&evidence["execution"]["termination"], &evidence["payload"]),
+        (&json!("unavailable"), &Value::Null),
+        "an unknown occurrence is a typed unavailable read, not an empty callee list: {unknown}"
     );
+    for retired in [json!({"max_depth": 1}), json!({"resolve_dispatch": false})] {
+        let mut arguments = json!({"node_id": level_0});
+        for (key, value) in retired.as_object().unwrap() {
+            arguments[key] = value.clone();
+        }
+        assert_refused(
+            &refuse(arguments).await,
+            &format!("retired argument {retired}"),
+        );
+    }
 
-    let bad_depth = handle_real_server_tool_call_raw(
-        &server,
-        "tracedecay_callees",
-        json!({"node_id": "symbol.present", "max_depth": "deep", "format": "json"}),
-    )
-    .await;
-    assert_refusal(
-        &bad_depth,
-        "tool execution failed: config error: invalid arguments for tracedecay_callees: invalid type: string \"deep\", expected u32",
-    );
-
-    shutdown(fixture).await;
+    fixture.harness.shutdown().await;
 }

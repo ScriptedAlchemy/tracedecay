@@ -9,7 +9,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 hotpath.workspace = true
-schemars = "1.2.1"
+schemars.workspace = true
 serde = { version = "1", features = ["derive"] }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 

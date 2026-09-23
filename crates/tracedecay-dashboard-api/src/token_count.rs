@@ -263,8 +263,6 @@ struct ComputedTokenCount {
 /// best-available token count.
 #[derive(Debug, Clone)]
 pub struct MessageTokens {
-    pub provider: String,
-    pub session_id: String,
     /// Normalized like the SQL CTE: `""` when no model id was recorded.
     pub model: String,
     pub role: String,
@@ -326,7 +324,7 @@ async fn build_overlay(
 ) -> Option<Vec<MessageTokens>> {
     // Metadata only, text never leaves SQLite unless a count is missing.
     let sql = format!(
-        "SELECT provider, message_id, session_id, role, timestamp, model, msg_len
+        "SELECT provider, message_id, role, timestamp, model, msg_len
          FROM ({MESSAGE_TOKENS_CTE})"
     );
     let rows = query_rows(conn, &sql, ()).await.ok()?;
@@ -371,8 +369,6 @@ async fn build_overlay(
                 .get(&(provider.to_owned(), message_id.to_owned()))
                 .filter(|c| c.text_len == len);
             MessageTokens {
-                provider: provider.to_owned(),
-                session_id: str_field(row, "session_id").to_owned(),
                 model: str_field(row, "model").to_owned(),
                 role: str_field(row, "role").to_owned(),
                 timestamp: row.get("timestamp").and_then(Value::as_i64),

@@ -9,8 +9,6 @@ use std::time::SystemTime;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
-use tracedecay::test_support::host_admission::LcmLineageFaultForTest;
-#[cfg(feature = "test-transport")]
 use tracedecay_domain::CanonicalMessageRoleV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::PayloadAccessState;
@@ -23,6 +21,8 @@ use tracedecay_lcm::{
     LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmLifecycleUpdate, LcmMaintenanceDebt, LcmSourceRef,
     LcmSummaryNodeDraft,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::LcmLineageFaultForTest;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
@@ -1934,7 +1934,6 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         "{raw_payload}"
     );
     assert_eq!(raw_payload["expansion"]["from_current_session"], false);
-    assert!(raw_payload["expansion"]["externalized_note"].is_null());
     let payload_ref = raw_payload["expansion"]["payload_ref"]
         .as_str()
         .expect("cross-session external row should surface payload_ref")

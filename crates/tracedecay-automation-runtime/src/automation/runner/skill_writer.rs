@@ -12,6 +12,7 @@ use crate::automation::lifecycle::{
     AutomationRunSettlementGuard, RetainedAutomationRun,
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::curation::unpersisted_rejected_parts;
@@ -305,7 +306,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
             None => match build_skill_writer_evidence(
                 retrieval,
                 analytics_project_root,
-                analytics_db.map(|database| database as &dyn AutomationSessionStore),
+                analytics_db,
                 options,
             )
             .await?
@@ -313,12 +314,14 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
                 SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
                 SkillWriterEvidenceOutcome::Skipped {
                     reason,
+                    budget_stage,
                     evidence_hash,
                 } => {
                     return Ok(rejected_skill_writer_run(
                         &run,
                         config,
                         reason,
+                        budget_stage,
                         evidence_hash,
                     ));
                 }
@@ -894,6 +897,7 @@ pub(super) fn rejected_skill_writer_run(
     run: &AgentTaskRunContext<'_>,
     config: &AutomationConfig,
     reason: &str,
+    budget_stage: Option<SessionRetrievalBudgetStageV1>,
     evidence_hash: Option<String>,
 ) -> SkillWriterAutomationRun {
     let (report, record) = unpersisted_rejected_parts(
@@ -901,6 +905,7 @@ pub(super) fn rejected_skill_writer_run(
         config,
         AgentTaskKind::SkillWriter,
         reason,
+        budget_stage,
         evidence_hash,
         "skill_writer",
     );

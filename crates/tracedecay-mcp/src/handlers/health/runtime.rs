@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 use crate::{McpDoctorReportV1, McpToolContext, ToolResult, generic_tool_result};
 
@@ -18,7 +19,7 @@ async fn session_temporal_health_value(
     match project_session_db {
         Some(db) => match tokio::time::timeout(
             SESSION_TEMPORAL_HEALTH_BUDGET,
-            db.session_temporal_doctor_health(),
+            SessionTemporalAccess::new(db).session_temporal_doctor_health(),
         )
         .await
         {

@@ -44,9 +44,9 @@ use std::process::{Command, Output};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::{self, StoreLayout};
 
 use super::IsolatedEnv;
@@ -262,12 +262,7 @@ impl TestProfile {
     pub fn unenrolled(&self, name: impl AsRef<Path>) -> UnenrolledProject {
         let root = self.path(name);
         assert!(
-            !storage::has_repository_identity_marker(&root)
-                && storage::read_legacy_enrollment_marker(&root)
-                    .unwrap_or_else(|err| {
-                        panic!("failed to read fixture enrollment marker: {err}")
-                    })
-                    .is_none(),
+            !storage::has_repository_identity_marker(&root),
             "an unenrolled fixture root must not carry an identity marker: {}",
             root.display()
         );
@@ -487,10 +482,10 @@ impl RegisteredProject {
     /// and project-session seams require.
     pub fn project_scoped_runtime(
         &self,
-    ) -> tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1 {
-        tracedecay::test_support::host_admission::ProjectScopedTestRuntimeV1::new(Arc::clone(
-            &self.registry,
-        ))
+    ) -> tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1 {
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            Arc::clone(&self.registry),
+        )
         .unwrap_or_else(|err| panic!("fixture project runtime must be project-scoped: {err}"))
     }
 

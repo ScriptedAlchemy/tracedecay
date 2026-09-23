@@ -245,7 +245,7 @@ pub(super) fn observe_invocation_response(
     started_at: UtcMicros,
     response: &DaemonInvocationResponse,
 ) {
-    let observed_at = current_micros();
+    let observed_at = now_micros();
     let outcome = invocation_response_outcome(response);
     let duration_micros = u64::try_from(observed_at.0.saturating_sub(started_at.0)).ok();
     if let Some(route) = route {

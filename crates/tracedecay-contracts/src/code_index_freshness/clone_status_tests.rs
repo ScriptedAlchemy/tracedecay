@@ -7,7 +7,7 @@ fn observation() -> CodeCloneIndexObservationV1 {
     CodeCloneIndexObservationV1 {
         generation_id: "generation.clone.1".to_owned(),
         source_revision: Some("commit.clone.1".to_owned()),
-        artifact_format_revision: Some(16),
+        artifact_format_revision: Some(23),
         conservative_normalization_revision: 1,
         rename_normalization_revision: 1,
         coverage: CodeCloneIndexCoverageV1 {
@@ -40,12 +40,9 @@ fn clone_readiness_preserves_all_states_and_a_complete_zero() {
         CodeCloneIndexStatusV1::Unavailable {
             reason: "artifact unreadable".to_owned(),
         },
-        CodeCloneIndexStatusV1::Backfilling {
-            observation: sample.clone(),
-        },
         CodeCloneIndexStatusV1::Partial {
             observation: sample.clone(),
-            omission_reasons: vec!["fingerprint successor missing".to_owned()],
+            omission_reasons: vec!["positional fingerprints missing".to_owned()],
         },
         CodeCloneIndexStatusV1::Ready {
             observation: sample.clone(),
@@ -65,10 +62,7 @@ fn clone_readiness_preserves_all_states_and_a_complete_zero() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        states,
-        ["unavailable", "backfilling", "partial", "ready", "stale"]
-    );
+    assert_eq!(states, ["unavailable", "partial", "ready", "stale"]);
     let ready = serde_json::to_value(CodeCloneIndexStatusV1::Ready {
         observation: observation(),
     })

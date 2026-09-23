@@ -75,15 +75,15 @@ use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
     LspRuntimeFuture,
 };
-use tracedecay_session_memory::context::MonotonicDeadline;
+use tracedecay_runtime_core::cancellation::MonotonicDeadline;
 
 use super::{DaemonInvocationState, POLICY_REVISION_V1, register_project_query_authority};
 use crate::mcp::McpServer;
-use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
-use tracedecay_agent_hosts::agents::context_scout::ports::{
+use tracedecay_agent_hosts::agents::context_scout::address_registry::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
 };
+use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDeliverySelectionInputV1, ContextScoutRuntimeOutcomeV1, ContextScoutServiceStateV1,
     ContextScoutTriggerV1,
@@ -655,7 +655,7 @@ async fn install_project_open_context_scout_configuration(
 /// exact current-generation authority that maps saved-edit hooks back to
 /// indexed documents.
 struct ProjectOpenScoutProducerV1 {
-    graph: Arc<crate::project::TraceDecay>,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
     scout_owner: Arc<ProjectContextScoutOwnerV1>,
     scout_registry: Arc<ProjectContextScoutAddressRegistryV1>,
     feedback_cycle: tokio::sync::RwLock<ProjectOpenFeedbackCyclePinV1>,
@@ -2002,7 +2002,7 @@ async fn register_project_proximity_read_authority(
 /// unavailable until that upgrade replaces this owner.
 #[derive(Clone)]
 struct ProjectOpenProximityReadOwnerV1 {
-    graph: Arc<crate::project::TraceDecay>,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
     scope: tracedecay_contracts::ResolvedScope,
     project_root: std::path::PathBuf,
     feedback_scope: FeedbackScopeV1,

@@ -31,13 +31,14 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::storage::{
     read_repository_identity_marker, write_repository_identity_marker,
 };
 use tracedecay_runtime_core::timeutil::nearest_rank;
 use tracedecay_session_memory::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
 use tracedecay_session_memory::session::{
@@ -46,12 +47,14 @@ use tracedecay_session_memory::session::{
     SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
     SessionTemporalQuery,
 };
-use tracedecay_session_temporal_store::RegisteredGlobalDbSessionTemporalExecution;
+use tracedecay_session_temporal_store::{
+    RegisteredGlobalDbSessionTemporalExecution, SessionTemporalAccess,
+};
 use tracedecay_sessions::observation::ObservationCancellation;
-use tracedecay_sessions::runtime::codex;
+use tracedecay_sessions::runtime::hosts::codex;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 mod root_relation_fixture;
@@ -168,7 +171,7 @@ pub struct IsolatedBenchmarkEnv {
 
 impl IsolatedBenchmarkEnv {
     pub fn enter(prefix: &str) -> BenchResult<Self> {
-        let env_lock = crate::config::lock_user_data_dir_test_env();
+        let env_lock = tracedecay_project::config::lock_user_data_dir_test_env();
         let temp = tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
@@ -718,7 +721,7 @@ fn measurement_result(source_identity: Value, measurement: Value) -> Value {
 /// benchmark-private handle.
 fn ensure_admission_resource_authorities()
 -> Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1> {
-    crate::test_support::host_admission::ensure_process_background_cpu_authority()
+    tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
         .expect("install process capture authorities for the benchmark")
 }
 
@@ -867,8 +870,7 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurem
         ));
     }
     let replay_started = Instant::now();
-    prepared
-        .registered
+    SessionTemporalAccess::new(&*prepared.registered)
         .complete_session_refresh_result(
             prepared.complete_request.clone(),
             ExecutionControl::new(None),

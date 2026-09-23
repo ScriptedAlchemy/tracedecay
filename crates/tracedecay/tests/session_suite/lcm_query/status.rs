@@ -308,5 +308,4 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
         "only the canonically sanitized row counts as lossy"
     );
     assert!(status.redaction.enabled);
-    assert_eq!(status.redaction.legacy_truncated_count, 0);
 }

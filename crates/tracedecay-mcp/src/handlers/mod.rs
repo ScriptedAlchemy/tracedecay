@@ -25,7 +25,6 @@ pub mod health;
 pub mod hook_runtime;
 pub mod info;
 mod multi_root;
-mod retained_response;
 mod session_authorities;
 pub mod skills;
 pub mod support;
@@ -37,9 +36,6 @@ pub mod workflow_family;
 pub use bounded_search::run_bounded_search;
 pub use multi_root::handle_multi_root;
 pub(crate) use multi_root::multi_root_operation_for_tool;
-pub use retained_response::{
-    retained_problem_envelope, retained_safe_diagnostic, validated_retained_response,
-};
 pub use session_authorities::SessionAuthorities;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use session_authorities::mcp_session_authorities;

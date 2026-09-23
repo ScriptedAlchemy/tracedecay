@@ -721,7 +721,7 @@ fn exact_project_and_generation_route_canonical_attribution() {
     );
     let payload = evidence.payload.expect("payload");
     assert_eq!(
-        payload.tests,
+        payload.current_tests(),
         vec![SymbolOccurrenceId::new("symbol.test").expect("test")]
     );
     assert_eq!(
@@ -812,11 +812,46 @@ fn unknown_attribution_remains_typed_partial() {
         panic!("unknown attribution must stay partial");
     };
     let payload = evidence.payload.expect("payload");
-    assert!(payload.tests.is_empty());
+    assert!(payload.current_tests().is_empty());
     assert_eq!(
         payload.attributions[0].evidence_class,
         TestAttributionEvidenceClassV1::UnknownUnsupported
     );
+}
+
+#[test]
+fn current_disposition_with_non_candidate_class_fails_closed() {
+    for evidence_class in [
+        TestAttributionEvidenceClassV1::StaleEvidence,
+        TestAttributionEvidenceClassV1::UnknownUnsupported,
+    ] {
+        let project_id = ProjectId::new("project.affected-tests").expect("project");
+        let generation = generation("generation.affected-tests.1");
+        let mut read = complete_read(generation.clone());
+        read.evidence.as_mut().expect("join").records[0].disposition =
+            GenerationTestJoinDispositionV1::Current { evidence_class };
+        let port = TraceDecayAffectedTestsPortV1::from_binding(
+            Some(project_id.clone()),
+            generation.clone(),
+            Some(Arc::new(AttributionFixture {
+                calls: AtomicUsize::new(0),
+                read,
+            })),
+        );
+        let (context, operation, _) = context(project_id);
+
+        let RetrievalPortOutcome::Unavailable(evidence) = port.affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request(generation),
+        ) else {
+            panic!("a current disposition must carry a candidate class");
+        };
+        assert!(evidence.payload.is_none());
+        assert_eq!(evidence.omissions[0].reason, OmissionReason::Failed);
+    }
 }
 
 #[test]

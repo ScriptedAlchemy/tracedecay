@@ -1,11 +1,10 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationIdV1,
     CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1, ComponentVersion,
-    DurableClaudeObservationV1, DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+    DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId, RetentionClass,
@@ -13,6 +12,7 @@ use tracedecay_domain::{
     SensitivityV1, SessionId, UtcMicros, derive_exact_observation_anchor_id,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
@@ -20,7 +20,7 @@ use tracedecay_store::{
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
     ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use crate::common::isolated_lcm_db_path;
@@ -46,10 +46,11 @@ fn cursor_in_generation(
     generation: u64,
     byte_offset: u64,
 ) -> ObservationSourceCursorV1 {
-    ObservationSourceCursorV1::new(
+    ObservationSourceCursorV1::for_ordering(
         source(session_id),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         byte_offset,
     )
     .unwrap()
@@ -75,7 +76,7 @@ fn observation(
     end: u64,
     receipt_id: &str,
     payload: Value,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     observation_in_generation(session_id, GENERATION, start, end, receipt_id, payload)
 }
 
@@ -86,8 +87,8 @@ fn observation_in_generation(
     end: u64,
     receipt_id: &str,
     payload: Value,
-) -> DurableClaudeObservationV1 {
-    DurableClaudeObservationV1::new(
+) -> DurableObservationV1 {
+    DurableObservationV1::new(
         ObservationIdentityMaterialV1::new(
             source(session_id),
             ObservationScopeV1::Profile,
@@ -251,7 +252,7 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "projection-test")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         generation.clone(),
         UtcMicros(1),
@@ -262,7 +263,7 @@ fn anchored_write(write: ObservationWrite) -> AnchoredObservationWrite {
 }
 
 fn write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
     let next_cursor = cursor_in_generation(
@@ -275,7 +276,7 @@ fn write(
 
 async fn persist(
     store: &GlobalDbObservationStore,
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> u64 {
     match store

@@ -61,7 +61,12 @@ pub mod transport;
 pub use application_surface::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
     ApplicationToolRequest, FeedbackSurfaceRequest, adapt_application_tool_request,
-    parse_application_surface_request, separate_application_tool_request,
+    application_delivery_route, application_outcome_value, application_response,
+    application_surface_cancellation_policy,
+    application_surface_feedback_is_observable, application_surface_feedback_operation,
+    decode_retained_request, invoke_application_surface, is_source_edit_operation,
+    parse_application_surface_invocation_payload, parse_application_surface_request,
+    parse_source_edit_arguments, separate_application_tool_request,
 };
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,
@@ -69,9 +74,8 @@ pub use client::{
     DaemonInvocationError, DaemonInvocationExecutor, DaemonInvocationExecutorFuture,
     DaemonInvocationResult, DaemonLspSessionClient, DispatchError, DispatchInput,
     DispatchedInvocation, InvocationCancellationPolicy, InvocationControls, ResolvedBinding,
-    ScopeSelector, application_delivery_route, application_response, deadline_remaining,
-    handshake_refusal_error, invocation_now_micros, map_invocation_error, resolve_dispatch,
-    wait_for_cancellation,
+    ScopeSelector, deadline_remaining, handshake_refusal_error, map_invocation_error,
+    resolve_dispatch, wait_for_cancellation,
 };
 pub use client_identity::DaemonClientIdentity;
 pub use connection::{

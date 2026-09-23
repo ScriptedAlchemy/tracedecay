@@ -10,8 +10,8 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::dispatch_test_support::*;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
-use crate::project::TraceDecay;
+use tracedecay_project::config::lock_user_data_dir_test_env;
+use tracedecay_project::project::TraceDecay;
 
 #[derive(Default)]
 struct UnavailableEffectExecutor {
@@ -47,7 +47,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for UnavailableEffectEx
                 .unwrap()
                 .push((binding.operation().as_str().to_owned(), payload.clone()));
         }
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -65,7 +73,6 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
             tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
-        self.invocations.fetch_add(1, Ordering::SeqCst);
         if let tracedecay_daemon_protocol::DaemonInvocationPayload::Configuration {
             surface_operation,
             request,
@@ -264,10 +271,9 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
     }
 
     let application_invocations = executor.application_surface_invocations.lock().unwrap();
-    let migrated_effects = &effects[..2];
-    assert_eq!(application_invocations.len(), migrated_effects.len());
+    assert_eq!(application_invocations.len(), effects.len());
     for ((actual_operation, request), (_, expected_operation, idempotency_key, _)) in
-        application_invocations.iter().zip(migrated_effects)
+        application_invocations.iter().zip(&effects)
     {
         assert_eq!(actual_operation, expected_operation.as_str());
         assert_eq!(request["idempotency_key"], *idempotency_key);
@@ -275,10 +281,9 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
     drop(application_invocations);
 
     let invocations = executor.configuration_invocations.lock().unwrap();
-    let daemon_effects = &effects[2..];
-    assert_eq!(invocations.len(), daemon_effects.len());
+    assert_eq!(invocations.len(), effects.len());
     for ((actual_operation, request, policy), (_, expected_operation, idempotency_key, _)) in
-        invocations.iter().zip(daemon_effects)
+        invocations.iter().zip(&effects)
     {
         assert_eq!(actual_operation, expected_operation);
         assert_eq!(
@@ -371,23 +376,24 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
     }
 
     let application_invocations = executor.application_surface_invocations.lock().unwrap();
-    assert_eq!(application_invocations.len(), 1);
-    assert_eq!(application_invocations[0].0, "configuration_get");
+    assert_eq!(application_invocations.len(), reads.len());
+    for ((actual_operation, _), (_, expected_operation, _)) in
+        application_invocations.iter().zip(&reads)
+    {
+        assert_eq!(actual_operation, expected_operation.as_str());
+    }
     assert_eq!(
-        application_invocations[0].1,
+        application_invocations[1].1,
         json!({"key": "mcp.tool_timings"})
     );
     drop(application_invocations);
 
     let invocations = executor.configuration_invocations.lock().unwrap();
-    assert_eq!(invocations.len(), reads.len() - 1);
-    let expected_operations = reads.iter().filter_map(|(_, operation, _)| {
-        (*operation != ApplicationSurfaceOperation::ConfigurationGet).then_some(*operation)
-    });
-    for ((actual_operation, request, policy), expected_operation) in
-        invocations.iter().zip(expected_operations)
+    assert_eq!(invocations.len(), reads.len());
+    for ((actual_operation, request, policy), (_, expected_operation, _)) in
+        invocations.iter().zip(&reads)
     {
-        assert_eq!(actual_operation, &expected_operation);
+        assert_eq!(actual_operation, expected_operation);
         assert_eq!(
             policy,
             &tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly

@@ -14,17 +14,18 @@ use tracedecay::daemon::call_tool;
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
 use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 use tracedecay_domain::{
-    ComponentVersion, DurableClaudeObservationV1, ObservationIdentityMaterialV1,
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
-    ProjectionGenerationId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    ComponentVersion, DurableObservationV1, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    PayloadReferenceV1, ProjectionGenerationId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    SessionId, UtcMicros,
 };
 use tracedecay_global_db::GlobalDbObservationStore;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 #[cfg(all(unix, tracedecay_observation_fault_harness, feature = "test-transport"))]
@@ -53,16 +54,17 @@ fn source(stage: &str) -> ObservationSourceIdentityV1 {
 }
 
 fn cursor(stage: &str, byte_offset: u64) -> ObservationSourceCursorV1 {
-    ObservationSourceCursorV1::new(
+    ObservationSourceCursorV1::for_ordering(
         source(stage),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(GENERATION).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         byte_offset,
     )
     .unwrap()
 }
 
-fn observation(stage: &str) -> DurableClaudeObservationV1 {
+fn observation(stage: &str) -> DurableObservationV1 {
     let payload = json!({
         "kind": "assistant_message",
         "body": format!("sanitized daemon fault payload {stage}"),
@@ -86,7 +88,7 @@ fn observation(stage: &str) -> DurableClaudeObservationV1 {
     )
     .unwrap();
 
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.daemon-fault").unwrap(),
@@ -95,12 +97,12 @@ fn observation(stage: &str) -> DurableClaudeObservationV1 {
     .unwrap()
 }
 
-fn write(stage: &str, observation: DurableClaudeObservationV1) -> AnchoredObservationWrite {
+fn write(stage: &str, observation: DurableObservationV1) -> AnchoredObservationWrite {
     let write = ObservationWrite::new(observation, None, cursor(stage, 100)).unwrap();
     let generation = ProjectionGenerationId::new("projection.daemon-fault.v4").unwrap();
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "daemon-fault").unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         generation.clone(),
         UtcMicros(1),
@@ -431,7 +433,7 @@ async fn assert_daemon_crash_stage(
         client_instance_id: "daemon-fault-harness".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: tracedecay::project::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     let ingest_args = |session_id: &str| {
         json!({
@@ -571,7 +573,7 @@ async fn assert_daemon_crash_stage(
             "provider": "claude",
             "session_id": session_id,
             "query": marker,
-            "catch_up": false,
+            "require_fresh": false,
             "format": "json",
         }),
         "user message search",

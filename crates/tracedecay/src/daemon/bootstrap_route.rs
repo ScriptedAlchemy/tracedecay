@@ -113,6 +113,12 @@ pub(super) fn daemon_bootstrap_response(
             response
         })),
         McpMethod::InitializedAck => Some(None),
+        McpMethod::TrivialAck => Some(
+            request
+                .id
+                .clone()
+                .map(|id| JsonRpcResponse::success(id, json!({}))),
+        ),
         McpMethod::ToolsList => Some(request.id.clone().map(|id| {
             let budget =
                 project_node_count.map_or_else(|| explore_call_budget(0), explore_call_budget);

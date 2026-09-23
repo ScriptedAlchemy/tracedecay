@@ -23,6 +23,9 @@ use tracedecay_contracts::now_micros;
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::DaemonInvocationService;
+use tracedecay_daemon_service::automation_observation::{
+    project_run_observation_producer, record_project_run,
+};
 use tracedecay_dashboard_api::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
     DashboardAutomationObservationRecorderV1, DashboardAutomationRunOutcomeV1,
@@ -32,9 +35,10 @@ use tracedecay_dashboard_api::{
 };
 use tracedecay_domain::configuration::UserProfileId;
 
-use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResolver};
-use crate::project::TraceDecay;
+use crate::mcp::server::RetainedProjectServerResolver;
+use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
 type DashboardAutomationResult<T> = std::result::Result<T, DashboardAutomationAuthorityErrorV1>;
 type DashboardAutomationProjectFuture = std::pin::Pin<
@@ -74,16 +78,13 @@ pub(crate) fn dashboard_automation_observation_port(
     Arc::new(move |project_root| {
         let invocation_service = invocation_service.clone();
         Box::pin(async move {
-            let producer = crate::daemon::project_automation_observation_producer(
-                &invocation_service,
-                &project_root,
-            )
-            .await
-            .ok_or_else(|| {
-                "dashboard automation observation authority is unavailable".to_owned()
-            })?;
+            let producer = project_run_observation_producer(&invocation_service, &project_root)
+                .await
+                .ok_or_else(|| {
+                    "dashboard automation observation authority is unavailable".to_owned()
+                })?;
             Ok(Arc::new(move |record| {
-                crate::daemon::record_project_automation_run(
+                record_project_run(
                     producer.as_ref(),
                     &project_root,
                     &record,
@@ -354,14 +355,11 @@ async fn execute_dashboard_automation_run(
     _run_control: &AutomationRunControl,
     invocation_service: &DaemonInvocationService,
 ) -> DashboardAutomationResult<DashboardAutomationRunOutcomeV1> {
-    let producer = crate::daemon::project_automation_observation_producer(
-        invocation_service,
-        cg.project_root(),
-    )
-    .await
-    .ok_or_else(|| DashboardAutomationAuthorityErrorV1::Unavailable {
-        detail: "dashboard automation observation authority is unavailable".to_owned(),
-    })?;
+    let producer = project_run_observation_producer(invocation_service, cg.project_root())
+        .await
+        .ok_or_else(|| DashboardAutomationAuthorityErrorV1::Unavailable {
+            detail: "dashboard automation observation authority is unavailable".to_owned(),
+        })?;
     let pinned = cg
         .configuration_runtime()
         .client()

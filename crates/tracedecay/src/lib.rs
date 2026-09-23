@@ -33,19 +33,11 @@
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
 
-// The project handle, its configuration authority, and the product runtime
-// live in `tracedecay-project`, below the MCP and daemon layers; the root
-// keeps their historical paths.
-pub use tracedecay_project::{config, product_runtime, project, version};
 pub mod daemon;
 pub mod dashboard;
 pub mod doctor;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::too_many_lines)]
-pub mod test_support;
-pub use tracedecay_application::git_query;
 mod hooks;
 #[cfg(test)]
 mod host_admission_test;
@@ -55,10 +47,9 @@ mod host_admission_test;
 #[path = "../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;
 pub mod mcp;
-pub use tracedecay_project::product_runtime::{
-    ProductRuntimeError, ProductRuntimeProvider, ProductSourceProvenance, product_runtime,
-    register_product_runtime,
-};
+#[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::too_many_lines)]
+pub mod test_support;
 mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports, session_review_port};
 mod serve;

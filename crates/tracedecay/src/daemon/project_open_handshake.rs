@@ -18,11 +18,11 @@ pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<crate::project::TraceDecay> {
+) -> Result<tracedecay_project::project::TraceDecay> {
     let open_options = crate::daemon::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) = match Box::pin(
-        crate::project::TraceDecay::resolve_registered_configuration_layout(
+        tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
             project_path,
             &open_options,
             registry_database.as_ref(),
@@ -38,7 +38,7 @@ pub(super) async fn open_project_for_handshake(
         // fallback below bootstrap it.
         Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
             Box::pin(
-                crate::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
+                tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
                     project_path,
                     &open_options,
                     registry_database.as_ref(),
@@ -89,7 +89,7 @@ pub(super) async fn open_project_for_handshake(
     // and durable store authority; project composition schedules the maintained
     // bounded code-index owner after publication.
     let open_result = Box::pin(
-        crate::project::TraceDecay::open_with_registered_configuration(
+        tracedecay_project::project::TraceDecay::open_with_registered_configuration(
             project_path,
             open_options.clone(),
             store_layout.clone(),
@@ -103,7 +103,7 @@ pub(super) async fn open_project_for_handshake(
         Ok(cg) => Ok(cg),
         Err(open_err) if is_readonly_database_error(&open_err) => {
             match Box::pin(
-                crate::project::TraceDecay::open_read_only_with_registered_configuration(
+                tracedecay_project::project::TraceDecay::open_read_only_with_registered_configuration(
                     project_path,
                     open_options,
                     store_layout,
@@ -127,7 +127,7 @@ pub(super) async fn open_project_for_handshake(
             // activation owner performs indexing after admission, so opening a
             // project never waits for a repository scan or rebuild.
             Box::pin(
-                crate::project::TraceDecay::init_with_registered_configuration(
+                tracedecay_project::project::TraceDecay::init_with_registered_configuration(
                     project_path,
                     open_options,
                     store_layout,

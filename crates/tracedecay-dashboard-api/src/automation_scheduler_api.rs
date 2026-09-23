@@ -4,7 +4,6 @@ use axum::Json;
 use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
-use serde_json::Value;
 
 use super::DashboardState;
 use super::automation_config_api::effective_automation_config;
@@ -12,7 +11,7 @@ use super::util::{JsonError, internal_error};
 use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
 use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunLedgerTaskSummary, load_run_ledger_task_summary,
+    AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, load_run_ledger_task_summary,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
     AutomationSchedulerControl, SessionActivity, load_scheduler_control, load_session_activity,
@@ -63,7 +62,7 @@ pub(super) struct AutomationTaskStatusV1 {
     pub skip_reason: Option<AutomationSkipReasonV1>,
     /// The most recent scheduler-triggered ledger record. Its run artifacts
     /// remain the canonical detailed receipt surface.
-    pub last_scheduler_run: Option<Value>,
+    pub last_scheduler_run: Option<AutomationRunLedgerRecord>,
 }
 
 #[hotpath::measure(label = "dashboard_api.scheduler.status", future = true)]
@@ -146,7 +145,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
                 activity,
                 now,
                 AgentTaskKind::MemoryCurator,
-            )?,
+            ),
             task_status(
                 &effective,
                 control.paused,
@@ -154,7 +153,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
                 activity,
                 now,
                 AgentTaskKind::SessionReflector,
-            )?,
+            ),
             task_status(
                 &effective,
                 control.paused,
@@ -162,7 +161,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
                 activity,
                 now,
                 AgentTaskKind::SkillWriter,
-            )?,
+            ),
         ],
     }))
 }
@@ -174,7 +173,7 @@ fn task_status(
     activity: SessionActivity,
     now: i64,
     task: AgentTaskKind,
-) -> std::result::Result<AutomationTaskStatusV1, JsonError> {
+) -> AutomationTaskStatusV1 {
     let decision = if paused {
         tracedecay_automation_runtime::automation::scheduler::AutomationScheduleDecision::skipped(
             AutomationSkipReasonV1::SchedulerPaused,
@@ -182,16 +181,12 @@ fn task_status(
     } else {
         schedule_decision(config, task, summary.records(), activity, now)
     };
-    Ok(AutomationTaskStatusV1 {
+    AutomationTaskStatusV1 {
         task: task_key(task).to_string(),
         due: decision.is_due(),
         skip_reason: decision.skip_reason(),
-        last_scheduler_run: summary
-            .latest_scheduler_activity()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|error| internal_error(&error))?,
-    })
+        last_scheduler_run: summary.latest_scheduler_activity().cloned(),
+    }
 }
 
 fn scheduler_status_label(
@@ -318,14 +313,13 @@ mod tests {
             SessionActivity::none(),
             150,
             AgentTaskKind::MemoryCurator,
-        )
-        .unwrap();
+        );
 
         assert!(!status.due);
         assert_eq!(
             status.skip_reason,
             Some(AutomationSkipReasonV1::SchedulerNonRetryableFailure)
         );
-        assert_eq!(status.last_scheduler_run.unwrap()["run_id"], "z-failure");
+        assert_eq!(status.last_scheduler_run.unwrap().run_id, "z-failure");
     }
 }

@@ -3,8 +3,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    context_description, def, def_always_load, def_object, def_required_object, number_property,
-    required_object_schema, string_property, with_project_selector_properties,
+    context_description, def, def_always_load, def_required_object, string_property,
+    with_project_selector_properties,
 };
 use crate::ToolDefinition;
 
@@ -132,7 +132,7 @@ pub(super) fn def_grep() -> ToolDefinition {
     def_always_load(
         "tracedecay_grep",
         "Grep Content",
-        "grep, ripgrep, rg, text search, find string. Literal/regex content search over UTF-8 text sources in the project working tree (respects .gitignore; binary and non-UTF-8 files are outside the search scope), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_body. Bounded file or line omissions and unavailable source candidates are reported as partial coverage. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_selector.project_id only when intentionally searching another registered project.",
+        "grep, ripgrep, rg, text search, find string. Literal/regex content search over UTF-8 text sources in the project working tree (respects .gitignore; binary and non-UTF-8 files are outside the search scope), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_source_body with its node_id. Bounded file or line omissions and unavailable source candidates are reported as partial coverage. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_selector.project_id only when intentionally searching another registered project.",
         json!({
             "type": "object",
             "properties": with_project_selector_properties(json!({
@@ -206,36 +206,6 @@ pub(super) fn def_context(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_callers_for() -> ToolDefinition {
-    def(
-        "tracedecay_callers_for",
-        "Bulk callers",
-        "Returns the caller set of every supplied node ID in one round-trip. \
-         Useful for clustering or similarity queries that need many caller \
-         sets at once. Returns a map of {node_id: [caller_id, …]}. Defaults \
-         to `calls` edges; pass `kind` to filter by `uses`, `type_of`, etc.",
-        json!({
-            "type": "object",
-            "properties": {
-                "node_ids": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Node IDs to look up callers for."
-                },
-                "kind": {
-                    "type": "string",
-                    "description": "Edge kind to filter by (default: \"calls\"). Pass an empty string to match all kinds."
-                },
-                "max_per_item": {
-                    "type": "number",
-                    "description": "Cap callers per item (default: 1000)."
-                }
-            },
-            "required": ["node_ids"]
-        }),
-    )
-}
-
 pub(super) fn def_by_qualified_name() -> ToolDefinition {
     def_required_object(
         "tracedecay_by_qualified_name",
@@ -247,24 +217,6 @@ pub(super) fn def_by_qualified_name() -> ToolDefinition {
             "qualified_name": string_property("The exact qualified name to look up.")
         }),
         &["qualified_name"],
-    )
-}
-
-pub(super) fn def_impls() -> ToolDefinition {
-    def_object(
-        "tracedecay_impls",
-        "Trait Implementations",
-        "List `impl` blocks matching a trait, a type, or both. With no filter \
-         returns every impl in the graph (use sparingly). Both arguments \
-         accept short names (e.g. `Display`) or qualified names. Surfaces \
-         information that is otherwise hard to query: trait-method dispatch \
-         targets, which types satisfy a given trait, and which traits a type \
-         implements.",
-        json!({
-            "trait": string_property("Trait name to filter by (short or qualified). Omit to include all traits."),
-            "type": string_property("Implementing type to filter by (short or qualified). Omit to include all types."),
-            "limit": number_property("Maximum number of results to return (default: 100).")
-        }),
     )
 }
 
@@ -293,40 +245,6 @@ pub(super) fn def_signature() -> ToolDefinition {
 }
 
 // ── Deferred tools (discovered via ToolSearch on demand) ────────────────
-
-pub(super) fn def_callers() -> ToolDefinition {
-    // alwaysLoad: "who calls this / find references" is the second-most-common
-    // native reflex after grep. It only needs a node_id, so keeping it loaded
-    // lets the model chain straight from a search/context hit into a caller
-    // trace. This is the 7th (and final) always-loaded tool, see def_grep.
-    def_always_load(
-        "tracedecay_callers",
-        "Callers",
-        "Who calls this, find references, find usages, call sites. Find all callers of a given node (function, method, etc.) up to a specified depth.",
-        required_object_schema(
-            json!({
-                "node_id": string_property("The unique node ID to find callers for"),
-                "max_depth": number_property("Maximum traversal depth (default: 3)")
-            }),
-            &["node_id"],
-        ),
-    )
-}
-
-pub(super) fn def_callees(input_schema: Value) -> ToolDefinition {
-    def(
-        "tracedecay_callees",
-        "Callees",
-        "What does this call, outgoing calls, dependencies of a function. \
-         Find all callees of a given node (function, method, etc.) up to a \
-         specified depth. When a callee resolves to a trait method, the \
-         concrete impl methods reachable through that trait are also \
-         returned, tagged with `dispatch_via_trait: true` and a `dispatch_from` \
-         pointing at the trait method. Pass `resolve_dispatch: false` to \
-         disable this behaviour and get only direct call edges.",
-        input_schema,
-    )
-}
 
 pub(super) fn def_impact(input_schema: Value) -> ToolDefinition {
     def(
@@ -391,28 +309,6 @@ pub(super) fn def_redundancy(input_schema: Value) -> ToolDefinition {
     )
 }
 
-pub(super) fn def_type_hierarchy() -> ToolDefinition {
-    def(
-        "tracedecay_type_hierarchy",
-        "Type Hierarchy",
-        "Use when asked a trait/interface/class type-hierarchy question, trigger before manually grepping `impl X for` / `extends X` chains across files. Returns the full recursive tree of implementors and extenders for a resolved type node.",
-        json!({
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "The type node ID to build the hierarchy for"
-                },
-                "max_depth": {
-                    "type": "number",
-                    "description": "Maximum inheritance depth to traverse (default: 5)"
-                }
-            },
-            "required": ["node_id"]
-        }),
-    )
-}
-
 pub(super) fn def_derives() -> ToolDefinition {
     def(
         "tracedecay_derives",
@@ -437,34 +333,6 @@ pub(super) fn def_derives() -> ToolDefinition {
                 { "required": ["qualified_name"] },
                 { "required": ["node_id"] }
             ]
-        }),
-    )
-}
-
-pub(super) fn def_body() -> ToolDefinition {
-    def(
-        "tracedecay_body",
-        "Symbol Body",
-        "Return the full source body of a symbol by name (function, struct, const, etc.). \
-         Collapses search + node lookup + file read into a single call. \
-         When the name is ambiguous, returns multiple matches ranked by relevance.",
-        json!({
-            "type": "object",
-            "properties": {
-                "symbol": {
-                    "type": "string",
-                    "description": "Symbol name to look up (e.g. 'resolve_provider_api_key', 'CCH_SEED', 'GraphStats'). Qualified names are also accepted."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of matching bodies to return when the name is ambiguous (default: 3, max: 20)"
-                },
-                "lazy_index_ignored_dependencies": {
-                    "type": "boolean",
-                    "description": "Opt in to bounded indexing of ignored dependency entry files when an import hint matches (default: false)."
-                }
-            },
-            "required": ["symbol"]
         }),
     )
 }
@@ -531,51 +399,6 @@ pub(super) fn def_constructors() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_signature_search() -> ToolDefinition {
-    def(
-        "tracedecay_signature_search",
-        "Signature Search",
-        "Find functions and methods by signature shape: return type, parameter \
-         substring, async, or path. Searches the cached `signature` column on \
-         every Function/Method node. Substring-matched with case-sensitive \
-         compare; combine multiple criteria for narrower hits. Use \
-         tracedecay_search for plain name lookups; this tool is for refactor \
-         questions like 'find every function returning Result<_, MyError>' or \
-         'every async fn taking &mut self'.",
-        json!({
-            "type": "object",
-            "properties": {
-                "returns": {
-                    "type": "string",
-                    "description": "Substring that must appear in the return-type portion of the signature (after '->'). E.g. 'Result<', 'impl Future', 'Vec<u32>'."
-                },
-                "params": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Substrings that must all appear in the parameter list portion of the signature. E.g. ['&mut self'], ['i32', 'String']."
-                },
-                "async": {
-                    "type": "boolean",
-                    "description": "When true, only return functions marked async. When false, exclude them. Omit to ignore async-ness."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to symbols defined under this directory."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum matches to return (default: 50, max: 500)."
-                }
-            },
-            "anyOf": [
-                { "required": ["returns"] },
-                { "required": ["params"] },
-                { "required": ["async"] }
-            ]
-        }),
-    )
-}
-
 pub(super) fn def_config() -> ToolDefinition {
     def(
         "tracedecay_config",
@@ -609,105 +432,6 @@ pub(super) fn def_config() -> ToolDefinition {
                 { "required": ["glob"] },
                 { "required": ["path"] }
             ]
-        }),
-    )
-}
-
-pub(super) fn def_implementations() -> ToolDefinition {
-    def(
-        "tracedecay_implementations",
-        "Trait / Method Implementations",
-        "Find every type implementing a given trait, or every body of a given \
-         method name. The 'trait' form returns each implementing type plus the \
-         methods on its impl block. The 'method' form returns every function/ \
-         method named X across the project, grouped by enclosing type when \
-         present. Each result includes file, signature, and the method body.",
-        json!({
-            "type": "object",
-            "properties": {
-                "trait": {
-                    "type": "string",
-                    "description": "Trait name to look up implementations of (e.g. 'LanguageExtractor', 'Display'). Mutually exclusive with 'method'."
-                },
-                "method": {
-                    "type": "string",
-                    "description": "Method or function name to find every implementation of (e.g. 'extensions', 'count_complexity'). Mutually exclusive with 'trait'."
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of implementations to return (default: 20, max: 200)"
-                }
-            },
-            "anyOf": [
-                { "required": ["trait"] },
-                { "required": ["method"] }
-            ]
-        }),
-    )
-}
-
-pub(super) fn def_outline() -> ToolDefinition {
-    def(
-        "tracedecay_outline",
-        "File Outline",
-        "Flat list of every top-level symbol defined in a file (functions, structs, \
-         enums, traits, classes, impls, etc.), like a table of contents. Sorted by \
-         line number; no code bodies. Includes ast-grep outline JSON when the host \
-         ast-grep CLI supports outline flags from ast-grep 0.44 or newer. Optional \
-         'kinds' filter narrows to specific node kinds. Use this as the cheapest way \
-         to orient before zooming into a \
-         large file with tracedecay_node, tracedecay_body, or tracedecay_read.",
-        json!({
-            "type": "object",
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Project-relative path to the file (e.g. 'src/sync.rs')."
-                },
-                "kinds": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional filter on node kinds. Common values: 'function', 'struct', 'enum', 'trait', 'impl', 'class', 'method', 'const'. Case-insensitive. Default: all kinds."
-                }
-            },
-            "required": ["file"]
-        }),
-    )
-}
-
-pub(super) fn def_read() -> ToolDefinition {
-    def(
-        "tracedecay_read",
-        "Read File (mode-aware)",
-        "Read a file or its symbol map. Modes: 'full' (entire file), 'lines' \
-         (1-based inclusive line slice via the 'lines' arg, e.g. '120-180'), \
-         'map' (flat list of every top-level symbol from the graph, no source \
-         bytes touched), 'signatures' (functions and types with their cached \
-         signature). Line reads include overlapping symbol signatures by default; \
-         full reads can opt in with include_symbols. Cross-session cached: a re-call \
-         on an unchanged file returns a tiny stub with 'unchanged: true'.",
-        json!({
-            "type": "object",
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Project-relative or absolute path to the file (e.g. 'src/sync.rs')."
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["full", "lines", "map", "signatures"],
-                    "description": "Read mode. Default: 'full'."
-                },
-                "lines": {
-                    "type": "string",
-                    "description": "Required when mode='lines'. Format 'A-B' or single 'A' (1-based, inclusive). E.g. '120-180' or '42'."
-                },
-                "include_symbols": {
-                    "type": "boolean",
-                    "description": "Include graph symbol context for source reads. Defaults to true for mode='lines' and false for mode='full'."
-                }
-            },
-            "required": ["file"]
         }),
     )
 }

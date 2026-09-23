@@ -1,5 +1,5 @@
 use crate::common::fixture::{GitFixture, TestProfile};
-use tracedecay::project::TraceDecay;
+use tracedecay_project::project::TraceDecay;
 
 #[tokio::test]
 async fn direct_lifecycle_entry_points_retain_production_authority() {

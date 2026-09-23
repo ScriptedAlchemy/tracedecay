@@ -448,10 +448,11 @@ async fn settings_persist_under_dashboard_root() {
         lsp::settings::load_settings(temp.path()).await.unwrap(),
         replacement
     );
-    let backup = lsp::settings::settings_path(temp.path()).with_extension("json.bak");
-    let backup: lsp::settings::CodeDiagnosticsSettings =
-        serde_json::from_slice(&tokio::fs::read(backup).await.unwrap()).unwrap();
-    assert_eq!(backup, settings);
+    assert!(
+        !lsp::settings::settings_path(temp.path())
+            .with_extension("json.bak")
+            .exists()
+    );
 }
 
 #[tokio::test]

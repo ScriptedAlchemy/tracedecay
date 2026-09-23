@@ -11,7 +11,7 @@ use tracedecay_code_index::production::{
     CodeIndexPublishedGenerationV1, SealedGenerationSegmentReadV1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
-    DurablePublicationPointerV1, scoped_code_index_store_root,
+    DurablePublicationPointerV1, code_generation_segments_root, scoped_code_index_store_root,
 };
 use tracedecay_contracts::{
     VerifiedWorkGraphVersionV1, WorkAttemptReceiptV1, WorkEvidenceContinuationV1,
@@ -376,7 +376,7 @@ fn code_generation_wait_diagnostics(home: &Path, project: &Path) -> String {
                 "pointer={} generation_file_present={} segments_root_present={}",
                 pointer_path.display(),
                 generation_path.is_file(),
-                scope.join("code-generation-segments-v1").is_dir()
+                code_generation_segments_root(&scope).is_dir()
             )
         }
         None => format!(
@@ -404,9 +404,7 @@ fn read_active_code_generation(
             .join(pointer.generation_file),
     )
     .ok()?;
-    // The daemon publishes partitioned manifests; monolithic `decode_sealed`
-    // rejects them, which made this wait time out with the generation on disk.
-    let segments_root = scope.join("code-generation-segments-v1");
+    let segments_root = code_generation_segments_root(&scope);
     CodeIndexPublishedGenerationV1::decode_partitioned_sealed(&sealed, |request, buffer| {
         let (digest, size_bytes, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
@@ -434,7 +432,7 @@ fn read_active_code_generation(
         buffer.extend_from_slice(&segment[start..end]);
         Ok(())
     })
-    .ok()?
+    .ok()
 }
 
 /// The exact Work evidence scope one TaskSession availability sweep reads:

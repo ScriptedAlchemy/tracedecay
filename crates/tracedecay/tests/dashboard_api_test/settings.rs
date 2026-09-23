@@ -30,13 +30,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             exclude.iter().any(|glob| glob == "**/node_modules/**"),
             "default excludes should include node_modules: {settings}"
         );
-        assert!(
-            settings["project"]["config_path"]
-                .as_str()
-                .unwrap_or_default()
-                .ends_with("config.json")
-        );
-        assert_eq!(settings["project"]["legacy_config_read_only"], true);
+        assert!(settings["project"].get("config_path").is_none());
         assert!(
             settings["project"]["configuration_snapshot_id"]
                 .as_str()
@@ -65,29 +59,16 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             user_revision, revision,
             "project and profile values must share one configuration revision"
         );
-        let user_legacy_config_path = std::path::PathBuf::from(
-            settings["user"]["legacy_config_path"]
-                .as_str()
-                .unwrap_or_else(|| panic!("missing legacy user config path: {settings}")),
-        );
+        let user_legacy_config_path = tracedecay_session_memory::user_config::config_path()
+            .expect("pinned profile user config path");
         let user_legacy_config_before = std::fs::read(&user_legacy_config_path).ok();
-        assert_eq!(settings["user"]["legacy_config_read_only"], true);
+        assert!(settings["user"].get("legacy_config_path").is_none());
         assert!(
             settings["user"]["code_index_worker_configuration_snapshot_id"]
                 .as_str()
                 .is_some_and(|value| !value.is_empty()),
             "settings must expose the profile worker snapshot: {settings}"
         );
-        let legacy_config_path = std::path::PathBuf::from(
-            settings["project"]["legacy_config_path"]
-                .as_str()
-                .unwrap_or_else(|| panic!("missing legacy config path: {settings}")),
-        );
-        assert!(
-            !legacy_config_path.exists(),
-            "fresh initialization must not create a writable config.json"
-        );
-        let legacy_config_before = std::fs::read(&legacy_config_path).ok();
 
         assert_eq!(settings["user"]["upload_enabled"], false);
         assert_eq!(
@@ -127,10 +108,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .is_empty()
         );
 
-        tracedecay::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
         assert_eq!(
             settings["version"]["version"],
-            tracedecay::version::build_version().expect("fixture product runtime registered")
+            tracedecay_project::version::build_version().expect("fixture product runtime registered")
         );
         let channel = settings["version"]["channel"].as_str().unwrap_or_default();
         assert!(
@@ -224,11 +205,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "a project mutation without its authority must be unavailable: {unavailable}"
         );
         assert_eq!(unavailable["code"], "configuration_authority_unavailable");
-        assert_eq!(
-            std::fs::read(&legacy_config_path).ok(),
-            legacy_config_before,
-            "a rejected mutation must not fall back to config.json"
-        );
         let (status, after_unavailable) = get_json(&agent, &url);
         assert_eq!(status, 200);
         assert_eq!(

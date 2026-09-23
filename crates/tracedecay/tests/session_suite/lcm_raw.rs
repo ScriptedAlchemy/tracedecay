@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_lcm::{LcmCompressionRequest, LcmSummarizerMode};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionMessageRecord;
 use tracedecay_sessions::runtime::source::{
@@ -191,8 +191,6 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
         .expect("raw message should exist");
     assert_eq!(raw.content, content);
     assert!(raw.content.ends_with("::lossless-tail"));
-    assert!(!raw.legacy_source);
-    assert!(!raw.legacy_truncated);
 }
 
 #[tokio::test]

@@ -1072,25 +1072,7 @@ fn refresh_installed_service_with_state_and_runner(
         refreshed_spec.data_dir_override = windows_task::profile_root_from_task_xml(&unit);
     }
     if let Some(socket_path) = socket_path_from_unit_text(&unit) {
-        #[cfg(unix)]
-        {
-            let profile_root = refreshed_spec
-                .data_dir_override
-                .clone()
-                .map_or_else(tracedecay_data_dir, Ok)?;
-            let legacy_generated_socket = profile_root.join("daemon.sock");
-            if socket_path != legacy_generated_socket
-                || tracedecay_daemon_protocol::unix_socket_path_within_limit(&socket_path)
-            {
-                refreshed_spec.socket_path = socket_path;
-            } else {
-                refreshed_spec.socket_path = default_socket_path_for_profile(&profile_root);
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            refreshed_spec.socket_path = socket_path;
-        }
+        refreshed_spec.socket_path = socket_path;
     }
     let previous_state = match previous_state {
         Some(state) => state,

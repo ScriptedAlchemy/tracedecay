@@ -4,7 +4,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracedecay::dashboard;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
@@ -22,6 +21,7 @@ use tracedecay_graph_query::{
     CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
     VerifiedCodeGraphRead,
 };
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_session_memory::context::RegisteredScopeResolver;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -224,26 +224,28 @@ impl DashboardTestRuntimeV1 {
 
     pub(crate) fn dashboard_test_authority(
         self: &Arc<Self>,
-    ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
-        Ok(dashboard::DashboardHostAdmissionTestAuthorityV1::new(
-            Arc::clone(self),
-            self.profile_database.clone(),
-            self.project_database.clone(),
+    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
+        Ok(
+            tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1::new(
+                Arc::clone(self),
+                self.profile_database.clone(),
+                self.project_database.clone(),
+            )
+            .with_pr_autotrack_reader(Arc::new(|root| {
+                tracedecay_application::pr_tracking::managed_summary(&root).map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(
+                            |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
+                                branch: entry.branch,
+                                pr: entry.pr,
+                                head_branch: entry.head_branch,
+                            },
+                        )
+                        .collect()
+                })
+            })),
         )
-        .with_pr_autotrack_reader(Arc::new(|root| {
-            tracedecay_application::pr_tracking::managed_summary(&root).map(|entries| {
-                entries
-                    .into_iter()
-                    .map(
-                        |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
-                            branch: entry.branch,
-                            pr: entry.pr,
-                            head_branch: entry.head_branch,
-                        },
-                    )
-                    .collect()
-            })
-        })))
     }
 
     /// The dashboard authority plus the daemon-owned LCM and verified graph
@@ -252,7 +254,7 @@ impl DashboardTestRuntimeV1 {
     pub(crate) async fn dashboard_test_authority_with_session_reads(
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
-    ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self
             .dashboard_test_authority_with_session_reads_base(cg)
             .await?;
@@ -268,7 +270,7 @@ impl DashboardTestRuntimeV1 {
     async fn dashboard_test_authority_with_session_reads_base(
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
-    ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self.dashboard_test_authority()?;
         let (automation_authority, automation_writer) =
             dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile_root)
@@ -301,7 +303,7 @@ impl DashboardTestRuntimeV1 {
     pub(crate) async fn dashboard_test_authority_with_configuration(
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
-    ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self
             .dashboard_test_authority_with_session_reads_base(cg)
             .await?;
@@ -418,13 +420,6 @@ impl DashboardTestRuntimeV1 {
             .try_record_savings(project, tool, before, after, timestamp)
             .await
             .expect("seed dashboard savings ledger entry");
-    }
-
-    pub(crate) async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
-        self.profile_database
-            .try_upsert_project_tokens(project_path, tokens_saved)
-            .await
-            .expect("seed dashboard project token total");
     }
 
     pub(crate) async fn upsert_session_for_test(
@@ -592,7 +587,7 @@ impl DashboardTestRuntimeV1 {
             &draft.source_refs,
             &summary_hash,
         );
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        let control = tracedecay_temporal_query::execution::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(
                 tracedecay_lcm::types::LcmImmutableSummaryPublication {

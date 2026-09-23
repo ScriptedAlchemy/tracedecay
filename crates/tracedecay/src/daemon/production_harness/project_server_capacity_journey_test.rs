@@ -32,7 +32,7 @@ async fn open_project_composition(
         allow_initialize_root_routing: false,
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     };
     let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
     resources

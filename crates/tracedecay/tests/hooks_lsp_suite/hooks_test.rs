@@ -1,6 +1,5 @@
 use crate::common::{EnvVarGuard, lock_global_db_env};
 use std::path::Path;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay_agent_hosts::hooks::{
     HookWorkspaceStatus, additional_context_json, build_cursor_session_context,
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
@@ -10,6 +9,7 @@ use tracedecay_agent_hosts::hooks::{
     evaluate_hook_decision, evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths,
     record_codex_subagent_start,
 };
+use tracedecay_project::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::{
     pin_fixture_repository_identity, resolve_layout_for_current_profile,
 };
@@ -173,8 +173,7 @@ fn test_cursor_subagent_start_allows_tracedecay_plugin_agents() {
 #[test]
 fn test_cursor_project_root_uses_workspace_roots() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
-    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    enroll_profile_project(dir.path(), "proj_cursor_workspace_roots");
     let input = format!(
         r#"{{
             "hook_event_name": "beforeSubmitPrompt",
@@ -193,9 +192,8 @@ fn test_cursor_project_root_uses_workspace_roots() {
 fn test_cursor_project_root_uses_file_path_parent() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
-    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    enroll_profile_project(dir.path(), "proj_cursor_file_path");
     let file = src.join("lib.rs");
     let input = format!(
         r#"{{
@@ -216,10 +214,10 @@ fn test_cursor_project_root_prefers_cwd_in_multi_root_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let root_a = dir.path().join("root-a");
     let root_b = dir.path().join("root-b");
-    std::fs::create_dir_all(root_a.join(".tracedecay")).unwrap();
-    std::fs::create_dir_all(root_b.join(".tracedecay")).unwrap();
-    std::fs::write(root_a.join(".tracedecay/tracedecay.db"), "").unwrap();
-    std::fs::write(root_b.join(".tracedecay/tracedecay.db"), "").unwrap();
+    std::fs::create_dir_all(&root_a).unwrap();
+    std::fs::create_dir_all(&root_b).unwrap();
+    enroll_profile_project(&root_a, "proj_cursor_root_a");
+    enroll_profile_project(&root_b, "proj_cursor_root_b");
     let cwd_b = root_b.join("src");
     std::fs::create_dir_all(&cwd_b).unwrap();
 
@@ -806,8 +804,7 @@ fn test_codex_apply_patch_rel_paths_skips_paths_outside_root() {
 #[test]
 fn test_codex_project_root_uses_cwd() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
-    std::fs::write(dir.path().join(".tracedecay/tracedecay.db"), "").unwrap();
+    enroll_profile_project(dir.path(), "proj_codex_cwd");
     let input = format!(
         r#"{{
             "hook_event_name": "PostToolUse",

@@ -73,28 +73,6 @@ pub async fn query_rows(
     .await
 }
 
-/// Runs a scalar `SELECT COUNT(*)`-style query; errors and missing rows
-/// collapse to 0 (these feed overview cards, not critical paths).
-pub async fn query_i64(
-    conn: &(impl QueryExecutor + ?Sized),
-    sql: &str,
-    params: impl IntoParams,
-) -> i64 {
-    hotpath::future!(
-        async move {
-            let Ok(mut rows) = conn.query(sql, params).await else {
-                return 0;
-            };
-            match rows.next().await {
-                Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0),
-                _ => 0,
-            }
-        },
-        label = "dashboard_api.store.query_scalar"
-    )
-    .await
-}
-
 /// Runs a scalar integer query while preserving SQL, row-iteration, empty-row,
 /// and conversion failures for read models where zero carries domain meaning.
 pub async fn query_i64_result(
@@ -228,38 +206,6 @@ mod tests {
         let err = query_rows(&conn, "SELECT * FROM missing_table", ()).await;
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("missing_table"));
-    }
-
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn query_i64_returns_scalar_and_collapses_failures_to_zero() {
-        let (_directory, conn) = test_conn();
-        conn.execute_batch("CREATE TABLE c (v INTEGER)")
-            .await
-            .unwrap();
-        conn.execute_batch("INSERT INTO c VALUES (7), (8)")
-            .await
-            .unwrap();
-
-        assert_eq!(query_i64(&conn, "SELECT COUNT(*) FROM c", ()).await, 2);
-        assert_eq!(
-            query_i64(
-                &conn,
-                "SELECT v FROM c WHERE v = ?1",
-                tracedecay_runtime_core::db::engine::params![7],
-            )
-            .await,
-            7
-        );
-        // Bad SQL and empty result sets both collapse to 0 (overview-card semantics).
-        assert_eq!(
-            query_i64(&conn, "SELECT COUNT(*) FROM missing", ()).await,
-            0
-        );
-        assert_eq!(
-            query_i64(&conn, "SELECT v FROM c WHERE v = 999", ()).await,
-            0
-        );
     }
 
     #[tokio::test]

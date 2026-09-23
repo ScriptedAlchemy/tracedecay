@@ -1,5 +1,4 @@
 use tempfile::tempdir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::config::{
     AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,
@@ -15,6 +14,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
@@ -626,7 +626,7 @@ fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
 }
 
 #[test]
-fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
+fn scheduler_ranks_fractional_completions_before_run_id() {
     let config = automation_config(Some("daily"), None);
     let mut later_failure = record(
         "a-failure",
@@ -634,10 +634,8 @@ fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
         AutomationRunStatus::Failed,
         1_000,
     );
-    later_failure.schema_version = 1;
-    later_failure.started_at = "1970-01-01T00:16:39Z".to_string();
-    later_failure.completed_at = "1970-01-01T00:16:40.9Z".to_string();
-    later_failure.completed_at_micros = None;
+    later_failure.started_at = "999".to_string();
+    later_failure.completed_at_micros = Some(1_000_900_000);
     later_failure.error = Some("the request is permanently invalid".to_string());
     later_failure.error_classification = Some(AgentTaskFailureClass::Permanent);
     later_failure.error_retryable = Some(false);
@@ -647,10 +645,8 @@ fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
         AutomationRunStatus::Succeeded,
         1_000,
     );
-    older_success.schema_version = 1;
-    older_success.started_at = "1970-01-01T00:16:39Z".to_string();
-    older_success.completed_at = "1970-01-01T00:16:40.1Z".to_string();
-    older_success.completed_at_micros = None;
+    older_success.started_at = "999".to_string();
+    older_success.completed_at_micros = Some(1_000_100_000);
     let mut records = vec![later_failure, older_success];
 
     for _ in 0..2 {
@@ -829,7 +825,7 @@ fn scheduler_fails_closed_on_pre_epoch_session_start() {
 }
 
 #[test]
-fn scheduler_parses_started_at_by_record_schema() {
+fn scheduler_rejects_rfc3339_started_at() {
     let config = automation_config(Some("daily"), None);
     let mut schema_v2 = record(
         "schema-v2-rfc3339-start",
@@ -849,27 +845,6 @@ fn scheduler_parses_started_at_by_record_schema() {
         .skip_reason()
         .map(AutomationSkipReasonV1::as_str),
         Some("scheduler_history_invalid")
-    );
-
-    let mut schema_v1 = record(
-        "schema-v1-rfc3339-start",
-        AgentTaskKind::SessionReflector,
-        AutomationRunStatus::Succeeded,
-        1_000,
-    );
-    schema_v1.schema_version = 1;
-    schema_v1.started_at = "1970-01-01T00:16:39Z".to_string();
-    schema_v1.completed_at = "1970-01-01T00:16:40Z".to_string();
-    schema_v1.completed_at_micros = None;
-    assert!(
-        schedule_decision(
-            &config,
-            AgentTaskKind::SessionReflector,
-            &[schema_v1],
-            SessionActivity::at(1_000),
-            1_500,
-        )
-        .is_due()
     );
 }
 

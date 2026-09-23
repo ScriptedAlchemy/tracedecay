@@ -12,8 +12,7 @@ use serde_json::{Value, json};
 use crate::mcp::project_route::{
     HookProjectRouteCache, SharedHookProjectRouteCache, mcp_analytics_session_id,
 };
-use crate::project::TraceDecay;
-pub(crate) use tracedecay_code_index_runtime::code_index_scheduler::{
+use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
 };
 use tracedecay_contracts::code_index_freshness::{
@@ -31,6 +30,11 @@ use tracedecay_mcp::response_handles::{
 use tracedecay_mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
+use tracedecay_project::project::TraceDecay;
+use tracedecay_query::code_search::{
+    CodeIndexBranchDiffExecutor, CodeIndexRedundancyExecutor, CodeIndexSearchAuthorityV1,
+    CodeIndexSearchExecutor, CodeIndexSimilarExecutor,
+};
 use tracedecay_session_runtime::lcm_authority::{
     MountedLcmAuthorityPort, mount_registered_lcm_authority,
 };
@@ -45,7 +49,8 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 
 use tracedecay_contracts::ProjectRegistryReadPort;
-use tracedecay_mcp::hook_events::{self, HookAgent, HookEventPlan};
+use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_mcp::hook_events::{self, HookEventPlan};
 use tracedecay_mcp::tools::catalog_discovery::default_catalog_discovery_authority;
 use tracedecay_mcp::{
     ErrorCode, JsonRpcRequest, JsonRpcResponse, ToolRegistryMode, explore_call_budget,
@@ -100,9 +105,9 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = concat!(
 
 pub(crate) fn initialize_result(
     instructions: &str,
-) -> std::result::Result<Value, crate::product_runtime::ProductRuntimeError> {
+) -> std::result::Result<Value, tracedecay_project::product_runtime::ProductRuntimeError> {
     Ok(tracedecay_mcp::server::initialize_result(
-        crate::version::build_version()?,
+        tracedecay_project::version::build_version()?,
         instructions,
     ))
 }
@@ -275,15 +280,6 @@ pub(crate) type CodeIndexPublicationIdentityResolver = Arc<
         + 'static,
 >;
 
-/// Code-index search boundary contracts, owned by the query kernel.
-///
-/// The whole `CodeIndexSearch*V1` family is pure request/outcome data with no
-/// MCP coupling, so it lives in `tracedecay_query::code_search`. Re-exporting
-/// it here keeps the historical `crate::mcp::server::CodeIndexSearch*` paths
-/// resolving while the daemon depends on the query kernel instead of on
-/// `crate::mcp`.
-pub(crate) use tracedecay_query::code_search::*;
-
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
     /// The served code graph. Guarded so a mid-session `git checkout` can
@@ -424,10 +420,9 @@ pub struct McpServer {
     retained_project_server_resolver: Option<RetainedProjectServerResolver>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime:
-        Option<Arc<crate::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
+        Option<Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
     hook_project_routes: SharedHookProjectRouteCache,
     version_cache: std::sync::Mutex<VersionCheckState>,
-    pending_notifications: std::sync::Mutex<Vec<Value>>,
     /// When the MCP server was started from a subdirectory of the project root,
     /// this holds the relative path prefix (e.g. `"src/mcp"`). Listing tools
     /// use it as the default path filter. `None` when cwd == project root.
@@ -473,9 +468,9 @@ pub struct McpServer {
     /// entirely (the index is as fresh as auto-sync can make it). `Arc` so
     /// the retained refresh task can stamp it on completion.
     last_background_refresh_done_at: Arc<AtomicI64>,
-    /// The `[sync]` config resolved once at construction from the project
-    /// root (plus `TRACEDECAY_SYNC_*` env overrides). Cached so the read
-    /// hot path never re-reads the config file per `tools/call`.
+    /// The `[sync]` config resolved once at construction from the project's
+    /// pinned runtime configuration. Cached so the read hot path never
+    /// re-resolves configuration per `tools/call`.
     sync_config: tracedecay_configuration::SyncConfig,
     /// Savings-ledger recorder tasks spawned so far / finished so far, plus
     /// a notifier pinged on every completion. Production never awaits these
@@ -636,7 +631,7 @@ impl McpServer {
     #[doc(hidden)]
     pub fn host_admission_test_runtime_for_test(
         &self,
-    ) -> Option<&crate::test_support::host_admission::HostAdmissionTestRuntimeV1> {
+    ) -> Option<&tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1> {
         self._host_admission_test_runtime.as_deref()
     }
 
@@ -646,7 +641,7 @@ impl McpServer {
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: crate::test_support::host_admission::ProjectScopedTestRuntimeV1,
+        runtime: tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1,
     ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         Self::new_with_retained_test_servers_for_test(cg, scope_prefix, runtime, Vec::new()).await
     }
@@ -664,7 +659,7 @@ impl McpServer {
     pub async fn new_with_retained_test_servers_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: crate::test_support::host_admission::ProjectScopedTestRuntimeV1,
+        runtime: tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1,
         retained_servers: Vec<Arc<McpServer>>,
     ) -> tracedecay_domain::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
@@ -1141,7 +1136,6 @@ impl McpServer {
                 checked_at: None,
                 refreshing: false,
             }),
-            pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
             shutdown: tracedecay_daemon_service::ShutdownCoordinatorV1::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
@@ -1173,7 +1167,7 @@ impl McpServer {
         tokio::task::spawn_blocking(move || {
             let _ = cleanup_expired_response_handles(
                 &response_handle_project_root,
-                crate::project::current_timestamp(),
+                tracedecay_runtime_core::tracedecay::current_timestamp(),
             );
         });
         if own_project_host_admission_replay

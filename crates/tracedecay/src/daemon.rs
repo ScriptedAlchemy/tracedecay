@@ -241,13 +241,13 @@ mod connection_serving;
 pub use connection_serving::rmcp_benchmark;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
-#[cfg(all(unix, test))]
-use connection_serving::serve_socket_client;
 #[cfg(not(unix))]
 use connection_serving::serve_windows_broker_client_with_class_and_invocation;
+#[cfg(any(test, feature = "test-transport"))]
+pub(crate) use connection_serving::serve_routed_rmcp_connection;
 #[cfg(test)]
 use connection_serving::{
-    await_project_owner_or_disconnect, serve_routed_rmcp_connection, serve_windows_broker_client,
+    await_project_owner_or_disconnect, serve_windows_broker_client,
     serve_windows_broker_client_with_class,
 };
 mod core_admission;
@@ -257,10 +257,6 @@ use engine::DaemonEngine;
 use engine::{
     ensure_context_scout_owner_before_advertising,
     ensure_git_index_transactions_for_mutation_owners,
-};
-pub(crate) use tracedecay_daemon_service::automation_observation::{
-    project_run_observation_producer as project_automation_observation_producer,
-    record_project_run as record_project_automation_run,
 };
 mod core_client;
 mod core_doctor;
@@ -287,17 +283,6 @@ pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
 pub use core_proxy::*;
-// Daemon process lifecycle and logging live in `tracedecay-daemon-service`;
-// the root's engine, bootstrap, and connection serving still read them by
-// these names until they move.
-#[cfg(unix)]
-pub(crate) use tracedecay_daemon_service::logging::recent_watcher_events;
-pub(crate) use tracedecay_daemon_service::logging::unavailable_error;
-#[cfg(feature = "hotpath")]
-pub use tracedecay_daemon_service::shutdown::install_hotpath_shutdown_finalizer;
-pub(crate) use tracedecay_daemon_service::shutdown::{
-    DAEMON_CLIENT_DRAIN_DEADLINE, DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle, ShutdownStatus,
-};
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;

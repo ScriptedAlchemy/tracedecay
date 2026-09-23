@@ -28,8 +28,8 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
-use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
@@ -74,7 +74,7 @@ static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 /// from every fixture entry point is safe, idempotent, and always observes the
 /// identical runtime regardless of test order.
 pub fn register_process_product_runtime() {
-    tracedecay::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
 }
 
 /// Registers the composition root's runtime ports for this test process.
@@ -1057,7 +1057,10 @@ pub fn tracedecay_bin() -> PathBuf {
     // this test process only ever registers the fixture product runtime. The
     // released version is the strongest in-process comparison left, so pin
     // the release and accept any build-metadata suffix.
-    let expected_release = format!("tracedecay {}", tracedecay::version::PACKAGE_VERSION);
+    let expected_release = format!(
+        "tracedecay {}",
+        tracedecay_project::version::PACKAGE_VERSION
+    );
     assert!(
         actual == expected_release || actual.starts_with(&format!("{expected_release}+")),
         "{} reported `{actual}`, not release {expected_release}; rebuild it with `cargo build -p tracedecay-cli --bin tracedecay` or set TRACEDECAY_TEST_BIN",

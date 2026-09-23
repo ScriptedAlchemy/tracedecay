@@ -15,12 +15,12 @@ use tempfile::TempDir;
 use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId};
 
 use super::McpServer;
-use crate::project::TraceDecayOpenOptions;
-use crate::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::transport::JsonRpcRequest;
+use tracedecay_project::project::TraceDecayOpenOptions;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
-use tracedecay_sessions::runtime::claude::ClaudeSource;
+use tracedecay_sessions::runtime::hosts::claude::ClaudeSource;
 
 const PROJECT_ID: &str = "project.claude-recall";
 const SESSION: &str = "claude-recall-session";
@@ -41,8 +41,12 @@ fn git(root: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-async fn server_with_authorities() -> (Arc<McpServer>, TempDir, crate::config::PinnedUserDataDir) {
-    let pin = crate::config::PinnedUserDataDir::new();
+async fn server_with_authorities() -> (
+    Arc<McpServer>,
+    TempDir,
+    tracedecay_project::config::PinnedUserDataDir,
+) {
+    let pin = tracedecay_project::config::PinnedUserDataDir::new();
     let dir = TempDir::new().expect("temp project");
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(dir.path(), &["config", "user.email", "test@example.com"]);
@@ -57,7 +61,7 @@ async fn server_with_authorities() -> (Arc<McpServer>, TempDir, crate::config::P
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-q", "-m", "initial"]);
     let runtime = HostAdmissionTestRuntimeV1::project(
-        crate::config::user_data_dir().expect("isolated profile root"),
+        tracedecay_project::config::user_data_dir().expect("isolated profile root"),
         dir.path(),
         ProjectId::new(PROJECT_ID).expect("typed project identity"),
     )
@@ -209,7 +213,7 @@ async fn ingest_and_project(
         project_id: ProjectId::new(PROJECT_ID).expect("typed project identity"),
     };
     let stats =
-        tracedecay_sessions::runtime::claude_observation::ingest_source_with_observations_with_admission(
+        tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission(
             &source,
             project,
             scope,
@@ -239,7 +243,7 @@ async fn ingested_server() -> (
     Arc<McpServer>,
     TempDir,
     TempDir,
-    crate::config::PinnedUserDataDir,
+    tracedecay_project::config::PinnedUserDataDir,
 ) {
     let (server, dir, pin) = server_with_authorities().await;
     let home = TempDir::new().expect("temp home");

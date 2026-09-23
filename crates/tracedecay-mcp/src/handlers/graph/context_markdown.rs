@@ -14,7 +14,7 @@ use crate::path_tree::format_compact_path_list;
 use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::RelationEdgeKindV1;
-use tracedecay_domain::code_intelligence::NodeKind;
+use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
 use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
@@ -83,7 +83,7 @@ pub(super) fn append_verified_plan_context(
         if matches!(
             NodeKind::from_str(&metadata.kind),
             Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
-        ) && matches!(metadata.visibility.as_str(), "pub" | "public")
+        ) && Visibility::from_str(&metadata.visibility) == Some(Visibility::Pub)
         {
             let implementors = single_graph_adjacency_batch(graph.callers(
                 std::slice::from_ref(&node.occurrence),

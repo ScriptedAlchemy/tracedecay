@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay::test_support::host_admission::{
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
 };
 

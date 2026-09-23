@@ -31,7 +31,7 @@ use super::operation_events::{
     HttpOperationEventState, http_operation_event_router,
     resolve_authenticated_http_request_context,
 };
-use super::problems::{current_micros, invocation_problem};
+use super::problems::current_micros;
 use super::request_control::{
     ActiveHttpRequest, HttpCancellationRegistry, application_http_context,
 };
@@ -93,27 +93,6 @@ fn operation_context(project_id: &ProjectId) -> RequestContext {
         CancellationContext::active("cancel.http-adapter").expect("cancellation"),
     )
     .expect("context")
-}
-
-#[test]
-fn daemon_reset_problem_preserves_reset_terminal_contract() {
-    let problem =
-        invocation_problem(tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired)
-            .expect("canonical reset problem");
-    let ApplicationProblem::ResetRequired {
-        retry,
-        legal_actions,
-        ..
-    } = problem
-    else {
-        panic!("application surface must preserve reset-required");
-    };
-
-    assert_eq!(retry, tracedecay_contracts::RetryDirective::Never);
-    assert_eq!(
-        legal_actions,
-        vec![tracedecay_contracts::LegalAction::Reset]
-    );
 }
 
 #[test]
@@ -741,53 +720,15 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
     assert_eq!(
         compatibility_operations,
         [
-            "ast_grep_rewrite",
-            "callees",
             "context",
-            "fact_feedback",
-            "fact_store_add",
-            "fact_store_contradict",
-            "fact_store_curate",
-            "fact_store_get",
-            "fact_store_list",
-            "fact_store_probe",
-            "fact_store_reason",
-            "fact_store_related",
-            "fact_store_remove",
-            "fact_store_search",
-            "fact_store_supersede",
-            "fact_store_update",
             "impact",
-            "insert_at",
-            "insert_at_symbol",
-            "lcm_describe",
-            "lcm_doctor",
-            "lcm_expand",
-            "lcm_expand_query",
-            "lcm_grep",
-            "lcm_load_session",
-            "lcm_status",
-            "memory_status",
-            "message_search",
-            "move_symbol",
-            "multi_str_replace",
             "node",
             "port_order",
             "port_status",
             "redundancy",
             "rename_preview",
-            "rename_symbol",
-            "replace_symbol",
-            "session_refresh_begin",
-            "session_refresh_cancel",
-            "session_refresh_status",
-            "sessions_for",
             "similar",
-            "source_edit_reconcile",
-            "source_edit_rollback",
-            "str_replace",
             "todos",
-            "workflows",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -1510,19 +1451,43 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
     ] {
         assert_eq!(operation.as_str(), name);
         assert_eq!(
-            ApplicationSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")),
+            ApplicationSurfaceOperation::from_tool_name(operation.mcp_tool_name()),
             Some(operation)
+        );
+    }
+    for (short_name, operation) in [
+        (
+            "signature_search",
+            ApplicationSurfaceOperation::CodeSignatureSearch,
+        ),
+        (
+            "implementations",
+            ApplicationSurfaceOperation::CodeImplementations,
+        ),
+        (
+            "type_hierarchy",
+            ApplicationSurfaceOperation::CodeTypeHierarchy,
+        ),
+        ("callers", ApplicationSurfaceOperation::CodeCallers),
+        ("callees", ApplicationSurfaceOperation::CodeCallees),
+    ] {
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name(&format!("tracedecay_{short_name}")),
+            Some(operation)
+        );
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name(&format!(
+                "tracedecay_{}",
+                operation.as_str()
+            )),
+            None,
+            "the canonical code_* spelling is not a second MCP tool"
         );
     }
     for primitive_alias in [
         "exact_occurrence",
         "phrase_search",
         "symbol_search",
-        "signature_search",
-        "implementations",
-        "type_hierarchy",
-        "callers",
-        "callees",
         "facets",
         "timeline",
         "declaration",

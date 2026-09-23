@@ -41,7 +41,7 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
                 } => {
                     let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
                         std::collections::BTreeSet::from([
-                            tracedecay_contracts::WorkRelationScopeV1::Repository {
+                            tracedecay_contracts::WorkProductAuthorizedRelationScopeV1::Repository {
                                 project_id: context.scope().project_id.clone(),
                                 repository_id: context.scope().repository_id.clone(),
                             },
@@ -161,9 +161,9 @@ fn current_feedback_finding(
             .payload
             .ok_or(HandoffOpenTargetError::Unavailable)
             .map(|result| Some(result.finding)),
-        ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
-            Err(HandoffOpenTargetError::Unavailable)
-        }
+        ApplicationOutcome::Preview(_)
+        | ApplicationOutcome::Effect(_)
+        | ApplicationOutcome::Result(_) => Err(HandoffOpenTargetError::Unavailable),
     }
 }
 

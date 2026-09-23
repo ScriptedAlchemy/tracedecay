@@ -5,34 +5,26 @@ use tempfile::TempDir;
 
 use super::dispatch_test_support::{SelectorEnv, verified_graph_options};
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
+use tracedecay_project::config::lock_user_data_dir_test_env;
 
 fn graph_handlers_that_await_query() -> &'static [&'static str] {
     &[
-        "tracedecay_callers",
-        "tracedecay_callees",
+        // Callers, callees, implementations, type hierarchy, and signature
+        // search are application-surface reads served by the daemon.
         "tracedecay_impact",
         "tracedecay_node",
         // `tracedecay_similar` / `tracedecay_redundancy` bind clone-family
         // executors, never `verified_graph_query_port`. Behavioral coverage is
         // `clone_family_tools_refuse_absent_executors_without_awaiting_graph_query`.
         "tracedecay_rename_preview",
-        "tracedecay_implementations",
-        "tracedecay_callers_for",
         "tracedecay_find_exact_symbol",
         "tracedecay_by_qualified_name",
         "tracedecay_signature",
-        "tracedecay_impls",
         "tracedecay_derives",
         "tracedecay_files",
         "tracedecay_port_status",
         "tracedecay_port_order",
-        "tracedecay_type_hierarchy",
-        "tracedecay_body",
         "tracedecay_todos",
-        "tracedecay_read",
-        "tracedecay_outline",
-        "tracedecay_signature_search",
         "tracedecay_dead_code",
         "tracedecay_circular",
         "tracedecay_hotspots",

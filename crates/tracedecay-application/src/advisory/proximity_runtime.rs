@@ -22,7 +22,7 @@ use tracedecay_domain::feedback::{
     FeedbackScopeV1, PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1, ProviderEvaluationStateV1,
     ProximityAddressV1, ProximityContributionIdV1, ProximityContributionV1, ProximityCoverageV1,
     ProximityInclusionV1, ProximityObservationIdV1, ProximityRelationPathV1, ProximityRiskInputsV1,
-    ProximityTierV1, ProximityWarningClassV1, ProximityWarningIdV1,
+    ProximityTierV1, ProximityWarningClassV1,
 };
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CodeGenerationId, ManifestDigest, RetrievalAnchorId, UtcMicros,
@@ -645,9 +645,6 @@ fn build_proximity_contribution(
     let contribution = ProximityContributionV1 {
         contribution_id: ProximityContributionIdV1::new(format!("contribution.proximity.{suffix}"))
             .ok()?,
-        // Shared domain/publication compatibility still carries this alias.
-        // Runtime-local dedupe no longer stores or compares it.
-        warning_id: ProximityWarningIdV1::new(format!("warning.proximity.{suffix}")).ok()?,
         warning_class: evidence.warning_class,
         source_observation_ids,
         retrieval_anchor_ids: evidence.retrieval_anchor_ids,

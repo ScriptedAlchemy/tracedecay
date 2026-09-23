@@ -78,7 +78,7 @@ use crate::project_runtime::{
     ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1, StoreObservabilityMountErrorV1,
     StoreObservabilityMountV1, StoreObservabilityRegistryV1,
 };
-use tracedecay_agent_hosts::agents::context_scout::ports::{
+use tracedecay_agent_hosts::agents::context_scout::address_registry::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
 };
@@ -193,8 +193,7 @@ mod work_attempt_exec;
 mod work_blocked_interval_recovery;
 mod work_routing;
 
-use clock::now_micros;
-pub use clock::{current_micros, now_millis};
+pub use clock::now_millis;
 use configuration::*;
 use feedback::*;
 use git::*;
@@ -217,6 +216,7 @@ use retained::*;
 use source_edit::{
     execute_source_edit, execute_source_edit_reconcile, execute_source_edit_rollback,
 };
+use tracedecay_contracts::now_micros;
 use types::*;
 use work::*;
 pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;

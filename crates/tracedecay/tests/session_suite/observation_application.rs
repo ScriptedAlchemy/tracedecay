@@ -1,6 +1,5 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -9,10 +8,11 @@ use tracedecay_domain::{
     ObservationSourceRangeV1, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_privacy::{
-    ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1,
-    PrivacySanitizerError, RecordSanitizerV1, parse_claude_record_v1,
-    parse_normalized_observation_record_v1, parse_observation_record_v1,
+    ClaudeRecordSanitizerV1, ClaudeSanitizerPolicyV1, ObservationRecordParseErrorV1,
+    PrivacySanitizerError, RecordSanitizerV1, parse_normalized_observation_record_v1,
+    parse_observation_record_v1,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureClaudeObservationOutcome,
@@ -51,9 +51,10 @@ fn request(
 ) -> CaptureClaudeObservationRequest {
     let encoded_frame = serde_json::to_vec(&record).unwrap();
     let frame_end = u64::try_from(encoded_frame.len()).unwrap();
-    let parsed_record = parse_claude_record_v1(
+    let parsed_record = parse_observation_record_v1(
         &encoded_frame,
         ObservationSourceRangeV1::new(0, frame_end).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
     )
     .unwrap();
     CaptureClaudeObservationRequest::new(
@@ -419,7 +420,7 @@ async fn native_ordering_domain_survives_authoritative_capture() {
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     let request = CaptureObservationRequest::new(
@@ -538,7 +539,7 @@ fn provider_capture_request_with_canonical_provider(
                 }],
                 CanonicalObservationEvidenceV1::new(ordering_domain, range),
             )
-            .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
         })
         .unwrap();
     CaptureObservationRequest::new(

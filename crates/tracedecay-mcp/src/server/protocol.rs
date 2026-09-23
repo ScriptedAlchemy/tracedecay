@@ -11,7 +11,7 @@ pub enum McpMethod {
     ToolsCall,
     ResourcesList,
     ResourcesRead,
-    /// `ping` / `logging/setLevel`, acknowledged with an empty result.
+    /// `ping`, acknowledged with an empty result.
     TrivialAck,
     /// The daemon's internal hook-event notification.
     HookEvent,
@@ -31,7 +31,7 @@ pub fn classify_mcp_method(method: &str) -> McpMethod {
         "resources/list" => McpMethod::ResourcesList,
         "resources/read" => McpMethod::ResourcesRead,
         "notifications/cancelled" => McpMethod::Cancelled,
-        "ping" | "logging/setLevel" => McpMethod::TrivialAck,
+        "ping" => McpMethod::TrivialAck,
         _ => McpMethod::Unknown,
     }
 }
@@ -45,8 +45,7 @@ pub fn initialize_result(version: &str, instructions: &str) -> Value {
             "tools": {
                 "listChanged": true
             },
-            "resources": {},
-            "logging": {}
+            "resources": {}
         },
         "serverInfo": {
             "name": "tracedecay",

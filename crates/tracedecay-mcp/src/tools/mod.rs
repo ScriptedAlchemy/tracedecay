@@ -564,8 +564,8 @@ mod tests {
         let definition = tracedecay_mcp_catalog::get_tool_definitions()
             .expect("tool definitions")
             .into_iter()
-            .find(|definition| definition.name == "tracedecay_code_implementations")
-            .expect("code_implementations is advertised");
+            .find(|definition| definition.name == "tracedecay_implementations")
+            .expect("implementations is advertised");
 
         let help = render_tool_cli_help(&definition);
         let example = help

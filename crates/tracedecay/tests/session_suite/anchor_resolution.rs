@@ -7,18 +7,18 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorResolutionStateV2, ComponentVersion, DurableClaudeObservationV1, FactLineageEventV1,
-    FactOwnerV1, ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceCursorV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadAccessState, PayloadReferenceV1, ProjectionGenerationId, RetentionClass,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
-    RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, UtcMicros,
-    VectorWatermark, WatermarkDriftV1,
+    AnchorResolutionStateV2, ComponentVersion, DurableObservationV1, FactLineageEventV1,
+    FactOwnerV1, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadAccessState, PayloadReferenceV1, ProjectionGenerationId,
+    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorRecordParts,
+    RetrievalAnchorTarget, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, UtcMicros, VectorWatermark,
+    WatermarkDriftV1,
 };
 use tracedecay_host_admission::HostAdmissionFacade;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_session_memory::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
 };
@@ -31,7 +31,7 @@ use tracedecay_store::{
     ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, RetrievalAnchorQuery, SESSION_MESSAGE_PROJECTOR_VERSION,
     StoredFactV1, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    build_observation_retrieval_anchor,
 };
 
 const GENERATION: u64 = 7;
@@ -45,7 +45,7 @@ fn scope() -> ObservationScopeV1 {
     ObservationScopeV1::Profile
 }
 
-fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableClaudeObservationV1 {
+fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableObservationV1 {
     let payload = json!({
         "kind": "assistant_message",
         "body": body,
@@ -69,7 +69,7 @@ fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableCla
         ObservationSourceRangeV1::new(start, end).unwrap(),
     )
     .unwrap();
-    DurableClaudeObservationV1::new(
+    DurableObservationV1::new(
         identity,
         receipt,
         RetentionClass::new("retention.test").unwrap(),
@@ -79,13 +79,14 @@ fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableCla
 }
 
 fn write(
-    observation: DurableClaudeObservationV1,
+    observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> ObservationWrite {
-    let next_cursor = ObservationSourceCursorV1::new(
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
         observation.source().clone(),
         observation.scope().clone(),
         observation.identity().generation(),
+        ObservationOrderingDomainV1::FileBytes,
         observation.identity().position().end(),
     )
     .unwrap();
@@ -122,14 +123,14 @@ fn anchored_write_with(
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "anchor-resolution.v1")
             .unwrap();
-    let base = build_observation_retrieval_anchor_v2(
+    let base = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
         authorization,
     )
     .unwrap();
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: base.target().clone(),
         owner: base.owner().clone(),
         aliases: base.aliases().to_vec(),
@@ -287,7 +288,7 @@ async fn search_result_resolves_exact_source_after_index_change_with_drift_and_c
     assert_eq!(drifted.record(), Some(first_receipt.retrieval_anchor()));
     assert_eq!(
         drifted.record().unwrap().target(),
-        &RetrievalAnchorTargetV2::ExactObservation(first_id.clone())
+        &RetrievalAnchorTarget::ExactObservation(first_id.clone())
     );
     assert_eq!(
         drifted.resolution().watermark().frozen,
@@ -608,7 +609,7 @@ impl FactStore for UnavailableFactStore {
     async fn get_retrieval_anchor(
         &self,
         _query: RetrievalAnchorQuery,
-    ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+    ) -> FactStoreResult<Option<RetrievalAnchorRecord>> {
         unreachable!("report resolution never reads fact-shard anchors")
     }
 }

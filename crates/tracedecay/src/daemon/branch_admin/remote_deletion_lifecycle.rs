@@ -14,6 +14,7 @@ use super::super::remote_deletion::{
     RemoteDeletionReceipt, RemoteDeletionReceiptTarget,
 };
 use super::{StoreAdministration, destructive_reservation_error};
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 
 struct RemoteDeletionCleanupError {
     code: RemoteDeletionFailureCode,
@@ -399,7 +400,7 @@ impl StoreAdministration {
                     if !open_tasks
                         .shutdown_profile_with_deadline(
                             &profile_root,
-                            super::super::DAEMON_TASK_ABORT_DEADLINE,
+                            DAEMON_TASK_ABORT_DEADLINE,
                         )
                         .await
                     {
@@ -442,7 +443,7 @@ impl StoreAdministration {
                     self.host_admission_brokers.lock().await.clear();
                     #[cfg(unix)]
                     if !self
-                        .settle_retirement_reapers(super::super::DAEMON_TASK_ABORT_DEADLINE)
+                        .settle_retirement_reapers(DAEMON_TASK_ABORT_DEADLINE)
                         .await
                     {
                         let cleanup = tracedecay_global_db::RemoteDeletionCleanupState::Settling {
@@ -755,7 +756,7 @@ impl StoreAdministration {
             .settle_retirement_reapers_for_project(
                 profile_root,
                 project_id,
-                super::super::DAEMON_TASK_ABORT_DEADLINE,
+                DAEMON_TASK_ABORT_DEADLINE,
             )
             .await
         {
@@ -783,7 +784,7 @@ impl StoreAdministration {
             })?;
         super::retire_registered_context_scout_owner(
             &typed_project_id,
-            &data_root.join(crate::config::db_filename(&data_root)),
+            &data_root.join(tracedecay_project::config::db_filename(&data_root)),
         );
         self.git_index_transaction_services
             .retire_project_database(&typed_project_id, &project_sessions_path)
@@ -932,7 +933,7 @@ impl StoreAdministration {
                 ));
             }
             let database_paths = [
-                data_root.join(crate::config::db_filename(&data_root)),
+                data_root.join(tracedecay_project::config::db_filename(&data_root)),
                 project_sessions_path.clone(),
             ]
             .into_iter()

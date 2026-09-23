@@ -282,7 +282,6 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
 
     let proximity = ProximityContributionV1 {
         contribution_id: ProximityContributionIdV1::new("proximity-contribution.1").unwrap(),
-        warning_id: ProximityWarningIdV1::new("proximity-warning.1").unwrap(),
         warning_class: ProximityWarningClassV1::SameSymbol,
         source_observation_ids: vec![
             ProximityObservationIdV1::new("proximity-observation.1").unwrap(),

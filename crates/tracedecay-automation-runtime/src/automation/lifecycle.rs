@@ -1193,10 +1193,9 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count: outcome.accepted_count,
             rejected_count: outcome.rejected_count,
             skipped_count: usize::from(outcome.status == AutomationRunStatus::Skipped),
-            fallback_status: (outcome.status == AutomationRunStatus::Skipped)
-                .then(|| outcome.error.clone())
-                .flatten(),
+            fallback_status: None,
             error: outcome.error,
+            session_evidence_budget_stage: None,
             error_classification,
             error_retryable: error_classification
                 .map(super::backend::AgentTaskFailureClass::is_retryable),

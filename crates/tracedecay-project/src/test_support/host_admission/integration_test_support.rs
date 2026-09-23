@@ -283,8 +283,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         scope: HostAdmissionScope,
         observation: &tracedecay_store::ObservationCommitReceipt,
-    ) -> std::result::Result<Option<tracedecay_store::SourceCommitReceiptV1>, HostAdmissionOutcome>
-    {
+    ) -> std::result::Result<
+        Option<tracedecay_store::SourceCommitReceiptSummaryV1>,
+        HostAdmissionOutcome,
+    > {
         let database = self.registered_database(scope).ok_or_else(|| {
             HostAdmissionOutcome::retained_unavailable("registered_authority_unavailable")
         })?;

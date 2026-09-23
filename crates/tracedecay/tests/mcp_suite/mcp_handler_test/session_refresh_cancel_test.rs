@@ -19,11 +19,11 @@ use std::time::Duration;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
-use tracedecay::project::TraceDecay;
 use tracedecay_contracts::SessionTemporalRefreshWakePort;
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_service::DaemonSessionRefreshService;
 use tracedecay_mcp::handlers::SessionAuthorities;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::default_profile_root;
 
 const CANCEL_RESULT_SCHEMA: &str = "schema.application.retained.session-refresh-cancel.result";

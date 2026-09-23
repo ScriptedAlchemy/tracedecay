@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_agent_hosts::agents::AgentIntegration;
 
 #[test]
@@ -79,8 +80,10 @@ fn domain_symbol_rules_warning_is_silent_without_the_file() {
     let project = tempfile::tempdir().expect("temp project root");
     assert_eq!(domain_symbol_rules_warning(project.path()), None);
 
-    std::fs::create_dir_all(crate::config::get_tracedecay_dir(project.path()))
-        .expect("create project marker dir");
+    std::fs::create_dir_all(tracedecay_project::config::get_tracedecay_dir(
+        project.path(),
+    ))
+    .expect("create project marker dir");
     assert_eq!(
         domain_symbol_rules_warning(project.path()),
         None,
@@ -144,7 +147,9 @@ async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
     let before = std::fs::read(&db_path).unwrap();
     let before_family = temporal_family_manifest(&db_path);
 
-    let report = db.session_temporal_doctor_health().await;
+    let report = SessionTemporalAccess::new(db)
+        .session_temporal_doctor_health()
+        .await;
 
     let encoded = serde_json::to_value(report).unwrap();
     assert_eq!(encoded["status"], "complete");
@@ -207,7 +212,12 @@ async fn temporal_health_detects_index_and_column_migration_gaps() {
         )
         .await
         .unwrap();
-    let report = serde_json::to_value(db.session_temporal_doctor_health().await).unwrap();
+    let report = serde_json::to_value(
+        SessionTemporalAccess::new(db)
+            .session_temporal_doctor_health()
+            .await,
+    )
+    .unwrap();
     assert_eq!(report["status"], "partial");
     let findings = report["findings"].as_array().unwrap();
     assert!(
@@ -408,89 +418,6 @@ fn doctor_result_treats_unavailable_canonical_report_as_unknown() {
         },
     )
     .unwrap();
-}
-
-/// The canonical, plainly spelled identity of a fixture path.
-///
-/// Canonicalizing on every host is what keeps the fixture and the production
-/// resolver naming one directory; spelling the result plainly is what lets it
-/// still be handed to `git`, which refuses the `\\?\` form `canonicalize`
-/// returns on Windows.
-fn canonical_temp_path(path: &std::path::Path) -> std::path::PathBuf {
-    tracedecay_runtime_core::path_safety::canonical_root_identity(path)
-}
-
-#[tokio::test]
-async fn store_layout_resolution_surfaces_split_identity_conflict()
--> std::result::Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::TempDir::new()?;
-    let profile_root = dir.path().join("profile");
-    let project_root = dir.path().join("repo");
-    std::fs::create_dir_all(&project_root)?;
-    let project_root = canonical_temp_path(&project_root);
-    let status = std::process::Command::new("git")
-        .args(["init", "--quiet"])
-        .current_dir(tracedecay_runtime_core::path_safety::plain_host_path(
-            &project_root,
-        ))
-        .status()?;
-    assert!(status.success());
-
-    for project_id in ["proj_doctor_selected", "proj_doctor_legacy"] {
-        let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
-            &project_root,
-            &profile_root,
-            &tracedecay_runtime_core::storage::EnrollmentMarker {
-                project_id: project_id.to_string(),
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            },
-        )?;
-        std::fs::create_dir_all(&layout.data_root)?;
-        std::fs::write(&layout.graph_db_path, b"graph")?;
-        tracedecay_runtime_core::storage::write_store_manifest(&layout)?;
-    }
-    tracedecay_runtime_core::storage::write_repository_identity_marker(
-        &project_root,
-        "proj_doctor_selected",
-    )?;
-
-    let open_options = crate::project::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(dir.path().join("global.db")),
-    };
-    let selected_db = profile_root.join("projects/proj_doctor_selected/tracedecay.db");
-    let legacy_db = profile_root.join("projects/proj_doctor_legacy/tracedecay.db");
-    let selected_before = std::fs::read(&selected_db)?;
-    let legacy_before = std::fs::read(&legacy_db)?;
-
-    let resolution = crate::project::TraceDecay::try_initialized_store_layout_with_options(
-        &project_root,
-        &open_options,
-    )
-    .await;
-    let diagnostic = format!("{resolution:?}");
-    assert!(
-        diagnostic.contains("identity cutover conflict"),
-        "{diagnostic}"
-    );
-    assert!(diagnostic.contains("proj_doctor_selected"), "{diagnostic}");
-    assert!(diagnostic.contains("proj_doctor_legacy"), "{diagnostic}");
-    assert!(
-        diagnostic.contains("tracedecay migrate consolidate"),
-        "{diagnostic}"
-    );
-    assert!(
-        diagnostic.contains("--source-project-id proj_doctor_legacy"),
-        "{diagnostic}"
-    );
-    assert!(
-        diagnostic.contains("--target-project-id proj_doctor_selected"),
-        "{diagnostic}"
-    );
-    assert!(diagnostic.contains("no files changed"), "{diagnostic}");
-    assert_eq!(std::fs::read(selected_db)?, selected_before);
-    assert_eq!(std::fs::read(legacy_db)?, legacy_before);
-    Ok(())
 }
 
 #[test]

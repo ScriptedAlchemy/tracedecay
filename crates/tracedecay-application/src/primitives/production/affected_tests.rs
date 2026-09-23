@@ -172,7 +172,6 @@ pub(super) fn attributed_tests_outcome(
         );
     }
 
-    let mut tests = Vec::new();
     let mut attributions = Vec::new();
     let mut matching_incomplete = false;
     for record in &join.records {
@@ -200,7 +199,13 @@ pub(super) fn attributed_tests_outcome(
                     FreshnessState::Unknown,
                 );
             };
-            if test_occurrence.occurrence_id != record.attribution.test_occurrence {
+            let attribution = AffectedTestAttributionV1 {
+                test: test_occurrence.occurrence_id.clone(),
+                evidence_class: *evidence_class,
+            };
+            if attribution.test != record.attribution.test_occurrence
+                || !attribution.is_current_candidate()
+            {
                 return affected_tests_unavailable(
                     request,
                     finished_at,
@@ -208,11 +213,7 @@ pub(super) fn attributed_tests_outcome(
                     FreshnessState::Unknown,
                 );
             }
-            tests.push(test_occurrence.occurrence_id.clone());
-            attributions.push(AffectedTestAttributionV1 {
-                test: test_occurrence.occurrence_id.clone(),
-                evidence_class: *evidence_class,
-            });
+            attributions.push(attribution);
         } else {
             matching_incomplete = true;
             if matches!(
@@ -229,19 +230,18 @@ pub(super) fn attributed_tests_outcome(
             }
         }
     }
-    tests.sort();
-    tests.dedup();
     attributions.sort_by(|left, right| {
         (&left.test, left.evidence_class).cmp(&(&right.test, right.evidence_class))
     });
     attributions.dedup();
+    let result = AffectedTestsResult { attributions };
 
     let complete = read.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete
         && read.coverage.is_complete()
         && matches!(join.coverage, GenerationTestJoinCoverageV1::Complete)
         && !matching_incomplete;
     let (visited, eligible) = affected_tests_provider_counts(&read.coverage);
-    if eligible.is_some_and(|eligible| tests.len() as u64 > eligible) {
+    if eligible.is_some_and(|eligible| result.current_tests().len() as u64 > eligible) {
         return affected_tests_unavailable(
             request,
             finished_at,
@@ -251,10 +251,7 @@ pub(super) fn attributed_tests_outcome(
     }
     let evidence = affected_tests_evidence(
         request,
-        Some(AffectedTestsResult {
-            tests,
-            attributions,
-        }),
+        Some(result),
         finished_at,
         if complete {
             CoverageCompleteness::Complete
@@ -351,7 +348,7 @@ pub(super) fn affected_tests_evidence(
 ) -> RetrievalEvidence<AffectedTestsResult> {
     let returned = payload
         .as_ref()
-        .map_or(0, |result| result.tests.len() as u64);
+        .map_or(0, |result| result.current_tests().len() as u64);
     RetrievalEvidence {
         payload,
         temporal: TemporalState {

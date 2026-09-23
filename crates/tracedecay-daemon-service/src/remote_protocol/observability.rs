@@ -211,7 +211,9 @@ fn remote_query_response_observation(
                     "remote_query_result_payload_unavailable",
                 ),
             },
-            ApplicationOutcome::Preview(_) | ApplicationOutcome::Effect(_) => {
+            ApplicationOutcome::Preview(_)
+            | ApplicationOutcome::Effect(_)
+            | ApplicationOutcome::Result(_) => {
                 unavailable_observation(
                     operation_ref,
                     expected_shards,

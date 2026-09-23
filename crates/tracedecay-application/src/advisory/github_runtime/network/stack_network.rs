@@ -148,8 +148,8 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
     use tracedecay_contracts::retrieval::{
-        GitTopologyAnchorAuthorityV2, GitTopologyAnchorResolutionOutcomeV2,
-        GitTopologyAnchorResolutionV2,
+        GitTopologyAnchorAuthority, GitTopologyAnchorResolutionOutcome,
+        GitTopologyAnchorResolution,
     };
     use tracedecay_contracts::{RequestContext, now_micros};
     use tracedecay_domain::ObservationScopeV1;
@@ -476,13 +476,13 @@ mod tests {
         lineage.extend_from_slice(snapshot.source_anchors());
         for source in lineage {
             let store =
-                tracedecay_global_db::RegisteredGitTopologyAnchorAuthorityV2::new(database.clone());
+                tracedecay_global_db::RegisteredGitTopologyAnchorAuthority::new(database.clone());
             let owner = ObservationScopeV1::Project {
                 project_id: scope.project_id.clone(),
             };
-            let Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(source_record)) = store
+            let Ok(GitTopologyAnchorResolutionOutcome::Resolved(source_record)) = store
                 .resolve(
-                    GitTopologyAnchorResolutionV2::new(owner.clone(), source.anchor_id().clone())
+                    GitTopologyAnchorResolution::new(owner.clone(), source.anchor_id().clone())
                         .unwrap(),
                 )
                 .await
@@ -493,14 +493,14 @@ mod tests {
                 assert!(matches!(
                     store
                         .resolve(
-                            GitTopologyAnchorResolutionV2::new(
+                            GitTopologyAnchorResolution::new(
                                 owner.clone(),
                                 nested.anchor_id().clone(),
                             )
                             .unwrap(),
                         )
                         .await,
-                    Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(_))
+                    Ok(GitTopologyAnchorResolutionOutcome::Resolved(_))
                 ));
             }
         }

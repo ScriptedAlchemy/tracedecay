@@ -19,7 +19,7 @@ use tracedecay_host_admission::{
 use tracedecay_sessions::admission::{
     HostAdmissionOutcome, HostAdmissionScope, HostAdmissionStatus,
 };
-use tracedecay_sessions::runtime::codex::CodexDiscoveryHub;
+use tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub;
 
 use crate::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -880,7 +880,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
+    ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
         crate::config::ensure_runtime_configuration_for_registered_database(
             project_root,
             layout,
@@ -894,7 +894,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
+    ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
         crate::config::resolve_runtime_configuration_for_registered_database(
             project_root,
             layout,
@@ -908,7 +908,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         project_root: &Path,
         layout: &tracedecay_runtime_core::storage::StoreLayout,
-    ) -> Result<crate::config::DaemonRuntimeConfiguration> {
+    ) -> Result<tracedecay_configuration::config::PinnedRuntimeConfiguration> {
         crate::config::open_runtime_configuration_for_registered_database_read_only(
             project_root,
             layout,

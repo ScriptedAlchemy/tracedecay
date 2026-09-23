@@ -1044,7 +1044,6 @@ pub(crate) async fn dashboard_state_fixture(
         pr_autotrack_reader: None,
         storage_mode: "profile_sharded".to_owned(),
         store_root,
-        config_path: project.path().join("config.json"),
         dashboard_root,
         retention_config: tracedecay_configuration::RetentionConfig::default(),
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),

@@ -6,9 +6,9 @@
 //! projected from its executable registry instead, because that registry owns
 //! its complete mounted operation set and lifecycle contracts.
 //!
-//! Canonical application tools are projected from their executable registry
-//! and have no handwritten rows here. `group` is `None` only for retained
-//! tools whose predicate remains their dispatch authority.
+//! Canonical application tools are projected from their executable registry.
+//! Their rows here carry only registered-project selector access, with `group`
+//! `None`; dispatch derives from the operation identity.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -52,9 +52,7 @@ pub enum McpToolDispatchGroup {
     Admin,
     Analysis,
     Git,
-    Edit,
     Health,
-    RetainedApplication,
     Memory,
     SessionWorkflow,
     Work,
@@ -91,15 +89,13 @@ pub fn tool_branch_sensitivity(tool_name: &str) -> BranchSensitivity {
             | McpToolDispatchGroup::Admin
             | McpToolDispatchGroup::Analysis
             | McpToolDispatchGroup::Git
-            | McpToolDispatchGroup::Edit
             | McpToolDispatchGroup::Health
             | McpToolDispatchGroup::MultiRoot
             | McpToolDispatchGroup::ApplicationSurface
             | McpToolDispatchGroup::SessionWorkflow,
         ) => BranchSensitivity::Sensitive,
         Some(
-            McpToolDispatchGroup::RetainedApplication
-            | McpToolDispatchGroup::Memory
+            McpToolDispatchGroup::Memory
             | McpToolDispatchGroup::Work
             | McpToolDispatchGroup::Workflow,
         ) => BranchSensitivity::Independent,
@@ -136,6 +132,10 @@ fn application_surface_branch_sensitivity(
         NativeIntegrationWorktreeRemove, ObservatoryRead, QualifiedName, SessionLookup, SourceBody,
         SourceLines, SourceOutline, StorageStatus, TestResults,
     };
+    use ApplicationSurfaceOperation::{
+        AstGrepRewrite, InsertAt, InsertAtSymbol, MoveSymbol, MultiStrReplace, RenameSymbol,
+        ReplaceSymbol, SourceEditReconcile, SourceEditRollback, StrReplace,
+    };
     match operation {
         // Mixed ApplicationSurface group: these operations read configuration,
         // host-integration lifecycle, session identity, store identity, or
@@ -170,6 +170,34 @@ fn application_surface_branch_sensitivity(
         | NativeIntegrationApply
         | NativeIntegrationStatus
         | NativeIntegrationCancel => BranchSensitivity::Independent,
+        // Retained memory, session, and workflow authority.
+        ApplicationSurfaceOperation::FactStoreCurate
+        | ApplicationSurfaceOperation::FactStoreAdd
+        | ApplicationSurfaceOperation::FactStoreSearch
+        | ApplicationSurfaceOperation::FactStoreProbe
+        | ApplicationSurfaceOperation::FactStoreRelated
+        | ApplicationSurfaceOperation::FactStoreReason
+        | ApplicationSurfaceOperation::FactStoreContradict
+        | ApplicationSurfaceOperation::FactStoreGet
+        | ApplicationSurfaceOperation::FactStoreUpdate
+        | ApplicationSurfaceOperation::FactStoreRemove
+        | ApplicationSurfaceOperation::FactStoreSupersede
+        | ApplicationSurfaceOperation::FactStoreList
+        | ApplicationSurfaceOperation::FactFeedback
+        | ApplicationSurfaceOperation::MemoryStatus
+        | ApplicationSurfaceOperation::SessionRefreshStatus
+        | ApplicationSurfaceOperation::SessionRefreshCancel
+        | ApplicationSurfaceOperation::SessionRefreshBegin
+        | ApplicationSurfaceOperation::MessageSearch
+        | ApplicationSurfaceOperation::SessionsFor
+        | ApplicationSurfaceOperation::Workflows
+        | ApplicationSurfaceOperation::LcmStatus
+        | ApplicationSurfaceOperation::LcmDoctor
+        | ApplicationSurfaceOperation::LcmLoadSession
+        | ApplicationSurfaceOperation::LcmGrep
+        | ApplicationSurfaceOperation::LcmDescribe
+        | ApplicationSurfaceOperation::LcmExpand
+        | ApplicationSurfaceOperation::LcmExpandQuery => BranchSensitivity::Independent,
         // Mixed ApplicationSurface group: git walks, worktree inventory, stack
         // snapshots, code-graph reads, source-file bodies, health, diagnostics,
         // and post-edit feedback all depend on the current checkout or graph.
@@ -218,7 +246,17 @@ fn application_surface_branch_sensitivity(
         | ModuleApi
         | HealthRead
         | HealthDelta
-        | DiagnosticsRead => BranchSensitivity::Sensitive,
+        | DiagnosticsRead
+        | StrReplace
+        | MultiStrReplace
+        | InsertAt
+        | AstGrepRewrite
+        | ReplaceSymbol
+        | InsertAtSymbol
+        | MoveSymbol
+        | RenameSymbol
+        | SourceEditReconcile
+        | SourceEditRollback => BranchSensitivity::Sensitive,
     }
 }
 
@@ -257,10 +295,10 @@ macro_rules! binding_groups {
 const BINDING_GROUPS: &[BindingGroup] = binding_groups![
     [Some(McpToolDispatchGroup::Graph), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_search", "tracedecay_grep", "tracedecay_ast_grep_search", "tracedecay_retrieve",
-        "tracedecay_context", "tracedecay_callers", "tracedecay_callees", "tracedecay_impact",
+        "tracedecay_context", "tracedecay_impact",
         "tracedecay_node", "tracedecay_similar", "tracedecay_redundancy", "tracedecay_rename_preview",
-        "tracedecay_implementations", "tracedecay_callers_for", "tracedecay_find_exact_symbol",
-        "tracedecay_by_qualified_name", "tracedecay_signature", "tracedecay_impls", "tracedecay_derives"],
+        "tracedecay_find_exact_symbol",
+        "tracedecay_by_qualified_name", "tracedecay_signature", "tracedecay_derives"],
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_status", "tracedecay_remote_status", "tracedecay_active_project",
         "tracedecay_project_list", "tracedecay_project_search"],
@@ -268,8 +306,7 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
         "tracedecay_project_context"],
     [Some(McpToolDispatchGroup::Info), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_files", "tracedecay_admin_sync", "tracedecay_port_status", "tracedecay_port_order",
-        "tracedecay_type_hierarchy", "tracedecay_body", "tracedecay_todos", "tracedecay_read",
-        "tracedecay_outline", "tracedecay_config", "tracedecay_signature_search"],
+        "tracedecay_todos", "tracedecay_config"],
     [Some(McpToolDispatchGroup::Admin), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_hook_runtime", "tracedecay_admin_cli", "tracedecay_admin_project"],
     [Some(McpToolDispatchGroup::Analysis), RegisteredProjectAccess::ActiveProjectOnly,
@@ -281,10 +318,6 @@ const BINDING_GROUPS: &[BindingGroup] = binding_groups![
         "tracedecay_admin_branch_add", "tracedecay_affected", "tracedecay_diff_context", "tracedecay_changelog",
         "tracedecay_commit_context", "tracedecay_pr_context", "tracedecay_branch_search",
         "tracedecay_branch_diff", "tracedecay_branch_list"],
-    [Some(McpToolDispatchGroup::Edit), RegisteredProjectAccess::ActiveProjectOnly,
-        "tracedecay_str_replace", "tracedecay_multi_str_replace", "tracedecay_insert_at", "tracedecay_ast_grep_rewrite",
-        "tracedecay_replace_symbol", "tracedecay_insert_at_symbol", "tracedecay_move_symbol", "tracedecay_rename_symbol",
-        "tracedecay_source_edit_reconcile", "tracedecay_source_edit_rollback"],
     [Some(McpToolDispatchGroup::Health), RegisteredProjectAccess::ActiveProjectOnly,
         "tracedecay_test_map", "tracedecay_gini", "tracedecay_dependency_depth", "tracedecay_health",
         "tracedecay_runtime", "tracedecay_dsm", "tracedecay_test_risk"],
@@ -663,10 +696,7 @@ pub fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
 }
 
 fn compute_tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
-    matches!(
-        binding(tool_name).and_then(|binding| binding.group),
-        Some(McpToolDispatchGroup::Edit)
-    ) && application_capability_for_tool(tool_name)
+    application_capability_for_tool(tool_name)
         .ok()
         .flatten()
         .is_some_and(|capability| capability.effect() == EffectClass::SourceEdit)
@@ -783,11 +813,6 @@ fn executable_handler_is_available(
         || matches!(group, Some(McpToolDispatchGroup::ApplicationSurface))
             && application_capability
                 .is_some_and(|capability| capability.availability().is_callable())
-        || matches!(group, Some(McpToolDispatchGroup::Edit))
-            && application_capability.is_some_and(|capability| {
-                capability.effect() == EffectClass::SourceEdit
-                    && capability.availability().is_callable()
-            })
 }
 
 fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract {

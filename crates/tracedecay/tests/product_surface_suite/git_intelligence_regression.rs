@@ -19,11 +19,11 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
-use tracedecay::git_query::{
-    GenerationBoundGitQueryV1, GenerationStalenessV1, GitQueryBounds, GitQueryEngine, GitQueryError,
-};
 use tracedecay_application::git_intelligence::{
     GitBlameRequest, GitHistoryRequest, GitIntelligenceError, NativeGitIntelligence,
+};
+use tracedecay_application::git_query::{
+    GenerationBoundGitQueryV1, GenerationStalenessV1, GitQueryBounds, GitQueryEngine, GitQueryError,
 };
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::git::{

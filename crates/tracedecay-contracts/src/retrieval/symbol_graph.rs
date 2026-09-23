@@ -82,6 +82,19 @@ pub struct SymbolRelationRecord {
     pub depth: Option<u32>,
 }
 
+/// One implementation match with its exact source: the implementing
+/// impl/class block (methods included) for a trait selector, or the function
+/// body for a method selector.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ImplementationRecord {
+    pub symbol: SymbolPrimitiveRecord,
+    pub edge_kind: String,
+    /// Trait or interface node a trait-selector match was reached through.
+    pub dispatch_from: Option<String>,
+    pub body: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TypeHierarchyRecord {
@@ -479,7 +492,7 @@ pub trait SymbolGraphPrimitivePort {
         &'a self,
         context: SymbolGraphPortContext<'a>,
         request: &'a ImplementationsRequest,
-    ) -> SymbolGraphPortFuture<'a, SymbolRelationRecord>;
+    ) -> SymbolGraphPortFuture<'a, ImplementationRecord>;
 
     fn type_hierarchy<'a>(
         &'a self,

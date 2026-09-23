@@ -5,14 +5,15 @@ use tracedecay_domain::{
     canonical_sha256, sha256_hex_suffix,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_session_temporal_store::SessionTemporalCursorKeyProvider;
+use tracedecay_session_temporal_store::{SessionTemporalAccess, SessionTemporalCursorKeyProvider};
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
+use tracedecay_temporal_query::execution::BindingDigest;
 use tracedecay_temporal_query::ports::SessionCursorAuthenticator;
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
-    TemporalWatermarks,
-};
+use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 const PR_CONTEXT_CURSOR_SESSION: &str = "session.daemon.pr-context";
 
@@ -245,7 +246,8 @@ pub(super) async fn pr_context_cursor_authority(
     };
     let session_db: &RegisteredGlobalDb = session_db;
     let authenticator = hotpath::future!(
-        session_db.load_preprovisioned_session_cursor_key_provider_result(),
+        SessionTemporalAccess::new(session_db)
+            .load_preprovisioned_session_cursor_key_provider_result(),
         label = "mcp.git.cursor.key_provider"
     )
     .await
@@ -706,7 +708,7 @@ mod tests {
             .expect("registered project lease");
         // The daemon provisions this store's signing key at project open; the
         // authority path below reads it back exactly as production does.
-        lease
+        SessionTemporalAccess::new(&*lease)
             .ensure_active_session_cursor_key_result()
             .await
             .expect("provision the store's cursor signing key");

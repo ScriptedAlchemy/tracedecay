@@ -2,9 +2,9 @@
 
 use serde_json::Value;
 
-use crate::project::TraceDecay;
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_project::project::TraceDecay;
 
 use super::super::ToolCallRegistryOptions;
 use super::verified_graph_open;
@@ -38,7 +38,7 @@ pub(in crate::mcp::tools::handlers) async fn dispatch_health_tools(
                 &ctx,
                 args,
                 options.global_db.map(RegisteredGlobalDbLeaseV1::as_ref),
-                crate::version::build_version()?,
+                tracedecay_project::version::build_version()?,
             )
             .await
         }

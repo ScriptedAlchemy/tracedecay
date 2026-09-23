@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use tracedecay_automation::evidence_budget::SESSION_EVIDENCE_BUDGET_EXHAUSTED;
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 
 use super::backend::{
     AgentTaskFailureClass, AgentTaskKind, AgentTaskRetryAttempt, task_key as canonical_task_key,
@@ -38,7 +40,7 @@ const RUN_ARTIFACTS_DIR: &str = "automation_artifacts";
 /// this window or the complete append-only ledger.
 const RUN_LEDGER_TAIL_CHUNK_BYTES: u64 = 256 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationTrigger {
     #[default]
@@ -62,7 +64,7 @@ impl AutomationTrigger {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationRunStatus {
     Queued,
@@ -88,7 +90,7 @@ impl AutomationRunStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationRunArtifactKind {
     Traces,
@@ -124,7 +126,7 @@ impl AutomationRunArtifactKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AutomationRunArtifact {
     pub schema_version: u32,
     pub kind: String,
@@ -135,7 +137,7 @@ pub struct AutomationRunArtifact {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AutomationRunLedgerRecord {
     pub schema_version: u32,
     pub run_id: String,
@@ -187,6 +189,10 @@ pub struct AutomationRunLedgerRecord {
     pub skipped_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Exhausted retrieval boundary of a `session_evidence_budget_exhausted`
+    /// skip; present exactly on those skips.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_evidence_budget_stage: Option<SessionRetrievalBudgetStageV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_classification: Option<AgentTaskFailureClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -499,34 +505,18 @@ pub(super) fn canonical_completion_parts(
     completed_at: &str,
     completed_at_micros: Option<i64>,
 ) -> Result<(i64, i64)> {
-    let (completed_at, canonical_micros) = match schema_version {
-        1 => parse_schema_v1_rfc3339_micros(completed_at, "completion timestamp")?,
-        2 => {
-            let completed_at =
-                parse_nonnegative_unix_integer(completed_at, "schema-v2 completion timestamp")?;
-            let canonical_micros = completed_at.checked_mul(1_000_000).ok_or_else(|| {
-                config_error("automation completion timestamp overflows signed microseconds")
-            })?;
-            (completed_at, canonical_micros)
-        }
-        _ => {
-            return Err(config_error(format!(
-                "automation run ledger schema version {schema_version} is unsupported"
-            )));
-        }
-    };
+    require_supported_schema(schema_version)?;
+    let completed_at = parse_nonnegative_unix_integer(completed_at, "completion timestamp")?;
+    let canonical_micros = completed_at.checked_mul(1_000_000).ok_or_else(|| {
+        config_error("automation completion timestamp overflows signed microseconds")
+    })?;
     let completed_at_micros = completed_at_micros.unwrap_or(canonical_micros);
     if completed_at_micros < 0 {
         return Err(config_error(
             "automation completion timestamp predates the UNIX epoch",
         ));
     }
-    let consistent = match schema_version {
-        1 => completed_at_micros == canonical_micros,
-        2 => completed_at_micros.div_euclid(1_000_000) == completed_at,
-        _ => false,
-    };
-    if !consistent {
+    if completed_at_micros.div_euclid(1_000_000) != completed_at {
         return Err(config_error(
             "automation completion timestamp seconds and microseconds disagree",
         ));
@@ -545,11 +535,8 @@ pub fn canonical_record_completion_micros(record: &AutomationRunLedgerRecord) ->
     .map(|(_, completed_at_micros)| completed_at_micros)
 }
 
-/// Schema-aware start instant in Unix seconds.
-///
-/// Schema v1 rows store RFC3339. Schema v2 rows store nonnegative Unix
-/// seconds. Callers that window the ledger, including analytics, must use
-/// this instead of assuming one textual form.
+/// Validated start instant in Unix seconds. Callers that window the ledger,
+/// including analytics, must use this instead of parsing `started_at`.
 pub fn canonical_record_started_at_seconds(
     record: &AutomationRunLedgerRecord,
     label: &str,
@@ -562,18 +549,17 @@ pub(super) fn canonical_started_at_seconds(
     started_at: &str,
     label: &str,
 ) -> Result<i64> {
-    match schema_version {
-        1 => tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp(started_at).ok_or_else(
-            || {
-                config_error(format!(
-                    "automation schema-v1 {label} '{started_at}' is not valid RFC3339"
-                ))
-            },
-        ),
-        2 => parse_nonnegative_unix_integer(started_at, label),
-        schema_version => Err(config_error(format!(
+    require_supported_schema(schema_version)?;
+    parse_nonnegative_unix_integer(started_at, label)
+}
+
+fn require_supported_schema(schema_version: u32) -> Result<()> {
+    if schema_version == 2 {
+        Ok(())
+    } else {
+        Err(config_error(format!(
             "automation run ledger schema version {schema_version} is unsupported"
-        ))),
+        )))
     }
 }
 
@@ -587,55 +573,6 @@ pub(super) fn validate_run_ledger_record_semantics(
         record.completed_at_micros,
     )
     .map(|_| ())
-}
-
-fn parse_schema_v1_rfc3339_micros(value: &str, label: &str) -> Result<(i64, i64)> {
-    let seconds =
-        tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp(value).ok_or_else(|| {
-            config_error(format!(
-                "automation schema-v1 {label} '{value}' is not valid RFC3339"
-            ))
-        })?;
-    let fraction_micros = rfc3339_fraction_micros(value, label)?;
-    let micros = seconds
-        .checked_mul(1_000_000)
-        .and_then(|whole| whole.checked_add(fraction_micros))
-        .ok_or_else(|| {
-            config_error(format!(
-                "automation schema-v1 {label} overflows signed microseconds"
-            ))
-        })?;
-    Ok((seconds, micros))
-}
-
-fn rfc3339_fraction_micros(value: &str, label: &str) -> Result<i64> {
-    let Some(dot) = value.find('.') else {
-        return Ok(0);
-    };
-    let digits = value.as_bytes()[dot + 1..]
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit());
-    let mut micros = 0_i64;
-    let mut count = 0_usize;
-    for digit in digits {
-        count += 1;
-        if count <= 6 {
-            micros = micros * 10 + i64::from(*digit - b'0');
-        } else if *digit != b'0' {
-            return Err(config_error(format!(
-                "automation schema-v1 {label} has precision finer than exact microseconds"
-            )));
-        }
-    }
-    if count == 0 {
-        return Err(config_error(format!(
-            "automation schema-v1 {label} has an empty fractional component"
-        )));
-    }
-    for _ in count..6 {
-        micros *= 10;
-    }
-    Ok(micros)
 }
 
 fn parse_nonnegative_unix_integer(value: &str, label: &str) -> Result<i64> {
@@ -1287,16 +1224,8 @@ fn is_session_evidence_budget_exhausted_skip(
     status == AutomationRunStatus::Skipped && session_evidence_budget_exhausted_error
 }
 
-/// Classifies the legacy exhaustion anchor and its bounded stage-specific
-/// successors. Scheduler backoff and ledger projection use this same rule.
 pub(super) fn is_session_evidence_budget_exhausted_reason(reason: Option<&str>) -> bool {
-    let Some(reason) = reason else {
-        return false;
-    };
-    reason == SESSION_EVIDENCE_BUDGET_EXHAUSTED
-        || reason
-            .strip_prefix(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
-            .is_some_and(|suffix| suffix.starts_with('_'))
+    reason == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
 }
 
 #[hotpath::measure(label = "automation_runtime.run_ledger.scan_task_summary")]
@@ -1843,8 +1772,8 @@ mod tests {
     fn task_summary_keeps_the_budget_exhausted_anchor_visible_past_newer_skips() {
         let lines = vec![
             skipped_session_reflector_line(
-                "run-budget-stage",
-                "session_evidence_budget_exhausted_request_candidate_bytes",
+                "run-budget-exhausted",
+                SESSION_EVIDENCE_BUDGET_EXHAUSTED,
                 100,
             ),
             skipped_session_reflector_line(
@@ -1867,27 +1796,30 @@ mod tests {
             "run-suppressed"
         );
         let anchor = summary.latest_session_evidence_budget_exhausted().unwrap();
-        assert_eq!(anchor.run_id, "run-budget-stage");
-        assert_eq!(
-            anchor.error.as_deref(),
-            Some("session_evidence_budget_exhausted_request_candidate_bytes")
-        );
+        assert_eq!(anchor.run_id, "run-budget-exhausted");
         assert!(
             summary
                 .records()
                 .iter()
-                .any(|record| record.run_id == "run-budget-stage"),
-            "stage-specific budget anchors reach schedule decisions through records()"
+                .any(|record| record.run_id == "run-budget-exhausted"),
+            "budget anchors reach schedule decisions through records()"
         );
     }
 
     #[test]
-    fn task_summary_reads_legacy_budget_exhaustion_anchors() {
-        let lines = vec![skipped_session_reflector_line(
-            "run-budget-legacy",
-            SESSION_EVIDENCE_BUDGET_EXHAUSTED,
-            100,
-        )];
+    fn task_summary_selects_only_the_exact_budget_exhausted_token() {
+        let lines = vec![
+            skipped_session_reflector_line(
+                "run-budget-near-prefix",
+                "session_evidence_budget_exhaustedX",
+                100,
+            ),
+            skipped_session_reflector_line(
+                "run-budget-stage-suffix",
+                "session_evidence_budget_exhausted_request_candidate_bytes",
+                200,
+            ),
+        ];
         let (_temp, path) = write_ledger(&lines);
 
         let summary = read_run_ledger_task_summary(
@@ -1895,31 +1827,7 @@ mod tests {
             AgentTaskKind::SessionReflector,
             "session_reflector",
         )
-        .unwrap();
-
-        let anchor = summary.latest_session_evidence_budget_exhausted().unwrap();
-        assert_eq!(anchor.run_id, "run-budget-legacy");
-        assert_eq!(
-            anchor.error.as_deref(),
-            Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
-        );
-    }
-
-    #[test]
-    fn task_summary_does_not_select_near_prefix_budget_errors() {
-        let lines = vec![skipped_session_reflector_line(
-            "run-budget-near-prefix",
-            "session_evidence_budget_exhaustedX",
-            100,
-        )];
-        let (_temp, path) = write_ledger(&lines);
-
-        let summary = read_run_ledger_task_summary(
-            &path,
-            AgentTaskKind::SessionReflector,
-            "session_reflector",
-        )
-        .expect("near-prefix error must not create a projection/decode mismatch");
+        .expect("non-canonical errors must not create a projection/decode mismatch");
 
         assert!(summary.latest_session_evidence_budget_exhausted().is_none());
     }

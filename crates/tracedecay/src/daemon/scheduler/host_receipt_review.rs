@@ -4,8 +4,8 @@ use std::pin::Pin;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 
-use crate::project::TraceDecay;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
 use super::{DaemonEngine, DaemonHandshake, effective_automation_config_for_project};
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -312,14 +312,16 @@ mod tests {
         std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
         std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
             .expect("project source");
-        let options = crate::project::TraceDecayOpenOptions {
+        let options = tracedecay_project::project::TraceDecayOpenOptions {
             profile_root: Some(profile_root.clone()),
             global_db_path: Some(profile_root.join("global.db")),
         };
-        let writable =
-            crate::project::TraceDecay::init_with_options_for_test(&project_root, options.clone())
-                .await
-                .expect("initialize host receipt project");
+        let writable = tracedecay_project::project::TraceDecay::init_with_options_for_test(
+            &project_root,
+            options.clone(),
+        )
+        .await
+        .expect("initialize host receipt project");
         let dashboard_root = writable.store_layout().dashboard_root.clone();
         let route = Some(HookRouteMetadata {
             session_id: Some("session.context-failure".to_owned()),
@@ -349,12 +351,13 @@ mod tests {
         .await
         .expect("mark host receipt ready");
         writable.close();
-        let read_only = crate::project::TraceDecay::open_read_only_with_options_for_test(
-            &project_root,
-            options,
-        )
-        .await
-        .expect("open read-only host receipt project");
+        let read_only =
+            tracedecay_project::project::TraceDecay::open_read_only_with_options_for_test(
+                &project_root,
+                options,
+            )
+            .await
+            .expect("open read-only host receipt project");
         let handshake = DaemonHandshake {
             project_path: Some(project_root.clone()),
             scope_prefix: None,

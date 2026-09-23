@@ -2,22 +2,8 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
 use tracedecay_mcp::get_tool_definitions;
-#[test]
-fn outline_schema_requires_file_without_provider_property() {
-    let tools = get_tool_definitions().expect("tool definitions");
-    let schema = tool_schema(&tools, "tracedecay_outline");
-
-    assert_eq!(required_args_at(schema, &[]), vec!["file"]);
-    assert!(
-        schema["properties"]
-            .as_object()
-            .is_some_and(|properties| !properties.contains_key("provider")),
-        "tracedecay_outline should not advertise a provider property: {schema}"
-    );
-}
-
+use tracedecay_project::project::TraceDecay;
 #[tokio::test]
 async fn schema_required_arguments_match_representative_handler_parsers() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -42,25 +28,16 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         .expect("production project server");
     wait_for_current_graph(&server).await;
 
-    // Shared helper parser style, including canonical node_id despite id alias support.
+    // Canonical application request parser style.
     assert_schema_requires(&tools, "tracedecay_callers", &["node_id"]);
     expect_real_server_missing_argument_error(
         &server,
         "tracedecay_callers",
         json!({}),
-        "missing required parameter: node_id",
+        "missing field `node_id`",
     )
     .await;
 
-    // Non-empty array parser style.
-    assert_schema_requires(&tools, "tracedecay_callers_for", &["node_ids"]);
-    expect_real_server_missing_argument_error(
-        &server,
-        "tracedecay_callers_for",
-        json!({}),
-        "node_ids",
-    )
-    .await;
     // Multi-field edit parser style.
     assert_schema_requires(
         &tools,
@@ -453,7 +430,11 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 
     // Registered-project readers dispatch to other mounted projects, so the
     // selector has to be discoverable from the schema.
-    for name in ["tracedecay_context", "tracedecay_grep", "tracedecay_read"] {
+    for name in [
+        "tracedecay_context",
+        "tracedecay_grep",
+        "tracedecay_callers",
+    ] {
         let properties = tool_properties(&tools, name);
         assert!(properties.contains_key("project_selector"));
         for alias in ["project_id", "project_path", "project_root", "root"] {

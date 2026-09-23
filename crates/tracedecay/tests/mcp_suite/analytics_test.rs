@@ -13,11 +13,11 @@ use crate::support::{
 #[cfg(feature = "test-transport")]
 use serde_json::Value;
 #[cfg(feature = "test-transport")]
-use tracedecay::project::current_timestamp;
-#[cfg(feature = "test-transport")]
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-#[cfg(feature = "test-transport")]
 use tracedecay_global_db::AnalyticsEventInsert;
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 #[cfg(feature = "test-transport")]
 fn tool_call_event(
@@ -588,10 +588,16 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
     let payload = extract_json(&response);
     let tools = &payload["tools"];
     assert_eq!(tools["raw_distinct_event_name_count"].as_i64(), Some(5));
-    assert_eq!(
-        tools["distinct_tools_called"], tools["raw_distinct_event_name_count"],
-        "the shipped distinct-tools key remains a raw event-name count"
-    );
+    for retired in [
+        "distinct_tools_called",
+        "defined_tool_count",
+        "zero_call_tools",
+    ] {
+        assert!(
+            tools.get(retired).is_none(),
+            "retired analytics key {retired} must not be emitted"
+        );
+    }
     assert_eq!(
         tools["called_available_defined_tool_count"].as_i64(),
         Some(2)
@@ -602,18 +608,9 @@ async fn analytics_reconciles_public_catalog_with_alias_internal_and_unknown_or_
     let maximal_defined_tool_count = tools["maximal_defined_tool_count"]
         .as_i64()
         .expect("maximal defined tool count");
-    assert_eq!(
-        tools["defined_tool_count"].as_i64(),
-        Some(available_defined_tool_count),
-        "the shipped defined count remains an alias for current available definitions"
-    );
     let zero_call_count = tools["zero_call_available_defined_tools"]["count"]
         .as_i64()
         .expect("zero-call available defined tool count");
-    assert_eq!(
-        tools["zero_call_tools"], tools["zero_call_available_defined_tools"],
-        "the shipped zero-call object remains an alias for available definitions"
-    );
     assert_eq!(
         available_defined_tool_count,
         tools["called_available_defined_tool_count"]

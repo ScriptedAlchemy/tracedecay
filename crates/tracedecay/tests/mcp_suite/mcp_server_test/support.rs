@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::mcp::McpServer;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
 /// Creates a temporary Rust project and returns a direct protocol server.
@@ -260,13 +260,14 @@ pub(crate) async fn mcp_runtime_events(
     global_db_path: &std::path::Path,
     session_id: &str,
 ) -> Vec<tracedecay_global_db::AnalyticsEventRecord> {
-    let runtime = tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
-        global_db_path
-            .parent()
-            .expect("global db has a profile root"),
-    )
-    .await
-    .expect("registered profile runtime opens at isolated path");
+    let runtime =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::profile(
+            global_db_path
+                .parent()
+                .expect("global db has a profile root"),
+        )
+        .await
+        .expect("registered profile runtime opens at isolated path");
     runtime
         .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
             provider: Some("mcp".to_string()),

@@ -8,8 +8,6 @@
 //! mismatch when the daemon that answers is not the expected version.
 
 #[cfg(unix)]
-use std::io::{BufRead, Write};
-#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 
 #[cfg(unix)]
@@ -42,33 +40,6 @@ fn quiesced_guard() -> QuiescedDaemonLifecycle {
 #[cfg(unix)]
 use super::isolated_profile::EnvVarGuard;
 
-#[cfg(unix)]
-fn serve_initialize_identity(
-    listener: UnixListener,
-    name: &'static str,
-    version: &'static str,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept readiness probe");
-        let mut reader =
-            std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read handshake");
-        line.clear();
-        reader.read_line(&mut line).expect("read initialize");
-        let request: serde_json::Value =
-            serde_json::from_str(line.trim()).expect("initialize json");
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request["id"],
-            "result": {
-                "serverInfo": {"name": name, "version": version}
-            }
-        });
-        writeln!(stream, "{response}").expect("write initialize response");
-    })
-}
-
 /// Version skew must keep failing closed: when the daemon that answers after
 /// an upgrade is still the OLD binary (restart raced or was lost), readiness
 /// against the installed version reports a typed identity mismatch instead of
@@ -87,8 +58,14 @@ fn restore_readiness_rejects_a_stale_daemon_after_an_upgrade() {
     });
 
     let socket_path = profile.path().join("stale.sock");
+    let authority = super::tests::seed_socket_authority(&socket_path);
     let listener = UnixListener::bind(&socket_path).expect("bind stale daemon socket");
-    let server = serve_initialize_identity(listener, "tracedecay", QUIESCED_VERSION);
+    let server = super::tests::serve_probe_response(
+        listener,
+        "tracedecay",
+        QUIESCED_VERSION,
+        authority.auth_token().to_owned(),
+    );
 
     assert_eq!(
         super::probe::daemon_protocol_state_with_timeout(

@@ -6,10 +6,11 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     save_managed_skill, set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
-    AnalyticsEventRecord, SkillUsageAction, SkillUsageEvent, ingest_analytics_events,
-    load_skill_usage_records, record_skill_usage, record_skill_usage_event,
-    skill_usage_record_path, summarize_skill_usage, summarize_skill_usage_for,
+    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,
+    record_skill_usage, record_skill_usage_event, skill_usage_record_path, summarize_skill_usage,
+    summarize_skill_usage_for,
 };
+use tracedecay_global_db::AnalyticsEventRecord;
 
 fn draft() -> ManagedSkillDraft {
     ManagedSkillDraft {

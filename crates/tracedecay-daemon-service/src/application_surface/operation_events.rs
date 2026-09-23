@@ -51,12 +51,14 @@ impl Drop for SseDisconnectObserver {
         }
         let executor = Arc::clone(&self.executor);
         let subject = self.subject.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        if let (Ok(runtime), Ok(observed_at)) =
+            (tokio::runtime::Handle::try_current(), current_micros())
+        {
             runtime.spawn(async move {
                 let _ = executor
                     .observe_feedback(
                         subject,
-                        current_micros().unwrap_or(UtcMicros(1)),
+                        observed_at,
                         FeedbackSourceEventV1::SseLifecycle {
                             lifecycle: FeedbackSseLifecycleV1::Disconnected,
                             sequence: None,
@@ -363,13 +365,22 @@ pub(super) async fn http_operation_events(
     Query(query): Query<HttpOperationEventQuery>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
+    let observed_at = match current_micros() {
+        Ok(observed_at) => observed_at,
+        Err(error) => {
+            return operation_event_problem(
+                &request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
     let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
         OperationId::from_request(operation_id)
     } else {
         emit_http_feedback_observation(
             &state,
             observation_subject.as_ref(),
-            current_micros().unwrap_or(UtcMicros(1)),
+            observed_at,
             FeedbackSourceEventV1::SurfaceArgumentRejected {
                 operation: FeedbackOperationV1::SseStream,
                 route: Some(FeedbackDeliveryRouteV1::Http),
@@ -385,15 +396,6 @@ pub(super) async fn http_operation_events(
     let next_sequence = match operation_event_next_sequence(query.next_sequence, &headers) {
         Ok(next_sequence) => next_sequence,
         Err(error) => return operation_event_problem(&request_id, error),
-    };
-    let observed_at = match current_micros() {
-        Ok(observed_at) => observed_at,
-        Err(error) => {
-            return operation_event_problem(
-                &request_id,
-                OperationEventError::InvalidContext(error.to_string()),
-            );
-        }
     };
     // Same owner rule as cancellation: this authority answers for the
     // operations it began, and only an operation it does not own is delegated
@@ -536,11 +538,14 @@ pub(super) async fn http_operation_events(
                 if is_terminal {
                     observer.terminal.store(true, Ordering::Relaxed);
                 }
+                let Ok(observed_at) = current_micros() else {
+                    return event;
+                };
                 let _ = observer
                     .executor
                     .observe_feedback(
                         observer.subject.clone(),
-                        current_micros().unwrap_or(UtcMicros(1)),
+                        observed_at,
                         FeedbackSourceEventV1::SseLifecycle {
                             lifecycle,
                             sequence: Some(event.sequence),
@@ -644,13 +649,22 @@ pub(super) async fn http_operation_cancel(
     Extension(controls): Extension<HttpApplicationControls>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
+    let observed_at = match current_micros() {
+        Ok(observed_at) => observed_at,
+        Err(error) => {
+            return operation_event_problem(
+                &request_id,
+                OperationEventError::InvalidContext(error.to_string()),
+            );
+        }
+    };
     let operation_id = if let Ok(operation_id) = RequestId::new(operation_id) {
         OperationId::from_request(operation_id)
     } else {
         emit_http_feedback_observation(
             &state,
             observation_subject.as_ref(),
-            current_micros().unwrap_or(UtcMicros(1)),
+            observed_at,
             FeedbackSourceEventV1::SurfaceArgumentRejected {
                 operation: FeedbackOperationV1::SseStream,
                 route: Some(FeedbackDeliveryRouteV1::Http),
@@ -662,15 +676,6 @@ pub(super) async fn http_operation_cancel(
         )
         .await;
         return operation_event_problem(&request_id, OperationEventError::NotFoundOrNotAuthorized);
-    };
-    let observed_at = match current_micros() {
-        Ok(observed_at) => observed_at,
-        Err(error) => {
-            return operation_event_problem(
-                &request_id,
-                OperationEventError::InvalidContext(error.to_string()),
-            );
-        }
     };
     // The canonical owner of an operation is whichever authority began it. The
     // daemon mounts these routes with its *own* process-global authority and an

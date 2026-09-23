@@ -12,7 +12,6 @@ use super::{
     maybe_run_global_retention, run_user_jobs_scheduler_pass, scheduler_run_observer,
     settle_scheduler_retained_automation,
 };
-use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority,
 };
@@ -20,6 +19,7 @@ use tracedecay_daemon_service::automation_effect::{
     prepare as prepare_automation_effect, scheduler_automation_request_id,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub(super) fn log_scheduler_pre_admission_problem(
@@ -101,7 +101,7 @@ async fn fixed_task_schedule_decision(
 )]
 pub(super) async fn scheduler_automation_effect(
     engine: &DaemonEngine,
-    memory: &crate::project::TraceDecay,
+    memory: &tracedecay_project::project::TraceDecay,
     run_control: &AutomationRunControl,
     project_path: &Path,
     dashboard_root: &Path,

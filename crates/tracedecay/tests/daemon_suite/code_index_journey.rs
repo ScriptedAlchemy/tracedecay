@@ -16,7 +16,8 @@ use tracedecay::daemon::{
     tool_call_transport_error_is_retryable,
 };
 use tracedecay_daemon_protocol::DaemonHandshake;
-use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent, HookEventNotifyOutcomeV1};
+use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_hooks::core_events::{DaemonHookEvent, HookEventNotifyOutcomeV1};
 
 use crate::common::{DaemonProcess, tracedecay_command_with_home};
 
@@ -553,7 +554,7 @@ pub async fn deliver_save(project: &Path, paths: &[&str]) {
     let outcome = notify_hook_event(
         project,
         DaemonHookEvent::post_tool_use_edit(
-            HookAgent::Codex,
+            HostIntegrationIdV1::Codex,
             paths.iter().map(|path| (*path).to_owned()).collect(),
             project.to_path_buf(),
         ),

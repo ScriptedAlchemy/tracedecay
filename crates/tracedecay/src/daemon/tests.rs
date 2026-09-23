@@ -24,10 +24,11 @@ use super::explicit_git_state;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
 use super::{
-    DaemonClientIdentity, DaemonHandshake, DaemonLifecycle, DatabaseOwnerRegistry, ProjectRouteKey,
+    DaemonClientIdentity, DaemonHandshake, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
     store_owner_key_from_paths,
 };
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 
 mod bootstrap;
 mod code_index_hydration;
@@ -66,7 +67,6 @@ fn git(root: &std::path::Path, args: &[&str]) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ObservedMcpRoute {
     Rmcp,
-    Legacy,
 }
 
 fn observed_mcp_routes()
@@ -268,7 +268,7 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     // that drives the engine without ever building a handshake (for example
     // the unparseable-handshake refusals) would otherwise depend on some other
     // fixture in the same process registering it first.
-    crate::product_runtime::register_fixture_product_runtime();
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
     prepare_test_profile_root(profile_root);
     let profile_identity =
         tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
@@ -345,14 +345,16 @@ async fn initialize_test_project(
     // Heap-allocate the graph-init composition so every test awaiting this
     // fixture keeps a bounded resident frame (perf-profile layouts overflow
     // the test stack when the mega-future is inlined).
-    let project = Box::pin(crate::project::TraceDecay::init_with_exclusive_maintenance(
-        project_root,
-        crate::project::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-        &lifecycle,
-    ))
+    let project = Box::pin(
+        tracedecay_project::project::TraceDecay::init_with_exclusive_maintenance(
+            project_root,
+            tracedecay_project::project::TraceDecayOpenOptions {
+                profile_root: Some(client_identity.profile_root.clone()),
+                global_db_path: Some(client_identity.global_db_path.clone()),
+            },
+            &lifecycle,
+        ),
+    )
     .await
     .expect("initialize project");
     let store_layout = project.store_layout().clone();
@@ -363,7 +365,8 @@ async fn initialize_test_project(
 fn test_handshake_defaults() -> DaemonHandshake {
     // Test processes only ever register the fixture product runtime, so every
     // handshake in the suite advertises one identical fixture version.
-    let build_version = crate::product_runtime::register_fixture_product_runtime().build_version();
+    let build_version =
+        tracedecay_project::product_runtime::register_fixture_product_runtime().build_version();
     DaemonHandshake {
         project_path: None,
         scope_prefix: None,
@@ -375,8 +378,83 @@ fn test_handshake_defaults() -> DaemonHandshake {
         client_instance_id: tracedecay_runtime_core::runtime_identity::process_run_id().to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
-        moved_store_adoption: crate::project::MovedStoreAdoption::Never,
+        moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,
     }
+}
+
+/// Daemon credential the in-process socket fixtures serve and present.
+#[cfg(unix)]
+const TEST_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+/// Serves one socket client through the production authenticated entry.
+#[cfg(unix)]
+async fn serve_authenticated_test_client(
+    stream: tokio::net::UnixStream,
+    engine: DaemonEngine,
+) -> tracedecay_domain::errors::Result<()> {
+    Box::pin(super::serve_authenticated_socket_client_with_class(
+        tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+        engine,
+        TEST_AUTH_TOKEN.to_owned(),
+        super::DaemonClientAdmissionClass::General,
+    ))
+    .await
+}
+
+/// Writes the auth preface an authenticated client sends before its handshake.
+#[cfg(unix)]
+async fn write_test_auth_preface(writer: &mut (impl tokio::io::AsyncWrite + Unpin)) {
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TEST_AUTH_TOKEN)
+        .to_line()
+        .expect("test auth preface");
+    writer
+        .write_all(preface.as_bytes())
+        .await
+        .expect("write auth preface");
+    writer.write_all(b"\n").await.expect("auth preface newline");
+}
+
+/// Publishes the authority record beside `socket` that clients resolve it
+/// through. Hold the authority for as long as the socket should be served.
+#[cfg(unix)]
+pub(super) fn seed_socket_authority(
+    socket: &std::path::Path,
+) -> tracedecay_daemon_identity::authority::DaemonAuthority {
+    tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        socket.parent().expect("socket parent"),
+        &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.to_path_buf()),
+        "test",
+    )
+    .expect("seed daemon authority")
+}
+
+/// Reads what a fake daemon receives first: the auth preface carrying
+/// `token`, then the handshake.
+#[cfg(unix)]
+async fn read_authenticated_handshake<R>(
+    lines: &mut tokio::io::Lines<R>,
+    token: &str,
+) -> DaemonHandshake
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let preface = lines
+        .next_line()
+        .await
+        .expect("read auth preface")
+        .expect("auth preface line");
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(preface.trim())
+        .expect("auth preface");
+    assert!(
+        preface.authenticate(token),
+        "client must present the current daemon token"
+    );
+    let handshake = lines
+        .next_line()
+        .await
+        .expect("read handshake")
+        .expect("handshake line");
+    DaemonHandshake::from_line(&handshake).expect("parse handshake")
 }
 
 #[test]
@@ -631,7 +709,7 @@ async fn apply_project_setting_via_surface(
         .expect("configuration capability")
         .deadline()
         .maximum_millis();
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))

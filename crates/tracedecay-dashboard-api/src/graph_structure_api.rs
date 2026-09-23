@@ -784,7 +784,7 @@ async fn node_tests(
                         return graph_error_response::<TestMapMeasurementV1>(&state, error);
                     }
                 };
-                let qualification = if crate::tracedecay::is_test_file(&caller.file_path) {
+                let qualification = if tracedecay_code_index::is_test_file(&caller.file_path) {
                     "test_file"
                 } else if match has_test_annotation(&annotations) {
                     Ok(has_test_annotation) => has_test_annotation,

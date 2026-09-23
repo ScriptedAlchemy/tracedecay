@@ -53,7 +53,7 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
             &session_id,
             1,
             "second",
-            AnchorProvenanceRelationV2::Supersedes,
+            AnchorProvenanceRelation::Supersedes,
             first.retrieval_anchor_id.clone(),
             None,
         )
@@ -160,7 +160,7 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
          FROM session_assertion_supersession
          WHERE generation = {generation}
          ORDER BY superseded_assertion_id, superseding_assertion_id",
-        "SELECT occurrence.occurrence_id || ':' || fts.index_text || ':' || fts.snippet_text
+        "SELECT occurrence.occurrence_id || ':' || fts.index_text || ':' || occurrence.snippet_text
          FROM session_occurrences AS occurrence
          JOIN session_occurrences_fts AS fts ON fts.rowid = occurrence.rowid
          WHERE occurrence.generation = {generation}

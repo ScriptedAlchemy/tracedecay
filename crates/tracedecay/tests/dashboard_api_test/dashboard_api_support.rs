@@ -12,13 +12,13 @@ pub(crate) use crate::common::{
 pub(crate) use crate::runtime::DashboardTestRuntimeV1;
 pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
-pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
-pub(crate) use tracedecay::project::TraceDecay;
 pub(crate) use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
 };
 pub(crate) use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+pub(crate) use tracedecay_project::config::USER_DATA_DIR_ENV;
+pub(crate) use tracedecay_project::project::TraceDecay;
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -81,7 +81,7 @@ pub(crate) struct DashboardFixture {
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) host_runtime: Arc<DashboardTestRuntimeV1>,
-    pub(crate) project_graphs: dashboard::DashboardTestProjectGraphsV1,
+    pub(crate) project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     pub(crate) server: DashboardServer,
 }
 
@@ -116,7 +116,7 @@ impl Drop for DashboardServer {
 pub(crate) fn spawn_dashboard_server_with_host_runtime(
     cg: TraceDecay,
     host_runtime: Arc<DashboardTestRuntimeV1>,
-    project_graphs: dashboard::DashboardTestProjectGraphsV1,
+    project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
     spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), false, None, port)
@@ -125,7 +125,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
 pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     cg: TraceDecay,
     host_runtime: Arc<DashboardTestRuntimeV1>,
-    project_graphs: dashboard::DashboardTestProjectGraphsV1,
+    project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
     spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), true, None, port)
@@ -145,7 +145,7 @@ fn spawn_dashboard_server_with_runner(
     cg: TraceDecay,
     host_authority: Option<(
         Arc<DashboardTestRuntimeV1>,
-        dashboard::DashboardTestProjectGraphsV1,
+        tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
     )>,
     mount_configuration_runtime: bool,
     delivery_authority: Option<FakeDeliveryAuthority>,
@@ -160,7 +160,7 @@ fn spawn_dashboard_server_with_runner(
                 Some(authority) => authority,
                 None => (
                     open_dashboard_host_runtime(&cg).await,
-                    dashboard::DashboardTestProjectGraphsV1::default(),
+                    tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
                 ),
             };
             let authority = if mount_configuration_runtime {
@@ -186,12 +186,15 @@ fn spawn_dashboard_server_with_runner(
                 cg.clone(),
                 authority,
                 project_graphs,
-                dashboard::DashboardTestEndpointV1 {
+                tracedecay_dashboard_api::DashboardTestEndpointV1 {
                     host: "127.0.0.1",
                     port,
                 },
-                tracedecay::product_runtime::register_fixture_product_runtime().build_version(),
-                dashboard::spa_router(tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS),
+                tracedecay_project::product_runtime::register_fixture_product_runtime()
+                    .build_version(),
+                tracedecay_api::static_dashboard_router(std::sync::Arc::new(
+                    tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
+                )),
                 async move {
                     let _ = shutdown_rx.await;
                 },
@@ -240,7 +243,7 @@ pub(crate) async fn setup_project(
             });
     let profile_root = tracedecay_runtime_core::storage::default_profile_root()
         .unwrap_or_else(|error| panic!("resolve dashboard fixture profile root: {error}"));
-    let open_options = tracedecay::project::TraceDecayOpenOptions {
+    let open_options = tracedecay_project::project::TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
         global_db_path: None,
     };
@@ -552,7 +555,7 @@ pub(crate) fn fixture_fact_id(
 ) -> FactId {
     let (status, overview) = get_json(
         agent,
-        &format!("{}/api/plugins/holographic/?limit=100", fixture.base_url),
+        &format!("{}/api/plugins/holographic?limit=100", fixture.base_url),
     );
     assert_eq!(status, 200, "dashboard fixture overview must succeed");
     overview["payload"]["holographic"]["facts"]
@@ -927,7 +930,7 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         seed_memory_fixture(&cg).await;
     }
 
-    let project_graphs = dashboard::DashboardTestProjectGraphsV1::default();
+    let project_graphs = tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default();
     if seed_lcm {
         seed_lcm_fixture(&host_runtime, &project_root).await;
     }

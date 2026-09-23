@@ -1,5 +1,6 @@
 //! Runtime adapters for leaf-owned automation backend contracts and policies.
 
+use schemars::JsonSchema;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -59,7 +60,7 @@ impl BackendRetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, JsonSchema)]
 pub struct AgentTaskRetryAttempt {
     pub attempt: u32,
     pub succeeded: bool,

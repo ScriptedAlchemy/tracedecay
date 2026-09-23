@@ -644,7 +644,7 @@ async fn stock_disabled_configuration_produces_nothing() {
                 &tracedecay_hooks::HookEventEnvelopeV2 {
                     schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
                     event_id: [64; 16],
-                    producer: tracedecay_hooks::HookHostV1::Codex,
+                    producer: tracedecay_domain::NativeHostIdentityV1::Codex,
                     protected_session_id: input.address.protected_session_id,
                     project_id: input.address.project_id,
                     repository_id: [61; 16],

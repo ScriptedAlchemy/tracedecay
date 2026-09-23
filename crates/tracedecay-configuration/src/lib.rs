@@ -8,10 +8,8 @@ pub mod config;
 pub mod configuration;
 
 pub use config::model::{
-    CONFIG_FILENAME, MIN_AUTO_TRACK_PR_POLL_SECS, RetentionConfig, SyncConfig, TelemetryConfig,
-    TraceDecayConfig, brand_env, get_config_path, is_excluded, is_excluded_dir,
-    is_generated_path_segment, is_in_gitignore, is_included, load_config, load_config_from_path,
-    resolve_path, resolve_path_with_discovery, save_config_to_path,
+    MIN_AUTO_TRACK_PR_POLL_SECS, RetentionConfig, SyncConfig, TelemetryConfig, brand_env,
+    is_generated_path_segment, is_in_gitignore, resolve_path, resolve_path_with_discovery,
 };
 pub use config::{
     OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, PinnedRuntimeConfigurationCachePort,

@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use super::super::get_tool_definitions;
 use super::dispatch_test_support::*;
 use super::*;
-use crate::config::lock_user_data_dir_test_env;
+use tracedecay_project::config::lock_user_data_dir_test_env;
 
 /// Records the daemon operation every multi-root tool routes to, then refuses
 /// it. The refusal is the point: it proves the MCP name reached the closed
@@ -266,7 +266,7 @@ fn git_dispatch_family_is_visible_to_the_server_horizon() {
             "{tool_name} dispatches through the git family",
         );
     }
-    assert!(!tool_dispatches_git_reads("tracedecay_outline"));
+    assert!(!tool_dispatches_git_reads("tracedecay_files"));
     assert!(!tool_dispatches_git_reads("tracedecay_diagnostics"));
 }
 
@@ -478,9 +478,12 @@ fn graph_reader_selector_dispatch_policy_is_allowlisted() {
     // must accept a selector.
     for tool_name in [
         "tracedecay_type_hierarchy",
-        "tracedecay_outline",
-        "tracedecay_read",
-        "tracedecay_body",
+        "tracedecay_callers",
+        "tracedecay_callees",
+        "tracedecay_implementations",
+        "tracedecay_signature_search",
+        "tracedecay_call_chain",
+        "tracedecay_file_dependents",
     ] {
         assert!(
             tool_accepts_registered_project_selector(tool_name),
@@ -651,7 +654,10 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     let meta = tracedecay_runtime_core::branch_meta::BranchMeta::new("main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
     let cg = runtime
-        .open_project_graph_for_test(&project, crate::project::TraceDecayOpenOptions::default())
+        .open_project_graph_for_test(
+            &project,
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -871,11 +877,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     // tracking ref rather than the user-visible branch name.
     let mut branch_meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
         .expect("main branch metadata");
-    branch_meta.add_branch(
-        "feature",
-        tracedecay_runtime_core::config::DB_FILENAME,
-        "main",
-    );
+    branch_meta.add_branch("feature", "main");
     tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &branch_meta)
         .unwrap();
     run_git_in(&project, &["checkout", "-b", "feature"]);
@@ -1199,16 +1201,20 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     let target_server = crate::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
         target,
         None,
-        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
-            .expect("target project-scoped runtime"),
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            target_runtime,
+        )
+        .expect("target project-scoped runtime"),
     )
     .await
     .expect("target retained server");
     let server = crate::mcp::McpServer::new_with_retained_test_servers_for_test(
         active,
         None,
-        crate::test_support::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
-            .expect("active project-scoped runtime"),
+        tracedecay_project::test_support::host_admission::ProjectScopedTestRuntimeV1::new(
+            active_runtime,
+        )
+        .expect("active project-scoped runtime"),
         vec![target_server],
     )
     .await
@@ -1633,12 +1639,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
         TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.blank-node-id")
             .await
             .unwrap();
-    for tool_name in [
-        "tracedecay_impact",
-        "tracedecay_callers",
-        "tracedecay_callees",
-        "tracedecay_node",
-    ] {
+    for tool_name in ["tracedecay_impact", "tracedecay_node"] {
         for blank in ["", "   "] {
             let error = dispatch_graph_tools(
                 tool_name,
@@ -1660,11 +1661,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     // Handlers clamp depth with `min(max)`, which leaves an explicit zero
     // intact, so a valid node id still reaches the guard from this side.
     let node_id = "symbol.blank-probe";
-    for tool_name in [
-        "tracedecay_impact",
-        "tracedecay_callers",
-        "tracedecay_callees",
-    ] {
+    for tool_name in ["tracedecay_impact"] {
         let error = dispatch_graph_tools(
             tool_name,
             &cg,
@@ -2262,7 +2259,7 @@ async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
     let reconcile_sink: crate::mcp::server::CodeIndexReconcileSink = std::sync::Arc::new(
         move |_, _| {
             Box::pin(async move {
-                crate::mcp::server::CodeIndexDemandAdmissionV1::Terminal(
+                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Terminal(
                     tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1 {
                         reason: "the publication authority is corrupt and requires an index reset: injected sync refusal".to_owned(),
                         blocked_reason: Some(

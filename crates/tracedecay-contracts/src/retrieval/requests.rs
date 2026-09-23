@@ -152,14 +152,40 @@ pub struct AffectedTestAttributionV1 {
     pub evidence_class: TestAttributionEvidenceClassV1,
 }
 
+impl AffectedTestAttributionV1 {
+    /// Stale and unknown attributions are reported, but never count as
+    /// affected tests.
+    pub const fn is_current_candidate(&self) -> bool {
+        match self.evidence_class {
+            TestAttributionEvidenceClassV1::ConservativeDependencyCandidates
+            | TestAttributionEvidenceClassV1::ObservedCoverageCandidates
+            | TestAttributionEvidenceClassV1::PredictiveRankedCandidates => true,
+            TestAttributionEvidenceClassV1::StaleEvidence
+            | TestAttributionEvidenceClassV1::UnknownUnsupported => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AffectedTestsResult {
-    pub tests: Vec<SymbolOccurrenceId>,
     /// Exact class reported by the generation-bound attribution authority.
-    /// `tests` remains the compatibility projection of current candidates.
-    #[serde(default)]
     pub attributions: Vec<AffectedTestAttributionV1>,
+}
+
+impl AffectedTestsResult {
+    /// Distinct current-candidate tests in identity order.
+    pub fn current_tests(&self) -> Vec<SymbolOccurrenceId> {
+        let mut tests: Vec<_> = self
+            .attributions
+            .iter()
+            .filter(|attribution| attribution.is_current_candidate())
+            .map(|attribution| attribution.test.clone())
+            .collect();
+        tests.sort();
+        tests.dedup();
+        tests
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

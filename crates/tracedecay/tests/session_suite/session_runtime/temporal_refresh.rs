@@ -40,12 +40,12 @@ use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
     SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshReceiptRequestV1,
     SessionRefreshStore, SessionRefreshTerminalStateV1, SessionTemporalProjectionBatchV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -142,7 +142,7 @@ fn anchored_write(observation: DurableObservationV1) -> AnchoredObservationWrite
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "refresh-scheduler")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         generation.clone(),
         UtcMicros(1),
@@ -432,7 +432,8 @@ async fn missing_active_relation_receipt_rebuilds_through_canonical_refresh() {
         1
     );
     assert!(
-        db.pending_session_temporal_refresh_page_result(1, 1, None)
+        SessionTemporalAccess::new(db)
+            .pending_session_temporal_refresh_page_result(1, 1, None)
             .await
             .unwrap()
             .into_parts()
@@ -556,7 +557,7 @@ async fn restart_after_materialization_resumes_from_durable_receipts() {
     let session_id = SessionId::new("session.refresh.materialized-crash").unwrap();
     admit_canonical_effect(db, &session_id, 2, "materialized crash canary").await;
     let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
-    let mut requests = db
+    let mut requests = SessionTemporalAccess::new(db)
         .pending_session_temporal_refresh_page_result(1, 0, None)
         .await
         .unwrap()

@@ -91,6 +91,9 @@ pub enum ApplicationOutcome<T> {
     Evidence(EvidencePacket<T>),
     Preview(PreviewResult<T>),
     Effect(EffectResult<T>),
+    /// An operation-owned typed result that carries its own receipts, such as
+    /// a source-edit result with its durable effect, or a rendered document.
+    Result(T),
 }
 
 impl<T> ApplicationOutcome<T> {
@@ -99,6 +102,7 @@ impl<T> ApplicationOutcome<T> {
             Self::Evidence(result) => result.payload.as_ref(),
             Self::Preview(result) => result.payload.as_ref(),
             Self::Effect(result) => result.payload.as_ref(),
+            Self::Result(result) => Some(result),
         }
     }
 }

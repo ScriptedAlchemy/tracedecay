@@ -28,7 +28,6 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
     let definitions = get_tool_definitions().expect("tool definitions");
     for (operation, tool_name, admits_project_selector) in [
         ("context", "tracedecay_context", true),
-        ("callees", "tracedecay_callees", true),
         ("impact", "tracedecay_impact", true),
         ("node", "tracedecay_node", true),
         ("similar", "tracedecay_similar", false),

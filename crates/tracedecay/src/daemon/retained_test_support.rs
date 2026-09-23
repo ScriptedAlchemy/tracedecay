@@ -18,7 +18,7 @@ use tracedecay_lsp::LspSessionRegistry;
 use super::project_open_owners::project_open_retained_grant;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
-use tracedecay_daemon_protocol::invocation_now_micros;
+use tracedecay_contracts::now_micros;
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonRetainedRuntimeRegistrar, daemon_owned_project_source_access_at,
 };
@@ -157,7 +157,7 @@ pub(crate) async fn register_project_retained_owner_for_test(
             message: format!("retained test owner scope is invalid: {error}"),
         }
     })?;
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let configuration = graph
         .configuration_runtime()
         .client()

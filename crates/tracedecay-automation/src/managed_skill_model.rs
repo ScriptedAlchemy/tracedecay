@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
@@ -9,8 +10,8 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use crate::Result;
 use crate::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
 use crate::managed_skill_validation::{
-    MAX_NATIVE_SKILL_DESCRIPTION_CHARS, MAX_NATIVE_SKILL_NAME_CHARS, validate_managed_skill,
-    validate_native_skill_markdown, validate_support_file,
+    MAX_NATIVE_SKILL_NAME_CHARS, validate_managed_skill, validate_native_skill_markdown,
+    validate_support_file,
 };
 
 pub const MAX_MANAGED_SUPPORT_FILES: usize = 20;
@@ -21,7 +22,7 @@ pub const MAX_MANAGED_SKILL_BODY_BYTES: usize = 256 * 1024;
 /// by TraceDecay automation.
 pub const MATERIALIZED_SKILL_MANAGED_BY: &str = "tracedecay-automation";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillInstallTarget {
     Cursor,
@@ -71,23 +72,6 @@ pub fn default_managed_skill_targets() -> Vec<SkillInstallTarget> {
     ]
 }
 
-/// Preserve the discovery text exported by retained summary-only skill records.
-pub fn legacy_managed_skill_routing_description(summary: &str) -> String {
-    let trimmed = summary.trim();
-    let description = if trimmed
-        .get(..8)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("use when"))
-        || trimmed
-            .get(..19)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("use this skill when"))
-    {
-        trimmed.to_string()
-    } else {
-        format!("Use when {trimmed}")
-    };
-    truncate_frontmatter_chars(&description, MAX_NATIVE_SKILL_DESCRIPTION_CHARS)
-}
-
 fn native_skill_name(id: &str) -> String {
     let mut normalized = String::with_capacity(id.len().min(MAX_NATIVE_SKILL_NAME_CHARS));
     for byte in id.bytes() {
@@ -121,7 +105,7 @@ fn truncate_frontmatter_chars(value: &str, max_chars: usize) -> String {
         .to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillSource {
     AutomationRun,
@@ -129,7 +113,7 @@ pub enum ManagedSkillSource {
     Import,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillState {
     Active,
@@ -137,7 +121,7 @@ pub enum ManagedSkillState {
     Archived,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedSkillMaterializationScope {
     #[default]
@@ -156,14 +140,14 @@ impl ManagedSkillMaterializationScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ManagedSkillProvenance {
     pub source: ManagedSkillSource,
     pub actor: String,
     pub run_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ManagedSupportFile {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
@@ -226,7 +210,7 @@ impl ManagedSkillDraft {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ManagedSkillMetadata {
     pub id: String,
     pub title: String,
@@ -256,7 +240,7 @@ pub struct ManagedSkillMetadata {
     pub provenance: ManagedSkillProvenance,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ManagedSkill {
     pub metadata: ManagedSkillMetadata,
     pub body_markdown: String,
@@ -537,53 +521,5 @@ mod tests {
             updated.materialized_package_hash().unwrap(),
             skill.materialized_package_hash().unwrap()
         );
-    }
-
-    #[test]
-    fn retained_summary_conversion_preserves_previous_export() {
-        assert_eq!(
-            legacy_managed_skill_routing_description("  Diagnose indexing  "),
-            "Use when Diagnose indexing"
-        );
-        for description in ["Use when indexing", "uSe ThIs SkIlL wHeN indexing"] {
-            assert_eq!(
-                legacy_managed_skill_routing_description(description),
-                description
-            );
-        }
-        let summary = format!("{}  tail", "é".repeat(1014));
-        assert_eq!(
-            legacy_managed_skill_routing_description(&summary),
-            format!("Use when {}", "é".repeat(1014))
-        );
-    }
-
-    #[test]
-    fn legacy_skill_without_consolidation_metadata_deserializes() {
-        let skill = ManagedSkillDraft {
-            id: "legacy-skill".to_string(),
-            title: "Legacy skill".to_string(),
-            summary: "Read records written before consolidation metadata.".to_string(),
-            routing_description: "Inspect retained skill consolidation records.".to_string(),
-            category: "testing".to_string(),
-            targets: vec![SkillInstallTarget::Codex],
-            body_markdown: "# Legacy\n".to_string(),
-            support_files: Vec::new(),
-            provenance: ManagedSkillProvenance {
-                source: ManagedSkillSource::AutomationRun,
-                actor: "legacy".to_string(),
-                run_id: None,
-            },
-        }
-        .materialize()
-        .unwrap();
-        let mut value = serde_json::to_value(skill).unwrap();
-        let metadata = value["metadata"].as_object_mut().unwrap();
-        metadata.remove("absorbed_into");
-        metadata.remove("archived_reason");
-
-        let decoded: ManagedSkill = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.metadata.absorbed_into, None);
-        assert_eq!(decoded.metadata.archived_reason, None);
     }
 }

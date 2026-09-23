@@ -177,11 +177,26 @@ fn lcm_compatibility_definitions_expose_only_opaque_continuation_cursors() {
             .as_object()
             .expect("LCM properties");
         assert_eq!(properties["cursor"]["type"], "string");
+        let kinds: Vec<&Value> = properties["temporal_mode"]["oneOf"]
+            .as_array()
+            .expect("temporal mode variants")
+            .iter()
+            .map(|variant| &variant["properties"]["kind"]["const"])
+            .collect();
         assert_eq!(
-            properties["temporal_mode"]["enum"],
-            json!(["current", "as_of", "evolution", "forensic"])
+            kinds,
+            [
+                &json!("current"),
+                &json!("as_of"),
+                &json!("evolution"),
+                &json!("forensic")
+            ]
         );
-        assert_eq!(properties["as_of_micros"]["minimum"], 0);
+        assert_eq!(
+            properties["temporal_mode"]["oneOf"][1]["required"],
+            json!(["kind", "cutoff"])
+        );
+        assert!(properties.get("as_of_micros").is_none());
     }
 
     assert!(

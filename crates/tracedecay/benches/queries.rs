@@ -308,7 +308,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_callers",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
+                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "maximum_depth": 3 }),
             )
         }),
     });
@@ -319,7 +319,7 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
             Query::read(
                 "by_id",
                 "tracedecay_callees",
-                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 3 }),
+                json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "maximum_depth": 3 }),
             )
         }),
     });
@@ -364,17 +364,6 @@ pub fn build_queries(ctx: &QueryContext) -> Vec<ToolGroup> {
                 "by_id",
                 "tracedecay_impact",
                 json!({ "node_id": QueryContext::pick(&ctx.function_ids, i), "max_depth": 2 }),
-            )
-        }),
-    });
-
-    groups.push(ToolGroup {
-        tool: "tracedecay_body",
-        queries: five(|i| {
-            Query::read(
-                "by_id",
-                "tracedecay_body",
-                json!({ "symbol": QueryContext::pick(&ctx.function_qnames, i) }),
             )
         }),
     });

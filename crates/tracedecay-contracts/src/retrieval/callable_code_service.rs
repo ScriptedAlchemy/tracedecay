@@ -8,15 +8,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_domain::{CodeGenerationId, TemporalModeV1, UtcMicros};
-use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
-use crate::authorization::{AuthorizationAdmission, AuthorizationPort, AuthorizationService};
 use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{
-    ApplicationProblem, ApplicationResult, AuthorityReceipt, PageCursor, RetryDirective,
-    SafeDiagnostic,
+    ApplicationProblem, ApplicationResult, AuthorityReceipt, PageCursor, SafeDiagnostic,
 };
 
 use super::callable_code::{
@@ -154,43 +151,22 @@ pub trait CallableCodeQueryPort: Send + Sync {
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord>;
 }
 
-/// Opaque authorization admission retained across one callable-code read.
-///
-/// Canonical source authorization keeps its full proof. A production route
-/// that already resolved exact project/source access may instead retain its
-/// route-owned receipt without reconstructing policy inputs.
-#[derive(Clone, Debug)]
-pub enum CallableCodeAuthorizationAdmission {
-    Source(Box<AuthorizationAdmission>),
-    Routed(AuthorityReceipt),
-}
-
-impl CallableCodeAuthorizationAdmission {
-    pub fn receipt(&self) -> &AuthorityReceipt {
-        match self {
-            Self::Source(admission) => admission.receipt(),
-            Self::Routed(receipt) => receipt,
-        }
-    }
-}
-
-/// Authorization boundary for callable-code application reads.
+/// Authorization boundary for callable-code application reads. The route
+/// owner retains its admission receipt across one read and revalidates it
+/// immediately before publication.
 pub trait CallableCodeAuthorizationPort: Send + Sync {
     fn admit<'a>(
         &'a self,
         context: &'a RequestContext,
         operation: &'a ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> CallableCodeAuthorizationFuture<
-        'a,
-        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
-    >;
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>>;
 
     fn recheck_publication<'a>(
         &'a self,
         context: &'a RequestContext,
         operation: &'a ApplicationOperation,
-        admission: &'a CallableCodeAuthorizationAdmission,
+        admission: &'a AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>>;
 }
@@ -201,10 +177,7 @@ impl CallableCodeAuthorizationPort for Arc<dyn CallableCodeAuthorizationPort> {
         context: &'a RequestContext,
         operation: &'a ApplicationOperation,
         observed_at: UtcMicros,
-    ) -> CallableCodeAuthorizationFuture<
-        'a,
-        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
-    > {
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         (**self).admit(context, operation, observed_at)
     }
 
@@ -212,54 +185,10 @@ impl CallableCodeAuthorizationPort for Arc<dyn CallableCodeAuthorizationPort> {
         &'a self,
         context: &'a RequestContext,
         operation: &'a ApplicationOperation,
-        admission: &'a CallableCodeAuthorizationAdmission,
+        admission: &'a AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         (**self).recheck_publication(context, operation, admission, observed_at)
-    }
-}
-
-impl<P, E> CallableCodeAuthorizationPort for AuthorizationService<P, E>
-where
-    P: AuthorizationPort + Send + Sync,
-    E: SourceAuthorizationEvaluator + Send + Sync,
-{
-    fn admit<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        operation: &'a ApplicationOperation,
-        observed_at: UtcMicros,
-    ) -> CallableCodeAuthorizationFuture<
-        'a,
-        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
-    > {
-        Box::pin(async move {
-            AuthorizationService::admit(self, context, operation, observed_at)
-                .map(|admission| CallableCodeAuthorizationAdmission::Source(Box::new(admission)))
-        })
-    }
-
-    fn recheck_publication<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        operation: &'a ApplicationOperation,
-        admission: &'a CallableCodeAuthorizationAdmission,
-        observed_at: UtcMicros,
-    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
-        Box::pin(async move {
-            let CallableCodeAuthorizationAdmission::Source(admission) = admission else {
-                return Err(ApplicationProblem::not_found_or_not_authorized(
-                    RetryDirective::Never,
-                ));
-            };
-            AuthorizationService::recheck_publication(
-                self,
-                context,
-                operation,
-                admission,
-                observed_at,
-            )
-        })
     }
 }
 
@@ -310,7 +239,7 @@ macro_rules! callable_code_service_method {
             evidence_envelope_with_async_publication_recheck(
                 context,
                 operation,
-                admission.receipt(),
+                &admission,
                 outcome,
                 observed_at,
                 |finished_at| {

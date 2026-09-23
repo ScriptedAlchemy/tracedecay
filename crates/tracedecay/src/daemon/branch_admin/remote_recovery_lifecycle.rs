@@ -16,6 +16,7 @@ use super::{
 };
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 use tracedecay_daemon_identity::authority;
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_store_runtime::WriterAdmissionGuard;
@@ -263,7 +264,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
         .await?;
         super::retire_registered_context_scout_owner(
             project_id,
-            &data_root.join(crate::config::db_filename(data_root)),
+            &data_root.join(tracedecay_project::config::db_filename(data_root)),
         );
         self.git_index_transaction_services
             .retire_project_database(project_id, database.db_path())
@@ -335,7 +336,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
 
     #[hotpath::skip]
     async fn settle_retained_runtime_retirement(&self, project_id: &ProjectId) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + super::super::DAEMON_TASK_ABORT_DEADLINE;
+        let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
         let receipt = super::project_retirement::settle_project_retirements(
             &self.project_server_retirements,
             &self.profile_root,
@@ -509,7 +510,7 @@ pub(super) async fn retire_runtime_work(
         )
         .await;
     }
-    let deadline = tokio::time::Instant::now() + super::super::DAEMON_TASK_ABORT_DEADLINE;
+    let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
     let receipt = super::project_retirement::settle_project_retirements(
         tracked_retirements,
         profile_root,

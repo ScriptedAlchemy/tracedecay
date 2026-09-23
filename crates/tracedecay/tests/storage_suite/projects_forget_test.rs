@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime;
 use tracedecay_global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 static PROJECTS_FORGET_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 

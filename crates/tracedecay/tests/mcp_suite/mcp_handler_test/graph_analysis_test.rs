@@ -8,9 +8,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::project::TraceDecay;
 use tracedecay_domain::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_mcp::ToolResult;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::resolve_layout_for_current_profile;
 
 struct MountedProductionProject {
@@ -2499,18 +2499,22 @@ pub fn helper() {}
     let result = handle_tool_call(
         &cg,
         "tracedecay_callees",
-        json!({"node_id": caller_id, "max_depth": 1, "resolve_dispatch": false}),
+        json!({"node_id": caller_id, "maximum_depth": 1, "resolve_trait_dispatch": false}),
         None,
         None,
     )
     .await
     .unwrap();
     let text = extract_text(&result.value);
-    let items: Value = serde_json::from_str(text).unwrap();
-    let arr = items.as_array().unwrap();
+    let payload: Value = serde_json::from_str(text).unwrap();
+    let arr = payload
+        .pointer("/outcome/value/payload/items")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("callee page missing: {payload:#}"));
+    assert!(!arr.is_empty(), "caller calls helper: {payload:#}");
     for entry in arr {
-        let kind = entry["kind"].as_str().unwrap_or("");
-        let name = entry["name"].as_str().unwrap_or("");
+        let kind = entry["symbol"]["kind"].as_str().unwrap_or("");
+        let name = entry["symbol"]["name"].as_str().unwrap_or("");
         let callable = matches!(
             kind,
             "function" | "method" | "struct_method" | "constructor" | "macro" | "arrow_function"
@@ -3063,6 +3067,16 @@ async fn typescript_typed_variables_reach_public_type_relation_queries() {
     close_test_graph(graph).await;
 }
 
+/// Whether the type-hierarchy page reached `child` over a `relation` edge.
+fn hierarchy_has_child(hierarchy: &Value, relation: &str, child: &str) -> bool {
+    hierarchy
+        .pointer("/outcome/value/payload/items")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("type hierarchy page missing: {hierarchy:#}"))
+        .iter()
+        .any(|item| item["edge_kind"] == relation && item["symbol"]["name"] == child)
+}
+
 #[tokio::test]
 async fn typescript_interface_extends_drives_hierarchy_and_depth() {
     let dir = test_temp_dir();
@@ -3099,10 +3113,7 @@ function helper() { return unrelated; }
     .unwrap();
     let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
     assert!(
-        hierarchy["tree"]
-            .as_str()
-            .unwrap()
-            .contains("extends SettingsUnderReview"),
+        hierarchy_has_child(&hierarchy, "extends", "SettingsUnderReview"),
         "interface child missing from hierarchy: {hierarchy}"
     );
 
@@ -3147,10 +3158,9 @@ function helper() { return unrelated; }
         .await
         .unwrap();
         let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
-        let expected = format!("{relation} {child}");
         assert!(
-            hierarchy["tree"].as_str().unwrap().contains(&expected),
-            "{expected} missing from hierarchy: {hierarchy}"
+            hierarchy_has_child(&hierarchy, relation, child),
+            "{relation} {child} missing from hierarchy: {hierarchy}"
         );
     }
 
@@ -3188,10 +3198,7 @@ function helper() { return unrelated; }
         .unwrap();
         let hierarchy: Value = serde_json::from_str(extract_text(&hierarchy.value)).unwrap();
         assert_eq!(
-            hierarchy["tree"]
-                .as_str()
-                .unwrap()
-                .contains("extends ScopedReview"),
+            hierarchy_has_child(&hierarchy, "extends", "ScopedReview"),
             contains_child,
             "qualified parent bound to the wrong namespace: {hierarchy}"
         );

@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::project::TraceDecay;
 use tracedecay_application::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
 #[cfg(feature = "test-transport")]
 use tracedecay_application::advisory::ci_runtime::{
@@ -54,6 +53,7 @@ use tracedecay_domain::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
+use tracedecay_project::project::TraceDecay;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[cfg(feature = "test-transport")]
@@ -71,9 +71,9 @@ use tracedecay_application::feedback::concrete::open_feedback_runtime;
 use tracedecay_contracts::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
     FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
-    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackProximityAccessKindV1, FeedbackProximityEncounterV1, FeedbackProximityIntervalV1,
-    FeedbackProximityParticipantV1, FeedbackProximityRelationV1, FeedbackRuntimeStateV1,
+    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackProximityAccessKindV1,
+    FeedbackProximityEncounterV1, FeedbackProximityIntervalV1, FeedbackProximityParticipantV1,
+    FeedbackProximityRelationV1, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
     ProximityEvaluationRequestV1, feedback_surface_operation,
 };
 #[cfg(feature = "test-transport")]
@@ -1470,17 +1470,19 @@ impl FeedbackImpactPort for GraphDerivedImpact {
     }
 }
 
+/// Authoritative runtime state resolved for the generation under evaluation.
 #[cfg(feature = "test-transport")]
-struct SharedFeedbackObservations(Arc<dyn FeedbackObservationPort + Send + Sync>);
+struct ResolvedRuntimeState(FeedbackRuntimeStateV1);
 
 #[cfg(feature = "test-transport")]
-impl FeedbackObservationPort for SharedFeedbackObservations {
-    fn observe(
-        &self,
-        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
-    ) {
-        self.0.observe(input, observation);
+impl FeedbackRuntimeStatePort for ResolvedRuntimeState {
+    fn resolve<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _input: &'a FeedbackEvaluationInputV1,
+    ) -> FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>> {
+        let runtime = self.0.clone();
+        Box::pin(async move { Some(runtime) })
     }
 }
 
@@ -2148,9 +2150,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     );
 
     let service = FeedbackCycleService::new(
-        move |_context: &RequestContext, _input: &FeedbackEvaluationInputV1| {
-            Some(runtime_state.clone())
-        },
+        ResolvedRuntimeState(runtime_state),
         SavedGenerationDiagnostics {
             results: vec![
                 DiagnosticProviderResult::new(
@@ -2166,7 +2166,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         },
         GraphDerivedImpact(impact),
         feedback.publication_store(),
-        SharedFeedbackObservations(feedback.observation_port()),
+        feedback.observation_port(),
         feedback.route_authorization(),
         operation,
     );

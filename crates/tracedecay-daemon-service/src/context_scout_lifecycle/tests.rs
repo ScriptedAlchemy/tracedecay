@@ -11,7 +11,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationStore, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use super::*;
@@ -97,7 +97,7 @@ fn durable_native_observation(project_id: &ProjectId) -> AnchoredObservationWrit
     let projection_generation = ProjectionGenerationId::new("projection.native-test.v1").unwrap();
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "native-test").unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),

@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracedecay::project::TraceDecay;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDecisionV1, ContextScoutEvidenceEnvelopeExt, ContextScoutLimitsV1,
     ContextScoutSelectionInputV1, select_deterministic_context_scout,
@@ -22,15 +21,17 @@ use tracedecay_contracts::{
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
     TemporalState, feedback_surface_catalog_contribution,
 };
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
 use tracedecay_domain::{
     CodeGenerationId, ComponentVersion, RefId, RetrievalAnchorId, TemporalModeV1, UtcMicros,
 };
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookEventFamily, HookHostV1, HookSpoolConfigV1, HookSpoolV1, NativeEnvelopeMaterialV1,
+    HookEventFamily, HookSpoolConfigV1, HookSpoolV1, NativeEnvelopeMaterialV1,
     decode_bound_native_hook_event, decode_native_hook_event, hook_configuration_path,
 };
+use tracedecay_project::project::TraceDecay;
 use tracedecay_tool_catalog::BindingSurface;
 
 use crate::common;
@@ -129,8 +130,8 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     let callback = include_bytes!(
         "../../../../crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json"
     );
-    let decoded =
-        decode_native_hook_event(HookHostV1::ClaudeCode, callback).expect("authentic callback");
+    let decoded = decode_native_hook_event(NativeHostIdentityV1::ClaudeCode, callback)
+        .expect("authentic callback");
 
     let layout = project_runtime.store_layout();
     let worktree_id = tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
@@ -139,7 +140,11 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     )
     .expect("production worktree identity");
     let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
-        hook_configuration_path(&layout.data_root, worktree_id, HookHostV1::ClaudeCode),
+        hook_configuration_path(
+            &layout.data_root,
+            worktree_id,
+            NativeHostIdentityV1::ClaudeCode,
+        ),
     ));
     let now = UtcMicros(
         SystemTime::now()
@@ -150,12 +155,12 @@ async fn authentic_callback_to_all_delivery_surfaces() {
             .expect("microsecond clock"),
     );
     let HookConfigurationReadOutcomeV1::Bound(configuration) =
-        subscriber.load_current(HookHostV1::ClaudeCode, now)
+        subscriber.load_current(NativeHostIdentityV1::ClaudeCode, now)
     else {
         panic!("project-open must publish the Hook V2 binding");
     };
     let envelope = decode_bound_native_hook_event(
-        HookHostV1::ClaudeCode,
+        NativeHostIdentityV1::ClaudeCode,
         callback,
         &configuration.binding,
         NativeEnvelopeMaterialV1 {
@@ -174,7 +179,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     let spool_root = layout.data_root.join("advisory-hook-replay");
     let (mut spool, _) = HookSpoolV1::open(
         &spool_root,
-        HookSpoolConfigV1::stock(HookHostV1::ClaudeCode),
+        HookSpoolConfigV1::stock(NativeHostIdentityV1::ClaudeCode),
         now,
     )
     .expect("Hook V2 replay spool");

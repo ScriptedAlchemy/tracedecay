@@ -21,12 +21,12 @@ use super::scheduler_automation_effect;
 use crate::daemon::DaemonEngine;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 
-use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, DeferredProblemSettlementRequest,
     DeferredRunSettlementRequest, DeferredSettlementOutcome, DeferredSettlementRequest,
 };
 use tracedecay_domain::errors::Result;
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub(super) enum CombinedEffectAdmission {
@@ -856,7 +856,7 @@ mod tests {
             let memory = Arc::new(
                 TraceDecay::init_with_options_for_test(
                     &project_root,
-                    crate::project::TraceDecayOpenOptions {
+                    tracedecay_project::project::TraceDecayOpenOptions {
                         profile_root: Some(profile_root.clone()),
                         global_db_path: Some(profile_root.join("global.db")),
                     },

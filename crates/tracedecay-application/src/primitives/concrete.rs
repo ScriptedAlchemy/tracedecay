@@ -20,7 +20,8 @@ use tracedecay_graph_query::SourceReadContext;
 use tracedecay_graph_query::context::read_modes::{LineRange, ReadMode};
 use tracedecay_graph_query::context::source_read::{SourceReadRequest, read_source};
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
-use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecutionSnapshot};
+use tracedecay_temporal_query::ports::SessionCursorAuthenticator;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 /// Production source-read adapter bound to one admitted project root.
 ///
@@ -477,11 +478,12 @@ mod tests {
     };
     use crate::primitives::SymbolGraphCursorPort;
     use tracedecay_contracts::retrieval::PrimitiveFailureKind;
-    use tracedecay_temporal_query::ports::{
-        BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
-        TemporalSnapshotRequest, TemporalWatermarks,
-    };
+    use tracedecay_temporal_query::execution::BindingDigest;
+    use tracedecay_temporal_query::ports::{InMemoryCursorAuthenticator, TemporalSnapshotRequest};
     use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+    use tracedecay_temporal_query::snapshot::{
+        KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+    };
 
     const NOW: UtcMicros = UtcMicros(1_000);
 

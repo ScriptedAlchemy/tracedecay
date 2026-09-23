@@ -1240,13 +1240,6 @@ mod tests {
         };
         assert_eq!(report.publication_revision, 2);
         assert_eq!(report.inserted, 1);
-        assert!(
-            store
-                .records_for_publication(resolver.0.generation_id(), 1)
-                .await
-                .unwrap()
-                .is_empty()
-        );
         let current = store
             .records_for_generation(resolver.0.generation_id())
             .await
@@ -1276,11 +1269,6 @@ mod tests {
         };
         assert_eq!(report.publication_revision, 3);
         assert_eq!(report.inserted, 1);
-        let prior = store
-            .records_for_publication(resolver.0.generation_id(), 2)
-            .await
-            .unwrap();
-        assert_eq!(prior, current, "revision 2 must remain immutable");
         let latest = store
             .records_for_generation(resolver.0.generation_id())
             .await

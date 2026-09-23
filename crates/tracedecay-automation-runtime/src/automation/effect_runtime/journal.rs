@@ -15,13 +15,12 @@ use tracedecay_contracts::{
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
-use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest, sha256_hex_suffix};
+use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
 
 use super::contract::contract_error;
-use super::retirement::RetirementBinding;
 use super::terminal::{AutomationSettledProblem, AutomationSettledTerminal};
 use tracedecay_domain::errors::Result;
 
@@ -104,8 +103,6 @@ pub enum AutomationRecoveryBinding {
     Memory {
         owner: FactOwnerV1,
         recovery_problem: AutomationSettledProblem,
-        retirement: Option<RetirementBinding>,
-        reset_source_digest: Option<String>,
     },
     /// External effects have no canonical destination-side receipt store.
     /// Restart recovery must close them with this typed indeterminate problem
@@ -128,23 +125,6 @@ impl DurableAutomationAdmission {
     pub fn memory_owner(&self) -> Option<&FactOwnerV1> {
         match &self.recovery {
             AutomationRecoveryBinding::Memory { owner, .. } => Some(owner),
-            AutomationRecoveryBinding::External { .. } => None,
-        }
-    }
-
-    pub fn retirement(&self) -> Option<&RetirementBinding> {
-        match &self.recovery {
-            AutomationRecoveryBinding::Memory { retirement, .. } => retirement.as_ref(),
-            AutomationRecoveryBinding::External { .. } => None,
-        }
-    }
-
-    pub fn reset_source_digest(&self) -> Option<&str> {
-        match &self.recovery {
-            AutomationRecoveryBinding::Memory {
-                reset_source_digest,
-                ..
-            } => reset_source_digest.as_deref(),
             AutomationRecoveryBinding::External { .. } => None,
         }
     }
@@ -199,7 +179,7 @@ impl DurableAutomationTerminalBinding {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DurableAutomationRecord {
     #[cfg(any(test, feature = "test-helpers"))]
@@ -210,74 +190,6 @@ pub struct DurableAutomationRecord {
     pub state: DurableAutomationState,
     #[cfg(not(any(test, feature = "test-helpers")))]
     state: DurableAutomationState,
-    #[serde(skip)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub legacy_terminal: Option<AutomationSettledTerminal>,
-    #[serde(skip)]
-    #[cfg(not(any(test, feature = "test-helpers")))]
-    legacy_terminal: Option<AutomationSettledTerminal>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CurrentDurableAutomationRecord {
-    admission: DurableAutomationAdmission,
-    state: DurableAutomationState,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LegacyDurableAutomationRecord {
-    admission: DurableAutomationAdmission,
-    state: LegacyDurableAutomationState,
-}
-
-#[derive(Deserialize)]
-#[serde(
-    tag = "state",
-    content = "terminal",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-enum LegacyDurableAutomationState {
-    Reserved,
-    Terminal(Box<AutomationSettledTerminal>),
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum DurableAutomationRecordWire {
-    Current(CurrentDurableAutomationRecord),
-    Legacy(LegacyDurableAutomationRecord),
-}
-
-impl<'de> Deserialize<'de> for DurableAutomationRecord {
-    fn deserialize<Deserializer>(
-        deserializer: Deserializer,
-    ) -> std::result::Result<Self, Deserializer::Error>
-    where
-        Deserializer: serde::Deserializer<'de>,
-    {
-        match DurableAutomationRecordWire::deserialize(deserializer)? {
-            DurableAutomationRecordWire::Current(record) => Ok(Self {
-                admission: record.admission,
-                state: record.state,
-                legacy_terminal: None,
-            }),
-            DurableAutomationRecordWire::Legacy(record) => match record.state {
-                LegacyDurableAutomationState::Reserved => Ok(Self {
-                    admission: record.admission,
-                    state: DurableAutomationState::Reserved,
-                    legacy_terminal: None,
-                }),
-                LegacyDurableAutomationState::Terminal(terminal) => Ok(Self {
-                    admission: record.admission,
-                    state: DurableAutomationState::Reserved,
-                    legacy_terminal: Some(*terminal),
-                }),
-            },
-        }
-    }
 }
 
 impl DurableAutomationRecord {
@@ -308,25 +220,20 @@ impl DurableAutomationRecord {
 pub enum ReservationResult {
     Execute {
         claim: AutomationReservationClaim,
-        retirement: Option<RetirementBinding>,
     },
     Replay {
         terminal: AutomationSettledTerminal,
         publication: Option<ExactRunPublication>,
-        retirement: Option<RetirementBinding>,
     },
     /// A prior process durably reserved this exact admission but did not
     /// publish its outer terminal. The caller must reconcile against the
     /// canonical memory receipt authority before this reservation can close.
-    Recover {
-        retirement: Option<RetirementBinding>,
-    },
+    Recover,
     /// A terminal was accepted and its exact ledger row was durably staged,
     /// but publication did not finish before the prior process stopped.
     RecoverPrepared {
         terminal: AutomationSettledTerminal,
         publication: ExactRunPublication,
-        retirement: Option<RetirementBinding>,
     },
     /// The run identity already has a valid durable record, but the newly
     /// prepared admission does not match the authority bound to that record.
@@ -397,21 +304,6 @@ fn reservation_claim_is_live(path: &Path) -> bool {
         .is_some()
 }
 
-pub fn retained_source_bindings(
-    path: &Path,
-) -> Result<(Option<RetirementBinding>, Option<String>)> {
-    with_journal_lock(path, || {
-        Ok(read_stabilized_record(path)?
-            .map(|record| {
-                (
-                    record.admission.retirement().cloned(),
-                    record.admission.reset_source_digest().map(str::to_owned),
-                )
-            })
-            .unwrap_or_default())
-    })
-}
-
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn reserve_or_replay_blocking(
     path: &Path,
@@ -454,16 +346,14 @@ fn reserve_or_replay_with_index_and_writer(
             None => {
                 let claim = acquire_reservation_claim(path)?;
                 ensure_pending()?;
-                let retirement = requested.retirement().cloned();
                 write_fresh(
                     path,
                     &DurableAutomationRecord {
                         admission: requested,
                         state: DurableAutomationState::Reserved,
-                        legacy_terminal: None,
                     },
                 )?;
-                Ok(ReservationResult::Execute { claim, retirement })
+                Ok(ReservationResult::Execute { claim })
             }
             Some(record) => {
                 if !stable_admission_matches(&record.admission, &requested) {
@@ -481,7 +371,6 @@ fn reserve_or_replay_with_index_and_writer(
                     } => Ok(ReservationResult::Replay {
                         terminal: read_terminal_sidecar(path, &binding)?,
                         publication,
-                        retirement: record.admission.retirement().cloned(),
                     }),
                     DurableAutomationState::Prepared {
                         terminal: binding,
@@ -489,14 +378,11 @@ fn reserve_or_replay_with_index_and_writer(
                     } => Ok(ReservationResult::RecoverPrepared {
                         terminal: read_terminal_sidecar(path, &binding)?,
                         publication,
-                        retirement: record.admission.retirement().cloned(),
                     }),
                     DurableAutomationState::Reserved if reservation_claim_is_live(path) => Err(
                         contract_error("an identical memory automation run is already in flight"),
                     ),
-                    DurableAutomationState::Reserved => Ok(ReservationResult::Recover {
-                        retirement: record.admission.retirement().cloned(),
-                    }),
+                    DurableAutomationState::Reserved => Ok(ReservationResult::Recover),
                 }
             }
         }
@@ -1148,22 +1034,9 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
         ));
     }
     {
-        let mut record =
+        let record =
             serde_json::from_slice::<DurableAutomationRecord>(&bytes).map_err(contract_error)?;
         validate_admission_shape(&record.admission)?;
-        if let Some(legacy_terminal) = record.legacy_terminal.take() {
-            if !legacy_terminal.matches_admission(&record.admission) {
-                return Err(contract_error(
-                    "legacy automation terminal is inconsistent with its admission",
-                ));
-            }
-            let binding = write_terminal_sidecar(path, &legacy_terminal)?;
-            record.state = DurableAutomationState::Terminal {
-                terminal: binding,
-                publication: None,
-            };
-            write_record(path, &record)?;
-        }
         match &record.state {
             DurableAutomationState::Reserved => {
                 // A terminal sidecar without Prepared is the crash residue of
@@ -1613,33 +1486,6 @@ fn validate_admission_shape(admission: &DurableAutomationAdmission) -> Result<()
             "automation recovery binding does not match the admitted task",
         ));
     }
-    if let AutomationRecoveryBinding::Memory {
-        retirement,
-        reset_source_digest,
-        ..
-    } = &admission.recovery
-    {
-        if retirement.is_some() && reset_source_digest.is_some() {
-            return Err(contract_error(
-                "automation recovery cannot retire and reset the same source",
-            ));
-        }
-        if let Some(retirement) = retirement {
-            validate_sha256_text(&retirement.source_digest)?;
-            let expected = format!(
-                "fact_proposals.{}.json",
-                retirement.source_digest.trim_start_matches("sha256:")
-            );
-            if retirement.archive_name != expected {
-                return Err(contract_error(
-                    "automation retirement archive identity is inconsistent",
-                ));
-            }
-        }
-        if let Some(source_digest) = reset_source_digest {
-            validate_sha256_text(source_digest)?;
-        }
-    }
     admission.scope.validate().map_err(contract_error)?;
     admission.input_digest.validate().map_err(contract_error)?;
     admission
@@ -1684,24 +1530,6 @@ fn validate_admission_shape(admission: &DurableAutomationAdmission) -> Result<()
     {
         return Err(contract_error(
             "memory automation prepared effect binding is inconsistent",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_sha256_text(digest: &str) -> Result<()> {
-    let Some(raw) = sha256_hex_suffix(digest) else {
-        return Err(contract_error(
-            "automation recovery source digest is not canonical SHA-256",
-        ));
-    };
-    if raw.len() != 64
-        || !raw
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(contract_error(
-            "automation recovery source digest is not canonical SHA-256",
         ));
     }
     Ok(())

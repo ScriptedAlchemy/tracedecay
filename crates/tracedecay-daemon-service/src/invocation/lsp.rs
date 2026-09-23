@@ -28,7 +28,7 @@ pub(super) fn admit_lsp_control(
             ApplicationProblem::cancelled_before_admission(),
         )));
     }
-    if deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(now_micros()) {
         return Err(Box::new(DaemonInvocationResponse::application_problem(
             request_id,
             ApplicationProblem::timed_out_before_admission(),
@@ -234,7 +234,7 @@ impl DaemonInvocationService {
         )
         .ok()?;
         if request_cancellation.is_some_and(CancellationToken::is_cancelled)
-            || deadline.is_elapsed_at(current_micros())
+            || deadline.is_elapsed_at(now_micros())
         {
             return None;
         }
@@ -308,7 +308,7 @@ impl DaemonInvocationService {
         let authority = AuthorityReceipt::from_context(&context, policy, observed_at).ok()?;
         let execution = OperationReceipt::completed(
             observed_at,
-            current_micros(),
+            now_micros(),
             deadline,
             OperationBudgetUsage::default(),
         )
@@ -677,7 +677,7 @@ impl DaemonInvocationService {
                 &mut session.next_delivery_sequence,
                 frame,
                 access.session_id(),
-                current_micros(),
+                now_micros(),
             );
         }
         let frame = outbound.and_then(|frame| String::from_utf8(frame).ok());

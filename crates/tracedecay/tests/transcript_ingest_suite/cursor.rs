@@ -2,11 +2,11 @@ use std::hash::BuildHasher;
 use std::io::Write;
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::cursor::{
+use tracedecay_sessions::runtime::hosts::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
     ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
     ingest_cursor_transcript_event_capped as ingest_cursor_transcript_event_capped_for_project,
@@ -432,8 +432,6 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     ];
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir(project.join(".tracedecay")).unwrap();
-    std::fs::write(project.join(".tracedecay/tracedecay.db"), "").unwrap();
     init_git_repo(&project);
     let project_id = mark_test_project(&project);
 

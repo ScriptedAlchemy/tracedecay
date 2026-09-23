@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -7,7 +8,7 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use crate::config::AutomationBackend;
 use crate::{AutomationError, Result, config_error};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskKind {
     MemoryCurator,
@@ -125,7 +126,7 @@ pub struct AgentTaskResponse {
     pub output_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskFailureClass {
     Retryable,
@@ -427,7 +428,7 @@ fn skill_update_schema() -> Value {
             "routing_validation", "reason"
         ],
         "properties": {
-            "action": { "type": "string", "enum": ["update", "patch"] },
+            "action": { "type": "string", "enum": ["update"] },
             "id": { "type": "string" },
             "base_checksum": { "type": "string" },
             "title": nullable_string_schema(),

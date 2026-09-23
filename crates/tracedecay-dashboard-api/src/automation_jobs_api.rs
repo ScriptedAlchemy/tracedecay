@@ -12,7 +12,8 @@ use axum::Extension;
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::DashboardState;
@@ -86,12 +87,24 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
+/// `GET /api/automation/jobs`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub(crate) struct AutomationJobsPayloadV1 {
+    jobs: Vec<AutomationJob>,
+    count: usize,
+}
+
 #[hotpath::measure(label = "dashboard_api.jobs.list", future = true)]
-pub async fn list(State(state): State<DashboardState>) -> ApiResult {
+pub async fn list(
+    State(state): State<DashboardState>,
+) -> std::result::Result<Json<AutomationJobsPayloadV1>, JsonError> {
     let jobs = load_jobs(&state.dashboard_root)
         .await
         .map_err(|err| internal_error(&err))?;
-    Ok(Json(json!({ "jobs": jobs, "count": jobs.len() })))
+    Ok(Json(AutomationJobsPayloadV1 {
+        count: jobs.len(),
+        jobs,
+    }))
 }
 
 #[hotpath::measure(label = "dashboard_api.jobs.create", future = true)]

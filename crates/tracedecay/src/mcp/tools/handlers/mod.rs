@@ -5,6 +5,9 @@
 //! formats the result.
 
 mod application_surface;
+pub use application_surface::{
+    RetainedSurfaceExecution, execute_retained_surface_tool, render_retained_execution,
+};
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -164,11 +167,10 @@ use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 use tracedecay_tool_catalog::{ProfileId, SurfaceOperationName};
 
 use super::LegacyToolCompatibilityOwner;
-use crate::project::TraceDecay;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
-    dispatch_edit_tools, dispatch_git_tools, dispatch_graph_tools, dispatch_health_tools,
-    dispatch_info_tools, dispatch_memory_tools, dispatch_retained_application_tools,
+    dispatch_git_tools, dispatch_graph_tools, dispatch_health_tools,
+    dispatch_info_tools, dispatch_memory_tools,
     dispatch_session_workflow_tools,
 };
 #[cfg(test)]
@@ -192,6 +194,7 @@ use tracedecay_mcp::tools::binding::{
 };
 use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
+use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::storage::registered_project_id;
 
 /// Dispatches a tool call to the appropriate handler.
@@ -328,13 +331,16 @@ pub struct ToolCallRegistryOptions<'a> {
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_reconcile_sink: Option<crate::mcp::server::CodeIndexReconcileSink>,
-    pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
-    pub(crate) code_index_similar_executor: Option<crate::mcp::server::CodeIndexSimilarExecutor>,
+    pub(crate) code_index_search_executor:
+        Option<tracedecay_query::code_search::CodeIndexSearchExecutor>,
+    pub(crate) code_index_similar_executor:
+        Option<tracedecay_query::code_search::CodeIndexSimilarExecutor>,
     pub(crate) code_index_redundancy_executor:
-        Option<crate::mcp::server::CodeIndexRedundancyExecutor>,
+        Option<tracedecay_query::code_search::CodeIndexRedundancyExecutor>,
     pub(crate) code_index_branch_diff_executor:
-        Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
-    pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
+        Option<tracedecay_query::code_search::CodeIndexBranchDiffExecutor>,
+    pub(crate) code_index_search_authority:
+        Option<tracedecay_query::code_search::CodeIndexSearchAuthorityV1>,
     /// The checkout the serving route was admitted for. Every scoped authority
     /// a moved handler family reads binds against this one scope; absent, no
     /// scoped authority may be admitted at all.
@@ -563,10 +569,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
             }
         }
         if tool_accepts_registered_project_selector(tool_name) {
-            support::validate_registered_project_selector_aliases(
-                &args,
-                crate::mcp::project_route::semantic_route_argument_fields(tool_name),
-            )?;
+            support::validate_registered_project_selector_aliases(&args)?;
         } else if rejected_tool_project_selector_present(tool_name, &args) {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -575,7 +578,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
             });
         }
         if tool_dispatches_registered_project_reader(tool_name)
-            && crate::mcp::project_route::arguments_have_project_selector(tool_name, &args)
+            && crate::mcp::project_route::arguments_have_project_selector(&args)
             && options.resolved_project_route.is_none()
         {
             return Err(TraceDecayError::project_route(
@@ -730,22 +733,8 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 Some(McpToolDispatchGroup::Git) => {
                     boxed_send(dispatch_git_tools(tool_name, cg, args, options)).await
                 }
-                Some(McpToolDispatchGroup::Edit) => {
-                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options)).await
-                }
                 Some(McpToolDispatchGroup::Health) => {
                     boxed_send(dispatch_health_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        project_session_db,
-                        options,
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::RetainedApplication) => {
-                    boxed_send(dispatch_retained_application_tools(
                         tool_name,
                         cg,
                         args,
@@ -775,11 +764,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 | None => Err(unknown_tool_error(tool_name)),
             }
         };
-        let result = if matches!(
-            dispatch_group,
-            Some(McpToolDispatchGroup::RetainedApplication)
-        ) || tool_requires_canonical_effect_settlement(tool_name)
-        {
+        let result = if tool_requires_canonical_effect_settlement(tool_name) {
             // Canonically settled effects complete their own deadline and
             // cancellation protocol before this adapter receives a terminal.
             // Dropping that terminal in the generic transport timeout would
@@ -920,11 +905,7 @@ fn classify_mcp_tool_dispatch_group(tool_name: &str) -> Option<McpToolDispatchGr
     if ApplicationSurfaceOperation::from_tool_name(tool_name).is_some() {
         return Some(McpToolDispatchGroup::ApplicationSurface);
     }
-    if let Some(group) = dispatch_group_for_tool(tool_name) {
-        return Some(group);
-    }
-    RetainedSurfaceOperation::from_tool_name(tool_name)
-        .map(|_| McpToolDispatchGroup::RetainedApplication)
+    dispatch_group_for_tool(tool_name)
 }
 
 /// Whether a tool's dispatch resolves to the git handler family.

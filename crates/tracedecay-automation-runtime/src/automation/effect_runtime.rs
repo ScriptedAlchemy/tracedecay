@@ -10,7 +10,6 @@ pub mod projection;
 pub mod recovery_index;
 #[cfg(not(any(test, feature = "test-helpers")))]
 mod recovery_index;
-pub mod retirement;
 pub mod settlement;
 pub mod terminal;
 

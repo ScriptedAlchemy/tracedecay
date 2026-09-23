@@ -94,7 +94,7 @@ async fn cli_configuration_set(
         maximum_millis, 15_000,
         "CLI configuration effects use the catalog-owned 15 second deadline"
     );
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let deadline = Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))
@@ -188,7 +188,7 @@ async fn configuration_batch_via_surface(
         maximum_millis, 15_000,
         "user configuration effects use the catalog-owned 15 second deadline"
     );
-    let observed_at = tracedecay_daemon_protocol::invocation_now_micros();
+    let observed_at = tracedecay_contracts::now_micros();
     let deadline = Deadline::new(tracedecay_domain::UtcMicros(
         observed_at.0 + i64::try_from(maximum_millis).expect("deadline fits") * 1_000,
     ))

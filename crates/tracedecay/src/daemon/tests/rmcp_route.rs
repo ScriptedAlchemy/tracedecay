@@ -238,14 +238,6 @@ fn assert_delivered_cancellation(responses: &[Value], request_id: u64, context: 
     );
 }
 
-fn assert_response_order(responses: &[Value], expected: &[u64], context: &str) {
-    let ids = responses
-        .iter()
-        .filter_map(|response| response["id"].as_u64())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, expected, "{context}: response order drifted");
-}
-
 async fn assert_initialized_route_is_rmcp<R, W>(
     mut reader: R,
     mut writer: W,
@@ -327,16 +319,17 @@ async fn assert_initialized_route_is_rmcp<R, W>(
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unix_production_route_selects_rmcp_only_after_initialize() {
+async fn unix_production_route_serves_initialize_and_stateless_requests_over_rmcp() {
     let fixture = rmcp_route_fixture("unix-rmcp-production-route").await;
 
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("production route socket pair");
     let engine = fixture.engine.clone();
     let initialized_task = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
     });
-    let (reader, writer) = client_stream.into_split();
+    let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     assert_initialized_route_is_rmcp(
         tokio::io::BufReader::new(reader),
         writer,
@@ -347,67 +340,281 @@ async fn unix_production_route_selects_rmcp_only_after_initialize() {
     )
     .await;
 
-    let fixture = rmcp_route_fixture("unix-legacy-production-route").await;
-    let response_lifecycle = fixture.server.project_server_response_lifecycle();
-    let response_gate = Arc::clone(response_lifecycle.response_gate());
-    let gate = response_gate.write().await;
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("legacy route socket pair");
-    let engine = fixture.engine.clone();
-    let legacy_task = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    let mut reader = tokio::io::BufReader::new(reader);
-    writer
-        .write_all(
-            fixture
-                .handshake
-                .to_line()
-                .expect("legacy handshake")
-                .as_bytes(),
-        )
-        .await
-        .expect("write legacy handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
-    let first_request_line = format!(" \t{} ", blocked_tool_request(4));
-    writer
-        .write_all(first_request_line.as_bytes())
-        .await
-        .expect("write legacy first request");
-    writer
-        .write_all(b"\n")
-        .await
-        .expect("legacy request newline");
-    write_line(&mut writer, &ping_request(5)).await;
+    let fixture = rmcp_route_fixture("unix-stateless-production-route").await;
+    let client_instance_id = &fixture.handshake.client_instance_id;
+    let tool = unix_one_request(&fixture, &stateless_request(blocked_tool_request(4))).await;
+    assert_single_result(&tool, 4, "Unix stateless tools/call");
+    let project = fixture
+        .handshake
+        .project_path
+        .clone()
+        .expect("fixture project");
+    wait_for_host_ingest_publication(&fixture).await;
+    let hook = unix_one_request(&fixture, &stateless_request(hook_event_request(5, project))).await;
+    assert_single_result(&hook, 5, "Unix stateless hook event");
+    assert_eq!(hook[0]["result"], json!({}), "{hook:?}");
     wait_for_mcp_routes(
-        &fixture.handshake.client_instance_id,
-        &[ObservedMcpRoute::Legacy],
+        client_instance_id,
+        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Rmcp],
     )
     .await;
-    assert_eq!(
-        first_request_replays(&fixture.handshake.client_instance_id),
-        vec![first_request_line],
-        "legacy transport must receive the bounded first request byte-for-byte"
-    );
-    writer.shutdown().await.expect("shutdown legacy client");
-    drop(gate);
-    let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
-        .await
-        .expect("legacy replay responses timed out");
-    legacy_task
-        .await
-        .expect("join legacy route")
-        .expect("serve legacy route");
-    assert_response_order(
-        &responses,
-        &[5, 4],
-        "Unix legacy transport must emit an independent ping before the blocked read",
+
+    let refused = unix_one_request(&fixture, &blocked_tool_request(6)).await;
+    assert_sessionless_refusal(&refused, 6, "Unix sessionless tools/call");
+    wait_for_mcp_routes(
+        client_instance_id,
+        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Rmcp],
+    )
+    .await;
+}
+
+/// `tracedecay serve` opens one daemon connection per host line: the host's
+/// `initialize` and `tools/call` are served by rmcp, and `initialized` and
+/// `tools/list` by the static bootstrap. No line reaches another route.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn serve_proxy_host_session_is_served_only_over_rmcp() {
+    let fixture = rmcp_route_fixture("serve-proxy-host-session").await;
+    let socket = fixture._temp.path().join("daemon.sock");
+    let authority = super::seed_socket_authority(&socket);
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind proxy daemon socket");
+    let engine = fixture.engine.clone();
+    let token = authority.auth_token().to_owned();
+    let accepting = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept proxy connection");
+            let engine = engine.clone();
+            let token = token.clone();
+            tokio::spawn(async move {
+                Box::pin(super::super::serve_authenticated_socket_client_with_class(
+                    tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+                    engine,
+                    token,
+                    super::super::DaemonClientAdmissionClass::General,
+                ))
+                .await
+            });
+        }
+    });
+
+    let (mut host, host_lines, mut host_output) =
+        tracedecay_mcp::transport::ChannelTransport::new();
+    for line in [
+        initialize_request(),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_status",
+                "arguments": {"admission_only": true, "format": "json"}
+            }
+        }),
+    ] {
+        host_lines.send(line.to_string()).expect("queue host line");
+    }
+    drop(host_lines);
+    tokio::time::timeout(
+        PHASE_TIMEOUT,
+        super::super::proxy_transport_to_daemon(&socket, &fixture.handshake, None, &mut host),
+    )
+    .await
+    .expect("proxied host session timed out")
+    .expect("proxied host session");
+    accepting.abort();
+
+    let mut responses = Vec::new();
+    while let Ok(line) = host_output.try_recv() {
+        if !line.trim().is_empty() {
+            responses.push(serde_json::from_str::<Value>(line.trim()).expect("host frame JSON"));
+        }
+    }
+    for id in 1..=3 {
+        let response = responses
+            .iter()
+            .find(|response| response["id"] == json!(id))
+            .unwrap_or_else(|| panic!("host request {id} was not answered: {responses:?}"));
+        assert!(response.get("result").is_some(), "{response}");
+    }
+    wait_for_mcp_routes(
+        &fixture.handshake.client_instance_id,
+        &[ObservedMcpRoute::Rmcp, ObservedMcpRoute::Rmcp],
+    )
+    .await;
+}
+
+fn stateless_request(request: Value) -> Value {
+    let mut request: tracedecay_mcp::JsonRpcRequest =
+        serde_json::from_value(request).expect("JSON-RPC request fixture");
+    assert!(tracedecay_mcp::server::attach_stateless_request_context(
+        &mut request
+    ));
+    serde_json::to_value(request).expect("stateless request")
+}
+
+/// A hook event routes only to an owner that published registered host
+/// ingest, which follows the core graph publication.
+#[cfg(unix)]
+async fn wait_for_host_ingest_publication(fixture: &RmcpRouteFixture) {
+    let project = fixture
+        .handshake
+        .project_path
+        .as_deref()
+        .expect("fixture project");
+    let route =
+        ProjectRouteKey::from_handshake(project, &fixture.handshake).expect("fixture route");
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        loop {
+            if fixture
+                .engine
+                .store_administration
+                .project_servers()
+                .lock()
+                .await
+                .get_route_and_touch_for(
+                    &route,
+                    super::super::ProjectServerRequirement::RegisteredHostIngest,
+                )
+                .is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("fixture project never published registered host ingest");
+}
+
+#[cfg(unix)]
+fn hook_event_request(id: u64, project: std::path::PathBuf) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": tracedecay_hooks::core_events::HOOK_EVENT_METHOD,
+        "params": tracedecay_hooks::core_events::DaemonHookEvent::cursor_after_shell_execution(
+            project,
+        ),
+    })
+}
+
+fn assert_single_result(responses: &[Value], id: u64, context: &str) {
+    assert_eq!(responses.len(), 1, "{context}: {responses:?}");
+    assert_eq!(responses[0]["id"], json!(id), "{context}: {responses:?}");
+    assert!(
+        responses[0].get("result").is_some(),
+        "{context}: {responses:?}"
     );
 }
 
+fn assert_sessionless_refusal(responses: &[Value], id: u64, context: &str) {
+    assert_eq!(responses.len(), 1, "{context}: {responses:?}");
+    assert_eq!(responses[0]["id"], json!(id), "{context}: {responses:?}");
+    assert_eq!(
+        responses[0]["error"]["code"],
+        json!(-32600),
+        "{context}: {responses:?}"
+    );
+}
+
+/// Sends one request on a fresh authenticated connection and returns every
+/// frame the daemon wrote before closing it.
+async fn one_request_responses<R, W>(
+    mut reader: R,
+    mut writer: W,
+    handshake: &DaemonHandshake,
+    request: &Value,
+) -> Vec<Value>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, request).await;
+    writer.shutdown().await.expect("shutdown one-request client");
+    tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
+        .await
+        .expect("one-request responses timed out")
+}
+
+#[cfg(unix)]
+async fn unix_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Vec<Value> {
+    let (server_stream, client_stream) =
+        tokio::net::UnixStream::pair().expect("one-request socket pair");
+    let engine = fixture.engine.clone();
+    let task = tokio::spawn(async move {
+        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
+    });
+    let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
+    let responses = one_request_responses(
+        tokio::io::BufReader::new(reader),
+        writer,
+        &fixture.handshake,
+        request,
+    )
+    .await;
+    task.await
+        .expect("join one-request connection")
+        .expect("serve one-request connection");
+    responses
+}
+
+async fn portable_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Vec<Value> {
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    )
+    .await
+    .expect("portable one-request listener");
+    let lifecycle = DaemonLifecycle::default();
+    let store_administration = fixture.store_administration.clone();
+    let task = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept portable client");
+        Box::pin(super::super::serve_windows_broker_client(
+            stream,
+            AUTH_TOKEN,
+            &lifecycle,
+            store_administration,
+            Arc::new(tokio::sync::Mutex::new(
+                super::super::ProjectOpenGates::default(),
+            )),
+            None,
+        ))
+        .await
+    });
+    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
+        .await
+        .expect("connect portable client");
+    let (reader, mut writer) = stream.into_split();
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
+        .to_line()
+        .expect("portable auth preface");
+    writer
+        .write_all(preface.as_bytes())
+        .await
+        .expect("write auth preface");
+    writer.write_all(b"\n").await.expect("auth newline");
+    let responses = one_request_responses(
+        tokio::io::BufReader::new(reader),
+        writer,
+        &fixture.handshake,
+        request,
+    )
+    .await;
+    task.await
+        .expect("join portable one-request connection")
+        .expect("serve portable one-request connection");
+    responses
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn portable_production_route_selects_rmcp_after_initialize() {
+async fn portable_production_route_serves_initialize_and_stateless_requests_over_rmcp() {
     let fixture = rmcp_route_fixture("portable-rmcp-production-route").await;
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
@@ -453,89 +660,22 @@ async fn portable_production_route_selects_rmcp_after_initialize() {
     )
     .await;
 
-    let fixture = rmcp_route_fixture("portable-legacy-production-route").await;
-    let response_lifecycle = fixture.server.project_server_response_lifecycle();
-    let response_gate = Arc::clone(response_lifecycle.response_gate());
-    let gate = response_gate.write().await;
-    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
-        &tracedecay_daemon_protocol::default_loopback_endpoint(),
-    )
-    .await
-    .expect("portable legacy route listener");
-    let lifecycle = DaemonLifecycle::default();
-    let store_administration = fixture.store_administration.clone();
-    let legacy_task = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept legacy client");
-        Box::pin(super::super::serve_windows_broker_client(
-            stream,
-            AUTH_TOKEN,
-            &lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            None,
-        ))
-        .await
-    });
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect portable legacy client");
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = tokio::io::BufReader::new(reader);
-    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
-        .to_line()
-        .expect("portable legacy auth preface");
-    writer
-        .write_all(preface.as_bytes())
-        .await
-        .expect("write legacy auth preface");
-    writer.write_all(b"\n").await.expect("auth newline");
-    writer
-        .write_all(
-            fixture
-                .handshake
-                .to_line()
-                .expect("portable legacy handshake")
-                .as_bytes(),
-        )
-        .await
-        .expect("write portable legacy handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
-    let first_request_line = format!(" \t{} ", blocked_tool_request(4));
-    writer
-        .write_all(first_request_line.as_bytes())
-        .await
-        .expect("write portable legacy first request");
-    writer
-        .write_all(b"\n")
-        .await
-        .expect("legacy request newline");
-    write_line(&mut writer, &ping_request(5)).await;
+    let fixture = rmcp_route_fixture("portable-stateless-production-route").await;
+    let tool = portable_one_request(&fixture, &stateless_request(blocked_tool_request(4))).await;
+    assert_single_result(&tool, 4, "portable stateless tools/call");
     wait_for_mcp_routes(
         &fixture.handshake.client_instance_id,
-        &[ObservedMcpRoute::Legacy],
+        &[ObservedMcpRoute::Rmcp],
     )
     .await;
-    assert_eq!(
-        first_request_replays(&fixture.handshake.client_instance_id),
-        vec![first_request_line],
-        "portable legacy transport must receive the bounded first request byte-for-byte"
-    );
-    writer.shutdown().await.expect("shutdown legacy client");
-    drop(gate);
-    let responses = tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
-        .await
-        .expect("portable legacy replay responses timed out");
-    legacy_task
-        .await
-        .expect("join portable legacy route")
-        .expect("serve portable legacy route");
-    assert_response_order(
-        &responses,
-        &[5, 4],
-        "portable legacy transport must emit an independent ping before the blocked read",
-    );
+
+    let refused = portable_one_request(&fixture, &blocked_tool_request(5)).await;
+    assert_sessionless_refusal(&refused, 5, "portable sessionless tools/call");
+    wait_for_mcp_routes(
+        &fixture.handshake.client_instance_id,
+        &[ObservedMcpRoute::Rmcp],
+    )
+    .await;
 }
 
 #[cfg(unix)]
@@ -718,9 +858,10 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         tokio::net::UnixStream::pair().expect("selected target socket pair");
     let engine = fixture.engine.clone();
     let server_task = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
     });
     let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let mut reader = tokio::io::BufReader::new(reader);
     writer
         .write_all(
@@ -812,9 +953,10 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         tokio::net::UnixStream::pair().expect("selector-owner cancellation socket pair");
     let engine = fixture.engine.clone();
     let server_task = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
     });
     let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let mut reader = tokio::io::BufReader::new(reader);
     writer
         .write_all(
@@ -945,9 +1087,10 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
         tokio::net::UnixStream::pair().expect("cancellation socket pair");
     let engine = fixture.engine.clone();
     let server_task = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
     });
     let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     let mut reader = tokio::io::BufReader::new(reader);
     writer
         .write_all(

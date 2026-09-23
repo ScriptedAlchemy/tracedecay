@@ -1,4 +1,5 @@
 use super::*;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +106,7 @@ impl HostAdmissionTestRuntimeV1 {
         transaction
             .execute(
                 "UPDATE lcm_raw_messages
-                 SET content = ?2, snippet_text = ?2, index_text = ?2
+                 SET content = ?2
                  WHERE store_id = ?1",
                 tracedecay_runtime_core::db::engine::params![store_id, poison],
             )
@@ -501,7 +502,7 @@ impl HostAdmissionTestRuntimeV1 {
             &draft.source_refs,
             &summary_hash,
         );
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        let control = tracedecay_temporal_query::execution::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(
                 tracedecay_lcm::types::LcmImmutableSummaryPublication {
@@ -546,7 +547,7 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        let control = tracedecay_temporal_query::execution::ExecutionControl::default();
         database
             .lcm_publish_immutable_summary_guarded(publication, &control, || Ok(()))
             .await
@@ -986,7 +987,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: error.to_string(),
                 }
             })?;
-            let (_, mut session_relations) = database
+            let (_, mut session_relations) = SessionTemporalAccess::new(&*database)
                 .active_session_summary_relations(
                     &session_id,
                     &summary_ids,

@@ -7,10 +7,11 @@
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_daemon_service::{DaemonInvocationService, DaemonLspSessionAccess, Lease};
 use tracedecay_mcp::BrokerSelectedResponseLease;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_session_memory::context::CancellationToken;
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.
 ///
@@ -85,20 +86,6 @@ fn report_profile_host_admission_bootstrap_status(
     }
 }
 
-#[cfg(all(unix, test))]
-pub(super) async fn serve_socket_client(
-    stream: tokio::net::UnixStream,
-    engine: DaemonEngine,
-) -> Result<()> {
-    Box::pin(serve_broker_socket_client(
-        BrokerStream::Unix(stream),
-        engine,
-        None,
-        DaemonClientAdmissionClass::General,
-    ))
-    .await
-}
-
 #[cfg(unix)]
 pub(super) async fn serve_authenticated_socket_client_with_class(
     stream: BrokerStream,
@@ -109,14 +96,14 @@ pub(super) async fn serve_authenticated_socket_client_with_class(
     Box::pin(serve_broker_socket_client(
         stream,
         engine,
-        Some(auth_token),
+        auth_token,
         admission_class,
     ))
     .await
 }
 
 #[hotpath::measure(label = "daemon.engine.transport.rmcp", future = true)]
-pub(super) async fn serve_routed_rmcp_connection(
+pub(crate) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
     first_request_line: String,
@@ -193,8 +180,32 @@ fn serve_routed_rmcp_connection_inner(
     })
 }
 
-fn is_mcp_initialize_request(request: Option<&JsonRpcRequest>) -> bool {
-    request.is_some_and(|request| request.method == "initialize")
+fn opens_rmcp_session(request: Option<&JsonRpcRequest>) -> bool {
+    request.is_some_and(tracedecay_mcp::server::opens_rmcp_session)
+}
+
+/// Answers a project-routed first request that neither initializes an MCP
+/// session nor carries SEP-2575 per-request context. A notification gets no
+/// frame; an unparseable line is answered with the null id.
+async fn refuse_sessionless_request(
+    transport: &mut (impl McpTransport + Send),
+    request: &AuthenticatedFirstRequest,
+) -> Result<()> {
+    if request.parsed().is_some_and(|request| request.id.is_none()) {
+        return Ok(());
+    }
+    let request_id = request
+        .parsed()
+        .and_then(|request| request.id.clone())
+        .unwrap_or(serde_json::Value::Null);
+    let response = JsonRpcResponse::error(
+        request_id,
+        ErrorCode::InvalidRequest,
+        "a daemon MCP connection must begin with initialize or carry SEP-2575 request _meta \
+         (protocolVersion and clientCapabilities)"
+            .to_owned(),
+    );
+    write_json_rpc_response(transport, &response).await
 }
 
 /// Answer an unparseable handshake with one typed refusal frame and drain
@@ -787,7 +798,7 @@ where
 async fn serve_broker_socket_client(
     stream: BrokerStream,
     engine: DaemonEngine,
-    auth_token: Option<String>,
+    auth_token: String,
     admission_class: DaemonClientAdmissionClass,
 ) -> Result<()> {
     serve_broker_socket_client_inner(stream, engine, auth_token, admission_class).await
@@ -1036,7 +1047,7 @@ async fn serve_retained_invocation_connection(
 fn serve_broker_socket_client_inner(
     stream: BrokerStream,
     engine: DaemonEngine,
-    auth_token: Option<String>,
+    auth_token: String,
     admission_class: DaemonClientAdmissionClass,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
     // Erase the deeply nested broker connection future before it reaches the
@@ -1051,20 +1062,18 @@ fn serve_broker_socket_client_inner(
             _per_client_permit,
         )) = boxed_broker_connection_phase(async move {
             let mut transport = BrokerStreamTransport::new(stream);
-        if let Some(expected_token) = auth_token.as_deref() {
-            let preface_line = tokio::select! {
-                result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = engine.lifecycle.wait_for_draining() => return Ok(None),
-            };
-            let Some(preface_line) = preface_line else {
-                return Ok(None);
-            };
-            let authenticated = DaemonAuthPreface::from_line(&preface_line)
-                .is_ok_and(|preface| preface.authenticate(expected_token));
-            if !authenticated {
-                refuse_unauthenticated_client(&mut transport, binary_version()?).await;
-                return Ok(None);
-            }
+        let preface_line = tokio::select! {
+            result = read_line_handling_wire_oversized(&mut transport) => result?,
+            () = engine.lifecycle.wait_for_draining() => return Ok(None),
+        };
+        let Some(preface_line) = preface_line else {
+            return Ok(None);
+        };
+        let authenticated = DaemonAuthPreface::from_line(&preface_line)
+            .is_ok_and(|preface| preface.authenticate(&auth_token));
+        if !authenticated {
+            refuse_unauthenticated_client(&mut transport, binary_version()?).await;
+            return Ok(None);
         }
         let line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
@@ -1474,7 +1483,7 @@ fn serve_broker_socket_client_inner(
                     return Err(error);
                 }
                 if let Some(server) = server {
-                    if is_mcp_initialize_request(first_request.parsed()) {
+                    if opens_rmcp_session(first_request.parsed()) {
                         #[cfg(test)]
                         tests::record_mcp_route(
                             &handshake.client_instance_id,
@@ -1496,27 +1505,7 @@ fn serve_broker_socket_client_inner(
                         ))
                         .await?;
                     } else {
-                        #[cfg(test)]
-                        tests::record_mcp_route(
-                            &handshake.client_instance_id,
-                            tests::ObservedMcpRoute::Legacy,
-                        );
-                        #[cfg(test)]
-                        tests::record_first_request_replay(
-                            &handshake.client_instance_id,
-                            first_request.raw(),
-                        );
-                        let mut transport = ReplayTransport::new(transport);
-                        transport.push_replay(first_request.into_raw())?;
-                        for line in pending_project_open_lines {
-                            transport.push_replay(line)?;
-                        }
-                        Box::pin(server.run_daemon_connection_with_timings(
-                            &mut transport,
-                            handshake.timings,
-                            &engine.lifecycle,
-                        ))
-                        .await?;
+                        refuse_sessionless_request(&mut transport, &first_request).await?;
                     }
                 } else {
                     let mut transport = ReplayTransport::new(transport);
@@ -1958,7 +1947,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         };
         drop(setup_activity);
         let (server, pending_lines) = server;
-        if is_mcp_initialize_request(first_request.parsed()) {
+        if opens_rmcp_session(first_request.parsed()) {
             #[cfg(test)]
             tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
             #[cfg(test)]
@@ -1974,24 +1963,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             ))
             .await?;
         } else {
-            #[cfg(test)]
-            tests::record_mcp_route(
-                &handshake.client_instance_id,
-                tests::ObservedMcpRoute::Legacy,
-            );
-            #[cfg(test)]
-            tests::record_first_request_replay(&handshake.client_instance_id, first_request.raw());
-            let mut transport = ReplayTransport::new(transport);
-            transport.push_replay(first_request.into_raw())?;
-            for line in pending_lines {
-                transport.push_replay(line)?;
-            }
-            Box::pin(server.run_daemon_connection_with_timings(
-                &mut transport,
-                handshake.timings,
-                lifecycle,
-            ))
-            .await?;
+            refuse_sessionless_request(&mut transport, &first_request).await?;
         }
     } else {
         drop(setup_activity);

@@ -1,6 +1,6 @@
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::ParseOffset;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{TranscriptStore, TranscriptStoreError, TranscriptWriteBatch};
 

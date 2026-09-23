@@ -34,7 +34,7 @@ use super::read_model::{
 use super::util::json_error;
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
-use tracedecay_session_memory::context::CancellationToken;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
     ExplorerSourceIdV1::CodeGraph,

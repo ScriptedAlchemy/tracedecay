@@ -9,8 +9,7 @@ use tracedecay_automation_runtime::automation::managed_skills::{
 };
 use tracedecay_automation_runtime::automation::skill_targets::{
     SkillInstallTarget, export_native_skill_overlay, export_prompt_skill_index,
-    install_managed_skills, remove_prompt_skill_index, remove_prompt_skill_index_for_target,
-    stale_prompt_index_ids,
+    install_managed_skills, remove_prompt_skill_index_for_target, stale_prompt_index_ids,
 };
 use tracedecay_automation_runtime::automation::skill_writer::deploy_managed_skills_at;
 
@@ -448,34 +447,6 @@ async fn prompt_index_repairs_slugged_orphan_end_without_claiming_user_text() {
 }
 
 #[test]
-fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
-    let temp = tempdir();
-    let prompt_path = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# User rules\n\nKeep before.\n\n",
-        "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `generated`: Generated.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
-        "Keep after.\n",
-    );
-    std::fs::write(&prompt_path, contents).unwrap();
-
-    remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
-        .unwrap();
-
-    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
-    assert!(repaired.contains("Keep before."));
-    assert!(repaired.contains("Keep after."));
-    assert!(!repaired.contains("TraceDecay managed skills"));
-    assert!(!repaired.contains("`generated`"));
-
-    remove_prompt_skill_index_for_target(&host_io(), &prompt_path, SkillInstallTarget::Agents)
-        .unwrap();
-    assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), repaired);
-}
-
-#[test]
 fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
     let temp = tempdir();
     let prompt_path = temp.path().join("AGENTS.md");
@@ -492,35 +463,6 @@ fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
             .unwrap_err();
     assert!(error.to_string().contains("markers are unbalanced"));
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), contents);
-}
-
-#[test]
-fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
-    let temp = tempdir();
-    let prompt_path = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# User rules\n\nKeep before.\n\n",
-        "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `legacy`: Legacy.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
-        "## TraceDecay managed skills\n\n",
-        "This Claude index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
-        "- `slugged`: Slugged.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
-        "Keep after.\n",
-    );
-    std::fs::write(&prompt_path, contents).unwrap();
-
-    remove_prompt_skill_index(&host_io(), &prompt_path).unwrap();
-
-    let repaired = std::fs::read_to_string(&prompt_path).unwrap();
-    assert!(repaired.contains("Keep before."));
-    assert!(repaired.contains("Keep after."));
-    assert!(!repaired.contains("TraceDecay managed skills"));
-    assert!(!repaired.contains("`legacy`"));
-    assert!(!repaired.contains("`slugged`"));
 }
 
 #[test]
@@ -546,47 +488,9 @@ fn prompt_index_duplicate_balanced_blocks_fail_closed() {
 }
 
 #[tokio::test]
-async fn uninstall_preserves_legacy_block_on_shared_file_mid_migration() {
-    // A shared AGENTS.md mid-migration: host A migrated to a slugged `claude`
-    // block, host B is still using the legacy unslugged block. Uninstalling a
-    // third target (`agents`, which has no slugged block here) must NOT fall
-    // back to deleting the legacy block, since another host's slugged block is
-    // present the legacy block cannot be assumed to be ours.
-    let temp = tempdir();
-    let agents_md = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# Shared prompt\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
-        "Claude host index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
-        "Legacy host B index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
-    );
-    std::fs::write(&agents_md, contents).unwrap();
-
-    remove_prompt_skill_index_for_target(&host_io(), &agents_md, SkillInstallTarget::Agents)
-        .unwrap();
-
-    let after = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(
-        after.contains("Legacy host B index."),
-        "legacy block belonging to another host must be preserved: {after}"
-    );
-    assert!(
-        after.contains("<!-- TRACEDECAY MANAGED SKILLS START -->"),
-        "legacy markers must be preserved: {after}"
-    );
-    assert!(
-        after.contains("<!-- TRACEDECAY MANAGED SKILLS START claude -->"),
-        "unrelated slugged block must be preserved: {after}"
-    );
-}
-
-#[tokio::test]
 async fn uninstall_removes_own_slugged_block_on_shared_file() {
     // Uninstalling a target with its own slugged block removes only that block
-    // and leaves the legacy block for a still-migrating host untouched.
+    // and leaves another host's block untouched.
     let temp = tempdir();
     let agents_md = temp.path().join("AGENTS.md");
     let contents = concat!(
@@ -594,9 +498,9 @@ async fn uninstall_removes_own_slugged_block_on_shared_file() {
         "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
         "Claude host index.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
-        "Legacy host B index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
+        "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
+        "Agents host index.\n",
+        "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n",
     );
     std::fs::write(&agents_md, contents).unwrap();
 
@@ -609,32 +513,8 @@ async fn uninstall_removes_own_slugged_block_on_shared_file() {
         "own block removed: {after}"
     );
     assert!(
-        after.contains("Legacy host B index."),
-        "legacy block preserved: {after}"
-    );
-}
-
-#[tokio::test]
-async fn uninstall_removes_legacy_block_when_no_slugged_blocks_remain() {
-    // When only a legacy unslugged block exists (no other host has migrated),
-    // per-target uninstall may safely reclaim it.
-    let temp = tempdir();
-    let agents_md = temp.path().join("AGENTS.md");
-    let contents = concat!(
-        "# Shared prompt\n\n",
-        "<!-- TRACEDECAY MANAGED SKILLS START -->\n",
-        "Legacy index.\n",
-        "<!-- TRACEDECAY MANAGED SKILLS END -->\n",
-    );
-    std::fs::write(&agents_md, contents).unwrap();
-
-    remove_prompt_skill_index_for_target(&host_io(), &agents_md, SkillInstallTarget::Agents)
-        .unwrap();
-
-    let after = std::fs::read_to_string(&agents_md).unwrap();
-    assert!(
-        !after.contains("Legacy index."),
-        "legacy block removed: {after}"
+        after.contains("Agents host index."),
+        "other host's block preserved: {after}"
     );
 }
 

@@ -28,9 +28,10 @@ use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_application::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
+use tracedecay_code_index::is_test_file;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_project::project::{TraceDecay, is_test_file};
+use tracedecay_project::project::TraceDecay;
 
 use crate::ToolResult;
 use crate::handlers::{generic_tool_result, rendered_tool_result, unique_file_paths};

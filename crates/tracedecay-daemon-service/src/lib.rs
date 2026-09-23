@@ -50,12 +50,6 @@
 #![allow(clippy::single_match_else)]
 #![allow(clippy::large_futures)]
 
-/// Abort bound for in-flight invocation tasks during shutdown.
-///
-/// Re-exported here as the daemon-service authority while the lower runtime
-/// crate remains the cycle-free owner shared with code-index runtime.
-pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE as TASK_ABORT_DEADLINE;
-
 pub mod adoption_observation;
 pub mod application_surface;
 pub mod automation_effect;
@@ -87,7 +81,7 @@ pub use callable_code_authorization::{
 pub use invocation::{
     AuthorizedDaemonLspWorkspace, DaemonConfigurationRuntimeRegistrationPauseV1,
     DaemonFeedbackPublicationTestGate, InvocationProjectRuntimeIdentityV1, LspLeaseTaskRegistry,
-    RuntimeLspSession, WorkAttemptProcessRegistryV1, canonicalize_lsp_roots, current_micros,
+    RuntimeLspSession, WorkAttemptProcessRegistryV1, canonicalize_lsp_roots,
     execute_work_application, lsp_delivery_attempt, mounted_configuration_layers, now_millis,
     retain_lsp_delivery_attempt,
 };

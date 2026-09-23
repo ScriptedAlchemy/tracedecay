@@ -1,6 +1,6 @@
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
+    ApplicationSurfaceOperation, AvailabilityContract, BindingId, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestV1,
     CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
     DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
@@ -140,8 +140,6 @@ pub fn callable_code_catalog_contribution()
                 operation: SurfaceOperationName::new(*method)?,
                 protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
                 required_features: Vec::new(),
-                status: BindingStatus::Current,
-                alias_of: None,
             })?);
             binding_ids.push(binding_id);
         }
@@ -302,6 +300,15 @@ fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
     }
 }
 
+/// MCP and CLI callers cannot choose a page size, so callee traversal defaults
+/// to a page that holds a typical answer; `meta.cursor` continues.
+pub(crate) const fn callable_code_default_page_size(kind: CallableCodeOperationKind) -> u32 {
+    match kind {
+        CallableCodeOperationKind::Callees => 100,
+        _ => 10,
+    }
+}
+
 fn code_query_capability_id(
     kind: CallableCodeOperationKind,
 ) -> Result<CapabilityId, ApplicationContractError> {
@@ -327,9 +334,12 @@ fn code_query_capability(
             routing: RoutingContractV1::new(
                 1,
                 format!("Query {readable_name}"),
-                format!(
-                    "Invoke the generation-bound query {readable_name} query without replacing its owning kernel."
-                ),
+                match kind {
+                    CallableCodeOperationKind::Callees => "What does this call: outgoing calls of a known symbol node ID up to `maximum_depth` (default 3). A callee that is a trait method also returns the concrete impl methods reachable through the trait, tagged `dispatch_via_trait` with `dispatch_from`; set `resolve_trait_dispatch: false` for direct call edges only.".to_owned(),
+                    _ => format!(
+                        "Invoke the generation-bound query {readable_name} query without replacing its owning kernel."
+                    ),
+                },
                 // Keep examples distinct from primitive-read fixtures ("Read …").
                 vec![format!("Query indexed {readable_name}")],
             )?,
@@ -347,7 +357,11 @@ fn code_query_capability(
                 CancellationPoint::DuringRead,
             ])?,
             deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
-            pagination: Some(PaginationContract::new(10, 1_000, 15 * 60 * 1_000)?),
+            pagination: Some(PaginationContract::new(
+                callable_code_default_page_size(kind),
+                1_000,
+                15 * 60 * 1_000,
+            )?),
             inverse: None,
             authority_revalidation: RevalidationContract::required(vec![
                 RevalidationPoint::Authority,

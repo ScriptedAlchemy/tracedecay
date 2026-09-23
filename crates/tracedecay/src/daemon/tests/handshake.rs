@@ -14,9 +14,10 @@ pub(super) async fn daemon_round_trip(
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("daemon socket pair");
     let server = tokio::spawn(async move {
-        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
     });
     let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     writer
         .write_all(handshake.to_line().expect("handshake json").as_bytes())
         .await
@@ -74,7 +75,7 @@ fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
     let decoded = DaemonHandshake::from_line(&encoded).expect("legacy handshake should decode");
     assert_eq!(
         decoded.moved_store_adoption,
-        crate::project::MovedStoreAdoption::Never
+        tracedecay_project::project::MovedStoreAdoption::Never
     );
 }
 
@@ -274,7 +275,7 @@ fn missing_index_classifier_covers_every_auto_init_store_miss() {
     }
 
     let unrelated = tracedecay_domain::errors::TraceDecayError::Config {
-        message: "identity cutover conflict".to_string(),
+        message: "repository identity conflict".to_string(),
     };
     assert!(!super::super::is_missing_index_error(&unrelated));
 }
@@ -310,9 +311,10 @@ async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
         enter_test_daemon_database_scope(&client_identity.profile_root, "handshake-refusal-test");
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+    let server_task = tokio::spawn(super::serve_authenticated_test_client(server, engine));
 
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     // Valid JSON that is not this daemon's handshake shape, followed by the
     // pipelined first request a real client writes before it starts reading.
     writer
@@ -372,9 +374,10 @@ async fn non_json_handshake_reads_invalid_handshake_refusal() {
     );
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
+    let server_task = tokio::spawn(super::serve_authenticated_test_client(server, engine));
 
     let (reader, mut writer) = client.into_split();
+    super::write_test_auth_preface(&mut writer).await;
     writer
         .write_all(b"GET / HTTP/1.1\n")
         .await

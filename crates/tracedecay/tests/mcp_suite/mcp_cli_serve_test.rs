@@ -31,9 +31,6 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 #[cfg(unix)]
 use tracedecay::mcp::handle_tool_call;
-#[cfg(unix)]
-use tracedecay::project::TraceDecay;
-use tracedecay::project::TraceDecayOpenOptions;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     create_managed_skill,
@@ -42,6 +39,9 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
     append_run_record, write_run_artifact,
 };
+#[cfg(unix)]
+use tracedecay_project::project::TraceDecay;
+use tracedecay_project::project::TraceDecayOpenOptions;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 #[cfg(unix)]
 use tracedecay_runtime_core::storage::{PrivateStoreIo, pin_fixture_repository_identity};
@@ -415,6 +415,7 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             fallback_status: None,
+            session_evidence_budget_stage: None,
             report_ref: None,
             artifacts: vec![artifact],
             started_at: "1782283199".to_string(),
@@ -490,6 +491,30 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
     );
 }
 
+/// Publishes the authority record beside `socket` that serve resolves a fake
+/// daemon through. Hold it for as long as the fake daemon serves.
+#[cfg(unix)]
+fn seed_fake_daemon_authority(
+    socket: &Path,
+) -> tracedecay_daemon_identity::authority::DaemonAuthority {
+    tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        socket.parent().expect("socket parent"),
+        &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.to_path_buf()),
+        "fake-daemon",
+    )
+    .expect("seed fake daemon authority")
+}
+
+#[cfg(unix)]
+fn assert_fake_daemon_preface(line: &str, token: &str) {
+    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(line.trim())
+        .expect("fake daemon auth preface");
+    assert!(
+        preface.authenticate(token),
+        "serve must present the daemon token"
+    );
+}
+
 /// Serve must proxy through a reachable daemon without opening either database
 /// locally. The intentionally uninitialized explicit path also proves that
 /// proxy startup preserves authoritative path routing without local resolution.
@@ -504,6 +529,8 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
     let project = TempDir::new().unwrap();
     let socket_path = common::daemon_socket_path(home.path());
     fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let authority = seed_fake_daemon_authority(&socket_path);
+    let token = authority.auth_token().to_owned();
     let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
     listener
         .set_nonblocking(true)
@@ -527,6 +554,9 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
                 .set_nonblocking(false)
                 .expect("blocking fake daemon stream");
             let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            let mut preface = String::new();
+            reader.read_line(&mut preface).expect("read auth preface");
+            assert_fake_daemon_preface(&preface, &token);
             let mut handshake_line = String::new();
             reader
                 .read_line(&mut handshake_line)
@@ -549,7 +579,7 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
                         "name": "sentinel-proxy-first-daemon",
                         // The fixture build version: the value only needs to
                         // round-trip through the proxy, not match the child.
-                        "version": tracedecay::product_runtime::register_fixture_product_runtime()
+                        "version": tracedecay_project::product_runtime::register_fixture_product_runtime()
                             .build_version()
                     }
                 }
@@ -655,6 +685,10 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
     )
     .unwrap();
 
+    // The previous daemon's authority record outlives its socket.
+    let authority = seed_fake_daemon_authority(&socket_path);
+    let token = authority.auth_token().to_owned();
+
     // The "restarted daemon" binds the socket only after serve has started.
     // It answers `initialize` with a sentinel server name and a skewed
     // version, so a proxied response is distinguishable from the in-process
@@ -683,13 +717,18 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
                     .expect("blocking fake daemon stream");
                 let mut reader =
                     BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+                let mut preface = String::new();
+                if reader.read_line(&mut preface).expect("read auth preface") == 0 {
+                    // The transport probe connects and hangs up without a preamble.
+                    return None;
+                }
+                assert_fake_daemon_preface(&preface, &token);
                 let mut handshake_line = String::new();
                 if reader
                     .read_line(&mut handshake_line)
                     .expect("read handshake")
                     == 0
                 {
-                    // The transport probe connects and hangs up without a handshake.
                     return None;
                 }
                 let mut request_line = String::new();
@@ -791,6 +830,7 @@ async fn serve_daemon_proxy_reports_daemon_disconnect_as_json_rpc_error() {
 
     let listener_path = socket_path.clone();
     let fake_daemon = std::thread::spawn(move || {
+        let _authority = seed_fake_daemon_authority(&listener_path);
         let listener = UnixListener::bind(&listener_path).expect("bind fake daemon socket");
         ready_tx.send(()).expect("notify fake daemon readiness");
         if let Ok((mut stream, _addr)) = listener.accept() {

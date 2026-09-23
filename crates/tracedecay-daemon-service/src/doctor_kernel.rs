@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
     CodeIndexMountReadV1, CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort,
@@ -34,10 +35,10 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
-use tracedecay_project::config::DaemonRuntimeConfiguration;
 
 use crate::DaemonFeedbackRuntimeRegistrar;
 use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
@@ -54,7 +55,7 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 /// a fabricated healthy result.
 #[must_use]
 pub fn configuration_read_from_pin<E>(
-    resolved: &Result<DaemonRuntimeConfiguration, E>,
+    resolved: &Result<PinnedRuntimeConfiguration, E>,
 ) -> ConfigurationAuthorityReadV1 {
     match resolved {
         Ok(_) => ConfigurationAuthorityReadV1::Resolved {
@@ -121,10 +122,10 @@ fn host_integration_read_from_report(
     }) {
         HostConformanceV1::ProtocolDrift
     } else if report.components.iter().any(|component| {
-        // `Drifted`, `OrphanedRegistration`, and `ActivationDeferred` are
-        // repairable conformance, not protocol drift: the component's ownership
-        // is intact and either the ordinary reinstall or the host's own
-        // activation converges it, so none may escalate to `ProtocolDrift`.
+        // `Drifted`, `OrphanedRegistration`, `ActivationDeferred`, and
+        // `ReinstallRequired` are repairable conformance, not protocol drift:
+        // an ordinary or adopting install, or the host's own activation,
+        // converges each, so none may escalate to `ProtocolDrift`.
         matches!(
             component.state,
             HostBundleComponentDoctorStateV1::Repairable
@@ -132,6 +133,7 @@ fn host_integration_read_from_report(
                 | HostBundleComponentDoctorStateV1::Drifted
                 | HostBundleComponentDoctorStateV1::OrphanedRegistration
                 | HostBundleComponentDoctorStateV1::ActivationDeferred
+                | HostBundleComponentDoctorStateV1::ReinstallRequired
         )
     }) {
         HostConformanceV1::Drifted
@@ -1026,7 +1028,7 @@ pub fn production_doctor_report_reader(
                         tokio::join!(
                     graph.quick_check_report(),
                     observation_authority_audit_ok(registry.as_ref()),
-                    project_sessions.session_temporal_doctor_health(),
+                    SessionTemporalAccess::new(&*project_sessions).session_temporal_doctor_health(),
                     profile_storage_reads,
                     collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
                     tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(

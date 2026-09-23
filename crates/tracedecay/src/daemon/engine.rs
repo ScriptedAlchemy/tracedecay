@@ -12,6 +12,8 @@ use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 use tracedecay_daemon_identity::profile_identity;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
+#[cfg(unix)]
+use tracedecay_daemon_service::shutdown::{DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle};
 use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
 
 #[cfg(unix)]
@@ -171,19 +173,19 @@ fn ensure_git_index_transactions_for_mutation_owners_inner<'a>(
 
 #[hotpath::measure(label = "daemon.engine.context_scout.ensure_owner")]
 pub(super) fn ensure_context_scout_owner_before_advertising(
-    project: &crate::project::TraceDecay,
+    project: &tracedecay_project::project::TraceDecay,
 ) -> Result<()> {
     if project.store_layout().identity.project_id.is_none() {
         return Ok(());
     }
     let owner = match project.context_scout_owner_lookup() {
-        crate::project::ContextScoutOwnerLookupV1::Ready(owner) => owner,
-        crate::project::ContextScoutOwnerLookupV1::ReadOnly => {
+        tracedecay_project::project::ContextScoutOwnerLookupV1::Ready(owner) => owner,
+        tracedecay_project::project::ContextScoutOwnerLookupV1::ReadOnly => {
             return Err(TraceDecayError::Config {
                 message: "read-only project has no Context Scout owner".to_owned(),
             });
         }
-        crate::project::ContextScoutOwnerLookupV1::Unregistered => {
+        tracedecay_project::project::ContextScoutOwnerLookupV1::Unregistered => {
             return Err(TraceDecayError::Config {
                 message: "project Context Scout owner did not start".to_owned(),
             });

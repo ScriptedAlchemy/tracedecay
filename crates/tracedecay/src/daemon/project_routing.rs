@@ -81,7 +81,7 @@ pub(super) fn project_route_for_handshake(
     let canonical_project_path = project_path
         .canonicalize()
         .unwrap_or_else(|_| project_path.clone());
-    if crate::config::is_ambient_project_root(&canonical_project_path) {
+    if tracedecay_project::config::is_ambient_project_root(&canonical_project_path) {
         return Err(TraceDecayError::Config {
             message: format!(
                 "'{}' is an ambient user/filesystem root, not an active TraceDecay code project",
@@ -211,12 +211,13 @@ pub(super) async fn resolved_project_server_key(
         return Ok(None);
     }
     let registry_database = store_administration.registered_profile_database().await?;
-    let Ok(layout) = crate::project::TraceDecay::resolve_registered_configuration_layout(
-        canonical_project_path,
-        &crate::daemon::handshake_open_options(handshake),
-        registry_database.as_ref(),
-    )
-    .await
+    let Ok(layout) =
+        tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
+            canonical_project_path,
+            &crate::daemon::handshake_open_options(handshake),
+            registry_database.as_ref(),
+        )
+        .await
     else {
         // The canonical open remains responsible for typed identity errors and
         // any permitted repair; this is only a mounted-runtime reuse path.
@@ -231,7 +232,7 @@ pub(super) async fn resolved_project_server_key(
                     tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
                 });
             let (graph_db_path, _, fallback_warning) =
-                crate::project::TraceDecay::resolve_db_for_branch(
+                tracedecay_project::project::TraceDecay::resolve_db_for_branch(
                     &probe_path,
                     &data_root,
                     graph_scope.as_deref(),

@@ -7,6 +7,19 @@
 //! without depending on daemon-service. Execution stays in daemon-service.
 
 mod git;
+mod invocation;
+mod retained;
+mod source_edit;
+
+pub use retained::decode_retained_request;
+pub use source_edit::{is_source_edit_operation, parse_source_edit_arguments};
+
+pub use invocation::{
+    application_delivery_route, application_outcome_value, application_response,
+    application_surface_cancellation_policy,
+    application_surface_feedback_is_observable, application_surface_feedback_operation,
+    invoke_application_surface, parse_application_surface_invocation_payload,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,6 +46,7 @@ use tracedecay_contracts::{
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
     ConfigurationWireRequestV1, HealthReadRequest, NativeIntegrationSurfaceRequest,
     ObservatoryReadRequestV1, PrimitiveCodeSurfaceRequest, SessionLookupRequest,
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
     SourceLinesRequest, configuration_wire_request_from_invocation_payload,
 };
 use tracedecay_tool_catalog::{
@@ -42,6 +56,7 @@ use tracedecay_tool_catalog::{
 use crate::output_format::{RequestedOutputFormat, requested_output_format};
 use crate::surface::GitReadSurfaceRequest;
 use tracedecay_contracts::context_scout::ContextScoutSurfaceRequestV1;
+use tracedecay_contracts::retained_surfaces::{RetainedSurfaceOperation, RetainedSurfaceRequestV1};
 
 #[derive(Debug, Error)]
 pub enum ApplicationSurfaceAdapterError {
@@ -200,7 +215,10 @@ pub enum ApplicationSurfaceRequest {
     ObservatoryRead(ObservatoryReadRequestV1),
     Configuration(ConfigurationWireRequestV1),
     ContextScout(ContextScoutSurfaceRequestV1),
-    Retained(tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1),
+    SourceEdit(SourceEditInvocationV1),
+    SourceEditReconcile(SourceEditReconciliationInvocationV1),
+    SourceEditRollback(SourceEditRollbackInvocationV1),
+    Retained(RetainedSurfaceRequestV1),
 }
 
 pub struct ApplicationSurfaceInvocationResult {
@@ -212,6 +230,9 @@ pub struct ApplicationSurfaceInvocationResult {
 
 impl ApplicationSurfaceRequest {
     pub fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
+        if let Self::SourceEdit(invocation) = self {
+            return source_edit::source_edit_kind(operation) == Some(invocation.edit.kind());
+        }
         if let Self::Retained(request) = self {
             return request.operation().as_str() == operation.as_str();
         }
@@ -455,6 +476,14 @@ impl ApplicationSurfaceRequest {
                 | (
                     Self::ContextScout(ContextScoutSurfaceRequestV1::Feedback(_)),
                     ApplicationSurfaceOperation::ContextScoutFeedback
+                )
+                | (
+                    Self::SourceEditReconcile(_),
+                    ApplicationSurfaceOperation::SourceEditReconcile
+                )
+                | (
+                    Self::SourceEditRollback(_),
+                    ApplicationSurfaceOperation::SourceEditRollback
                 )
         )
     }
@@ -802,6 +831,53 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::FeedbackProximity => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::FeedbackProximity)
             .map_err(ApplicationSurfaceAdapterError::invalid_request),
+        ApplicationSurfaceOperation::StrReplace
+        | ApplicationSurfaceOperation::MultiStrReplace
+        | ApplicationSurfaceOperation::InsertAt
+        | ApplicationSurfaceOperation::AstGrepRewrite
+        | ApplicationSurfaceOperation::ReplaceSymbol
+        | ApplicationSurfaceOperation::InsertAtSymbol
+        | ApplicationSurfaceOperation::MoveSymbol
+        | ApplicationSurfaceOperation::RenameSymbol
+        | ApplicationSurfaceOperation::SourceEditReconcile
+        | ApplicationSurfaceOperation::SourceEditRollback => {
+            parse_source_edit_arguments(operation, &value)
+                .map_err(ApplicationSurfaceAdapterError::invalid_request)
+        }
+        ApplicationSurfaceOperation::FactStoreCurate
+        | ApplicationSurfaceOperation::FactStoreAdd
+        | ApplicationSurfaceOperation::FactStoreSearch
+        | ApplicationSurfaceOperation::FactStoreProbe
+        | ApplicationSurfaceOperation::FactStoreRelated
+        | ApplicationSurfaceOperation::FactStoreReason
+        | ApplicationSurfaceOperation::FactStoreContradict
+        | ApplicationSurfaceOperation::FactStoreGet
+        | ApplicationSurfaceOperation::FactStoreUpdate
+        | ApplicationSurfaceOperation::FactStoreRemove
+        | ApplicationSurfaceOperation::FactStoreSupersede
+        | ApplicationSurfaceOperation::FactStoreList
+        | ApplicationSurfaceOperation::FactFeedback
+        | ApplicationSurfaceOperation::MemoryStatus
+        | ApplicationSurfaceOperation::SessionRefreshStatus
+        | ApplicationSurfaceOperation::SessionRefreshCancel
+        | ApplicationSurfaceOperation::SessionRefreshBegin
+        | ApplicationSurfaceOperation::MessageSearch
+        | ApplicationSurfaceOperation::SessionsFor
+        | ApplicationSurfaceOperation::Workflows
+        | ApplicationSurfaceOperation::LcmStatus
+        | ApplicationSurfaceOperation::LcmDoctor
+        | ApplicationSurfaceOperation::LcmLoadSession
+        | ApplicationSurfaceOperation::LcmGrep
+        | ApplicationSurfaceOperation::LcmDescribe
+        | ApplicationSurfaceOperation::LcmExpand
+        | ApplicationSurfaceOperation::LcmExpandQuery => {
+            let retained = RetainedSurfaceOperation::from_application(operation).ok_or_else(|| {
+                ApplicationSurfaceAdapterError::invalid_request("operation is not retained")
+            })?;
+            decode_retained_request(retained, value)
+                .map(ApplicationSurfaceRequest::Retained)
+                .map_err(ApplicationSurfaceAdapterError::invalid_request)
+        }
     }
 }
 

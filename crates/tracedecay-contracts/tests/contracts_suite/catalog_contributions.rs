@@ -186,8 +186,6 @@ fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
 
 #[test]
 fn similar_and_redundancy_use_the_current_protocol_revision_only() {
-    use tracedecay_tool_catalog::BindingStatus;
-
     let contribution = primitive_read_contribution().unwrap();
     for operation in ["similar", "redundancy"] {
         let mcp_bindings: Vec<_> = contribution
@@ -204,8 +202,6 @@ fn similar_and_redundancy_use_the_current_protocol_revision_only() {
             "{operation} must keep one MCP (surface, operation) binding"
         );
         let binding = mcp_bindings[0];
-        assert!(matches!(binding.status(), BindingStatus::Current));
-        assert_eq!(binding.alias_of(), None);
         assert!(
             binding.protocol_revisions().contains(1),
             "{operation} must accept the current protocol revision"

@@ -16,8 +16,7 @@ use tracedecay_contracts::surface_contracts::{
 };
 use tracedecay_contracts::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    AuthorityReceipt, AuthorizationService, CALLABLE_CODE_OPERATION_COUNT,
-    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
+    AuthorityReceipt, CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryFuture,
     CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
     CodeImplementationsRequest, CodeQueryPage, CodeQueryScope, CodeRelationRequest,
@@ -33,10 +32,7 @@ use tracedecay_domain::{
     QueryFallbackSubpayload, QueryNormalizationRevision, RetrieverKind, SanitizerRevision,
     TemporalModeV1, UtcMicros,
 };
-use tracedecay_policy::authorization::SourceAuthorizationEvaluatorV1;
-use tracedecay_tool_catalog::{
-    AuthorityRequirement, BindingStatus, BindingSurface, LifecycleClass,
-};
+use tracedecay_tool_catalog::{AuthorityRequirement, BindingSurface, LifecycleClass};
 
 fn meta() -> RetrievalRequestMeta {
     RetrievalRequestMeta::current(
@@ -243,28 +239,18 @@ impl CallableCodeAuthorizationPort for RoutedAuthorization {
         context: &'a RequestContext,
         _operation: &'a ApplicationOperation,
         _observed_at: UtcMicros,
-    ) -> CallableCodeAuthorizationFuture<
-        'a,
-        Result<CallableCodeAuthorizationAdmission, ApplicationProblem>,
-    > {
-        Box::pin(async move {
-            Ok(CallableCodeAuthorizationAdmission::Routed(
-                common::authority(context),
-            ))
-        })
+    ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
+        Box::pin(async move { Ok(common::authority(context)) })
     }
 
     fn recheck_publication<'a>(
         &'a self,
         context: &'a RequestContext,
         _operation: &'a ApplicationOperation,
-        admission: &'a CallableCodeAuthorizationAdmission,
+        admission: &'a AuthorityReceipt,
         observed_at: UtcMicros,
     ) -> CallableCodeAuthorizationFuture<'a, Result<AuthorityReceipt, ApplicationProblem>> {
         Box::pin(async move {
-            let CallableCodeAuthorizationAdmission::Routed(admission) = admission else {
-                panic!("routed authorization admission remains opaque");
-            };
             let mut current = common::authority(context);
             assert_eq!(admission.policy, current.policy);
             current.revalidated_at = observed_at;
@@ -285,14 +271,8 @@ fn execute_exact_in_scope(
 ) -> tracedecay_contracts::ApplicationResult<CodeQueryPage<ExactOccurrenceRecord>> {
     let operations = callable_code_operations().unwrap();
     let context = common::context(operations.get(CallableCodeOperationKind::ExactOccurrence));
-    let service = CallableCodeQueryService::new(
-        ExactOnlyPort { scenario },
-        AuthorizationService::new(
-            common::StaticAuthorizationPort::authorized(),
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
-        operations,
-    );
+    let service =
+        CallableCodeQueryService::new(ExactOnlyPort { scenario }, RoutedAuthorization, operations);
     block_on(service.exact_occurrence(
         &context,
         ExactOccurrenceRequest::new("ApplicationOperation", None, scope, meta()).unwrap(),
@@ -749,11 +729,9 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
                 format!("binding.{surface_name}.{surface_operation}.v1")
             );
             assert_eq!(binding.operation().as_str(), *surface_operation);
-            assert_eq!(binding.status(), &BindingStatus::Current);
             assert!(binding.protocol_revisions().contains(1));
             assert!(!binding.protocol_revisions().contains(2));
             assert!(binding.required_features().is_empty());
-            assert!(!binding.is_alias());
             assert!(capability.binding_ids().contains(binding.binding_id()));
         }
     }

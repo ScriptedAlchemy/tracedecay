@@ -20,8 +20,7 @@ use tracedecay_contracts::feedback::{
     FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, FeedbackCycleExecutionResult,
     FeedbackCycleService, FeedbackDiagnosticsReadRequestV1, FeedbackExpandRequestV1,
     FeedbackImpactPort, FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
-    FeedbackPortFuture, FeedbackRuntimeStatePort, FeedbackRuntimeStateV1,
-    GenerationBoundFeedbackDiagnosticsAdapter,
+    FeedbackPortFuture, FeedbackRuntimeStatePort, GenerationBoundFeedbackDiagnosticsAdapter,
 };
 use tracedecay_contracts::retrieval::{
     AffectedTestsRequest, AffectedTestsResult, AffectedTestsRetrievalPort, AnchorExpandRequest,
@@ -237,13 +236,13 @@ impl FeedbackCycleRuntimeError {
 }
 
 type ProductionFeedbackCycleService = FeedbackCycleService<
-    SharedFeedbackRuntimeState,
+    Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     GenerationBoundFeedbackDiagnosticsAdapter<
         DiagnosticStoreFeedbackProvider<DatabaseDiagnosticStore>,
     >,
     DirectFeedbackImpactAdapter,
     ProjectFeedbackStore,
-    SharedFeedbackObservations,
+    Arc<dyn FeedbackObservationPort + Send + Sync>,
     ProjectFeedbackRouteAuthorization,
 >;
 
@@ -319,18 +318,18 @@ pub fn open_feedback_cycle_runtime(
     let impact = DirectFeedbackImpactAdapter::new(
         project_root,
         code_graph,
-        SharedAffectedTests(affected_tests),
+        affected_tests,
         route_authorization.clone(),
         graph_operation,
         tests_operation,
         code_index_identity,
     );
     let service = FeedbackCycleService::new(
-        SharedFeedbackRuntimeState(runtime_state),
+        runtime_state,
         diagnostics,
         impact,
         publications.clone(),
-        SharedFeedbackObservations(observations),
+        observations,
         route_authorization,
         operation,
     );
@@ -709,22 +708,10 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
     }
 }
 
-struct SharedFeedbackRuntimeState(Arc<dyn FeedbackRuntimeStatePort + Send + Sync>);
-
-impl FeedbackRuntimeStatePort for SharedFeedbackRuntimeState {
-    fn resolve<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        input: &'a tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-    ) -> FeedbackPortFuture<'a, Option<FeedbackRuntimeStateV1>> {
-        self.0.resolve(context, input)
-    }
-}
-
 struct DirectFeedbackImpactAdapter {
     project_root: PathBuf,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
-    tests: SharedAffectedTests,
+    tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
     authorization: ProjectFeedbackRouteAuthorization,
     graph_operation: ApplicationOperation,
     tests_operation: ApplicationOperation,
@@ -739,7 +726,7 @@ impl DirectFeedbackImpactAdapter {
     fn new(
         project_root: PathBuf,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
-        tests: SharedAffectedTests,
+        tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
         authorization: ProjectFeedbackRouteAuthorization,
         graph_operation: ApplicationOperation,
         tests_operation: ApplicationOperation,
@@ -1138,18 +1125,6 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
     }
 }
 
-struct SharedAffectedTests(Arc<dyn AffectedTestsRetrievalPort + Send + Sync>);
-
-impl AffectedTestsRetrievalPort for SharedAffectedTests {
-    fn affected_tests(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &AffectedTestsRequest,
-    ) -> RetrievalPortOutcome<AffectedTestsResult> {
-        self.0.affected_tests(context, request)
-    }
-}
-
 enum DirectAffectedTestsOutcome {
     Evidence {
         tests: Vec<SymbolOccurrenceId>,
@@ -1180,7 +1155,7 @@ fn affected_tests_outcome(
             DirectAffectedTestsOutcome::Evidence {
                 tests: evidence
                     .payload
-                    .map_or_else(Vec::new, |result| result.tests),
+                    .map_or_else(Vec::new, |result| result.current_tests()),
                 state,
             }
         }
@@ -1191,7 +1166,7 @@ fn affected_tests_outcome(
             DirectAffectedTestsOutcome::Evidence {
                 tests: evidence
                     .payload
-                    .map_or_else(Vec::new, |result| result.tests),
+                    .map_or_else(Vec::new, |result| result.current_tests()),
                 state: FeedbackImpactStateV1::Partial,
             }
         }
@@ -1203,18 +1178,6 @@ fn affected_tests_outcome(
                 state: FeedbackImpactStateV1::Unavailable,
             }
         }
-    }
-}
-
-struct SharedFeedbackObservations(Arc<dyn FeedbackObservationPort + Send + Sync>);
-
-impl FeedbackObservationPort for SharedFeedbackObservations {
-    fn observe(
-        &self,
-        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
-    ) {
-        self.0.observe(input, observation);
     }
 }
 

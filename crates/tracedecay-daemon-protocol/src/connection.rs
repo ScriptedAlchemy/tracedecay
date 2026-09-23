@@ -47,7 +47,7 @@ pub trait DaemonLivenessProbe: Send + Sync {
 #[derive(Clone)]
 pub struct DaemonConnection {
     pub endpoint: DaemonEndpoint,
-    pub auth_token: Option<String>,
+    pub auth_token: String,
     /// The daemon version advertised by the authority record that named this
     /// endpoint. Lets transport failures name version skew instead of hiding
     /// it behind a raw io error.
@@ -56,7 +56,7 @@ pub struct DaemonConnection {
 }
 
 impl DaemonConnection {
-    pub fn new(endpoint: DaemonEndpoint, auth_token: Option<String>) -> Self {
+    pub fn new(endpoint: DaemonEndpoint, auth_token: String) -> Self {
         Self {
             endpoint,
             auth_token,
@@ -75,10 +75,6 @@ impl DaemonConnection {
     pub fn with_daemon_version(mut self, daemon_version: impl Into<String>) -> Self {
         self.daemon_version = Some(daemon_version.into());
         self
-    }
-
-    pub fn unauthenticated_for_test(endpoint: DaemonEndpoint) -> Self {
-        Self::new(endpoint, None)
     }
 }
 
@@ -231,7 +227,7 @@ where
     .await
 }
 
-/// Writes the optional auth preface and the handshake line.
+/// Writes the auth preface and the handshake line.
 ///
 /// Callers that already hold a [`DaemonConnection`] use
 /// [`write_daemon_preamble`]. The composition-root client uses this directly
@@ -239,15 +235,13 @@ where
 /// connection.
 pub async fn write_daemon_handshake_preamble(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    auth_token: Option<&str>,
+    auth_token: &str,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
-    if let Some(token) = auth_token {
-        writer
-            .write_all(DaemonAuthPreface::new(token).to_line()?.as_bytes())
-            .await?;
-        writer.write_all(b"\n").await?;
-    }
+    writer
+        .write_all(DaemonAuthPreface::new(auth_token).to_line()?.as_bytes())
+        .await?;
+    writer.write_all(b"\n").await?;
     writer.write_all(handshake.to_line()?.as_bytes()).await?;
     writer.write_all(b"\n").await?;
     Ok(())
@@ -259,7 +253,7 @@ pub async fn write_daemon_preamble(
     connection: &DaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
-    write_daemon_handshake_preamble(writer, connection.auth_token.as_deref(), handshake).await
+    write_daemon_handshake_preamble(writer, &connection.auth_token, handshake).await
 }
 
 pub fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {

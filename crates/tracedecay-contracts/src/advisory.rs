@@ -29,7 +29,7 @@ pub use tracedecay_domain::feedback::{
     ProximityBranchWorktreeIncompatibilityV1, ProximityContributionIdV1, ProximityContributionV1,
     ProximityCoverageV1, ProximityInclusionV1, ProximityObservationIdV1,
     ProximityRelationPathKindV1, ProximityRelationPathV1, ProximityRelationStrengthV1,
-    ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1, ProximityWarningIdV1,
+    ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,7 +209,7 @@ impl AdvisoryFindingContributorV1 for ProximityContributionV1 {
             .ok_or_else(|| inconsistent("proximity contribution anchor"))?;
         let finding_id = tracedecay_domain::feedback::FeedbackFindingId::new(format!(
             "finding.proximity.{}",
-            self.warning_id.as_str()
+            self.contribution_id.as_str()
         ))
         .map_err(|_| inconsistent("proximity finding id"))?;
         validated_batch(

@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::{
-    HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
-};
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandRequest, LcmExpandTarget,
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
+};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
 
@@ -703,7 +704,7 @@ async fn pending_relation_receipt_requires_explicit_recovery_before_read() {
     drop(journal_rows);
     drop(snapshot);
     assert!(
-        database
+        SessionTemporalAccess::new(&*database)
             .active_session_summary_relations(
                 &session_id,
                 &["summary.relation-recovery".to_owned()],
@@ -716,7 +717,7 @@ async fn pending_relation_receipt_requires_explicit_recovery_before_read() {
     );
 
     assert_eq!(
-        database
+        SessionTemporalAccess::new(&*database)
             .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
             .await
             .expect("recover pending graph projection"),
@@ -742,7 +743,7 @@ async fn pending_relation_receipt_requires_explicit_recovery_before_read() {
             .expect("recovered journal count value"),
         0
     );
-    let (_, relations) = database
+    let (_, relations) = SessionTemporalAccess::new(&*database)
         .active_session_summary_relations(
             &session_id,
             &["summary.relation-recovery".to_owned()],
@@ -857,11 +858,11 @@ async fn concurrent_publications_leave_one_active_generation() {
     let session_id = tracedecay_domain::SessionId::new("session-concurrent").expect("session id");
     // A loser that re-applied the refreshed generation may leave its own
     // superseded marker pending; recovery settles exactly that marker.
-    database
+    SessionTemporalAccess::new(&*database)
         .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
         .await
         .expect("settle any superseded publication marker");
-    let (active_generation, relations) = database
+    let (active_generation, relations) = SessionTemporalAccess::new(&*database)
         .active_session_summary_relations(
             &session_id,
             &[
@@ -922,7 +923,7 @@ async fn concurrent_publications_leave_one_active_generation() {
     drop(journal_rows);
     drop(snapshot);
     assert_eq!(
-        database
+        SessionTemporalAccess::new(&*database)
             .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
             .await
             .expect("recovery after settlement is idempotent"),

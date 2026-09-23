@@ -24,6 +24,7 @@ use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 use tracedecay_store::StoreShardIdV1;
 
 use super::*;
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 
 type ProjectlessPhaseFutureV1<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
@@ -170,7 +171,7 @@ async fn projectless_response(
 ) -> Option<tracedecay_mcp::JsonRpcResponse> {
     let id = request.id.clone()?;
     match request.method.as_str() {
-        "initialize" => Some(match crate::version::build_version() {
+        "initialize" => Some(match tracedecay_project::version::build_version() {
             Ok(version) => JsonRpcResponse::success(
                 id,
                 json!({
@@ -205,7 +206,7 @@ async fn projectless_response(
             );
             Some(response)
         }
-        "ping" | "logging/setLevel" => Some(JsonRpcResponse::success(id, json!({}))),
+        "ping" => Some(JsonRpcResponse::success(id, json!({}))),
         _ => Some(JsonRpcResponse::error(
             id,
             ErrorCode::MethodNotFound,
@@ -868,8 +869,8 @@ mod projectless_admission_tests {
             std::fs::set_permissions(&foreign_root, std::fs::Permissions::from_mode(0o700))
                 .expect("restrict foreign profile root");
         }
-        crate::product_runtime::register_fixture_product_runtime();
-        crate::test_support::host_admission::ensure_process_background_cpu_authority()
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install fixture worker authority");
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");
@@ -937,8 +938,8 @@ mod projectless_admission_tests {
     async fn removed_client_profile_symlink_keeps_retained_codex_path_pinned() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (real_root, linked_root) = linked_profile_root(temp.path());
-        crate::product_runtime::register_fixture_product_runtime();
-        crate::test_support::host_admission::ensure_process_background_cpu_authority()
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
             .expect("install fixture worker authority");
         let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&real_root)
             .expect("pin profile identity");

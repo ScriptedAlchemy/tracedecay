@@ -98,7 +98,7 @@ async fn branch_search_reads_committed_symbols_and_reports_a_missing_branch() {
         &harness,
         &project,
         "tracedecay_admin_sync",
-        json!({"force": true, "format": "json"}),
+        json!({"format": "json"}),
     )
     .await;
     let dirty_worktree = wait_until_worktree_search_serves_dirty_anchor(&harness, &project).await;

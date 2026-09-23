@@ -1,13 +1,13 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::{
-    HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
-};
 use tracedecay_domain::{
     SessionId, SessionRefreshKeyV1, SessionRefreshSourceTargetV1, SessionSourceFrontierV1,
     SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
     UtcMicros,
+};
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
 };
 use tracedecay_session_temporal_store::{SessionRefreshRestartStateV1, SessionTemporalStore};
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -19,7 +19,7 @@ use tracedecay_store::{
     SessionRetrievalStore, SessionStoreError, SessionTemporalProjectionBatchV1,
     SessionTemporalSnapshotRequestV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 fn session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()

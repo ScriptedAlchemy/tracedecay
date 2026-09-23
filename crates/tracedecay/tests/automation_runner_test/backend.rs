@@ -17,7 +17,7 @@ use tracedecay_automation_runtime::automation::backend::{
 };
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
-use tracedecay_sessions::runtime::codex_app_server::{
+use tracedecay_sessions::runtime::hosts::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
 

@@ -5,14 +5,12 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum SchemaConvergenceStageV1 {
     RegisteredSchema,
-    RuntimeWriterLedger,
 }
 
 impl SchemaConvergenceStageV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RegisteredSchema => "registered_schema",
-            Self::RuntimeWriterLedger => "runtime_writer_ledger",
         }
     }
 }

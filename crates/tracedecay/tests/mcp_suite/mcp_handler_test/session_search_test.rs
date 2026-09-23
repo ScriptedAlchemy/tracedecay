@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-#[cfg(feature = "test-transport")]
-use tracedecay::project::TraceDecay;
 use tracedecay_domain::SessionId;
+#[cfg(feature = "test-transport")]
+use tracedecay_project::project::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_session_temporal_store::SessionTemporalStore;
 #[cfg(feature = "test-transport")]
@@ -262,41 +262,45 @@ async fn message_search_rejects_invalid_scope() {
     );
 }
 
-/// `project_scope` is closed: the mounted retained owner serves only its own
-/// project, so any other scope value fails closed as not-found-or-not-
-/// authorized rather than silently degrading to a broader search.
+/// The request has one spelling per control: `since`/`until` for time bounds,
+/// `require_fresh` for the freshness precondition, and `project_selector` for
+/// cross-project reads. Removed spellings fail decode instead of being
+/// silently ignored or reinterpreted.
 #[tokio::test]
-async fn message_search_rejects_unsupported_project_scope() {
+async fn message_search_rejects_removed_request_spellings() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
-    for invalid in ["everything", "all", "registered", "all_registered"] {
+    for (field, value) in [
+        ("project_scope", json!("project")),
+        ("time_from", json!(0)),
+        ("time_to", json!(0)),
+        ("catch_up", json!(false)),
+    ] {
         let err = expect_tool_error(
             handle_tool_call(
                 &cg,
                 "tracedecay_message_search",
-                json!({"query": "anything", "project_scope": invalid}),
+                json!({"query": "anything", field: value}),
                 None,
                 None,
             )
             .await,
         );
         assert!(
-            err.contains("not found or is not authorized"),
-            "unexpected error for project_scope {invalid:?}: {err}"
+            err.contains(&format!("unknown field `{field}`")),
+            "unexpected error for removed field {field:?}: {err}"
         );
     }
 
-    // The owner's own scope stays served: the closed enum rejects foreign
-    // scopes without breaking the supported one.
     handle_tool_call(
         &cg,
         "tracedecay_message_search",
-        json!({"query": "anything", "project_scope": "project"}),
+        json!({"query": "anything", "since": 0, "until": 1, "require_fresh": false}),
         None,
         None,
     )
     .await
-    .expect("project-scoped message search must stay served");
+    .expect("canonical spellings must stay served");
 }
 
 /// Cross-project selection has exactly one spelling,
@@ -308,38 +312,26 @@ async fn message_search_rejects_unsupported_project_scope() {
 async fn message_search_rejects_foreign_project_selectors() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
-    let err = expect_tool_error(
-        handle_tool_call(
-            &cg,
-            "tracedecay_message_search",
-            json!({"query": "anything", "project_id": "proj_0123456789abcdef"}),
-            None,
-            None,
-        )
-        .await,
-    );
-    assert!(
-        err.contains("project_route_invalid_selector")
-            && err.contains("is not a registered-project selector"),
-        "unexpected error for top-level project_id: {err}"
-    );
-
-    // `project_path` is a semantic message-search argument, not a route
-    // selector; the mounted owner refuses a foreign path closed.
-    let err = expect_tool_error(
-        handle_tool_call(
-            &cg,
-            "tracedecay_message_search",
-            json!({"query": "anything", "project_path": "/some/foreign/path"}),
-            None,
-            None,
-        )
-        .await,
-    );
-    assert!(
-        err.contains("not found or is not authorized"),
-        "unexpected error for foreign project_path: {err}"
-    );
+    for (alias, value) in [
+        ("project_id", "proj_0123456789abcdef"),
+        ("project_path", "/some/foreign/path"),
+    ] {
+        let err = expect_tool_error(
+            handle_tool_call(
+                &cg,
+                "tracedecay_message_search",
+                json!({"query": "anything", alias: value}),
+                None,
+                None,
+            )
+            .await,
+        );
+        assert!(
+            err.contains("project_route_invalid_selector")
+                && err.contains("is not a registered-project selector"),
+            "unexpected error for top-level {alias}: {err}"
+        );
+    }
 
     let err = expect_tool_error(
         handle_tool_call(
@@ -950,9 +942,7 @@ async fn message_search_returns_literal_seeded_messages() {
     assert_eq!(plum["scope"], "all");
     assert_eq!(plum["message_type"], "all");
     assert_eq!(plum["goals"], false);
-    assert_eq!(plum["catch_up"], false);
-    assert_eq!(plum["catch_up_performed"], false);
-    assert_eq!(plum["catch_up_provider"], "all");
+    assert_eq!(plum["require_fresh"], false);
     assert_eq!(plum["include_subagents"], true);
     assert_eq!(plum["refresh_required"], false);
     assert_eq!(plum["store_scope"], "project");

@@ -330,19 +330,6 @@ impl FeedbackImpactPort for FixedImpact {
     }
 }
 
-#[derive(Clone)]
-struct Observations(Arc<dyn tracedecay_contracts::feedback::FeedbackObservationPort + Send + Sync>);
-
-impl tracedecay_contracts::feedback::FeedbackObservationPort for Observations {
-    fn observe(
-        &self,
-        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
-    ) {
-        self.0.observe(input, observation);
-    }
-}
-
 struct NoopFeedbackCycle;
 
 impl FeedbackCycleRuntimePort for NoopFeedbackCycle {
@@ -505,7 +492,7 @@ async fn consume_fixture() -> ConsumeFixture {
         },
         FixedImpact(impact),
         runtime.publication_store(),
-        Observations(runtime.observation_port()),
+        runtime.observation_port(),
         runtime.route_authorization(),
         operation,
     );

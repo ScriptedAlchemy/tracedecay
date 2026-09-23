@@ -14,10 +14,9 @@ use tracedecay_tool_catalog::{BindingId, SchemaId};
 
 use crate::ToolResult;
 use crate::handlers::support::{json_result, unknown_tool_error};
+use tracedecay_contracts::now_micros;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_daemon_protocol::{
-    DaemonInvocationExecutor, InvocationCancellationPolicy, invocation_now_micros,
-};
+use tracedecay_daemon_protocol::{DaemonInvocationExecutor, InvocationCancellationPolicy};
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
     DaemonInvocationResponse,
@@ -45,7 +44,7 @@ pub async fn handle_multi_root(
             }
         })?,
     };
-    let observed_at = invocation_now_micros();
+    let observed_at = now_micros();
     let deadline = match protocol_deadline {
         Some(deadline) => deadline,
         None => Deadline::new(UtcMicros(

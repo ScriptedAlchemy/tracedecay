@@ -6,8 +6,8 @@ use tokio::sync::Mutex;
 use tracedecay_contracts::{
     ApplicationOutcome, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GenerateProposalRequest, PrepareWorkProductMutationRequestV1,
-    WorkGraphReadRequestV1, WorkProductChangeDraftV1, WorkProductMutationRequestV1,
-    WorkProductSelectionScopeV1, WorkRelationScopeV1,
+    WorkGraphReadRequestV1, WorkProductAuthorizedRelationScopeV1, WorkProductChangeDraftV1,
+    WorkProductMutationRequestV1, WorkProductSelectionScopeV1,
 };
 use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{
@@ -73,13 +73,14 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.core-invocation").expect("project id");
-    let host = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-        project.path(),
-        project_id.clone(),
-    )
-    .await
-    .expect("registered project runtime");
+    let host =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
     let database = host
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
@@ -214,7 +215,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
     }
 
     let product_selection = WorkProductSelectionScopeV1::relations(
-        [WorkRelationScopeV1::Repository {
+        [WorkProductAuthorizedRelationScopeV1::Repository {
             project_id: scope.project_id.clone(),
             repository_id: scope.repository_id.clone(),
         }]
@@ -678,13 +679,14 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project root");
     let project_id = ProjectId::new("project.work.task-activity").expect("project id");
-    let host = crate::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
-        tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
-        project.path(),
-        project_id.clone(),
-    )
-    .await
-    .expect("registered project runtime");
+    let host =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
     let database = host
         .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
         .expect("registered project database");
@@ -778,7 +780,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     }
 
     let product_selection = WorkProductSelectionScopeV1::relations(
-        [WorkRelationScopeV1::Repository {
+        [WorkProductAuthorizedRelationScopeV1::Repository {
             project_id: scope.project_id.clone(),
             repository_id: scope.repository_id.clone(),
         }]

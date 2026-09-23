@@ -23,8 +23,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) use serde_json::{Value, json};
 pub(crate) use tempfile::tempdir;
 
-pub(crate) use tracedecay::project::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
-pub(crate) use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 pub(crate) use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
     record_session_automatic_facts,
@@ -55,6 +53,9 @@ pub(crate) use tracedecay_automation_runtime::automation::{
 };
 pub(crate) use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ProjectId, SessionId, TemporalCoverageCountsV1};
+pub(crate) use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+pub(crate) use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+pub(crate) use tracedecay_runtime_core::tracedecay::current_timestamp;
 pub(crate) use tracedecay_sessions::admission::HostAdmissionScope;
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -1302,6 +1303,7 @@ pub(crate) fn scheduler_record_for(
         backend_attempt_count: 0,
         backend_attempts: Vec::new(),
         fallback_status: None,
+        session_evidence_budget_stage: None,
         report_ref: None,
         artifacts: Vec::new(),
         started_at: (completed_at - 1).to_string(),

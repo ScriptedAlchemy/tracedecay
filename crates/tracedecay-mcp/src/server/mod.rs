@@ -13,8 +13,7 @@ pub use crate::lifecycle::{
     McpBackgroundTaskOwner, ProjectServerResponseLifecycle, StartupCatchUpMachineV1,
 };
 pub use connection::{
-    McpConnectionContext, McpConnectionServer, McpConnectionState, McpResponseLease,
-    await_route_with_cancellation,
+    McpConnectionContext, McpConnectionState, McpResponseLease, await_route_with_cancellation,
 };
 pub use dispatch::{
     McpDispatchParams, McpDispatchRequest, ToolCallParams, dispatch_is_independent_read,
@@ -33,7 +32,8 @@ pub use read_coalescing::{
 };
 pub use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
-    RmcpWorkDeliverySettlement, await_dispatch_with_cancellation, project_server_retired_error,
+    RmcpWorkDeliverySettlement, attach_stateless_request_context,
+    await_dispatch_with_cancellation, opens_rmcp_session, project_server_retired_error,
     rmcp_response_result,
 };
 pub use settlement::{

@@ -7,11 +7,11 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
-use tracedecay::project::current_timestamp;
 use tracedecay_mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 #[tokio::test]
 async fn test_initialize() {
@@ -1560,87 +1560,10 @@ async fn test_resources_read_missing_uri() {
     );
 }
 
-/// The MCP client sends `logging/setLevel` immediately after initialisation
-/// whenever the server advertises the `logging` capability. Before the fix the
-/// server returned -32601 (MethodNotFound), which Claude Code logged as an
-/// error on every session start.
+/// Logging is deprecated by MCP SEP-2577 and the server emits no log
+/// notifications, so `initialize` must not invite `logging/setLevel`.
 #[tokio::test]
-async fn test_logging_set_level_returns_success() {
-    let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(500),
-            "logging/setLevel",
-            json!({"level": "info"}),
-        )],
-    )
-    .await;
-
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 500)
-        .expect("should have response for id=500");
-    let resp = parse_response(resp_str);
-    assert!(
-        resp["error"].is_null(),
-        "logging/setLevel must not return an error, got: {resp}"
-    );
-    assert!(
-        resp["result"].is_object(),
-        "logging/setLevel must return an object result"
-    );
-}
-
-/// Verify every log level accepted by RFC 5424 is handled without error.
-///
-/// One server session carries all eight requests: level changes are a
-/// mid-session operation, and building a fresh server per level only
-/// multiplied fixture cost (8x setup dominated this test's runtime) without
-/// adding coverage.
-#[tokio::test]
-async fn test_logging_set_level_all_levels() {
-    let levels = [
-        "debug",
-        "info",
-        "notice",
-        "warning",
-        "error",
-        "critical",
-        "alert",
-        "emergency",
-    ];
-    let (server, _dir) = setup_server().await;
-    let requests = levels
-        .iter()
-        .enumerate()
-        .map(|(idx, level)| {
-            jsonrpc_request(
-                json!(600 + idx as u64),
-                "logging/setLevel",
-                json!({"level": level}),
-            )
-        })
-        .collect();
-    let responses = run_server_with_messages(server, requests).await;
-    for (idx, level) in levels.iter().enumerate() {
-        let id = json!(600 + idx as u64);
-        let resp_str = responses
-            .iter()
-            .find(|r| parse_response(r)["id"] == id)
-            .unwrap_or_else(|| panic!("no response for level={level}"));
-        let resp = parse_response(resp_str);
-        assert!(
-            resp["error"].is_null(),
-            "logging/setLevel with level={level} must not error, got: {resp}"
-        );
-    }
-}
-
-/// The `initialize` response must advertise the `logging` capability so that
-/// clients know they may send `logging/setLevel`.
-#[tokio::test]
-async fn test_initialize_advertises_logging_capability() {
+async fn test_initialize_does_not_advertise_logging_capability() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
         server,
@@ -1654,8 +1577,12 @@ async fn test_initialize_advertises_logging_capability() {
         .expect("missing initialize response");
     let resp = parse_response(resp_str);
     assert!(
-        resp["result"]["capabilities"]["logging"].is_object(),
-        "initialize must advertise logging capability, got: {resp}"
+        resp["result"]["capabilities"].is_object(),
+        "initialize must return capabilities, got: {resp}"
+    );
+    assert!(
+        resp["result"]["capabilities"].get("logging").is_none(),
+        "initialize must not advertise logging capability, got: {resp}"
     );
 }
 

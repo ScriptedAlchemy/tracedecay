@@ -1,11 +1,11 @@
 use tracedecay_tool_catalog::{
-    AvailabilityContract, BindingId, BindingStatus, BindingSurface, CancellationContract,
-    CancellationPoint, CapabilityId, CatalogContributionInputV1, CatalogContributionV1,
-    ContributionId, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    FeatureId, LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
+    AvailabilityContract, BindingId, BindingSurface, CancellationContract, CancellationPoint,
+    CapabilityId, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, FeatureId,
+    LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange, RevalidationContract,
+    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
+    StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName,
+    TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::capability_manifest::{
@@ -66,8 +66,6 @@ pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, Appli
             operation: SurfaceOperationName::new(spec.method)?,
             protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
             required_features: vec![feature.clone()],
-            status: BindingStatus::Current,
-            alias_of: None,
         })?);
         capabilities.push(application_capability_manifest(
             ApplicationCapabilityManifestInput {

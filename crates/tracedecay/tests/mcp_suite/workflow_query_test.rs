@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
-use tracedecay::test_support::host_admission::{
+use tracedecay_project::project::TraceDecay;
+use tracedecay_project::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{

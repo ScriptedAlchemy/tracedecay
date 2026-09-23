@@ -95,9 +95,7 @@ mod error;
 mod surface_binding;
 pub mod surface_contracts;
 
-pub(crate) use surface_binding::{
-    current_application_bindings, current_bindings, current_bindings_with_slug, surface_name,
-};
+pub(crate) use surface_binding::{current_application_bindings, current_bindings, surface_name};
 
 pub use advisory::{
     AdvisoryFindingContributionBatchV1, AdvisoryFindingContributorV1,
@@ -116,25 +114,21 @@ pub use advisory::{
     ProximityBranchWorktreeIncompatibilityV1, ProximityContributionIdV1, ProximityContributionV1,
     ProximityCoverageV1, ProximityInclusionV1, ProximityObservationIdV1,
     ProximityRelationPathKindV1, ProximityRelationPathV1, ProximityRelationStrengthV1,
-    ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1, ProximityWarningIdV1,
+    ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1,
 };
-pub use authorization::{
-    AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
-    AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
-    SourceAuthorizationSnapshot,
-};
+pub use authorization::AuthorizationRequest;
 pub use clock::{ClockError, now_micros, try_now_micros};
 pub use configuration::{
     ActivationDriftV1, ComponentConfigurationState, ConfigurationAuditPage,
     ConfigurationAuditRequestV1, ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1,
     ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationMutationReceipt,
     ConfigurationObservedStateRequestV1, ConfigurationProtectedApplyRequestV1,
-    ConfigurationProtectedPreviewRequestV1, ConfigurationRollbackApplyRequestV1,
-    ConfigurationRollbackPreviewRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
-    ConfigurationWireRequestV1, ResolvedSetting, SettingSummary,
-    configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
-    configuration_surface_operation, configuration_surface_request_schema,
-    configuration_surface_result_schema, configuration_wire_request_from_invocation_payload,
+    ConfigurationProtectedPreviewRequestV1, ConfigurationRollbackPreviewRequestV1,
+    ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWireRequestV1,
+    ResolvedSetting, SettingSummary, configuration_surface_catalog_contribution,
+    configuration_surface_handler_descriptors, configuration_surface_operation,
+    configuration_surface_request_schema, configuration_surface_result_schema,
+    configuration_wire_request_from_invocation_payload,
 };
 pub use context::{
     APPLICATION_REQUEST_ID_HEADER, ApplicationRequestControlV1, CancellationContext,
@@ -361,7 +355,7 @@ pub use retained_surfaces::{
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, RetainedSurfaceOperation, RetainedSurfacePortsV1,
     RetainedSurfaceServiceV1, retained_surface_application_operation,
-    retained_surface_catalog_contribution, retained_surface_executable_binding_registry,
+    retained_surface_catalog_contribution,
     retained_surface_execution_problem, retained_surface_handler_descriptors,
     retained_surface_operation_is_effect, retained_surface_outcome_matches_terminal,
     retained_surface_problem_matches_terminal,
@@ -373,24 +367,23 @@ pub use retrieval::catalog::{
 };
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
-    CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationAdmission,
-    CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, CallableCodeOperationKind,
-    CallableCodeOperations, CallableCodeQueryFuture, CallableCodeQueryPort,
-    CallableCodeQueryService, CodeFacetDimension, CodeFacetRecord, CodeFacetRequest,
-    CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest, CodeLexicalField,
-    CodeLexicalFieldFilter, CodeNavigationRequest, CodeOccurrenceRecord, CodeQueryPage,
-    CodeQueryScope, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
-    CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    GraphImpactResult, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
-    HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1,
-    HealthDimensionPointV1, HealthReadRequest, LexicalOccurrenceRecord, MAX_APPLICATION_PAGE_SIZE,
-    ModuleApiRequest, OperationalRetrievalPort, PageRequest, PhraseSearchRequest,
-    QualifiedNameRequest, ResultProjection, RetrievalOrder, RetrievalPortContext,
-    RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest, SourceLinesRequest,
-    SourceLinesResult, SourceMetadataRecord, SourceMetadataRequest, SourceRetrievalPort,
-    TemporalRetrievalPort, UNPINNED_LATEST_GENERATION_SENTINEL, callable_code_catalog_contribution,
-    callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
-    callable_code_request_schema, callable_code_result_schema,
+    CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort,
+    CallableCodeOperationKind, CallableCodeOperations, CallableCodeQueryFuture,
+    CallableCodeQueryPort, CallableCodeQueryService, CodeFacetDimension, CodeFacetRecord,
+    CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest,
+    CodeLexicalField, CodeLexicalFieldFilter, CodeNavigationRequest, CodeOccurrenceRecord,
+    CodeQueryPage, CodeQueryScope, CodeRelationRequest, CodeSignatureRequest,
+    CodeSymbolSearchRequest, CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord,
+    ExactOccurrenceRequest, GraphImpactResult, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1,
+    HealthDeltaPointV1, HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1,
+    HealthDimensionDeltaV1, HealthDimensionPointV1, HealthReadRequest, LexicalOccurrenceRecord,
+    MAX_APPLICATION_PAGE_SIZE, ModuleApiRequest, OperationalRetrievalPort, PageRequest,
+    PhraseSearchRequest, QualifiedNameRequest, ResultProjection, RetrievalOrder,
+    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest,
+    SourceLinesRequest, SourceLinesResult, SourceMetadataRecord, SourceMetadataRequest,
+    SourceRetrievalPort, TemporalRetrievalPort, UNPINNED_LATEST_GENERATION_SENTINEL,
+    callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
+    callable_code_operations, callable_code_request_schema, callable_code_result_schema,
 };
 pub use sdk_catalog::{
     application_http_executable_binding_registry, application_http_route_path,
@@ -421,11 +414,10 @@ pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback
 pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,
-    QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1, RelativeArtifactPathV1,
-    RetentionBacklogRecordV1, StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1,
-    StoreBudgetEvaluationV1, StoreKeyV1, StoreSizeBudgetV1, StoreSizeSampleV1,
-    StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1, incident_debris_finding,
-    orphan_store_finding, over_budget_finding, retention_backlog_finding,
+    RelativeArtifactPathV1, RetentionBacklogRecordV1, StorageByteSizeV1, StorageTelemetryFuture,
+    StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1, StoreSizeBudgetV1,
+    StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
+    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
 };
 pub use surface_contracts::{
     CallableCodeSurfaceMeta, CallableCodeSurfaceRequest, CodeCalleesSurfaceRequest,
@@ -435,10 +427,7 @@ pub use surface_contracts::{
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
     NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest, primitive_code_into_primitive,
 };
-pub use work::{
-    ReviewProposalDispositionV1, WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1,
-    WorkRoutingSnapshotV1,
-};
+pub use work::{WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1};
 pub use work_artifact_hydration::{
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationService, WorkArtifactHydrationV1,
     WorkAttemptArtifactsV1, WorkAttemptEvidencePageV1, WorkAttemptEvidenceReadPort,
@@ -539,15 +528,16 @@ pub use work_product::{
     WorkGraphTimelineV1, WorkGraphVersionEntryV1, WorkHistoryCoverageV1, WorkHistoryReadPortV1,
     WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
     WorkProductAttemptAdmissionErrorV1, WorkProductAttemptAdmissionOutcomeV1,
-    WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1, WorkProductBindingV1,
-    WorkProductChangeDraftV1, WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1,
-    WorkProductEventDraftV1, WorkProductEventPortErrorV1, WorkProductEventPortV1,
-    WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1,
-    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProductMutationServiceV1,
+    WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1,
+    WorkProductAuthorizedRelationScopeV1, WorkProductBindingV1, WorkProductChangeDraftV1,
+    WorkProductEventCommitOutcomeV1, WorkProductEventCommitV1, WorkProductEventDraftV1,
+    WorkProductEventPortErrorV1, WorkProductEventPortV1, WorkProductEvidenceServiceV1,
+    WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationReceiptV1,
+    WorkProductMutationRequestV1, WorkProductMutationServiceV1,
     WorkProductOwnerAuthorizationErrorV1, WorkProductOwnerAuthorizationPortV1,
     WorkProductPortContextV1, WorkProductReadServiceV1, WorkProductRetryAdmissionV1,
     WorkProductRevisionPinsV1, WorkProductSelectionScopeV1, WorkProductSynthesisAdmissionV1,
-    WorkRelationScopeV1, work_product_projection_generation,
+    work_product_projection_generation,
 };
 pub use work_retry::{
     RetryWorkAttemptCommandV1, RuntimeWorkRetryEvidenceV1, VerifiedWorkRetryFailureV1,

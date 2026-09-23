@@ -6,7 +6,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
-use crate::project::TraceDecay;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
@@ -18,6 +17,7 @@ use tracedecay_mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
+use tracedecay_project::project::TraceDecay;
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -322,6 +322,163 @@ fn render_result_parts(
             .with_semantic_error(true)
             .with_failure_message(failure_message),
         None => rendered,
+    })
+}
+
+/// A settled retained tool call, before rendering.
+pub struct RetainedSurfaceExecution {
+    pub operation: ApplicationSurfaceOperation,
+    pub binding_id: BindingId,
+    pub requested_format: RequestedOutputFormat,
+    pub result: ApplicationResult<Value>,
+}
+
+/// Run one retained memory, session, or workflow tool on `surface` and render
+/// its tool result exactly as the retained tools always have.
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(future = true, label = "mcp.retained.total")]
+pub async fn run_retained_surface_tool(
+    project_root: Option<&std::path::Path>,
+    surface: tracedecay_tool_catalog::BindingSurface,
+    operation: ApplicationSurfaceOperation,
+    args: Value,
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    protocol_request_id: Option<RequestId>,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
+) -> Result<tracedecay_mcp::ToolResult> {
+    let execution = execute_retained_surface_tool(
+        surface,
+        operation,
+        args,
+        executor,
+        protocol_request_id,
+        deadline,
+        cancellation,
+    )
+    .await?;
+    render_retained_execution(project_root, &execution)
+}
+
+/// Render a settled retained tool call.
+pub fn render_retained_execution(
+    project_root: Option<&std::path::Path>,
+    execution: &RetainedSurfaceExecution,
+) -> Result<tracedecay_mcp::ToolResult> {
+    hotpath::measure_block!(
+        "mcp.retained.render",
+        render_result_parts(
+            project_root,
+            execution.operation.as_str(),
+            &execution.binding_id,
+            &execution.result,
+            execution.requested_format,
+        )
+    )
+}
+
+/// Decode, dispatch, and settle one retained tool call. `Err` is an argument
+/// or transport failure the caller reports as-is.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_retained_surface_tool(
+    surface: tracedecay_tool_catalog::BindingSurface,
+    operation: ApplicationSurfaceOperation,
+    args: Value,
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    protocol_request_id: Option<RequestId>,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
+) -> Result<RetainedSurfaceExecution> {
+    let tool_name = operation.mcp_tool_name();
+    let retained = RetainedSurfaceOperation::from_application(operation)
+        .ok_or_else(|| super::unknown_tool_error(tool_name))?;
+    let normalized =
+        tracedecay_daemon_protocol::separate_application_tool_request(args).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
+    let requested_format = normalized.requested_format;
+    let request = hotpath::measure_block!(
+        "mcp.retained.decode",
+        tracedecay_daemon_protocol::decode_retained_request(retained, normalized.request)
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("invalid retained application request for {tool_name}: {error}"),
+    })?;
+    let request_id = match protocol_request_id {
+        Some(request_id) => request_id,
+        None => self::request_id()?,
+    };
+    let (deadline, cancellation) =
+        complete_retained_protocol_controls(retained, &request_id, deadline, cancellation)?
+            .ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "retained_application_controls_unavailable",
+                    true,
+                    "retained application protocol controls are unavailable",
+                )
+            })?;
+    // The executor belongs to the selected project's server, and the retained
+    // daemon payload carries no resolved scope, so the target stays current.
+    let dispatched = tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
+        surface,
+        operation,
+        request_id.clone(),
+        tracedecay_daemon_protocol::ApplicationSurfaceRequest::Retained(request),
+        tracedecay_contracts::PageRequest::first(10).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?,
+        Some(deadline),
+        cancellation,
+        requested_format,
+    )
+    .map_err(application_surface_dispatch_error)?;
+    let binding_id = dispatched.invocation.binding_id.clone();
+    let result_contract =
+        tracedecay_contracts::ResultContractRef::from_schema(&dispatched.invocation.result_schema);
+    let unavailable = |code: String, message: String| {
+        tracedecay_contracts::ApplicationProblemEnvelope::new(
+            result_contract.clone(),
+            request_id.clone(),
+            tracedecay_contracts::ApplicationProblem::unavailable(
+                tracedecay_contracts::SafeDiagnostic { code, message },
+            ),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid retained application problem envelope: {error}"),
+        })
+    };
+    let result = match executor {
+        None => Err(unavailable(
+            "application.transport.unavailable".to_owned(),
+            "The daemon retained application transport is unavailable".to_owned(),
+        )?),
+        Some(executor) => match hotpath::future!(
+            tracedecay_daemon_service::application_surface::execute_application_surface(
+                operation,
+                dispatched,
+                Some(executor),
+            ),
+            label = "mcp.retained.invoke"
+        )
+        .await
+        {
+            Ok(result) => result.result,
+            Err(
+                tracedecay_daemon_protocol::ApplicationSurfaceAdapterError::DaemonUnreachable {
+                    reason_code,
+                    detail,
+                },
+            ) => Err(unavailable(reason_code, detail)?),
+            Err(error) => return Err(application_surface_dispatch_error(error)),
+        },
+    };
+    Ok(RetainedSurfaceExecution {
+        operation,
+        binding_id,
+        requested_format,
+        result,
     })
 }
 

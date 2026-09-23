@@ -4,7 +4,7 @@
 //!
 //! Durable `GenerationDiagnosticV1` records persist in the project store and
 //! survive restarts. Publication is version-monotone: a newer clean
-//! generation clears or supersedes prior current records deterministically,
+//! generation clears prior current records deterministically,
 //! stale findings never cross snapshots, and dirty editor overlays live only
 //! in memory, they are never sealed into the durable store.
 
@@ -19,13 +19,11 @@ use tracedecay_domain::{
     RetrievalAnchorId, SourceSpan, UtcMicros,
 };
 use tracedecay_store::{
-    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DIAGNOSTIC_STATE_SUPERSEDED,
-    DiagnosticPublicationDispositionV1, DiagnosticPublicationReceiptV1,
-    DiagnosticRecordStateKindV1, DiagnosticStore as DiagnosticStorePort, DiagnosticStoreError,
-    DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1, diagnostic_evidence_class_name,
-    diagnostic_producer_kind_name, diagnostic_severity_name, diagnostic_snapshot_observation_eq,
-    diagnostic_state_columns, parse_diagnostic_evidence_class, parse_diagnostic_producer_kind,
-    parse_diagnostic_severity,
+    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticRecordStateKindV1,
+    DiagnosticStore, DiagnosticStoreError, DiagnosticStoreResult,
+    diagnostic_evidence_class_name, diagnostic_producer_kind_name, diagnostic_severity_name,
+    diagnostic_snapshot_observation_eq, diagnostic_state_columns, parse_diagnostic_evidence_class,
+    parse_diagnostic_producer_kind, parse_diagnostic_severity,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -48,7 +46,6 @@ pub const SCHEMA: &str = tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL;
 // this engine and the rusqlite-runtime `DiagnosticExecutor` cannot drift apart
 // across a cutover. These aliases keep the SQL below readable.
 const STATE_CURRENT: &str = DIAGNOSTIC_STATE_CURRENT;
-const STATE_SUPERSEDED: &str = DIAGNOSTIC_STATE_SUPERSEDED;
 const STATE_CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
 
 /// SQLite-backed store for durable generation-bound diagnostics.
@@ -292,40 +289,6 @@ impl<'a> DiagnosticsStore<'a> {
                 Ok(generation)
             },
             label = "usecases.diagnostics_store.current_generation"
-        )
-        .await
-    }
-
-    /// Every published generation id in deterministic order. This stays on
-    /// the guarded diagnostics store so read-only query clients never need a
-    /// raw engine connection.
-    pub(crate) async fn published_generation_ids(&self) -> Result<Vec<String>> {
-        hotpath::future!(
-            async {
-                let operation = "diagnostics published_generation_ids";
-                let mut rows = self
-                    .conn
-                    .query(
-                        "SELECT DISTINCT generation_id FROM diagnostic_generation_publications \
-                 ORDER BY generation_id",
-                        params![],
-                    )
-                    .await
-                    .map_err(|error| db_error(operation, error))?;
-                let mut generations = Vec::new();
-                while let Some(row) = rows
-                    .next()
-                    .await
-                    .map_err(|error| db_error(operation, error))?
-                {
-                    generations.push(
-                        row.get::<String>(0)
-                            .map_err(|error| db_error(operation, error))?,
-                    );
-                }
-                Ok(generations)
-            },
-            label = "usecases.diagnostics_store.published_generation_ids"
         )
         .await
     }
@@ -579,117 +542,6 @@ impl<'a> DiagnosticsStore<'a> {
         .await
     }
 
-    /// Marks every `Current` record of `prior_generation` as superseded by
-    /// `successor_generation`. A generation can never supersede itself.
-    /// Returns the number of rows transitioned.
-    pub async fn supersede_generation(
-        &self,
-        prior_generation: &CodeGenerationId,
-        successor_generation: &CodeGenerationId,
-    ) -> Result<u64> {
-        let operation = "diagnostics supersede_generation";
-        if prior_generation == successor_generation {
-            return Err(db_message(
-                operation,
-                "a generation cannot supersede itself",
-            ));
-        }
-        let prior_generation = prior_generation.clone();
-        let successor_generation = successor_generation.clone();
-        hotpath::future!(
-            self.with_immediate_tx(operation, move |store| {
-                Box::pin(async move {
-                    let transitioned = store
-                        .conn
-                        .execute(
-                            "UPDATE generation_diagnostics
-                     SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = ?3 AND generation_id = ?4
-                     AND publication_revision = (
-                       SELECT publication_revision FROM diagnostic_generation_publications
-                       WHERE generation_id = ?4 AND record_state = ?3
-                     )",
-                            params![
-                                STATE_SUPERSEDED,
-                                successor_generation.as_str(),
-                                STATE_CURRENT,
-                                prior_generation.as_str()
-                            ],
-                        )
-                        .await
-                        .map_err(|e| db_error(operation, e))?;
-                    store
-                        .conn
-                        .execute(
-                            "UPDATE diagnostic_generation_publications
-                     SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = ?3 AND generation_id = ?4",
-                            params![
-                                STATE_SUPERSEDED,
-                                successor_generation.as_str(),
-                                STATE_CURRENT,
-                                prior_generation.as_str()
-                            ],
-                        )
-                        .await
-                        .map_err(|e| db_error(operation, e))?;
-                    Ok(transitioned)
-                })
-            }),
-            label = "usecases.diagnostics_store.supersede"
-        )
-        .await
-    }
-
-    /// Walks the supersession chain starting at `anchor`. Each step follows
-    /// the record's `Superseded { successor_generation }` edge to the current
-    /// record in the successor generation with the same logical finding key
-    /// (repository, producer, code, file occurrence, span, message digest).
-    /// The chain ends at a current, cleared, or missing successor and is
-    /// returned oldest-first including the starting record.
-    pub async fn supersession_chain(
-        &self,
-        anchor: &RetrievalAnchorId,
-    ) -> Result<Vec<GenerationDiagnosticV1>> {
-        hotpath::future!(
-            async {
-                let mut chain = Vec::new();
-                let Some(start) = self.record_by_anchor(anchor).await? else {
-                    return Ok(chain);
-                };
-                chain.push(start);
-                loop {
-                    let Some(last) = chain.last() else {
-                        // Unreachable: `chain` is seeded before the loop and only
-                        // grows; bail out with what we have rather than panic.
-                        return Ok(chain);
-                    };
-                    let DiagnosticRecordStateV1::Superseded {
-                        successor_generation,
-                    } = &last.state
-                    else {
-                        return Ok(chain);
-                    };
-                    let successor = self
-                        .find_logical_successor(last, successor_generation)
-                        .await?;
-                    match successor {
-                        Some(record)
-                            if !chain
-                                .iter()
-                                .any(|seen| seen.diagnostic_anchor == record.diagnostic_anchor) =>
-                        {
-                            chain.push(record);
-                        }
-                        _ => return Ok(chain),
-                    }
-                }
-            },
-            label = "usecases.diagnostics_store.supersession_chain"
-        )
-        .await
-    }
-
     /// Records in the latest immutable publication for `generation`, ordered by anchor.
     pub async fn records_for_generation(
         &self,
@@ -700,39 +552,6 @@ impl<'a> DiagnosticsStore<'a> {
             label = "usecases.diagnostics_store.records_for_generation"
         )
         .await
-    }
-
-    /// Records in one exact immutable publication of `generation`.
-    pub async fn records_for_publication(
-        &self,
-        generation: &CodeGenerationId,
-        publication_revision: u64,
-    ) -> Result<Vec<GenerationDiagnosticV1>> {
-        let operation = "diagnostics records_for_publication";
-        if publication_revision == 0 {
-            return Err(db_message(
-                operation,
-                "diagnostic publication revision must be positive",
-            ));
-        }
-        let revision = i64::try_from(publication_revision).map_err(|_| {
-            db_message(
-                operation,
-                "diagnostic publication revision exceeds SQLite range",
-            )
-        })?;
-        let mut rows = self
-            .conn
-            .query(
-                &format!(
-                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = ?2 \
-                     ORDER BY diagnostic_anchor"
-                ),
-                params![generation.as_str(), revision],
-            )
-            .await
-            .map_err(|error| db_error(operation, error))?;
-        collect_rows(&mut rows, operation).await
     }
 
     /// Current records bound to `generation`, the only set eligible for
@@ -897,35 +716,6 @@ impl<'a> DiagnosticsStore<'a> {
                 collect_rows(&mut rows, operation).await
             },
             label = "usecases.diagnostics_store.current_records_for_file"
-        )
-        .await
-    }
-
-    /// Stale (superseded or cleared) records bound to `generation`. Stale
-    /// findings remain queryable but never re-enter active publication.
-    pub async fn stale_records(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> Result<Vec<GenerationDiagnosticV1>> {
-        hotpath::future!(
-            async {
-                let operation = "diagnostics stale_records";
-                let mut rows = self
-                    .conn
-                    .query(
-                        &format!(
-                            "{SELECT_RECORDS} WHERE generation_id = ?1 AND record_state != ?2 \
-                     AND publication_revision = (SELECT MAX(publication_revision) FROM \
-                     diagnostic_generation_publications WHERE generation_id = ?1) \
-                     ORDER BY diagnostic_anchor"
-                        ),
-                        params![generation.as_str(), STATE_CURRENT],
-                    )
-                    .await
-                    .map_err(|e| db_error(operation, e))?;
-                collect_rows(&mut rows, operation).await
-            },
-            label = "usecases.diagnostics_store.stale_records"
         )
         .await
     }
@@ -1134,76 +924,9 @@ impl<'a> DiagnosticsStore<'a> {
             .map_err(|e| db_error(operation, e))?;
         collect_rows(&mut rows, operation).await
     }
-
-    #[hotpath::measure(label = "usecases.diagnostics_store.find_successor", future = true)]
-    async fn find_logical_successor(
-        &self,
-        prior: &GenerationDiagnosticV1,
-        successor_generation: &CodeGenerationId,
-    ) -> Result<Option<GenerationDiagnosticV1>> {
-        let operation = "diagnostics find_logical_successor";
-        let mut rows = self
-            .conn
-            .query(
-                &format!(
-                    "{SELECT_RECORDS} WHERE generation_id = ?1 AND publication_revision = (\
-                     SELECT MAX(publication_revision) FROM diagnostic_generation_publications \
-                     WHERE generation_id = ?1) AND repository = ?2 \
-                     AND producer = ?3 AND code = ?4 AND file_occurrence_id = ?5 \
-                     AND span_start = ?6 AND span_end = ?7 AND message_digest = ?8 \
-                     ORDER BY diagnostic_anchor"
-                ),
-                params![
-                    successor_generation.as_str(),
-                    prior.repository.as_str(),
-                    prior.provenance.producer.as_str(),
-                    prior.code.as_str(),
-                    prior.file_occurrence_id.as_str(),
-                    prior.span.start_byte as i64,
-                    prior.span.end_byte as i64,
-                    prior.message_digest.as_str(),
-                ],
-            )
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        let mut records = collect_rows(&mut rows, operation).await?;
-        if records.len() > 1 {
-            return Err(db_message(
-                operation,
-                format!(
-                    "ambiguous logical successor for {} in {}",
-                    prior.diagnostic_anchor, successor_generation
-                ),
-            ));
-        }
-        Ok(records.pop())
-    }
 }
 
-impl DiagnosticStorePort for DiagnosticsStore<'_> {
-    async fn publish_clean_diagnostics(
-        &self,
-        snapshot: SanitizedCleanDiagnosticSnapshotV1,
-    ) -> DiagnosticStoreResult<DiagnosticPublicationReceiptV1> {
-        let (generation, records) = snapshot.into_parts();
-        let (inserted, cleared, exact_replay, publication_revision) = self
-            .publish_clean_generation_with_disposition(&generation, &records)
-            .await
-            .map_err(|error| port_error("publish_clean_diagnostics", error))?;
-        let disposition = if exact_replay {
-            DiagnosticPublicationDispositionV1::ExactReplay
-        } else {
-            DiagnosticPublicationDispositionV1::Committed
-        };
-        Ok(DiagnosticPublicationReceiptV1::new(
-            generation,
-            publication_revision,
-            inserted,
-            cleared,
-            disposition,
-        ))
-    }
-
+impl DiagnosticStore for DiagnosticsStore<'_> {
     async fn current_diagnostic_generation(
         &self,
     ) -> DiagnosticStoreResult<Option<CodeGenerationId>> {
@@ -1219,16 +942,6 @@ impl DiagnosticStorePort for DiagnosticsStore<'_> {
         self.records_for_generation(generation)
             .await
             .map_err(|error| port_error("diagnostics_for_generation", error))
-    }
-
-    async fn diagnostics_for_publication(
-        &self,
-        generation: &CodeGenerationId,
-        publication_revision: u64,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        self.records_for_publication(generation, publication_revision)
-            .await
-            .map_err(|error| port_error("diagnostics_for_publication", error))
     }
 
     async fn current_diagnostics(
@@ -1250,15 +963,6 @@ impl DiagnosticStorePort for DiagnosticsStore<'_> {
             .map_err(|error| port_error("current_diagnostics_for_file", error))
     }
 
-    async fn stale_diagnostics(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        self.stale_records(generation)
-            .await
-            .map_err(|error| port_error("stale_diagnostics", error))
-    }
-
     async fn diagnostic_by_anchor(
         &self,
         anchor: &RetrievalAnchorId,
@@ -1266,25 +970,6 @@ impl DiagnosticStorePort for DiagnosticsStore<'_> {
         self.record_by_anchor(anchor)
             .await
             .map_err(|error| port_error("diagnostic_by_anchor", error))
-    }
-
-    async fn diagnostic_supersession_chain(
-        &self,
-        anchor: &RetrievalAnchorId,
-    ) -> DiagnosticStoreResult<Vec<GenerationDiagnosticV1>> {
-        self.supersession_chain(anchor)
-            .await
-            .map_err(|error| port_error("diagnostic_supersession_chain", error))
-    }
-
-    async fn supersede_diagnostic_generation(
-        &self,
-        prior_generation: &CodeGenerationId,
-        successor_generation: &CodeGenerationId,
-    ) -> DiagnosticStoreResult<u64> {
-        self.supersede_generation(prior_generation, successor_generation)
-            .await
-            .map_err(|error| port_error("supersede_diagnostic_generation", error))
     }
 }
 
@@ -1477,17 +1162,8 @@ fn record_from_row(row: &Row, operation: &str) -> Result<GenerationDiagnosticV1>
     })?;
     let state_generation = match kind.state_generation_field() {
         Some(field) => Some(stored_id(
-            optional_text(23)?.ok_or_else(|| {
-                db_message(
-                    operation,
-                    match kind {
-                        DiagnosticRecordStateKindV1::Cleared => {
-                            "cleared record missing state_generation"
-                        }
-                        _ => "superseded record missing state_generation",
-                    },
-                )
-            })?,
+            optional_text(23)?
+                .ok_or_else(|| db_message(operation, "cleared record missing state_generation"))?,
             operation,
             field,
         )?),
@@ -1745,76 +1421,15 @@ mod tests {
         assert_eq!((inserted, cleared), (0, 2));
 
         assert!(store.current_records(&id(gen1)).await.unwrap().is_empty());
-        let stale = store.stale_records(&id(gen1)).await.unwrap();
-        assert_eq!(stale.len(), 2);
-        assert!(stale.iter().all(|record| matches!(
+        // History stays queryable after clearing.
+        let history = store.records_for_generation(&id(gen1)).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|record| matches!(
             &record.state,
             DiagnosticRecordStateV1::Cleared {
                 cleared_in_generation
             } if cleared_in_generation.as_str() == gen2
         )));
-        // History stays queryable after clearing.
-        assert_eq!(
-            store.records_for_generation(&id(gen1)).await.unwrap().len(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn supersession_marks_old_records_and_chains() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("diagnostics.db");
-        let conn = open_store(&path).await;
-        let store = DiagnosticsStore::new_runtime(&conn);
-        let gen1 = "generation.clean.1";
-        let gen2 = "generation.clean.2";
-
-        let prior = fixture_record(gen1, "anchor.diagnostic.1");
-        store
-            .publish_clean_generation(&id(gen1), std::slice::from_ref(&prior))
-            .await
-            .unwrap();
-
-        assert!(
-            store
-                .supersede_generation(&id(gen1), &id(gen1))
-                .await
-                .is_err(),
-            "a generation cannot supersede itself"
-        );
-
-        assert_eq!(
-            store
-                .supersede_generation(&id(gen1), &id(gen2))
-                .await
-                .unwrap(),
-            1
-        );
-        let marked = store
-            .record_by_anchor(&id("anchor.diagnostic.1"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            &marked.state,
-            DiagnosticRecordStateV1::Superseded {
-                successor_generation
-            } if successor_generation.as_str() == gen2
-        ));
-        assert!(!marked.is_current());
-
-        // The successor publication republishes the same logical finding
-        // under a new anchor; the chain walks old -> new.
-        let successor = fixture_record(gen2, "anchor.diagnostic.2");
-        store
-            .publish_clean_generation(&id(gen2), std::slice::from_ref(&successor))
-            .await
-            .unwrap();
-        let chain = store
-            .supersession_chain(&id("anchor.diagnostic.1"))
-            .await
-            .unwrap();
-        assert_eq!(chain, vec![prior.supersede(id(gen2)).unwrap(), successor]);
     }
 
     #[tokio::test]
@@ -1954,7 +1569,7 @@ mod tests {
         // Stale findings cannot cross snapshots: publishing a non-current
         // record is rejected.
         let stale = fixture_record(gen1, "anchor.diagnostic.1")
-            .supersede(id(gen2))
+            .clear(id(gen2))
             .unwrap();
         assert!(
             store
@@ -2084,12 +1699,6 @@ mod tests {
             Some(second.clone()),
             "anchor lookup must follow the current publication header"
         );
-        assert_eq!(
-            store.records_for_publication(&generation, 1).await.unwrap(),
-            vec![first],
-            "the prior immutable publication must remain readable"
-        );
-        assert!(store.records_for_publication(&generation, 0).await.is_err());
     }
 
     #[tokio::test]
@@ -2129,14 +1738,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleared_or_superseded_generation_cannot_be_reactivated() {
+    async fn cleared_generation_cannot_be_reactivated() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("diagnostics.db");
         let conn = open_store(&path).await;
         let store = DiagnosticsStore::new_runtime(&conn);
         let gen1 = "generation.clean.1";
         let gen2 = "generation.clean.2";
-        let gen3 = "generation.clean.3";
         let cleared = fixture_record(gen1, "anchor.diagnostic.cleared");
 
         store
@@ -2153,23 +1761,6 @@ mod tests {
                 .await
                 .is_err(),
             "a cleared generation must stay historical"
-        );
-
-        let superseded = fixture_record(gen3, "anchor.diagnostic.superseded");
-        store
-            .publish_clean_generation(&id(gen3), std::slice::from_ref(&superseded))
-            .await
-            .unwrap();
-        store
-            .supersede_generation(&id(gen3), &id("generation.clean.4"))
-            .await
-            .unwrap();
-        assert!(
-            store
-                .publish_clean_generation(&id(gen3), std::slice::from_ref(&superseded))
-                .await
-                .is_err(),
-            "a superseded generation must stay historical"
         );
     }
 
@@ -2219,37 +1810,5 @@ mod tests {
                 .is_err(),
             "an empty newer overlay snapshot must still fence stale updates"
         );
-    }
-
-    #[tokio::test]
-    async fn root_port_reports_commit_and_exact_replay() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("diagnostics.db");
-        let conn = open_store(&path).await;
-        let store = DiagnosticsStore::new_runtime(&conn);
-        let generation = id("generation.clean.1");
-        let snapshot = SanitizedCleanDiagnosticSnapshotV1::new(
-            generation,
-            vec![fixture_record("generation.clean.1", "anchor.diagnostic.1")],
-        )
-        .unwrap();
-
-        let committed = store
-            .publish_clean_diagnostics(snapshot.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            committed.disposition(),
-            DiagnosticPublicationDispositionV1::Committed
-        );
-        assert_eq!(committed.inserted_records(), 1);
-
-        let replayed = store.publish_clean_diagnostics(snapshot).await.unwrap();
-        assert_eq!(
-            replayed.disposition(),
-            DiagnosticPublicationDispositionV1::ExactReplay
-        );
-        assert_eq!(replayed.inserted_records(), 0);
-        assert_eq!(replayed.cleared_records(), 0);
     }
 }

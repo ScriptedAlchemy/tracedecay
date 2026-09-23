@@ -14,7 +14,7 @@ use tracedecay_framing::{
     BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MCP_OVERSIZE_ID_INSPECT_BYTES,
     is_wire_oversized_io_error, wire_oversized_io_error_with_prefix,
 };
-use tracedecay_session_memory::context::CancellationToken;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::lifecycle::ProjectServerResponseLifecycle;
 use crate::server::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};

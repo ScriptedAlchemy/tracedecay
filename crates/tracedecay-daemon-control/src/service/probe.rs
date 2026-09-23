@@ -295,12 +295,8 @@ pub(super) fn daemon_readiness_probe(
         }
     };
     let deadline = std::time::Instant::now() + timeout;
-    let identity = query_daemon_identity_stream(
-        stream,
-        connection.auth_token.as_deref(),
-        expected_version,
-        deadline,
-    );
+    let identity =
+        query_daemon_identity_stream(stream, connection.auth_token(), expected_version, deadline);
     (
         DaemonSocketState::Connectable,
         classify_daemon_protocol_identity(identity, expected_version),
@@ -355,8 +351,7 @@ pub(super) fn daemon_readiness_probe(
             );
         }
     };
-    let identity =
-        query_daemon_identity_stream(stream, Some(&auth_token), expected_version, deadline);
+    let identity = query_daemon_identity_stream(stream, &auth_token, expected_version, deadline);
     (
         DaemonSocketState::Connectable,
         classify_daemon_protocol_identity(identity, expected_version),
@@ -365,7 +360,7 @@ pub(super) fn daemon_readiness_probe(
 
 fn query_daemon_identity_stream(
     mut stream: impl ProbeStream,
-    auth_token: Option<&str>,
+    auth_token: &str,
     client_version: &str,
     deadline: std::time::Instant,
 ) -> Result<(Option<String>, Option<String>)> {
@@ -376,12 +371,8 @@ fn query_daemon_identity_stream(
         "id": REQUEST_ID,
         "method": "initialize"
     });
-    let mut preamble = String::new();
-    if let Some(auth_token) = auth_token {
-        preamble
-            .push_str(&tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?);
-        preamble.push('\n');
-    }
+    let mut preamble = tracedecay_daemon_protocol::DaemonAuthPreface::new(auth_token).to_line()?;
+    preamble.push('\n');
     preamble.push_str(&handshake.to_line()?);
     preamble.push('\n');
     preamble.push_str(&request.to_string());
@@ -794,7 +785,7 @@ mod timeout_classification_tests {
         };
         let error = query_daemon_identity_stream(
             stream,
-            Some("token"),
+            "token",
             "0.1.0-test+service-probe",
             Instant::now() + Duration::from_secs(1),
         )
@@ -810,7 +801,7 @@ mod timeout_classification_tests {
         let _profile = PinnedUserDataDir::new();
         let error = query_daemon_identity_stream(
             UnusedStream,
-            Some("token"),
+            "token",
             "0.1.0-test+service-probe",
             Instant::now()
                 .checked_sub(Duration::from_secs(1))

@@ -7,7 +7,7 @@ async fn identical_reads_share_only_the_in_flight_result() {
     let coalescer = IdenticalReadCoalescer::default();
     let leader = match coalescer.claim(
         "graph-main",
-        "tracedecay_outline",
+        "tracedecay_source_outline",
         &json!({"path": "src/lib.rs"}),
         None,
     ) {
@@ -16,7 +16,7 @@ async fn identical_reads_share_only_the_in_flight_result() {
     };
     let follower = match coalescer.claim(
         "graph-main",
-        "tracedecay_outline",
+        "tracedecay_source_outline",
         &json!({"path": "src/lib.rs"}),
         None,
     ) {
@@ -38,7 +38,7 @@ async fn identical_reads_share_only_the_in_flight_result() {
     assert!(matches!(
         coalescer.claim(
             "graph-main",
-            "tracedecay_outline",
+            "tracedecay_source_outline",
             &json!({"path": "src/lib.rs"}),
             None,
         ),

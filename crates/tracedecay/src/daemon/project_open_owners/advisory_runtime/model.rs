@@ -5,7 +5,7 @@ use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_contracts::{ApplicationProblem, Deadline};
 use tracedecay_domain::UtcMicros;
 use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, MountedLspProvider};
-use tracedecay_session_memory::context::MonotonicDeadline;
+use tracedecay_runtime_core::cancellation::MonotonicDeadline;
 
 /// State retained after independent owners publish and consumed only after the
 /// durable code-index generation has mounted.
@@ -13,7 +13,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
     pub(in crate::daemon::project_open_owners) database: tracedecay_runtime_core::db::Database,
     pub(in crate::daemon::project_open_owners) session_db:
         tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    pub(in crate::daemon::project_open_owners) graph: Arc<crate::project::TraceDecay>,
+    pub(in crate::daemon::project_open_owners) graph: Arc<tracedecay_project::project::TraceDecay>,
     pub(in crate::daemon::project_open_owners) code_graph:
         Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     pub(in crate::daemon::project_open_owners) scope: tracedecay_contracts::ResolvedScope,

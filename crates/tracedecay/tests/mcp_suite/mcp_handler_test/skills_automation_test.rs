@@ -7,8 +7,6 @@ use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 #[cfg(feature = "test-transport")]
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
-#[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     create_managed_skill,
@@ -21,6 +19,8 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 use tracedecay_automation_runtime::automation::skill_usage::{
     SkillUsageAction, load_skill_usage_record, record_skill_usage,
 };
+#[cfg(feature = "test-transport")]
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
 #[tokio::test]
 async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
@@ -77,6 +77,7 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             backend_attempt_count: 0,
             backend_attempts: Vec::new(),
             fallback_status: None,
+            session_evidence_budget_stage: None,
             report_ref: None,
             artifacts: vec![artifact],
             started_at: "1782283199".to_string(),
@@ -178,7 +179,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
             provider: "mcp".to_string(),
             project_id: project_id.clone(),
             session_id: Some("mcp-skill-session".to_string()),
-            timestamp: tracedecay::project::current_timestamp(),
+            timestamp: tracedecay_runtime_core::tracedecay::current_timestamp(),
             event_kind: "mcp_tool_call".to_string(),
             hook_name: None,
             tool_name: Some("tracedecay_skill_view".to_string()),
@@ -331,7 +332,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
             provider: "mcp".to_string(),
             project_id,
             session_id: Some("mcp-skill-session".to_string()),
-            timestamp: tracedecay::project::current_timestamp(),
+            timestamp: tracedecay_runtime_core::tracedecay::current_timestamp(),
             event_kind: "mcp_tool_call".to_string(),
             hook_name: None,
             tool_name: Some("tracedecay_skill_view".to_string()),

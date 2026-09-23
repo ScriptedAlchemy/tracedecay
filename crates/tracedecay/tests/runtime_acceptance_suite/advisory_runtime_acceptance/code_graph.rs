@@ -156,7 +156,7 @@ pub(super) fn hermetic_ci_code_graph(
             simple_name: name.to_owned(),
             kind: kind.to_owned(),
             visibility: if declaration.starts_with("pub ") {
-                "pub".to_owned()
+                "public".to_owned()
             } else {
                 "private".to_owned()
             },

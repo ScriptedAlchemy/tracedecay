@@ -15,6 +15,7 @@ use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
 use tracedecay_daemon_identity::authority;
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
@@ -168,8 +169,7 @@ struct RefusedStoreFileIdentityV1 {
 }
 
 /// Every graph database the refused project store carried when the refusal
-/// was recorded: the root graph DB plus the per-branch graph DBs under
-/// `branches/`. Comparing the whole map catches deletions, replacements, and
+/// was recorded. Comparing the whole map catches deletions, replacements, and
 /// newly recreated databases alike.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RefusedStoreFingerprintV1 {
@@ -205,16 +205,6 @@ fn refused_store_fingerprint(route: &ProjectRouteKey) -> Option<RefusedStoreFing
     let mut graph_dbs = BTreeMap::new();
     if let Some(identity) = refused_store_file_identity(&layout.graph_db_path) {
         graph_dbs.insert(layout.graph_db_path.clone(), identity);
-    }
-    if let Ok(entries) = std::fs::read_dir(layout.data_root.join("branches")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) == Some("db")
-                && let Some(identity) = refused_store_file_identity(&path)
-            {
-                graph_dbs.insert(path, identity);
-            }
-        }
     }
     Some(RefusedStoreFingerprintV1 { graph_dbs })
 }
@@ -353,10 +343,6 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
         {
             Some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
         }
-        TraceDecayError::Config { message } => (message.contains("identity cutover conflict")
-            || message.contains("ambiguous legacy profile stores")
-            || message.contains("enrollment marker did not resolve a profile store"))
-        .then_some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF),
         // This audit's whole job is to read persisted rows and judge them, so
         // its verdict is a property of the stored data: a row rejected now is
         // rejected identically 250ms from now. Back off for the whole family
@@ -1202,7 +1188,7 @@ impl ProjectRouteKey {
 
 impl ProjectServerKey {
     pub(super) fn from_open_project(
-        cg: &crate::project::TraceDecay,
+        cg: &tracedecay_project::project::TraceDecay,
         handshake: &DaemonHandshake,
     ) -> Result<Self> {
         let layout = cg.store_layout();
@@ -1282,7 +1268,7 @@ mod refused_store_invalidation_tests {
     fn seed_refused_store(profile_root: &Path, project_root: &Path) -> PathBuf {
         let data_root = store_data_root(profile_root, project_root);
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(crate::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
         std::fs::write(&db_path, b"refused-store-stand-in").unwrap();
         db_path
     }
@@ -1344,32 +1330,6 @@ mod refused_store_invalidation_tests {
             panic!("the reset store must admit a fresh open without a daemon restart");
         };
         ProjectOpenTasks::wait_for_completion(state).await.unwrap();
-    }
-
-    /// Per-branch graph DBs are part of the refused store's fingerprint, so
-    /// a reset that removes only `branches/*.db` also clears the refusal.
-    #[tokio::test]
-    async fn branch_graph_db_reset_invalidates_the_cached_refusal() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let profile_root = temp.path().join("profile");
-        let project_root = temp.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        seed_refused_store(&profile_root, &project_root);
-        let branches_dir = store_data_root(&profile_root, &project_root).join("branches");
-        std::fs::create_dir_all(&branches_dir).unwrap();
-        let branch_db = branches_dir.join("develop.db");
-        std::fs::write(&branch_db, b"refused-branch-stand-in").unwrap();
-        let route = route_for(&profile_root, &project_root);
-        let tasks = ProjectOpenTasks::default();
-        record_reset_required_failure(&tasks, route.clone()).await;
-        assert!(tasks.cached_failure(&route).is_some());
-
-        std::fs::remove_file(&branch_db).unwrap();
-
-        assert!(
-            tasks.cached_failure(&route).is_none(),
-            "a branch graph DB reset must invalidate the cached refusal"
-        );
     }
 
     /// The invalidation is scoped to typed `ResetRequired` refusals: other

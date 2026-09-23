@@ -1,19 +1,19 @@
 use tracedecay_contracts::retrieval::{
-    GitTopologyAnchorAuthorityV2, GitTopologyAnchorPublicationOutcomeV2,
-    GitTopologyAnchorPublicationV2, GitTopologyAnchorResolutionOutcomeV2,
-    GitTopologyAnchorResolutionV2,
+    GitTopologyAnchorAuthority, GitTopologyAnchorPublicationOutcome,
+    GitTopologyAnchorPublication, GitTopologyAnchorResolutionOutcome,
+    GitTopologyAnchorResolution,
 };
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorProvenanceRelationV2,
-    AnchorSourceGenerationV2, CapabilityId, CommitId, CoverageReportV1, EvidenceClass,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRef, AnchorProvenanceRelation,
+    AnchorSourceGeneration, CapabilityId, CommitId, CoverageReportV1, EvidenceClass,
     GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1, GitTopologyAnchorTargetV1,
     ObservationScopeV1, PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
     ProjectId, ProjectionGenerationId, ProviderId, RepositoryId, ResolutionAuthorizationV1,
-    RetentionClass, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
     ScopeResolutionId, UtcMicros, VectorWatermark, WorktreeId,
 };
 use tracedecay_global_db::{
-    RegisteredGitTopologyAnchorAuthorityV2, tests::harness::RegisteredGlobalDbTestRuntime,
+    RegisteredGitTopologyAnchorAuthority, tests::harness::RegisteredGlobalDbTestRuntime,
 };
 
 const SHA: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -30,12 +30,12 @@ fn authorization() -> ResolutionAuthorizationV1 {
 
 fn record(
     owner: ObservationScopeV1,
-    target: RetrievalAnchorTargetV2,
-    source_generation: AnchorSourceGenerationV2,
+    target: RetrievalAnchorTarget,
+    source_generation: AnchorSourceGeneration,
     projection_generation: ProjectionGenerationId,
-    source_anchors: Vec<AnchorLineageRefV2>,
-) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    source_anchors: Vec<AnchorLineageRef>,
+) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target,
         owner,
         aliases: Vec::new(),
@@ -58,7 +58,7 @@ fn record(
 }
 
 #[tokio::test]
-async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
+async fn degraded_capability_persists_through_the_git_topology_authority() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let profile = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -70,11 +70,11 @@ async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
     let generation_id = ProjectionGenerationId::new("generation.github-stack.degraded").unwrap();
     let source = record(
         owner.clone(),
-        RetrievalAnchorTargetV2::ExactRepositoryCommit {
+        RetrievalAnchorTarget::ExactRepositoryCommit {
             repository_id: repository_id.clone(),
             commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
         },
-        AnchorSourceGenerationV2::Unknown,
+        AnchorSourceGeneration::Unknown,
         ProjectionGenerationId::new("generation.github-stack.source.degraded").unwrap(),
         Vec::new(),
     );
@@ -91,14 +91,14 @@ async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
     let capability_generation = capability.generation();
     let capability_record = record(
         owner.clone(),
-        RetrievalAnchorTargetV2::GitTopology(Box::new(
+        RetrievalAnchorTarget::GitTopology(Box::new(
             GitTopologyAnchorTargetV1::GitHubStackCapability(capability),
         )),
-        AnchorSourceGenerationV2::GitTopology(capability_generation),
+        AnchorSourceGeneration::GitTopology(capability_generation),
         generation_id,
         vec![
-            AnchorLineageRefV2::new(
-                AnchorProvenanceRelationV2::Observed,
+            AnchorLineageRef::new(
+                AnchorProvenanceRelation::Observed,
                 source.anchor_id().clone(),
                 owner.clone(),
             )
@@ -111,18 +111,18 @@ async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
             .await
             .unwrap();
     let database = runtime.project_database_arc().unwrap();
-    let authority = RegisteredGitTopologyAnchorAuthorityV2::new(database.clone());
+    let authority = RegisteredGitTopologyAnchorAuthority::new(database.clone());
     assert_eq!(
         authority
             .publish(
-                GitTopologyAnchorPublicationV2::new(
+                GitTopologyAnchorPublication::new(
                     owner.clone(),
                     vec![source, capability_record],
                 )
                 .unwrap(),
             )
             .await,
-        Ok(GitTopologyAnchorPublicationOutcomeV2::Published)
+        Ok(GitTopologyAnchorPublicationOutcome::Published)
     );
     drop(authority);
     drop(database);
@@ -133,14 +133,14 @@ async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
             .await
             .unwrap();
     let authority =
-        RegisteredGitTopologyAnchorAuthorityV2::new(restarted.project_database_arc().unwrap());
+        RegisteredGitTopologyAnchorAuthority::new(restarted.project_database_arc().unwrap());
     let resolved = authority
-        .resolve(GitTopologyAnchorResolutionV2::new(owner, capability_anchor_id).unwrap())
+        .resolve(GitTopologyAnchorResolution::new(owner, capability_anchor_id).unwrap())
         .await;
     assert!(matches!(
         resolved,
-        Ok(GitTopologyAnchorResolutionOutcomeV2::Resolved(record))
-            if matches!(record.target(), RetrievalAnchorTargetV2::GitTopology(target)
+        Ok(GitTopologyAnchorResolutionOutcome::Resolved(record))
+            if matches!(record.target(), RetrievalAnchorTarget::GitTopology(target)
                 if matches!(target.as_ref(), GitTopologyAnchorTargetV1::GitHubStackCapability(capability)
                     if capability.state == GitHubStackCapabilityStateV1::Degraded))
     ));

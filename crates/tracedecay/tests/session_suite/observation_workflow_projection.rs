@@ -2,7 +2,6 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowEvidenceKindV1,
@@ -13,12 +12,13 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStore,
     ObservationStore, ObservationWrite, ProjectionPersistOutcome, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use crate::common::global_message;
@@ -171,7 +171,7 @@ fn write(
         "observation-workflow-test.v1",
     )
     .unwrap();
-    let retrieval_anchor = build_observation_retrieval_anchor_v2(
+    let retrieval_anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),

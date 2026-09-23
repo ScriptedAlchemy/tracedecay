@@ -2,13 +2,14 @@
 use std::process::Command;
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AnchorLineageRefV2, AnchorProvenanceRelationV2, AnchorSourceGenerationV2, FactOwnerV1,
-    ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1, ProjectId,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
+    AnchorLineageRef, AnchorProvenanceRelation, AnchorSourceGeneration, FactOwnerV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ProjectId, RetrievalAnchorId, RetrievalAnchorRecord,
+    RetrievalAnchorRecordParts,
 };
 use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_session_memory::anchor_resolution::EvidenceAnchorReportResolver;
 use tracedecay_session_memory::memory::{EvidenceAnchorResolutionError, EvidenceAnchorResolver};
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -24,10 +25,10 @@ use super::{
 };
 
 fn anchor_with_sources(
-    anchor: &RetrievalAnchorRecordV2,
-    source_anchors: Vec<AnchorLineageRefV2>,
-) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    anchor: &RetrievalAnchorRecord,
+    source_anchors: Vec<AnchorLineageRef>,
+) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: anchor.target().clone(),
         owner: anchor.owner().clone(),
         aliases: anchor.aliases().to_vec(),
@@ -49,10 +50,10 @@ fn anchor_with_sources(
 }
 
 fn anchor_with_source_generation(
-    anchor: &RetrievalAnchorRecordV2,
-    source_generation: AnchorSourceGenerationV2,
-) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    anchor: &RetrievalAnchorRecord,
+    source_generation: AnchorSourceGeneration,
+) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target: anchor.target().clone(),
         owner: anchor.owner().clone(),
         aliases: anchor.aliases().to_vec(),
@@ -141,8 +142,8 @@ async fn copied_prompt_anchor_persists_exact_source_evidence_binding() {
         Some(cursor(100)),
     );
     let (copied_write, copied_anchor, projection_generation, _) = copied.into_parts();
-    let copied_from = AnchorLineageRefV2::new(
-        AnchorProvenanceRelationV2::CopiedFrom,
+    let copied_from = AnchorLineageRef::new(
+        AnchorProvenanceRelation::CopiedFrom,
         source_anchor_id.clone(),
         ObservationScopeV1::Profile,
     )
@@ -339,7 +340,7 @@ async fn daemon_denies_observation_anchor_with_corrupt_source_generation() {
     };
     let corrupted = anchor_with_source_generation(
         receipt.retrieval_anchor(),
-        AnchorSourceGenerationV2::Observation(
+        AnchorSourceGeneration::Observation(
             ObservationSourceGenerationV1::new(GENERATION + 1).unwrap(),
         ),
     );
@@ -396,10 +397,11 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
             project_id: project_a.clone(),
         },
     );
-    let next_cursor = ObservationSourceCursorV1::new(
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
         candidate.source().clone(),
         candidate.scope().clone(),
         candidate.identity().generation(),
+        ObservationOrderingDomainV1::FileBytes,
         candidate.identity().position().end(),
     )
     .unwrap();

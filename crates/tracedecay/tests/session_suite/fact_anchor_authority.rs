@@ -10,20 +10,20 @@ use std::sync::Arc;
 
 use serde_json::json;
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId,
     ComponentVersion, Confidence, CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass,
     FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEventId, FactEvidenceRefV1,
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
     ProjectId, ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_global_db::StoreInstanceUpsert;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::db::{Database, DatabaseAuthority};
 #[cfg(feature = "test-transport")]
 use tracedecay_runtime_core::db::{
@@ -91,13 +91,13 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
     .unwrap()
 }
 
-fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> RetrievalAnchorRecordV2 {
+fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> RetrievalAnchorRecord {
     const DIGEST_A: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const DIGEST_B: &str =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::Entity(EntityRef {
             id: EntityId::new(entity_id).unwrap(),
             kind: EntityKind::Document,
         }),
@@ -106,7 +106,7 @@ fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> Retri
         occurred_at: None,
         ingested_at: UtcMicros(ingested_at),
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new("projection.fact-anchor-authority")
             .unwrap(),
         projection_watermark: VectorWatermark::default(),

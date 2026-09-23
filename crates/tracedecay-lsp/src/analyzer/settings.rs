@@ -126,16 +126,6 @@ pub async fn save_settings(
             "failed to serialize code diagnostics settings: {error}"
         ))
     })?;
-    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        let backup = path.with_extension("json.bak");
-        tokio::fs::copy(&path, &backup).await.map_err(|error| {
-            AnalyzerRuntimeError::new(format!(
-                "failed to back up code diagnostics settings '{}' to '{}': {error}",
-                path.display(),
-                backup.display()
-            ))
-        })?;
-    }
     let staged = path.with_extension("json.pending");
     let publish_path = path.clone();
     tokio::task::spawn_blocking(move || publish_settings(&staged, &publish_path, &bytes))
@@ -267,9 +257,11 @@ mod tests {
         save_settings(temp.path(), &replacement).await.unwrap();
 
         assert_eq!(load_settings(temp.path()).await.unwrap(), replacement);
-        let backup = settings_path(temp.path()).with_extension("json.bak");
-        let backup: CodeDiagnosticsSettings =
-            serde_json::from_slice(&tokio::fs::read(backup).await.unwrap()).unwrap();
-        assert_eq!(backup, initial);
+        assert!(
+            !settings_path(temp.path())
+                .with_extension("json.bak")
+                .exists(),
+            "replacing settings keeps no copy of the prior bytes"
+        );
     }
 }

@@ -61,7 +61,7 @@ fn dashboard_root_serves_the_embedded_single_app_bundle() {
         // The suite serves the fixture bundle byte-exact; production
         // bundle-size and placeholder guards live with the CLI build script's
         // manifest validation and the product-runtime provider validation.
-        let fixture_script = tracedecay::product_runtime::FIXTURE_DASHBOARD_ASSETS
+        let fixture_script = tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS
             .assets
             .iter()
             .find(|asset| asset.path == "static/js/index.fixture.js")

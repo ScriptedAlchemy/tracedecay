@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::OnceCell;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::errors::Result as TdResult;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::storage::{
     PrivateStoreIo, default_profile_project_id, default_profile_root,
 };

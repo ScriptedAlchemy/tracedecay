@@ -8,15 +8,16 @@ use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
 
-use crate::project::TraceDecay;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
     RetainedAutomationSettlementProjection, pinned_automation_configuration_digest,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_project::project::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey};
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey};
+use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 mod combined_effect;
@@ -395,7 +396,7 @@ impl DaemonEngine {
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-        cg: Arc<crate::project::TraceDecay>,
+        cg: Arc<tracedecay_project::project::TraceDecay>,
     ) {
         if !self.lifecycle.accepting() {
             return;
@@ -994,7 +995,8 @@ impl DaemonEngine {
             .await
             .clear();
         let _child_shutdown =
-            tracedecay_sessions::runtime::codex_app_server::begin_codex_app_server_shutdown();
+            tracedecay_sessions::runtime::hosts::codex_app_server::begin_codex_app_server_shutdown(
+            );
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
             for retirement in retirements {
                 retirement.wait().await;
@@ -1518,7 +1520,7 @@ async fn maybe_run_global_retention(
     ) else {
         return;
     };
-    let now_secs = crate::project::current_timestamp();
+    let now_secs = tracedecay_runtime_core::tracedecay::current_timestamp();
     let global_config = global_table_retention_config(config);
     let Some(retention) = administration
         .try_with_writer(|| async {
@@ -1897,7 +1899,7 @@ struct PinnedAutomationConfiguration {
 
 #[hotpath::measure(label = "daemon.scheduler.read_automation_config", future = true)]
 async fn effective_automation_config_for_project(
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
 ) -> Result<PinnedAutomationConfiguration> {
     let configuration = cg
         .configuration_runtime()
@@ -1960,7 +1962,7 @@ pub(super) fn automation_scheduler_configured(
 /// scheduled fixed task or a schedulable user-defined job.
 #[hotpath::measure(label = "daemon.scheduler.probe_scheduler_work", future = true)]
 async fn automation_scheduler_has_work(
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
 ) -> Result<bool> {
     use tracedecay_automation_runtime::automation::config::{
@@ -2002,7 +2004,7 @@ async fn run_user_jobs_scheduler_pass(
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     profile_root: &Path,
-    cg: &crate::project::TraceDecay,
+    cg: &tracedecay_project::project::TraceDecay,
     configuration_digest: tracedecay_domain::ManifestDigest,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
     backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,

@@ -9,6 +9,8 @@ use super::*;
 use std::future::Future;
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_contracts::SharedProfileStoreLocatorV1;
+#[cfg(any(not(unix), test))]
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationService, Lease,

@@ -52,10 +52,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 use tracedecay_api::{
     WorkOperation, WorkflowOperation, http_application_full_route_path,
-    is_http_application_operation_exposed, retained_application_route_path,
+    is_http_application_operation_exposed,
 };
 use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
-use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_daemon_service::application_surface::resolve_catalog_tool_binding;
 use tracedecay_session_memory::event_lane::ActivityFamilyV1;
 use tracedecay_tool_catalog::{
@@ -578,20 +577,7 @@ fn every_catalog_binding_is_mounted_on_its_declared_surface() {
                     }
                     // An operation the router deliberately withholds from HTTP is
                     // an absence like any other.
-                    Some(_) => false,
-                    // Retained memory/session/workflow operations are the second
-                    // HTTP route family, addressed exactly as production route
-                    // documentation addresses them (`http_route_documents`): the
-                    // callable retained operation's canonical route. A catalog
-                    // HTTP binding naming neither family is an absence.
-                    None => match RetainedSurfaceOperation::from_operation_name(operation) {
-                        Some(retained) => http_route_is_mounted(
-                            &agent,
-                            &fixture,
-                            &retained_application_route_path(retained),
-                        ),
-                        None => false,
-                    },
+                    Some(_) | None => false,
                 }
             }
             BindingSurface::Mcp => mcp_tools.contains(&format!("tracedecay_{operation}")),

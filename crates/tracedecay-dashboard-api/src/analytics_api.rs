@@ -1,8 +1,8 @@
 //! Read-only durable analytics API for dashboard-level agent behavior.
 //!
 //! Durable `analytics_events` rows are preferred when available. Older session
-//! stores still get session-message usage rollups, and hint lifecycle telemetry
-//! falls back to the legacy `dashboard_hint_events` table when present.
+//! stores still get session-message usage rollups; hint lifecycle telemetry
+//! comes only from durable analytics events.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -28,7 +28,7 @@ use tracedecay_runtime_core::db::engine::params;
 
 use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
-use super::util::{i64_field, query_i64, query_i64_result, query_rows, str_field};
+use super::util::{i64_field, query_i64_result, query_rows, str_field};
 
 pub use tracedecay_application::analytics_bridge::{
     AnalyticsDiagnosticsPayloadV1, AnalyticsDiagnosticsRatiosV1, AnalyticsEventKindCountV1,
@@ -1157,81 +1157,16 @@ async fn hint_summary(
         return hint_summary_from_events(events);
     }
 
-    let Some(db) = db else {
-        return AnalyticsHintsPayloadV1 {
-            available: false,
-            source: "session_store_unavailable".to_owned(),
-            error: None,
-            by_category: empty_hint_categories(),
-        };
-    };
-
-    let connection = db.read_connection();
-    let has_table = query_i64(
-        &connection,
-        "SELECT COUNT(*) FROM sqlite_master
-         WHERE type IN ('table', 'view') AND name = 'dashboard_hint_events'",
-        (),
-    )
-    .await
-        > 0;
-    if !has_table {
-        return AnalyticsHintsPayloadV1 {
-            available: false,
-            source: "dashboard_hint_events_missing".to_owned(),
-            error: None,
-            by_category: empty_hint_categories(),
-        };
-    }
-
-    let rows = match query_rows(
-        &connection,
-        "SELECT category,
-                SUM(CASE WHEN event_type = 'emitted' THEN 1 ELSE 0 END) AS emitted,
-                SUM(CASE WHEN event_type = 'followed' THEN 1 ELSE 0 END) AS followed,
-                SUM(CASE WHEN event_type = 'ignored' THEN 1 ELSE 0 END) AS ignored,
-                SUM(CASE WHEN event_type = 'suppressed' THEN 1 ELSE 0 END) AS suppressed
-         FROM dashboard_hint_events
-         GROUP BY category
-         ORDER BY category",
-        (),
-    )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            return AnalyticsHintsPayloadV1 {
-                available: false,
-                source: "dashboard_hint_events_error".to_owned(),
-                error: Some(err),
-                by_category: empty_hint_categories(),
-            };
-        }
-    };
-
-    let mut by_category: BTreeMap<String, AnalyticsHintCategoryV1> = empty_hint_categories()
-        .into_iter()
-        .map(|row| (row.category.clone(), row))
-        .collect();
-    for row in rows {
-        let category = str_field(&row, "category");
-        by_category.insert(
-            category.to_owned(),
-            AnalyticsHintCategoryV1 {
-                category: category.to_owned(),
-                emitted: i64_field(&row, "emitted"),
-                followed: i64_field(&row, "followed"),
-                ignored: i64_field(&row, "ignored"),
-                suppressed: i64_field(&row, "suppressed"),
-            },
-        );
-    }
-
     AnalyticsHintsPayloadV1 {
-        available: true,
-        source: "dashboard_hint_events".to_owned(),
+        available: false,
+        source: if db.is_some() {
+            "analytics_events_missing"
+        } else {
+            "session_store_unavailable"
+        }
+        .to_owned(),
         error: None,
-        by_category: by_category.into_values().collect(),
+        by_category: empty_hint_categories(),
     }
 }
 

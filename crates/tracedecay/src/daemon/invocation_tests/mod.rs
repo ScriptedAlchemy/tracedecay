@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1;
+use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutLifecycleAddressV1;
 use tracedecay_application::feedback::observations::FeedbackObservationEmitterV1;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_application::work::{
@@ -50,10 +50,10 @@ pub(super) fn empty_work_proposal_routing(
     // The runtime pin rejects a snapshot that omitted registry defaults
     // such as `index.include.v1`. Resolve through the same core registry
     // the daemon uses at project open, then overlay empty Work bindings.
-    let snapshot = crate::config::resolver::resolve_configuration(
-        &crate::config::registry::ConfigurationRegistry::core()
+    let snapshot = tracedecay_project::config::resolver::resolve_configuration(
+        &tracedecay_project::config::registry::ConfigurationRegistry::core()
             .expect("configuration registry defaults"),
-        &[crate::config::resolver::ConfigurationLayerV1 {
+        &[tracedecay_project::config::resolver::ConfigurationLayerV1 {
             layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                 project_id: scope.project_id.clone(),
             },
@@ -202,7 +202,7 @@ fn hook_envelope(event: HookEventV2) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [1; 16],
-        producer: tracedecay_hooks::HookHostV1::Codex,
+        producer: tracedecay_domain::NativeHostIdentityV1::Codex,
         protected_session_id: [2; 32],
         project_id: [3; 16],
         repository_id: [4; 16],
@@ -217,7 +217,7 @@ fn hook_envelope(event: HookEventV2) -> HookEventEnvelopeV2 {
 
 fn hook_binding() -> HookScopeBindingV1 {
     HookScopeBindingV1 {
-        host: tracedecay_hooks::HookHostV1::Codex,
+        host: tracedecay_domain::NativeHostIdentityV1::Codex,
         project_id: [3; 16],
         repository_id: [4; 16],
         worktree_id: [5; 16],
@@ -234,7 +234,7 @@ fn hook_binding() -> HookScopeBindingV1 {
         .map(|family| tracedecay_hooks::HookCapabilityV1 {
             family,
             support: tracedecay_hooks::stock_event_support(
-                tracedecay_hooks::HookHostV1::Codex,
+                tracedecay_domain::NativeHostIdentityV1::Codex,
                 family,
             ),
         })

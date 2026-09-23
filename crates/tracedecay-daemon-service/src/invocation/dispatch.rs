@@ -254,7 +254,7 @@ impl DaemonInvocationService {
                 emit_invocation_observation(
                     observations.as_ref(),
                     observation_subject.as_ref(),
-                    current_micros(),
+                    now_micros(),
                     FeedbackSourceEventV1::SurfaceArgumentRejected {
                         operation: feedback_observation_operation(operation),
                         route: delivery_route,
@@ -300,7 +300,7 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         }
-        let dispatched_at = current_micros();
+        let dispatched_at = now_micros();
         if is_observable_operation(operation) {
             emit_invocation_observation(
                 observations.as_ref(),
@@ -603,6 +603,7 @@ impl DaemonInvocationService {
                     request_id,
                     ApplicationSurfaceOperation::FeedbackImpact,
                     PrimitiveRequest::Impact(request),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -622,6 +623,7 @@ impl DaemonInvocationService {
                     request_id,
                     ApplicationSurfaceOperation::AffectedTests,
                     PrimitiveRequest::AffectedFileTests(request),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -641,6 +643,7 @@ impl DaemonInvocationService {
                     request_id,
                     ApplicationSurfaceOperation::TestResults,
                     PrimitiveRequest::RecentTestResults(page),
+                    None,
                     observed_at,
                     deadline,
                     cancellation,
@@ -650,6 +653,7 @@ impl DaemonInvocationService {
             DaemonInvocationPayload::PrimitiveRead {
                 surface_operation,
                 request,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
@@ -661,6 +665,7 @@ impl DaemonInvocationService {
                     request_id,
                     surface_operation,
                     request,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -671,6 +676,7 @@ impl DaemonInvocationService {
                 surface_operation,
                 request,
                 page,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
@@ -698,6 +704,7 @@ impl DaemonInvocationService {
                     request_id,
                     surface_operation,
                     request,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,
@@ -708,6 +715,7 @@ impl DaemonInvocationService {
                 surface_operation,
                 request,
                 page,
+                resolved_scope,
                 observed_at,
                 deadline,
                 cancellation,
@@ -720,6 +728,7 @@ impl DaemonInvocationService {
                     surface_operation,
                     request,
                     page,
+                    resolved_scope.as_ref(),
                     observed_at,
                     deadline,
                     cancellation,

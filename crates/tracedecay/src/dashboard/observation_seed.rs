@@ -19,9 +19,10 @@ use tracedecay_domain::{
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros,
 };
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -171,7 +172,7 @@ pub async fn seed_session_message_observation_for_test(
         tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
     )
     .map_err(|error| fixture_error("resolution authorization", error))?;
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection.clone(),
         UtcMicros(1),
@@ -208,7 +209,7 @@ pub async fn materialize_session_temporal_refresh_for_test(
         .materialize_pending_session_refresh_for_test(&session_id)
         .await
         .map_err(|error| fixture_error("materialize session refresh", error))?;
-    project_database
+    SessionTemporalAccess::new(project_database)
         .apply_active_session_relation_projection(
             &session_id,
             std::sync::Arc::new(DashboardFixtureGraphCancellation),

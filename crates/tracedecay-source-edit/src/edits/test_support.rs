@@ -174,7 +174,7 @@ pub(super) fn fixture_symbol_code_graph(
             qualified_name: qualified_name.to_owned(),
             simple_name: simple_name.to_owned(),
             kind: "function".to_owned(),
-            visibility: "pub".to_owned(),
+            visibility: "public".to_owned(),
             branches: 0,
             loops: 0,
             max_nesting: 0,

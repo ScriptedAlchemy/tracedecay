@@ -17,7 +17,7 @@ use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::source_edit_rollback::{source_edit_rollback_operation, source_edit_rollback_schema};
-use crate::{current_bindings, current_bindings_with_slug};
+use crate::current_bindings;
 
 /// `serde` `skip_serializing_if` predicate for default-off flags.
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -397,6 +397,8 @@ const SOURCE_EDIT_KINDS: [SourceEditKind; 8] = [
 
 const SOURCE_EDIT_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
 
+const SOURCE_EDIT_SERVICE_ID: &str = "service.application.source-edit";
+
 pub fn source_edit_operation(
     kind: SourceEditKind,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
@@ -420,19 +422,25 @@ pub fn source_edit_handler_descriptors()
     let mut descriptors = SOURCE_EDIT_KINDS
         .into_iter()
         .map(|kind| {
-            ApplicationHandlerDescriptor::new(
+            ApplicationHandlerDescriptor::for_catalog_operation(
+                kind.operation_name(),
+                SOURCE_EDIT_SERVICE_ID,
                 source_edit_operation(kind)?,
                 source_edit_schema(kind, "request")?,
                 source_edit_schema(kind, "result")?,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    descriptors.push(ApplicationHandlerDescriptor::new(
+    descriptors.push(ApplicationHandlerDescriptor::for_catalog_operation(
+        "source_edit_reconcile",
+        SOURCE_EDIT_SERVICE_ID,
         source_edit_reconciliation_operation()?,
         source_edit_reconciliation_schema("request")?,
         source_edit_reconciliation_schema("result")?,
     )?);
-    descriptors.push(ApplicationHandlerDescriptor::new(
+    descriptors.push(ApplicationHandlerDescriptor::for_catalog_operation(
+        "source_edit_rollback",
+        SOURCE_EDIT_SERVICE_ID,
         source_edit_rollback_operation()?,
         source_edit_rollback_schema("request")?,
         source_edit_rollback_schema("result")?,
@@ -521,10 +529,9 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         )?);
     }
     let reconciliation_operation = source_edit_reconciliation_operation()?;
-    let (reconciliation_bindings, reconciliation_binding_ids) = current_bindings_with_slug(
+    let (reconciliation_bindings, reconciliation_binding_ids) = current_bindings(
         reconciliation_operation.capability_id(),
         "source_edit_reconcile",
-        "source-edit-reconcile",
         SOURCE_EDIT_SURFACES,
     )?;
     bindings.extend(reconciliation_bindings);
@@ -580,10 +587,9 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         required_features: Vec::new(),
     },
     )?);
-    let (rollback_bindings, rollback_binding_ids) = current_bindings_with_slug(
+    let (rollback_bindings, rollback_binding_ids) = current_bindings(
         rollback_operation.capability_id(),
         "source_edit_rollback",
-        "source-edit-rollback",
         SOURCE_EDIT_SURFACES,
     )?;
     bindings.extend(rollback_bindings);

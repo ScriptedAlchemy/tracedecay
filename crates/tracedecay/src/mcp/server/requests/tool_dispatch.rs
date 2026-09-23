@@ -36,7 +36,6 @@ impl McpServer {
         let routed_project = match private_route {
             Some(_)
                 if crate::mcp::project_route::arguments_have_project_selector(
-                    tool_name,
                     &handler_arguments,
                 ) =>
             {

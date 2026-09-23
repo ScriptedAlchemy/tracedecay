@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -235,7 +236,7 @@ fn candidate_read_failures_preserve_stable_typed_semantics() {
 
 #[derive(Clone)]
 struct MismatchedClaimCursor {
-    snapshot: tracedecay_temporal_query::ports::TemporalExecutionSnapshot,
+    snapshot: tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot,
     source_generation: tracedecay_domain::CodeGenerationId,
     finishes: Arc<AtomicUsize>,
 }
@@ -295,7 +296,8 @@ async fn mismatched_claim_and_reader_generation_fails_stale_before_query_or_admi
         next_generation(),
     )));
     let scheduler_port: Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1> = scheduler.clone();
-    let adapter = CanonicalSymbolGraphAdapter::new(graph, cursor, Some(scheduler_port));
+    let adapter =
+        CanonicalSymbolGraphAdapter::new(graph, PathBuf::new(), cursor, Some(scheduler_port));
 
     let outcome = adapter
         .exact_symbol(
@@ -316,7 +318,7 @@ async fn mismatched_claim_and_reader_generation_fails_stale_before_query_or_admi
 
 #[derive(Clone)]
 struct AdvancingFinishCursor {
-    snapshot: tracedecay_temporal_query::ports::TemporalExecutionSnapshot,
+    snapshot: tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot,
     source_generation: tracedecay_domain::CodeGenerationId,
     finishes: Arc<AtomicUsize>,
 }
@@ -373,8 +375,12 @@ async fn stale_claim_finish_prevents_lazy_scheduler_mutation() {
         next_generation(),
     )));
     let scheduler_port: Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1> = scheduler.clone();
-    let adapter =
-        CanonicalSymbolGraphAdapter::new(fixture.graph.clone(), cursor, Some(scheduler_port));
+    let adapter = CanonicalSymbolGraphAdapter::new(
+        fixture.graph.clone(),
+        PathBuf::new(),
+        cursor,
+        Some(scheduler_port),
+    );
 
     let outcome = adapter
         .exact_symbol(

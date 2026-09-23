@@ -208,8 +208,7 @@ fn count_skip_reason(reason: AutomationSkipReasonV1) {
         | AutomationSkipReasonV1::SessionEvidenceBudgetExhausted
         | AutomationSkipReasonV1::SessionEvidenceTimedOut
         | AutomationSkipReasonV1::SessionEvidenceCancelled
-        | AutomationSkipReasonV1::NoSessionEvidence
-        | AutomationSkipReasonV1::ShippedFactProposalHistoryRetired => {
+        | AutomationSkipReasonV1::NoSessionEvidence => {
             hotpath::gauge!("automation.skips.other_total").inc(1_u64);
         }
     }

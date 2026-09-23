@@ -8,13 +8,13 @@ use std::io::Write;
 use std::process::Stdio;
 
 use tempfile::TempDir;
-use tracedecay::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::ProjectId;
 #[cfg(unix)]
 use tracedecay_lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
-use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 
 #[cfg(unix)]
 use crate::common::{
@@ -29,13 +29,17 @@ async fn registered_runtime(
     home: &std::path::Path,
     project: &std::path::Path,
 ) -> HostAdmissionTestRuntimeV1 {
-    HostAdmissionTestRuntimeV1::project(
-        home.join(".tracedecay"),
-        project,
-        ProjectId::new("project.codex-compaction").unwrap(),
-    )
-    .await
-    .unwrap()
+    let project_id = ProjectId::new("project.codex-compaction").unwrap();
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project,
+            project_id.as_str()
+        )
+        .unwrap()
+    );
+    HostAdmissionTestRuntimeV1::project(home.join(".tracedecay"), project, project_id)
+        .await
+        .unwrap()
 }
 
 #[cfg(unix)]

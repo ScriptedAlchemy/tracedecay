@@ -1,5 +1,5 @@
 //! Fixture-based tests for Cursor composer ingestion
-//! ([`tracedecay_sessions::runtime::cursor_composer`]).
+//! ([`tracedecay_sessions::runtime::hosts::cursor_composer`]).
 //!
 //! Each test builds a small synthetic `state.vscdb` (and, for the DAG test, a
 //! `store.db`) with rusqlite, then drives the read-only composer sweep and
@@ -16,8 +16,8 @@ use tracedecay_domain::{
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::cursor::{CursorSweepSource, cursor_project_slug};
-use tracedecay_sessions::runtime::cursor_composer::CursorComposerSource;
+use tracedecay_sessions::runtime::hosts::cursor::{CursorSweepSource, cursor_project_slug};
+use tracedecay_sessions::runtime::hosts::cursor_composer::CursorComposerSource;
 use tracedecay_store::ObservationReplayRequest;
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};

@@ -324,7 +324,7 @@ where
     let invocation = tracedecay_daemon_protocol::DaemonInvocationRequest::workflow_application(
         request_id.as_str(),
         request,
-        tracedecay_daemon_protocol::invocation_now_micros(),
+        tracedecay_contracts::now_micros(),
         controls.deadline.clone(),
         controls.cancellation.context(),
     );

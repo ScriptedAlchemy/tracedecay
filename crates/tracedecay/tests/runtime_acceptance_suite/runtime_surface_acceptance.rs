@@ -968,12 +968,6 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         .as_str()
         .unwrap_or_else(|| panic!("settings must expose a revision: {settings}"))
         .to_owned();
-    let legacy_config_path = PathBuf::from(
-        settings["project"]["legacy_config_path"]
-            .as_str()
-            .unwrap_or_else(|| panic!("settings must expose the legacy path: {settings}")),
-    );
-    let legacy_config_before = std::fs::read(&legacy_config_path).ok();
     let original_max_file_size = settings["project"]["config"]["max_file_size"].clone();
 
     // The mirror of the in-process assertion: with the control plane mounted,
@@ -1025,11 +1019,6 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     assert_ne!(
         applied_payload["project"]["config"]["max_file_size"], original_max_file_size,
         "the committed value must differ from the pre-change reading"
-    );
-    assert_eq!(
-        std::fs::read(&legacy_config_path).ok(),
-        legacy_config_before,
-        "a typed mutation must not fall back to config.json"
     );
 
     // Re-read: the commit is durable and the pinned runtime configuration the
@@ -1095,11 +1084,8 @@ async fn dashboard_user_settings_replay_through_application_restart() {
         initial_revision.as_str(),
         "project and profile settings must share the control-plane revision"
     );
-    let legacy_user_config = PathBuf::from(
-        initial["user"]["legacy_config_path"]
-            .as_str()
-            .unwrap_or_else(|| panic!("profile settings must expose the legacy path: {initial}")),
-    );
+    let legacy_user_config = tracedecay_session_memory::user_config::config_path()
+        .expect("pinned profile user config path");
     let legacy_user_config_before = std::fs::read(&legacy_user_config).ok();
     let legal_actions = envelope["legal_actions"]
         .as_array()

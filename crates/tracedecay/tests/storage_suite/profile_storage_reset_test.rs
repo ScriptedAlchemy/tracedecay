@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
-use tracedecay::config::USER_DATA_DIR_ENV;
-use tracedecay::project::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay_project::config::USER_DATA_DIR_ENV;
+use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::storage::{STORE_MANIFEST_FILENAME, pin_fixture_repository_identity};
 
 use crate::common::{EnvVarGuard, canonical_existing_path};
@@ -193,13 +193,7 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
     let db_path = initialized.db_path().to_path_buf();
     drop(initialized);
 
-    // Not `SCHEMA_VERSION - 1`: that stamp is
-    // `PAYLOAD_DIGEST_STEP_SOURCE_VERSION`, the one sanctioned step this binary
-    // *does* carry forward in place, so an open of it upgrades instead of
-    // refusing. The reset contract covers every other stamp, so the store is
-    // aged one step past the sanctioned source.
-    let incompatible_version =
-        tracedecay_runtime_core::db::migrations::PAYLOAD_DIGEST_STEP_SOURCE_VERSION - 1;
+    let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
     let connection = rusqlite::Connection::open(&db_path).unwrap();
     connection
         .pragma_update(None, "user_version", incompatible_version)
@@ -263,7 +257,7 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
         client_profile.join("projects/proj_explicit")
     );
     assert!(
-        !cg.store_layout().config_path.exists(),
+        !cg.store_layout().data_root.join("config.json").exists(),
         "init persists configuration in the store, not a legacy config.json"
     );
     assert!(cg.db_path().is_file());
@@ -302,7 +296,7 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
         client_profile.join("projects/proj_db_only")
     );
     assert!(
-        !cg.store_layout().config_path.exists(),
+        !cg.store_layout().data_root.join("config.json").exists(),
         "init persists configuration in the store, not a legacy config.json"
     );
     assert!(cg.db_path().is_file());
@@ -490,11 +484,7 @@ async fn trace_decay_open_branch_uses_shared_profile_store() {
         .expect("init must persist branch tracking");
     if !branch_meta.is_tracked("feature/profile") {
         let default_branch = branch_meta.default_branch.clone();
-        branch_meta.add_branch(
-            "feature/profile",
-            tracedecay_runtime_core::config::db_filename(&shard_root),
-            &default_branch,
-        );
+        branch_meta.add_branch("feature/profile", &default_branch);
         tracedecay_runtime_core::branch_meta::save_branch_meta(&shard_root, &branch_meta).unwrap();
     }
     // `open_branch` refuses a tracked branch whose exact provenance is not

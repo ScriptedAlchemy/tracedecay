@@ -16,7 +16,8 @@ pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, session_refresh_profile_scope_requested,
 };
 pub use handlers::{
-    ToolCallRegistryOptions, handle_tool_call, handle_tool_call_with_registry_options,
+    RetainedSurfaceExecution, ToolCallRegistryOptions, execute_retained_surface_tool,
+    handle_tool_call, handle_tool_call_with_registry_options, render_retained_execution,
 };
 
 /// Explicit owner for advertised tools awaiting typed application contracts.

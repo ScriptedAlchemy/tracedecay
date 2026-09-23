@@ -389,9 +389,7 @@ impl TraceDecay {
         .into_parts();
         let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
-            storage::write_store_manifest(&store_layout)?;
-        }
+        storage::write_store_manifest(&store_layout)?;
 
         // Bootstrap branch metadata if we can detect a default branch
         let default_branch = active_branch.as_ref().and_then(|_| {
@@ -849,7 +847,7 @@ fn configuration_runtime_unavailable() -> TraceDecayError {
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
-    use tracedecay_agent_hosts::agents::context_scout::ports::{
+    use tracedecay_agent_hosts::agents::context_scout::address_registry::{
         AdmittedContextScoutHookV1, ContextScoutAddressBindOutcomeV1, ContextScoutAuthorityPinV1,
         ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
         ProjectContextScoutAddressRegistryV1,
@@ -858,6 +856,7 @@ mod tests {
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
     };
+    use tracedecay_domain::NativeHostIdentityV1;
     use tracedecay_domain::canonical_sha256;
     use tracedecay_domain::configuration::{
         CONTEXT_SCOUT_SETTINGS_SETTING_KEY, CandidateDispositionV1, ConfigurationCandidateV1,
@@ -868,15 +867,15 @@ mod tests {
     use tracedecay_domain::{ActorId, RepositoryId, UtcMicros, WorktreeId};
     use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
     use tracedecay_hooks::{
-        HookCapabilityV1, HookEventFamily, HookHostV1, HookScopeBindingV1,
-        NativeEnvelopeMaterialV1, decode_bound_native_hook_event, stock_event_support,
+        HookCapabilityV1, HookEventFamily, HookScopeBindingV1, NativeEnvelopeMaterialV1,
+        decode_bound_native_hook_event, stock_event_support,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     async fn mount_verified_reopen_claim(
         owner: &tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1,
     ) -> (
-        tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutLifecycleAddressV1,
+        ContextScoutLifecycleAddressV1,
         tracedecay_contracts::context_scout::ContextScoutAddressV1,
     ) {
         use tracedecay_domain::test_fixtures::id;
@@ -954,7 +953,7 @@ mod tests {
         )
         .expect("authority pin");
         let binding = HookScopeBindingV1 {
-            host: HookHostV1::ClaudeCode,
+            host: NativeHostIdentityV1::ClaudeCode,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
@@ -970,12 +969,12 @@ mod tests {
             .into_iter()
             .map(|family| HookCapabilityV1 {
                 family,
-                support: stock_event_support(HookHostV1::ClaudeCode, family),
+                support: stock_event_support(NativeHostIdentityV1::ClaudeCode, family),
             })
             .collect(),
         };
         let envelope = decode_bound_native_hook_event(
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!(
                 "../../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
             ),
@@ -1142,15 +1141,11 @@ mod tests {
         let db_path = initialized.store_layout().graph_db_path.clone();
         initialized.close();
         let connection = rusqlite::Connection::open(&db_path).expect("open graph fixture");
-        // Not `SCHEMA_VERSION - 1`: that stamp is
-        // `PAYLOAD_DIGEST_STEP_SOURCE_VERSION`, the one sanctioned step this
-        // binary carries forward in place, so an open of it upgrades instead
-        // of refusing. Age the store one step past the sanctioned source.
         connection
             .pragma_update(
                 None,
                 "user_version",
-                tracedecay_runtime_core::db::migrations::PAYLOAD_DIGEST_STEP_SOURCE_VERSION - 1,
+                tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1,
             )
             .expect("stamp incompatible graph schema");
         drop(connection);

@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
@@ -114,6 +115,7 @@ pub(super) fn unpersisted_rejected_parts(
     config: &AutomationConfig,
     task: AgentTaskKind,
     reason: &str,
+    budget_stage: Option<SessionRetrievalBudgetStageV1>,
     evidence_hash: Option<String>,
     report_task: &'static str,
 ) -> (Value, AutomationRunLedgerRecord) {
@@ -151,11 +153,12 @@ pub(super) fn unpersisted_rejected_parts(
         rejected_count: 0,
         skipped_count: 1,
         error: Some(reason.to_string()),
+        session_evidence_budget_stage: budget_stage,
         error_classification: None,
         error_retryable: None,
         backend_attempt_count: 0,
         backend_attempts: Vec::new(),
-        fallback_status: Some(reason.to_string()),
+        fallback_status: None,
         report_ref: Some(json!({
             "dashboard_runs": "/api/automation/runs",
             "run_id": run.run_id,

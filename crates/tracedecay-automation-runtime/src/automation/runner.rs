@@ -26,7 +26,6 @@ use super::skill_writer::{
     validate_skill_proposals,
 };
 use crate::ports::project_runtime::AutomationProjectContext;
-use crate::ports::session_store::AutomationSessionStore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_policy::CurationApplyAuthorityV1;

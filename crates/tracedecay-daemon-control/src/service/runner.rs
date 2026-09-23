@@ -143,22 +143,13 @@ impl ServiceRunner {
     pub(super) fn service_state(&self, socket_path: &Path) -> Result<DaemonServiceState> {
         match self {
             Self::Systemd { systemctl } => {
-                let running = Command::new(systemctl)
-                    .args(["--user", "is-active", "--quiet", crate::SERVICE_NAME])
-                    .status()
-                    .map_err(|error| {
-                        service_program_spawn_error("systemctl", "systemd service state", &error)
-                    })?
-                    .success();
-                let enablement = Command::new(systemctl)
-                    .args(["--user", "is-enabled", crate::SERVICE_NAME])
-                    .output()
-                    .map_err(|error| {
-                        service_program_spawn_error("systemctl", "systemd service state", &error)
-                    })?;
-                let enablement = String::from_utf8_lossy(&enablement.stdout)
-                    .trim()
-                    .to_string();
+                let activity = systemctl_unit_query(systemctl, "is-active")?;
+                let running = match activity.as_str() {
+                    "active" | "reloading" | "refreshing" => true,
+                    "inactive" | "failed" | "activating" | "deactivating" | "maintenance" => false,
+                    _ => return Err(systemctl_unknown_state("is-active", &activity)),
+                };
+                let enablement = systemctl_unit_query(systemctl, "is-enabled")?;
                 if enablement.starts_with("masked") {
                     Ok(DaemonServiceState::Masked)
                 } else if running && enablement.starts_with("enabled") {
@@ -464,6 +455,39 @@ fn service_program_is_executable(metadata: &std::fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn service_program_is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
+}
+
+/// `systemctl --user is-active`/`is-enabled` exit non-zero both for a stopped
+/// or disabled unit and when the user manager is unreachable; only the printed
+/// state tells them apart, so an empty answer is an error, not "stopped".
+fn systemctl_unit_query(systemctl: &Path, verb: &str) -> Result<String> {
+    let output = Command::new(systemctl)
+        .args(["--user", verb, crate::SERVICE_NAME])
+        .output()
+        .map_err(|error| {
+            service_program_spawn_error("systemctl", "systemd service state", &error)
+        })?;
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if state.is_empty() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "systemctl --user {verb} {} reported no unit state ({}): {}; the systemd user manager may be unreachable from this environment (check XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS)",
+                crate::SERVICE_NAME,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(state)
+}
+
+fn systemctl_unknown_state(verb: &str, state: &str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "systemctl --user {verb} {} reported unrecognized unit state `{state}`",
+            crate::SERVICE_NAME
+        ),
+    }
 }
 
 fn service_program_spawn_error(

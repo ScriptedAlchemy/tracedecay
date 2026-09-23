@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use tracedecay::mcp::McpServer;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -37,12 +38,10 @@ async fn tracedecay_lcm_describe_reports_shape_without_bodies() {
     let (cg, _env, dir) = setup_empty_project().await;
     let project = dir.path().to_path_buf();
     let external_body = format!("{SECRET} {}", "payload ".repeat(40_000));
-    let content_hash = tracedecay_lcm::util::sha256_hex(external_body.as_bytes());
+    let content_hash = sha256_hex(external_body.as_bytes());
     let payload_ref = format!(
         "payload_{}.payload",
-        tracedecay_lcm::util::sha256_hex(
-            format!("cursor\0{SESSION}\0{TOOL_ID}\0{content_hash}").as_bytes(),
-        ),
+        sha256_hex(format!("cursor\0{SESSION}\0{TOOL_ID}\0{content_hash}").as_bytes(),),
     );
     let source_projection =
         seed_temporal_lcm_session_message(&cg, SESSION, SOURCE_ID, SOURCE_BODY, 1).await;
@@ -64,7 +63,7 @@ async fn tracedecay_lcm_describe_reports_shape_without_bodies() {
         SESSION,
         0,
         &[LcmSourceRef::RawMessage { store_id: 1 }],
-        &tracedecay_lcm::util::sha256_hex(SUMMARY.as_bytes()),
+        &sha256_hex(SUMMARY.as_bytes()),
     );
     db.lcm_insert_summary_node_for_test(
         HostAdmissionScope::Project,

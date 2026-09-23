@@ -163,7 +163,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
@@ -479,6 +479,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                     backoff_millis: 0,
                 }],
                 fallback_status: None,
+                session_evidence_budget_stage: None,
                 report_ref: None,
                 artifacts: vec![artifact],
                 started_at: ledger_unix_seconds.to_string(),
@@ -495,7 +496,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
@@ -622,7 +623,7 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;

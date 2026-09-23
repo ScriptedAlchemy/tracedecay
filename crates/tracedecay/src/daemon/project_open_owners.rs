@@ -18,6 +18,7 @@ use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
 use crate::mcp::McpServer;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_agent_hosts::native_integration::{
     DaemonNativeIntegrationAnalysisV1, DaemonNativeIntegrationServiceRegistry,
     NativeIntegrationTargetV1,
@@ -80,7 +81,7 @@ async fn install_project_open_source_edit_owners(
 
 pub(crate) async fn install_project_open_source_edit_preview_owner(
     server: &McpServer,
-    graph: Arc<crate::project::TraceDecay>,
+    graph: Arc<tracedecay_project::project::TraceDecay>,
     code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
     project_root: &Path,
     project_id: &str,
@@ -812,7 +813,10 @@ async fn register_project_query_authority(
     session_db: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     scope: ResolvedScope,
 ) {
-    let cursor_keys = match session_db.load_session_cursor_key_provider_result().await {
+    let cursor_keys = match SessionTemporalAccess::new(&*session_db)
+        .load_session_cursor_key_provider_result()
+        .await
+    {
         Ok(cursor_keys) => cursor_keys,
         Err(error) => {
             tracing::debug!(

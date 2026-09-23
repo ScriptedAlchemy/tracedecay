@@ -143,9 +143,7 @@ pub(super) fn skill_merge_from_proposal(
             .transpose()?,
         category: optional_proposal_string(object.get("category"))?,
         targets: optional_proposal_targets(object.get("targets"))?,
-        body_markdown: optional_proposal_string(
-            object.get("body_markdown").or_else(|| object.get("body")),
-        )?,
+        body_markdown: optional_proposal_string(object.get("body_markdown"))?,
         support_files: if object
             .get("support_files")
             .is_some_and(|value| !value.is_null())
@@ -229,9 +227,7 @@ pub(super) fn applied_consolidation_record(
     let reason = proposal.get("reason").cloned().unwrap_or(Value::Null);
     let mut record = json!({
         "action": action.as_str(),
-        "proposal_action": action.as_str(),
-        "reason": reason.clone(),
-        "proposal_reason": reason,
+        "reason": reason,
         "application_status": "applied",
         "resulting_state": "archived",
         "archived_skill_id": applied_source.metadata.id,
@@ -270,7 +266,7 @@ mod tests {
         create_managed_skill, default_managed_skill_targets, load_managed_skill,
     };
     #[cfg(unix)]
-    use super::super::super::skill_usage::skill_usage_ledger_path;
+    use super::super::super::skill_usage::skill_usage_record_path;
     use super::super::super::skill_usage::{DEFAULT_SKILL_OVERLAP_LIMIT, skill_overlap_candidates};
     use super::*;
 
@@ -459,8 +455,10 @@ mod tests {
     #[cfg(unix)]
     fn replace_usage_ledger_with_blocking_fifo(
         profile_root: &Path,
+        first_synced_skill_id: &str,
     ) -> (std::thread::JoinHandle<std::fs::File>, std::path::PathBuf) {
-        let ledger_path = skill_usage_ledger_path(profile_root);
+        let ledger_path = skill_usage_record_path(profile_root, first_synced_skill_id);
+        std::fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
         match std::fs::remove_file(&ledger_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1080,7 +1078,8 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let archive = skill_archive_from_proposal(&proposal, &skills).unwrap();
-        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let (fifo_writer, ledger_path) =
+            replace_usage_ledger_with_blocking_fifo(profile.path(), "workflow-b");
         let profile_root = profile.path().to_path_buf();
         let archive_for_task = archive.clone();
         let mut task =
@@ -1153,7 +1152,8 @@ mod tests {
             "reason": "duplicate guidance"
         });
         let merge = skill_merge_from_proposal(&proposal, &skills).unwrap();
-        let (fifo_writer, ledger_path) = replace_usage_ledger_with_blocking_fifo(profile.path());
+        let (fifo_writer, ledger_path) =
+            replace_usage_ledger_with_blocking_fifo(profile.path(), "workflow-a");
         let profile_root = profile.path().to_path_buf();
         let merge_for_task = merge.clone();
         let mut task =

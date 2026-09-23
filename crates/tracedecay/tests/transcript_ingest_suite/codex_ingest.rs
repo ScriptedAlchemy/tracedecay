@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::codex::CodexSource;
+use tracedecay_sessions::runtime::hosts::codex::CodexSource;
 use tracedecay_sessions::runtime::source::{StoredCursor, TranscriptSource};
 
 use crate::codex::{write_codex_rollout, write_jsonl};

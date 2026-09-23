@@ -35,6 +35,7 @@ pub(super) async fn execute_primitive(
     wire_request_id: String,
     surface_operation: ApplicationSurfaceOperation,
     request: PrimitiveRequest,
+    resolved_scope: Option<&ResolvedScope>,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -61,6 +62,12 @@ pub(super) async fn execute_primitive(
     let Some(registered) = registered else {
         return missing_registered_owner_problem(publication, wire_request_id);
     };
+    // A cross-project selection executes only on the runtime registered for
+    // exactly that scope; anything else is concealed rather than served from
+    // whichever project this route reached.
+    if !resolved_scope.is_none_or(|scope| scope == &registered.scope) {
+        return concealed_application_problem(wire_request_id);
+    }
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) if access.scope == registered.scope => access,
         Ok(_) | Err(_) => return concealed_application_problem(wire_request_id),
@@ -120,7 +127,7 @@ pub(super) async fn execute_primitive(
         }
     };
     if result.is_ok() {
-        let finished_at = current_micros();
+        let finished_at = now_micros();
         let publication_authority = match authorization
             .recheck_publication(&context, &operation, &admission, finished_at)
             .await
@@ -160,6 +167,7 @@ pub(super) async fn execute_callable_code(
     surface_operation: ApplicationSurfaceOperation,
     request: CallableCodeSurfaceRequest,
     page: PageRequest,
+    resolved_scope: Option<&ResolvedScope>,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -176,6 +184,12 @@ pub(super) async fn execute_callable_code(
         // warming unless project-open already recorded a terminal failure.
         return missing_registered_owner_problem(publication, wire_request_id);
     };
+    // A cross-project selection executes only on the runtime registered for
+    // exactly that scope; anything else is concealed rather than served from
+    // whichever project this route reached.
+    if !resolved_scope.is_none_or(|scope| scope == &registered.scope) {
+        return concealed_application_problem(wire_request_id);
+    }
     let access = match registered.authorization.current(observed_at).await {
         Ok(access) => access,
         Err(problem) => return application_problem(wire_request_id, problem),
@@ -347,7 +361,7 @@ pub fn callable_code_request_context(
     if cancellation.is_cancelled() {
         return Err(ApplicationProblem::cancelled_before_admission());
     }
-    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(now_micros()) {
         return Err(ApplicationProblem::timed_out_before_admission());
     }
     let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
@@ -477,7 +491,7 @@ pub(super) async fn execute_context_scout(
         }
     };
     let Some(configuration) =
-        tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(&current)
     else {
         return DaemonInvocationResponse::problem(
             wire_request_id,
@@ -824,7 +838,7 @@ async fn execute_context_scout_mutation(
     };
     let execution = match OperationReceipt::completed(
         observed_at,
-        current_micros(),
+        now_micros(),
         deadline,
         OperationBudgetUsage::default(),
     ) {
@@ -1117,7 +1131,7 @@ async fn reconcile_context_scout_configuration(
         .map_err(|_| ContextScoutActivationReconciliationError::ConfigurationUnavailable)?;
     let current = current.into_current_state();
     let refreshed =
-        tracedecay_agent_hosts::agents::context_scout::ports::ContextScoutConfigurationPinV1::from_current(&current)
+        tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1::from_current(&current)
             .ok_or(ContextScoutActivationReconciliationError::InvalidConfiguration)?;
     if !registry
         .advance_control_exact_address(address, scope, &refreshed)

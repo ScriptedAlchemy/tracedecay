@@ -114,7 +114,7 @@ fn project_observation_id(cg: &TraceDecay) -> Result<ProjectId> {
 /// silently consuming the cap and reporting the pass as complete.
 async fn admit_codex_project_rollouts(
     admission: &HostAdmissionFacade<'_>,
-    source: &tracedecay_sessions::runtime::codex::CodexSource,
+    source: &tracedecay_sessions::runtime::hosts::codex::CodexSource,
     project_root: &Path,
     project_id: ProjectId,
     max_new_bytes: Option<u64>,
@@ -128,7 +128,7 @@ async fn admit_codex_project_rollouts(
     let mut paths = source.transcript_paths(project_root).into_iter().peekable();
     while let Some(path) = paths.next() {
         let progress =
-            tracedecay_sessions::runtime::codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+            tracedecay_sessions::runtime::hosts::codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
                 &path,
                 project_root,
                 project_id.clone(),
@@ -180,7 +180,7 @@ async fn drain_host_observation_projections(
     scope: &ObservationScopeV1,
     cancellation: &ObservationCancellation,
 ) -> Result<u64> {
-    let stats = tracedecay_sessions::runtime::claude_observation::drain_projection_queue(
+    let stats = tracedecay_sessions::runtime::hosts::claude_observation::drain_projection_queue(
         admission,
         scope,
         cancellation,
@@ -334,7 +334,7 @@ async fn admit_codex_rollouts_once(
     ) {
         return Err(rejection);
     }
-    let source = tracedecay_sessions::runtime::codex::CodexSource::new()
+    let source = tracedecay_sessions::runtime::hosts::codex::CodexSource::new()
         .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
     let project_id = project_observation_id(cg)?;
     let scope = ObservationScopeV1::Project {
@@ -749,7 +749,7 @@ pub async fn ingest_transcript_with_cancellation(
                     cg.project_root()
                 )),
                 cg.project_root(),
-                tracedecay_project::project::current_timestamp()
+                tracedecay_runtime_core::tracedecay::current_timestamp()
             ),
             label = "mcp.hook_runtime.hint_settle"
         )
