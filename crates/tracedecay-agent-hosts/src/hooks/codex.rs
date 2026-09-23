@@ -12,7 +12,7 @@ use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::claude::is_code_research_prompt;
 use super::steering::{HookWorkspaceStatus, index_status_line};
-use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
+use super::tool_hints::{HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
     additional_context_json, append_tool_hint, compact_daemon_args, deduped_project_hint_with_id,
     event_cwd_from_parsed, event_project_root, event_project_root_from_json,
@@ -21,6 +21,7 @@ use super::{
     record_hint_analytics, record_hook_analytics, record_hook_invoked_parsed,
     record_workspace_status_analytics, rel_under_root, text_field,
 };
+use tracedecay_domain::HostIntegrationIdV1;
 
 const CODEX_SUBAGENT_START_CONTEXT: &str = "TraceDecay context for this new or code-research \
 subagent: when the task needs unfamiliar code context, use tracedecay_context for concepts, \
@@ -45,14 +46,14 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Codex,
+        HostIntegrationIdV1::Codex,
         "SessionStart",
         &event,
         &parsed,
     );
     let guidance = super::dispatch::dispatch_for_scope(
         runtime,
-        tracedecay_hooks::HookHostV1::Codex,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
         root.as_deref(),
         Some(&hook_telemetry),
@@ -67,7 +68,7 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
     );
     if !super::write_hook_output(
         root.as_deref(),
-        tracedecay_hooks::HookHostV1::Codex,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
         &output,
     )
@@ -96,8 +97,13 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     match profile {
         Ok(None) => {
             return i32::from(
-                !super::write_hook_output(None, tracedecay_hooks::HookHostV1::Codex, &event, "{}")
-                    .await,
+                !super::write_hook_output(
+                    None,
+                    tracedecay_domain::NativeHostIdentityV1::Codex,
+                    &event,
+                    "{}",
+                )
+                .await,
             );
         }
         Err(error) => {
@@ -109,7 +115,7 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Codex,
+        HostIntegrationIdV1::Codex,
         "UserPromptSubmit",
         &event,
         &parsed,
@@ -141,7 +147,7 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     };
     if !super::write_hook_output(
         root.as_deref(),
-        tracedecay_hooks::HookHostV1::Codex,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
         &output,
     )
@@ -197,14 +203,14 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Codex,
+        HostIntegrationIdV1::Codex,
         "PostToolUse",
         &event,
         &parsed,
     );
     let guidance = super::dispatch::dispatch_for_scope(
         runtime,
-        tracedecay_hooks::HookHostV1::Codex,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
         root.as_deref(),
         Some(&hook_telemetry),
@@ -216,7 +222,7 @@ pub async fn hook_codex_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     if let Some(guidance) = guidance
         && !super::write_hook_output(
             root.as_deref(),
-            tracedecay_hooks::HookHostV1::Codex,
+            tracedecay_domain::NativeHostIdentityV1::Codex,
             &event,
             &additional_context_json("PostToolUse", &guidance),
         )
@@ -241,19 +247,21 @@ pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Codex,
+        HostIntegrationIdV1::Codex,
         "PostCompact",
         &event,
         &parsed,
     );
-    if std::env::var_os(tracedecay_sessions::runtime::codex_app_server::CODEX_SUMMARY_CHILD_ENV)
-        .is_none()
+    if std::env::var_os(
+        tracedecay_sessions::runtime::hosts::codex_app_server::CODEX_SUMMARY_CHILD_ENV,
+    )
+    .is_none()
     {
         codex_post_compact(runtime, &event, Some(&hook_telemetry)).await;
     }
     if !super::write_hook_output(
         root.as_deref(),
-        tracedecay_hooks::HookHostV1::Codex,
+        tracedecay_domain::NativeHostIdentityV1::Codex,
         &event,
         &serde_json::json!({}).to_string(),
     )
@@ -299,7 +307,7 @@ pub fn evaluate_codex_subagent_start(event_json: &str) -> Option<String> {
         record_hint_analytics(
             root.as_deref(),
             "hint_candidate",
-            HintAgent::Codex,
+            HostIntegrationIdV1::Codex,
             event_session_id(&parsed).as_deref(),
             &hint_id,
             &hint,
@@ -342,7 +350,7 @@ pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &s
         Some(&root),
         "codex_subagent_start",
         serde_json::json!({
-            "agent": HintAgent::Codex.as_key(),
+            "agent": HostIntegrationIdV1::Codex.as_key(),
             "session_id": analytics_session_id.as_deref(),
             "agent_type": agent_type,
             "count": next,
@@ -534,7 +542,7 @@ async fn codex_post_compact(
 fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<ToolHint> {
     deduped_project_hint_with_id(
         event_project_root(parsed).as_deref(),
-        HintAgent::Codex,
+        HostIntegrationIdV1::Codex,
         event_session_id(parsed),
         hint_id,
         hint,
@@ -543,7 +551,7 @@ fn deduped_codex_hint(parsed: &Value, hint_id: &str, hint: ToolHint) -> Option<T
 
 fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
     let hint = decide_hint(&ToolHintInput {
-        agent: HintAgent::Codex,
+        agent: HostIntegrationIdV1::Codex,
         session_id: event_session_id(parsed),
         tool_name: None,
         command: None,
@@ -560,7 +568,7 @@ fn codex_prompt_hint(parsed: &Value) -> Option<ToolHint> {
     record_hint_analytics(
         root.as_deref(),
         "hint_candidate",
-        HintAgent::Codex,
+        HostIntegrationIdV1::Codex,
         event_session_id(parsed).as_deref(),
         &hint_id,
         &hint,

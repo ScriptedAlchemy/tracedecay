@@ -22,8 +22,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    TextFileMutation, UpdatePluginOutcome, load_json_file, render_json_config,
-    safe_write_text_file, update_config_file_transactionally, update_text_file_transactionally,
+    TextFileMutation, load_json_file, render_json_config,
+    safe_write_text_file, update_text_file_transactionally,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -102,28 +102,18 @@ impl AgentIntegration for OpenCodeIntegration {
     fn deactivate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle::HostComponentV1],
-        ctx: &InstallContext,
+        _ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
         uninstall_mcp_server(&project_path.join("opencode.json"))?;
         remove_opencode_plugin(&project_path.join(".opencode/plugins/tracedecay.ts"))?;
         let agents_md = project_path.join("AGENTS.md");
         super::remove_managed_skill_prompt_index(
-            &ctx.home,
             &agents_md,
             tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
         )?;
         uninstall_prompt_rules(&agents_md)?;
         Ok(())
-    }
-
-    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        let plugin_path = opencode_plugin_path(&ctx.home);
-        if !plugin_path.exists() {
-            return Ok(UpdatePluginOutcome::NotInstalled);
-        }
-        install_opencode_plugin(&plugin_path, &ctx.tracedecay_bin)?;
-        Ok(UpdatePluginOutcome::Refreshed(vec![plugin_path]))
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -235,9 +225,7 @@ impl AgentIntegration for OpenCodeIntegration {
         if components.contains(&HostComponentV1::Core)
             || components.contains(&HostComponentV1::ContextMcp)
         {
-            let config = opencode_config_path(home);
-            paths.push(config.clone());
-            paths.push(opencode_original_config_path(&config));
+            paths.push(opencode_config_path(home));
         }
         if components.contains(&HostComponentV1::Core) {
             paths.push(opencode_prompt_path(home));
@@ -264,7 +252,6 @@ impl AgentIntegration for OpenCodeIntegration {
             &ctx.tracedecay_bin,
             mcp,
             core,
-            false,
         )?;
         if core {
             let prompt = opencode_prompt_path(&ctx.home);
@@ -288,11 +275,10 @@ impl AgentIntegration for OpenCodeIntegration {
 
         let core = components.contains(&HostComponentV1::Core);
         let mcp = components.contains(&HostComponentV1::ContextMcp);
-        remove_registration_entries(&opencode_config_path(&ctx.home), mcp, core, false)?;
+        remove_registration_entries(&opencode_config_path(&ctx.home), mcp, core)?;
         if core {
             let prompt = opencode_prompt_path(&ctx.home);
             super::remove_managed_skill_prompt_index(
-                &ctx.home,
                 &prompt,
                 tracedecay_automation_runtime::automation::skill_targets::SkillInstallTarget::OpenCode,
             )?;
@@ -421,33 +407,18 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
         .join("opencode/opencode.json")
 }
 
-/// Resolution depends only on which prompt *file* exists, never on whether the
-/// `~/.config/opencode` directory exists. The directory is created by
-/// TraceDecay's own managed artifacts (`plugins/`, `agent/`, `command/`,
-/// `skills/`), which a component-set transaction writes between the moment the
-/// registration authority confirms a revision and the moment it applies. Keying
-/// on the directory therefore moved this path, and with it the hashed
-/// registration path list, mid-transaction, so every apply rechecked against a
-/// different revision and rolled back with `StalePreview`. No managed artifact
-/// ever writes an `AGENTS.md`, so file existence is stable across a deploy.
-///
-/// A user whose rules already live in the legacy `~/AGENTS.md` keeps that file;
-/// everyone else gets the modern config-dir path, whose parent the write path
-/// creates on demand.
+/// Resolution never depends on filesystem state. `~/.config/opencode` is
+/// created by TraceDecay's own managed artifacts, which a component-set
+/// transaction writes between the moment the registration authority confirms
+/// a revision and the moment it applies; a path keyed on what exists would
+/// move the hashed registration path list mid-transaction and roll every apply
+/// back with `StalePreview`. The write path creates the parent on demand.
 pub(super) fn opencode_prompt_path(home: &Path) -> std::path::PathBuf {
-    if let Some(xdg) = ambient_xdg_config_home(home)
+    ambient_xdg_config_home(home)
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute())
-    {
-        return xdg.join("opencode/AGENTS.md");
-    }
-    let modern = home.join(".config/opencode/AGENTS.md");
-    let legacy = home.join("AGENTS.md");
-    if !modern.is_file() && legacy.is_file() {
-        legacy
-    } else {
-        modern
-    }
+        .unwrap_or_else(|| home.join(".config"))
+        .join("opencode/AGENTS.md")
 }
 
 fn opencode_asset_relative_paths(
@@ -534,7 +505,7 @@ fn mirror_external_opencode_assets_to(
                 source.display()
             ),
         })?;
-        super::safe_write_bytes_file(&destination, &bytes, None)?;
+        super::safe_write_bytes_file(&destination, &bytes)?;
     }
     Ok(())
 }
@@ -602,7 +573,7 @@ fn install_opencode_plugin(path: &Path, tracedecay_bin: &str) -> Result<()> {
         });
     }
     for (_, rendered) in rendered_plugin_files(tracedecay_bin)? {
-        safe_write_text_file(path, &rendered, None)?;
+        safe_write_text_file(path, &rendered)?;
     }
     Ok(())
 }
@@ -637,11 +608,10 @@ fn remove_opencode_plugin(path: &Path) -> Result<()> {
 
 /// Register MCP server in opencode.json.
 ///
-/// Safety: creates a `.bak` backup before writing and restores it on any
-/// error. Uses strict JSON parsing so an existing file with invalid syntax
-/// is never silently replaced with an empty object.
+/// Uses strict JSON parsing so an existing file with invalid syntax is never
+/// silently replaced with an empty object.
 fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    install_registration_entries(config_path, tracedecay_bin, true, true, true)
+    install_registration_entries(config_path, tracedecay_bin, true, true)
 }
 
 /// Merge TraceDecay's `mcp` and `lsp` registrations into `opencode.json`.
@@ -663,12 +633,11 @@ fn install_registration_entries(
     tracedecay_bin: &str,
     install_mcp: bool,
     install_lsp: bool,
-    preserve_backup: bool,
 ) -> Result<()> {
     if !install_mcp && !install_lsp {
         return Ok(());
     }
-    let merge = |existing: &str| {
+    update_text_file_transactionally(config_path, |existing: &str| {
         let config = merge_registration_entries(
             config_path,
             existing,
@@ -680,15 +649,7 @@ fn install_registration_entries(
             (),
             TextFileMutation::Write(render_json_config(config_path, &config)?),
         ))
-    };
-    // Component-set transactions (`preserve_backup: false`) already stage
-    // exact registration backups, so only the direct install path leaves the
-    // user-facing `.bak`.
-    if preserve_backup {
-        update_config_file_transactionally(config_path, merge)?;
-    } else {
-        update_text_file_transactionally(config_path, merge)?;
-    }
+    })?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
         config_path.display()
@@ -710,12 +671,6 @@ fn merge_registration_entries(
     // so the write below can be proven not to have created, altered, or
     // dropped the key `opencode plugin` owns.
     let host_plugin_before = plugin_cli::host_owned_plugin_registration(&config);
-    let original_path = opencode_original_config_path(config_path);
-    let has_tracedecay =
-        config.pointer("/mcp/tracedecay").is_some() || config.pointer("/lsp/tracedecay").is_some();
-    if !has_tracedecay && config_path.is_file() && !original_path.exists() {
-        super::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
-    }
 
     let config_object = config
         .as_object_mut()
@@ -836,13 +791,12 @@ fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
 
 /// Remove MCP server from opencode.json.
 fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
-    remove_registration_entries(config_path, true, true, true)
+    remove_registration_entries(config_path, true, true)
 }
 
 /// Outcome of the uninstall transform, reported after publication.
 enum OpenCodeRegistrationRemoval {
     NoEntry,
-    RestoredOriginal,
     RemovedFile,
     Rewritten,
 }
@@ -851,42 +805,19 @@ fn remove_registration_entries(
     config_path: &Path,
     remove_mcp: bool,
     remove_lsp: bool,
-    preserve_backup: bool,
 ) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
-    let original_path = opencode_original_config_path(config_path);
-    let strip = |existing: &str| {
-        strip_registration_entries(
-            config_path,
-            &original_path,
-            existing,
-            remove_mcp,
-            remove_lsp,
-        )
-    };
-    // Component-set transactions (`preserve_backup: false`) already stage
-    // exact registration backups, so only the direct uninstall path leaves
-    // the user-facing `.bak`.
-    let outcome = if preserve_backup {
-        update_config_file_transactionally(config_path, strip)?
-    } else {
-        update_text_file_transactionally(config_path, strip)?
-    };
+    let outcome = update_text_file_transactionally(config_path, |existing: &str| {
+        strip_registration_entries(config_path, existing, remove_mcp, remove_lsp)
+    })?;
     match outcome {
         OpenCodeRegistrationRemoval::NoEntry => {
             eprintln!(
                 "  No tracedecay MCP/LSP registration in {}, skipping",
                 config_path.display()
             );
-        }
-        OpenCodeRegistrationRemoval::RestoredOriginal => {
-            super::safe_remove_host_file(&original_path).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("failed to remove {}: {error}", original_path.display()),
-                }
-            })?;
         }
         OpenCodeRegistrationRemoval::RemovedFile => {
             eprintln!(
@@ -905,11 +836,9 @@ fn remove_registration_entries(
 }
 
 /// Strip TraceDecay's registrations from the config bytes observed under the
-/// write lock, deciding between a byte-exact pre-install restore, a rewrite,
-/// and removal of an emptied file.
+/// write lock, deciding between a rewrite and removal of an emptied file.
 fn strip_registration_entries(
     config_path: &Path,
-    original_path: &Path,
     existing: &str,
     remove_mcp: bool,
     remove_lsp: bool,
@@ -952,17 +881,6 @@ fn strip_registration_entries(
             TextFileMutation::Unchanged,
         ));
     }
-    if let Ok(original) = std::fs::read(original_path)
-        && serde_json::from_slice::<serde_json::Value>(&original).ok() == Some(config.clone())
-    {
-        let original = String::from_utf8(original).map_err(|error| TraceDecayError::Config {
-            message: format!("{} is not valid UTF-8: {error}", original_path.display()),
-        })?;
-        return Ok((
-            OpenCodeRegistrationRemoval::RestoredOriginal,
-            TextFileMutation::Write(original),
-        ));
-    }
     plugin_cli::ensure_host_owned_plugin_registration_untouched(
         host_plugin_before.as_ref(),
         &config,
@@ -979,10 +897,6 @@ fn strip_registration_entries(
             TextFileMutation::Write(render_json_config(config_path, &config)?),
         ))
     }
-}
-
-fn opencode_original_config_path(config_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
 fn uninstall_prompt_rules(prompt_path: &Path) -> Result<()> {
@@ -1350,7 +1264,6 @@ mod tests {
         let ctx = InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "/usr/bin/tracedecay".to_string(),
-            tool_permissions: Vec::new(),
             project_root: Some(project.path().to_path_buf()),
             dashboard: false,
         };

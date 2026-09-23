@@ -29,13 +29,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{UtcMicros, canonical_json_bytes, framed_log::checksum as frame_checksum};
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write as shared_atomic_write,
     read_bounded as shared_read_bounded, sync_directory as shared_sync_directory,
     truncate_file as shared_truncate_file, validate_regular_or_missing as shared_validate_regular,
 };
 
-use crate::{HookEventEnvelopeV2, HookHostV1, MAX_SPOOL_AGE_MICROS, MAX_SPOOL_RECORDS_PER_HOST};
+use crate::{HookEventEnvelopeV2, MAX_SPOOL_AGE_MICROS, MAX_SPOOL_RECORDS_PER_HOST};
+use tracedecay_domain::NativeHostIdentityV1;
 
 const LEDGER_MAGIC: &[u8; 4] = b"TDL1";
 const LEDGER_FORMAT_VERSION: u16 = 1;
@@ -155,18 +157,12 @@ pub fn hook_admission_digest(
 #[derive(Debug)]
 pub struct HookAdmissionLedgerV1 {
     root: PathBuf,
-    _writer_lock: fs::File,
-    host: HookHostV1,
+    _writer_lock: FileLease,
+    host: NativeHostIdentityV1,
     limits: HookAdmissionLedgerLimitsV1,
     entries: BTreeMap<[u8; IDENTITY_BYTES], LedgerEntry>,
     completed_work: BTreeSet<[u8; IDENTITY_BYTES]>,
     next_order: u64,
-}
-
-impl Drop for HookAdmissionLedgerV1 {
-    fn drop(&mut self) {
-        let _ = self._writer_lock.unlock();
-    }
 }
 
 impl HookAdmissionLedgerV1 {
@@ -174,7 +170,7 @@ impl HookAdmissionLedgerV1 {
     #[hotpath::measure(label = "hooks.admission.open")]
     pub fn open(
         root: impl Into<PathBuf>,
-        host: HookHostV1,
+        host: NativeHostIdentityV1,
         limits: HookAdmissionLedgerLimitsV1,
         now: UtcMicros,
     ) -> Result<(Self, HookAdmissionLedgerOpenReportV1), HookAdmissionLedgerError> {
@@ -256,7 +252,7 @@ impl HookAdmissionLedgerV1 {
         Ok((ledger, report))
     }
 
-    pub fn host(&self) -> HookHostV1 {
+    pub fn host(&self) -> NativeHostIdentityV1 {
         self.host
     }
 
@@ -460,7 +456,7 @@ fn lock_path(root: &Path) -> PathBuf {
     root.join(LOCK_FILE)
 }
 
-fn acquire_writer_lock(root: &Path) -> Result<fs::File, HookAdmissionLedgerError> {
+fn acquire_writer_lock(root: &Path) -> Result<FileLease, HookAdmissionLedgerError> {
     let path = lock_path(root);
     shared_validate_regular(&path).map_err(|_| HookAdmissionLedgerError::UnsafePath)?;
     let file = fs::OpenOptions::new()
@@ -471,7 +467,7 @@ fn acquire_writer_lock(root: &Path) -> Result<fs::File, HookAdmissionLedgerError
         .open(&path)
         .map_err(|_| HookAdmissionLedgerError::Io)?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(FileLease::held(file, "hooks.admission.writer")),
         Err(std::fs::TryLockError::WouldBlock) => {
             hotpath::gauge!("hooks.admission.lock.contended").inc(1);
             Err(HookAdmissionLedgerError::Busy)
@@ -637,7 +633,7 @@ mod tests {
         HookEventEnvelopeV2 {
             schema_version: HOOK_EVENT_SCHEMA_VERSION,
             event_id: [event_id; 16],
-            producer: HookHostV1::ClaudeCode,
+            producer: NativeHostIdentityV1::ClaudeCode,
             protected_session_id: [7; 32],
             project_id: [1; 16],
             repository_id: [2; 16],
@@ -655,7 +651,7 @@ mod tests {
     fn open(root: &Path, now: UtcMicros) -> HookAdmissionLedgerV1 {
         HookAdmissionLedgerV1::open(
             root,
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             HookAdmissionLedgerLimitsV1::stock(),
             now,
         )
@@ -746,7 +742,7 @@ mod tests {
                 "contended" => assert!(matches!(
                     HookAdmissionLedgerV1::open(
                         &root,
-                        HookHostV1::ClaudeCode,
+                        NativeHostIdentityV1::ClaudeCode,
                         HookAdmissionLedgerLimitsV1::stock(),
                         UtcMicros(2),
                     ),
@@ -755,7 +751,7 @@ mod tests {
                 "released" => {
                     HookAdmissionLedgerV1::open(
                         &root,
-                        HookHostV1::ClaudeCode,
+                        NativeHostIdentityV1::ClaudeCode,
                         HookAdmissionLedgerLimitsV1::stock(),
                         UtcMicros(3),
                     )
@@ -885,10 +881,14 @@ mod tests {
             max_records: 8,
             max_age_micros: MAX_SPOOL_AGE_MICROS,
         };
-        let mut ledger =
-            HookAdmissionLedgerV1::open(root.path(), HookHostV1::ClaudeCode, limits, UtcMicros(1))
-                .unwrap()
-                .0;
+        let mut ledger = HookAdmissionLedgerV1::open(
+            root.path(),
+            NativeHostIdentityV1::ClaudeCode,
+            limits,
+            UtcMicros(1),
+        )
+        .unwrap()
+        .0;
         for index in 1..=9u8 {
             assert_eq!(
                 ledger
@@ -901,10 +901,14 @@ mod tests {
         assert!(ledger.live_records() <= 8);
         // The newest identity is still deduplicated after eviction + reopen.
         drop(ledger);
-        let mut reopened =
-            HookAdmissionLedgerV1::open(root.path(), HookHostV1::ClaudeCode, limits, UtcMicros(20))
-                .unwrap()
-                .0;
+        let mut reopened = HookAdmissionLedgerV1::open(
+            root.path(),
+            NativeHostIdentityV1::ClaudeCode,
+            limits,
+            UtcMicros(20),
+        )
+        .unwrap()
+        .0;
         assert_eq!(
             reopened.admit(&envelope(9, 5), UtcMicros(21)).unwrap(),
             HookAdmissionDecisionV1::ExactDuplicate
@@ -925,7 +929,7 @@ mod tests {
 
         let (mut ledger, report) = HookAdmissionLedgerV1::open(
             root.path(),
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             HookAdmissionLedgerLimitsV1::stock(),
             UtcMicros(3),
         )

@@ -8,8 +8,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// A domain-catalogued host whose lifecycle hooks notify the daemon.
-pub use tracedecay_domain::HostIntegrationIdV1 as HookAgent;
+use tracedecay_domain::HostIntegrationIdV1;
 
 pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
 
@@ -67,7 +66,7 @@ pub struct DaemonHookEvent {
 
 impl DaemonHookEvent {
     fn new(
-        agent: HookAgent,
+        agent: HostIntegrationIdV1,
         event: &'static str,
         rel_paths: Vec<String>,
         command: Option<String>,
@@ -92,7 +91,7 @@ impl DaemonHookEvent {
 
     pub fn cursor_after_shell_execution(cwd: PathBuf) -> Self {
         Self::new(
-            HookAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             "afterShellExecution",
             Vec::new(),
             None,
@@ -102,18 +101,22 @@ impl DaemonHookEvent {
 
     /// A provider session started: let the daemon own branch tracking and
     /// index refresh for the session's actual working directory.
-    pub fn session_start(agent: HookAgent, cwd: PathBuf) -> Self {
+    pub fn session_start(agent: HostIntegrationIdV1, cwd: PathBuf) -> Self {
         Self::new(agent, "sessionStart", Vec::new(), None, Some(cwd))
     }
 
     /// A file-edit tool finished: request targeted sync of the edited paths.
-    pub fn post_tool_use_edit(agent: HookAgent, rel_paths: Vec<String>, cwd: PathBuf) -> Self {
+    pub fn post_tool_use_edit(
+        agent: HostIntegrationIdV1,
+        rel_paths: Vec<String>,
+        cwd: PathBuf,
+    ) -> Self {
         Self::new(agent, "postToolUseEdit", rel_paths, None, Some(cwd))
     }
 
     /// A shell command finished. Command text is deliberately discarded:
     /// native daemon state, not shell parsing, owns Git reconciliation.
-    pub fn post_tool_use_shell(agent: HookAgent, cwd: PathBuf) -> Self {
+    pub fn post_tool_use_shell(agent: HostIntegrationIdV1, cwd: PathBuf) -> Self {
         Self::new(agent, "postToolUseShell", Vec::new(), None, Some(cwd))
     }
 }

@@ -8,12 +8,12 @@ use super::{
     ContextScoutModelExecutionV1, ContextScoutModelFuture, ContextScoutModelProposalV1,
     ContextScoutModelRequestV1, serialized_token_count, warm_token_counter,
 };
-use crate::ports::pricing::cost_of_turn;
 use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskContract, AgentTaskError, AgentTaskKind, AgentTaskRequest,
     AgentTaskResponse, CodexAppServerBackend, backend_availability,
 };
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay_session_memory::provider_pricing::{cost_of_usage, load_table};
 
 const CONTEXT_SCOUT_PROMPT_V1: &str = "\
 Select one supplied candidate and return only the JSON object required by the response schema. \
@@ -278,7 +278,15 @@ fn estimated_cost_microusd(
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
 ) -> Option<u64> {
-    let cost = cost_of_turn(provider?, model?, input_tokens?, output_tokens?, 0, 0)?;
+    let cost = cost_of_usage(
+        load_table(),
+        provider?,
+        model?,
+        input_tokens?,
+        output_tokens?,
+        Some(0),
+        Some(0),
+    )?;
     Some((cost * 1_000_000.0).round().clamp(0.0, u64::MAX as f64) as u64)
 }
 

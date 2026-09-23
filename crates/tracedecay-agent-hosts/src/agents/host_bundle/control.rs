@@ -1,43 +1,27 @@
 //! Layout of the `.tracedecay-host-bundle-v1` control directory: file names,
-//! path-rooted receipt readers, and receipt/journal validators.
+//! path-rooted receipt readers, and receipt validators.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::model::{
-    HostComponentSetEntryV1, HostComponentSetExecutionRequestV1,
-    HostComponentSetLifecyclePreviewV1, HostComponentSetV1,
+    HostComponentSetExecutionRequestV1, HostComponentSetLifecyclePreviewV1, HostComponentSetV1,
 };
 use super::planner::inspect_install_target;
 use super::{
-    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleBackupReceiptV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleJournalV1, HostBundleLifecycleOpV1,
-    HostBundleRestoreReceiptV1, HostBundleRollbackBoundaryV1, HostComponentSetJournalV1,
-    HostComponentSetReceiptV1, HostComponentV1, HostKindV1, MAX_HOST_COMPONENTS,
-    MAX_MANIFEST_ARTIFACTS, stock_host_kinds, validate_identifier, validate_relative_install_path,
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
+    MAX_HOST_COMPONENTS, MAX_MANIFEST_ARTIFACTS, stock_host_kinds, validate_identifier,
+    validate_relative_install_path,
 };
 
 pub(super) const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
-/// Legacy shared single-component journal. One file per lifecycle root meant
-/// recovering host Y rolled back host X, and a wedged journal blocked every
-/// other host. Journals are host-scoped now; this name is still read (and
-/// retired) so a journal left by an older binary is recovered rather than
-/// orphaned.
-pub(super) const HOST_BUNDLE_JOURNAL_FILE: &str = "journal.v1.json";
-/// Legacy shared component-set journal name. One journal per lifecycle root
-/// meant an interrupted transaction for any host blocked every other host.
-/// Journals are host-scoped now; this name is still read (and retired) so a
-/// journal left by an older binary is recovered rather than orphaned.
-pub(super) const HOST_COMPONENT_SET_JOURNAL_FILE: &str = "component-set-journal.v1.json";
-pub(super) const HOST_COMPONENT_SET_STAGE_DIR: &str = "component-set-staging";
-/// Set-aside directory for journals an operator explicitly abandoned with
-/// `tracedecay host-bundle recover --quarantine --yes`. Backups stay in place.
-pub(super) const HOST_BUNDLE_QUARANTINE_DIR: &str = "quarantine";
 /// Retired lifecycle-root lock. Hosts do not share a write target, so each
 /// host owns `writer.{slug}.v1.lock`. This name is not acquired; a new binary
 /// must not recreate it or independent hosts serialize again.
@@ -74,8 +58,14 @@ pub fn latest_host_component_set_receipt_at(
             continue;
         }
         let bytes = fs::read(entry.path()).map_err(|_| host_bundle_storage_failure!())?;
-        let Ok(receipt) = serde_json::from_slice::<HostComponentSetReceiptV1>(&bytes) else {
-            continue;
+        let receipt = match parse_receipt::<HostComponentSetReceiptV1>(&bytes) {
+            Ok(receipt) => receipt,
+            Err(HostBundleError::ReinstallRequired)
+                if receipt_schema_probe(&bytes).is_some_and(|probe| probe.host == Some(host)) =>
+            {
+                return Err(HostBundleError::ReinstallRequired);
+            }
+            Err(_) => continue,
         };
         if receipt.host != host
             || receipt.operation == HostBundleLifecycleOpV1::Uninstall
@@ -92,16 +82,6 @@ pub fn latest_host_component_set_receipt_at(
         }
     }
     Ok(latest.map(|(_, receipt)| receipt))
-}
-
-/// Where rollback backups are written, one subdirectory per applied operation
-/// id. Exposed so a dry run can tell the operator where the bytes it is about
-/// to replace will be preserved, without the CLI reconstructing a
-/// control-directory layout it does not own. The operation id is minted when
-/// the mutation actually runs, so only the root is knowable during a preview.
-#[must_use]
-pub fn host_bundle_backup_root(lifecycle_root: &Path) -> PathBuf {
-    lifecycle_root.join(HOST_BUNDLE_CONTROL_DIR).join("backups")
 }
 
 pub fn latest_host_component_receipt_at(
@@ -131,12 +111,39 @@ pub(super) fn read_receipt_at(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(host_bundle_storage_failure!()),
     };
-    let receipt = serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted)?;
+    let receipt: HostBundleInstallReceiptV1 = parse_receipt(&bytes)?;
     validate_receipt(&receipt)?;
     if receipt.host != host || receipt.component != component {
         return Err(HostBundleError::ReceiptCorrupted);
     }
     Ok(Some(receipt))
+}
+
+#[derive(Deserialize)]
+pub(super) struct ReceiptSchemaProbe {
+    schema_version: u16,
+    #[serde(default)]
+    pub(super) host: Option<HostKindV1>,
+}
+
+impl ReceiptSchemaProbe {
+    pub(super) fn is_current(&self) -> bool {
+        self.schema_version == HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
+    }
+}
+
+pub(super) fn receipt_schema_probe(bytes: &[u8]) -> Option<ReceiptSchemaProbe> {
+    serde_json::from_slice(bytes).ok()
+}
+
+/// Parse a receipt of the current schema. A receipt from an older schema is a
+/// typed [`HostBundleError::ReinstallRequired`], never migrated in place.
+pub(super) fn parse_receipt<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, HostBundleError> {
+    let probe = receipt_schema_probe(bytes).ok_or(HostBundleError::ReceiptCorrupted)?;
+    if !probe.is_current() {
+        return Err(HostBundleError::ReinstallRequired);
+    }
+    serde_json::from_slice(bytes).map_err(|_| HostBundleError::ReceiptCorrupted)
 }
 
 pub(super) fn is_safe_component(value: &str) -> bool {
@@ -154,7 +161,6 @@ pub(super) fn validate_receipt(
         || receipt.operation_id == [0; 16]
         || receipt.manifest_digest == [0; 32]
         || receipt.artifacts.len() > MAX_MANIFEST_ARTIFACTS
-        || receipt.rollback_history.len() > MAX_MANIFEST_ARTIFACTS
         || (receipt.operation == HostBundleLifecycleOpV1::Uninstall) != receipt.artifacts.is_empty()
     {
         return Err(HostBundleError::ReceiptCorrupted);
@@ -168,97 +174,6 @@ pub(super) fn validate_receipt(
             || receipt.artifacts[..index]
                 .iter()
                 .any(|existing| existing.relative_path == artifact.relative_path)
-        {
-            return Err(HostBundleError::ReceiptCorrupted);
-        }
-    }
-    for (index, operation_id) in receipt.rollback_history.iter().enumerate() {
-        if *operation_id == [0; 16] || receipt.rollback_history[..index].contains(operation_id) {
-            return Err(HostBundleError::ReceiptCorrupted);
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn validate_backup_receipt(
-    receipt: &HostBundleBackupReceiptV1,
-) -> Result<(), HostBundleError> {
-    if receipt.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
-        || receipt.operation_id == [0; 16]
-        || receipt.source_receipt_digest == [0; 32]
-        || receipt.host != receipt.manifest.host
-        || receipt.component != receipt.manifest.component
-        || receipt.artifacts.len() != receipt.manifest.artifacts.len()
-    {
-        return Err(HostBundleError::ReceiptCorrupted);
-    }
-    receipt
-        .manifest
-        .validate_structure()
-        .map_err(|_| HostBundleError::ReceiptCorrupted)?;
-    for (index, artifact) in receipt.artifacts.iter().enumerate() {
-        validate_relative_install_path(Path::new(&artifact.relative_path))?;
-        validate_identifier(&artifact.ownership_marker)?;
-        if artifact.artifact_digest == [0; 32]
-            || !is_safe_component(&artifact.snapshot_name)
-            || receipt.artifacts[..index]
-                .iter()
-                .any(|existing| existing.relative_path == artifact.relative_path)
-            || !receipt.manifest.artifacts.iter().any(|expected| {
-                expected.relative_path == artifact.relative_path
-                    && expected.artifact_digest == artifact.artifact_digest
-                    && expected.ownership_marker == artifact.ownership_marker
-            })
-        {
-            return Err(HostBundleError::ReceiptCorrupted);
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn validate_restore_receipt(
-    receipt: &HostBundleRestoreReceiptV1,
-) -> Result<(), HostBundleError> {
-    validate_receipt(&receipt.restored_receipt)?;
-    if receipt.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
-        || receipt.operation_id == [0; 16]
-        || receipt.backup_operation_id == [0; 16]
-        || receipt.restored_receipt.operation_id != receipt.operation_id
-        || receipt.restored_receipt.operation != HostBundleLifecycleOpV1::Repair
-        || receipt.restored_receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed
-    {
-        return Err(HostBundleError::ReceiptCorrupted);
-    }
-    Ok(())
-}
-
-pub(super) fn validate_journal(journal: &HostBundleJournalV1) -> Result<(), HostBundleError> {
-    if journal.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
-        || journal.operation_id == [0; 16]
-        || journal.manifest_digest == [0; 32]
-        || (journal.entries.is_empty() && journal.operation != HostBundleLifecycleOpV1::Uninstall)
-        || journal.entries.len() > MAX_MANIFEST_ARTIFACTS
-    {
-        return Err(HostBundleError::ReceiptCorrupted);
-    }
-    if let Some(receipt) = &journal.previous_receipt {
-        validate_receipt(receipt)?;
-        if receipt.host != journal.host || receipt.component != journal.component {
-            return Err(HostBundleError::ReceiptCorrupted);
-        }
-    }
-    for (index, entry) in journal.entries.iter().enumerate() {
-        validate_relative_install_path(Path::new(&entry.relative_path))?;
-        if entry
-            .backup_name
-            .as_deref()
-            .is_some_and(|backup| !is_safe_component(backup))
-            || journal.entries[..index]
-                .iter()
-                .any(|existing| existing.relative_path == entry.relative_path)
-            || (entry.backup_created && entry.backup_name.is_none())
-            || (entry.backup_name.is_some() && entry.wrote_new && !entry.backup_created)
-            || (entry.wrote_new && entry.installed_digest.is_none())
         {
             return Err(HostBundleError::ReceiptCorrupted);
         }
@@ -344,7 +259,6 @@ pub(super) fn component_set_receipt_matches(
             component_receipt.host == component.manifest.host
                 && component_receipt.component == component.manifest.component
                 && component_receipt.manifest_digest == manifest_digest
-                && component_receipt.rollback_boundary == HostBundleRollbackBoundaryV1::Passed
         });
         if !receipt_matches {
             return Ok(false);
@@ -399,7 +313,6 @@ pub(super) fn validate_component_set_receipt(
         if component_receipt.host != receipt.host
             || manifest.host != receipt.host
             || manifest.canonical_digest()? != component_receipt.manifest_digest
-            || component_receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed
             || receipt.component_receipts[..index]
                 .iter()
                 .any(|previous| previous.component == component_receipt.component)
@@ -410,145 +323,6 @@ pub(super) fn validate_component_set_receipt(
     Ok(())
 }
 
-pub(super) fn component_set_from_journal(
-    journal: &HostComponentSetJournalV1,
-) -> HostComponentSetV1 {
-    HostComponentSetV1 {
-        host: journal.host,
-        components: journal
-            .components
-            .iter()
-            .map(|component| HostComponentSetEntryV1 {
-                manifest: component.manifest.clone(),
-                contents: Vec::new(),
-            })
-            .collect(),
-    }
-}
-
-pub(super) fn validate_component_set_journal(
-    journal: &HostComponentSetJournalV1,
-) -> Result<(), HostBundleError> {
-    if journal.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
-        || journal.operation_id == [0; 16]
-        || journal.components.is_empty()
-        || journal.components.len() > MAX_HOST_COMPONENTS
-        || !journal.explicit_confirmation
-        || matches!(
-            journal.host,
-            HostKindV1::Hermes if journal.hermes_profile_bindings != 1
-        )
-        || matches!(
-            journal.host,
-            host if host != HostKindV1::Hermes && journal.hermes_profile_bindings != 0
-        )
-    {
-        return Err(HostBundleError::ReceiptCorrupted);
-    }
-    let preview_authority = [
-        journal.confirmed_plan_digest,
-        journal.base_registration_revision,
-        journal.current_registration_revision,
-        journal.artifact_state_revision,
-    ];
-    if preview_authority.iter().any(Option::is_some)
-        && preview_authority.iter().any(Option::is_none)
-    {
-        return Err(HostBundleError::ReceiptCorrupted);
-    }
-    // The recorded phase and the two registration flags are not independent:
-    // the writer raises each flag before the hook it names and advances the
-    // phase after that hook returns. A journal claiming a phase its flags
-    // cannot support was never written by this lifecycle, so recovery must not
-    // act on its registration story at all.
-    if !journal.registration_flags_match_state() {
-        return Err(HostBundleError::ReceiptCorrupted);
-    }
-    let mut components = BTreeMap::new();
-    let mut paths = BTreeMap::new();
-    let mut configuration_authority = None;
-    for component in &journal.components {
-        component.manifest.validate_structure()?;
-        let authority = (
-            component.manifest.configuration_snapshot_id.as_str(),
-            component.manifest.integration_manifest_digest,
-            component.manifest.catalog_digest,
-        );
-        if let Some(expected) = configuration_authority {
-            if authority != expected {
-                return Err(HostBundleError::ReceiptCorrupted);
-            }
-        } else {
-            configuration_authority = Some(authority);
-        }
-        if component.manifest.host != journal.host
-            || components
-                .insert(component.manifest.component, ())
-                .is_some()
-            || (component.entries.is_empty()
-                && journal.operation != HostBundleLifecycleOpV1::Uninstall)
-            || component.entries.len() > MAX_MANIFEST_ARTIFACTS
-        {
-            return Err(HostBundleError::ReceiptCorrupted);
-        }
-        if let Some(receipt) = &component.previous_receipt {
-            validate_receipt(receipt)?;
-            if receipt.host != journal.host || receipt.component != component.manifest.component {
-                return Err(HostBundleError::ReceiptCorrupted);
-            }
-        }
-        for (index, entry) in component.entries.iter().enumerate() {
-            validate_relative_install_path(Path::new(&entry.relative_path))?;
-            if entry
-                .backup_name
-                .as_deref()
-                .is_some_and(|backup| !is_safe_component(backup))
-                || component.entries[..index]
-                    .iter()
-                    .any(|previous| previous.relative_path == entry.relative_path)
-                || paths.insert(entry.relative_path.clone(), ()).is_some()
-                || (entry.backup_created && entry.backup_name.is_none())
-                || (entry.backup_name.is_some() && entry.wrote_new && !entry.backup_created)
-                || (entry.wrote_new && entry.installed_digest.is_none())
-            {
-                return Err(HostBundleError::ReceiptCorrupted);
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn backup_name(operation_id: [u8; 16], relative_path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(operation_id);
-    hasher.update(relative_path.as_bytes());
-    format!("artifact-{}", hex::encode(hasher.finalize()))
-}
-
-pub(super) fn host_bundle_snapshot_name(index: usize, relative_path: &str) -> String {
-    let digest = Sha256::digest(relative_path.as_bytes());
-    format!("{index:03}-{}", hex::encode(&digest[..16]))
-}
-
-pub(super) fn host_bundle_backup_receipt_file(operation_id: [u8; 16]) -> String {
-    format!("backup-receipt.{}.v1.json", hex::encode(operation_id))
-}
-
-pub(super) fn host_bundle_restore_receipt_file(operation_id: [u8; 16]) -> String {
-    format!("restore-receipt.{}.v1.json", hex::encode(operation_id))
-}
-
-pub(super) fn component_set_stage_name(component: HostComponentV1, relative_path: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(component_slug(component).as_bytes());
-    hasher.update(relative_path.as_bytes());
-    format!(
-        "{}-{}",
-        component_slug(component),
-        hex::encode(hasher.finalize())
-    )
-}
-
 pub(super) fn receipt_file(host: HostKindV1, component: HostComponentV1) -> String {
     format!(
         "receipt.{}.{}.v1.json",
@@ -557,29 +331,14 @@ pub(super) fn receipt_file(host: HostKindV1, component: HostComponentV1) -> Stri
     )
 }
 
-/// Host-scoped component-set journal name.
+/// Host-scoped writer lock name.
 ///
-/// Blast-radius argument for per-host isolation: every host deploys its
-/// artifacts under its own disjoint subtree of the artifact root
-/// (`.claude/…`, `.codex/…`, `.cursor/…`, `.config/opencode/…`,
+/// Every host deploys its artifacts under its own disjoint subtree of the
+/// artifact root (`.claude/…`, `.codex/…`, `.cursor/…`, `.config/opencode/…`,
 /// `.kimi-code/…`, `.hermes/…`, `.kiro/…`, `.cline/…`, `.roo/…`,
-/// `.config/kilo/…`), and backups plus staging directories are keyed by
-/// `operation_id`. A pending transaction for host X therefore shares no
-/// mutable path with a transaction for host Y, so X awaiting recovery is not a
-/// reason to refuse Y. `first_party_host_artifact_prefixes_are_disjoint`
-/// pins that premise as a test, so a future host that violates it fails the
-/// suite rather than silently widening the blast radius. The receipt namespace
-/// is already host-scoped (`receipt_file`). The writer lock is host-scoped
-/// too (`writer_lock_file`): one host's in-flight mutation is a real
-/// invariant, a second host's is not.
-pub(super) fn component_set_journal_file(host: HostKindV1) -> String {
-    format!("component-set-journal.{}.v1.json", host.descriptor().slug())
-}
-
-pub(super) fn journal_file(host: HostKindV1) -> String {
-    format!("journal.{}.v1.json", host.descriptor().slug())
-}
-
+/// `.config/kilo/…`), so one host's in-flight mutation shares no mutable path
+/// with another's. `first_party_host_artifact_prefixes_are_disjoint` pins that
+/// premise as a test.
 pub(super) fn writer_lock_file(host: HostKindV1) -> String {
     format!("writer.{}.v1.lock", host.descriptor().slug())
 }

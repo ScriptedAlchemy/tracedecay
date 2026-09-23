@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-pub use tracedecay_domain::HostIntegrationIdV1 as HintAgent;
+use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_policy::hint_delivery::{
     HintDeliveryDecisionV1, HintDeliveryInputV1, decide_hint_delivery,
 };
@@ -193,12 +193,12 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         key: "file_read",
         label: "file read",
         skill: "exploring-code",
-        message: "Before reading whole files, consider tracedecay_outline, tracedecay_body, or tracedecay_read.",
-        context: "tracedecay_outline gives a file's table of contents, tracedecay_body returns one symbol's source, and tracedecay_read (mode: \"lines\") slices a range, usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
+        message: "Before reading whole files, consider tracedecay_source_outline or tracedecay_source_body.",
+        context: "tracedecay_source_outline gives a file's table of contents, and tracedecay_source_body returns one symbol's source for a node ID from tracedecay_find_exact_symbol or tracedecay_search, usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
         expected_tools: &[
-            "tracedecay_outline",
-            "tracedecay_body",
-            "tracedecay_read",
+            "tracedecay_source_outline",
+            "tracedecay_source_body",
+            "tracedecay_find_exact_symbol",
             "tracedecay_grep",
         ],
         nonblocking: true,
@@ -327,11 +327,10 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
         label: "type orientation",
         skill: "exploring-code",
         message: "For type, constructor, field, trait, or duplicate-logic questions, use TraceDecay's AST orientation tools.",
-        context: "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_impls or tracedecay_implementations for trait methods, and tracedecay_type_hierarchy for a trait/interface/class's full recursive implementor/extender tree.",
+        context: "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_implementations for a trait's implementors or every body of a method name, and tracedecay_type_hierarchy for a trait/interface/class's full recursive implementor/extender tree.",
         expected_tools: &[
             "tracedecay_constructors",
             "tracedecay_field_sites",
-            "tracedecay_impls",
             "tracedecay_implementations",
             "tracedecay_type_hierarchy",
         ],
@@ -425,7 +424,7 @@ const CATEGORY_SPECS: &[HintCategorySpec] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolHintInput {
-    pub agent: HintAgent,
+    pub agent: HostIntegrationIdV1,
     pub session_id: Option<String>,
     pub tool_name: Option<String>,
     pub command: Option<String>,
@@ -449,7 +448,7 @@ pub struct ToolHintInput {
 impl Default for ToolHintInput {
     fn default() -> Self {
         Self {
-            agent: HintAgent::Cursor,
+            agent: HostIntegrationIdV1::Cursor,
             session_id: None,
             tool_name: None,
             command: None,
@@ -593,41 +592,9 @@ impl ToolHintDedupe {
     #[hotpath::measure(label = "hosts.hooks.tool_hints.load")]
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        // v2: {"version":2, "sessions":[...], "categories":[...]}. v1: a bare
-        // array of {session_id, category}. Probe for the versioned object first,
-        // then fall back to the legacy array so old files load losslessly.
-        if let Ok(persisted) = serde_json::from_str::<PersistedHints>(&content) {
-            return Ok(Self::from_persisted(persisted));
-        }
-        let entries: Vec<PersistedHintEntry> = serde_json::from_str(&content).unwrap_or_default();
-        Ok(Self::from_v1_entries(entries))
-    }
-
-    fn from_v1_entries(entries: Vec<PersistedHintEntry>) -> Self {
-        // A v1 entry records that the category was hinted once; it carries no
-        // budget or escalation counters. Reconstruct `hinted` state and
-        // per-session emitted counts so a v1->v2 load preserves suppression.
-        let mut dedupe = Self::default();
-        for entry in entries {
-            let Some(category) = HintCategory::from_key(&entry.category) else {
-                continue;
-            };
-            let already = dedupe
-                .categories
-                .insert(
-                    (entry.session_id.clone(), category),
-                    CategoryState {
-                        hinted: true,
-                        triggers_after_hint: 0,
-                        escalated: false,
-                    },
-                )
-                .is_some();
-            if !already {
-                *dedupe.emitted.entry(entry.session_id).or_default() += 1;
-            }
-        }
-        dedupe
+        let persisted = serde_json::from_str::<PersistedHints>(&content)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(Self::from_persisted(persisted))
     }
 
     fn from_persisted(persisted: PersistedHints) -> Self {
@@ -726,14 +693,6 @@ struct PersistedCategory {
     triggers_after_hint: u32,
     #[serde(default)]
     escalated: bool,
-}
-
-/// Legacy v1 entry: a bare `{session_id, category}` pair meaning "this category
-/// was hinted once this session". Still parsed so old stores migrate losslessly.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PersistedHintEntry {
-    session_id: String,
-    category: String,
 }
 
 #[hotpath::measure(label = "hosts.hooks.tool_hints.decide")]

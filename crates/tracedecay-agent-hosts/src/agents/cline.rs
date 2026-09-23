@@ -13,9 +13,8 @@ use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, config_backup_path, install_mcp_server_entry,
-    load_json_file, mcp_servers_registration_state, report_mcp_registration,
-    uninstall_mcp_server_entry,
+    McpDoctorLabels, McpUninstallPolicy, install_mcp_server_entry, load_json_file,
+    mcp_servers_registration_state, report_mcp_registration, uninstall_mcp_server_entry,
 };
 
 pub struct ClineIntegration;
@@ -23,20 +22,6 @@ pub struct ClineIntegration;
 /// Current Cline CLI/IDE user MCP settings path documented by Cline.
 fn cline_mcp_settings_path(home: &Path) -> PathBuf {
     home.join(".cline/mcp.json")
-}
-
-/// Legacy VS Code extension storage path retained only for migration diagnosis.
-fn legacy_cline_mcp_settings_path(home: &Path) -> PathBuf {
-    super::vscode_data_dir(home)
-        .join("User/globalStorage/saoudrizwan.claude-dev")
-        .join("settings/cline_mcp_settings.json")
-}
-
-fn cline_settings_paths(home: &Path) -> [PathBuf; 2] {
-    [
-        cline_mcp_settings_path(home),
-        legacy_cline_mcp_settings_path(home),
-    ]
 }
 
 /// Cline accepts any `mcpServers.tracedecay` entry, so this deliberately skips
@@ -72,9 +57,6 @@ impl AgentIntegration for ClineIntegration {
 
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".cline").is_dir()
-            || legacy_cline_mcp_settings_path(home)
-                .parent()
-                .is_some_and(Path::is_dir)
     }
 
     fn primary_config_path(&self, home: &Path) -> Option<PathBuf> {
@@ -87,8 +69,7 @@ impl AgentIntegration for ClineIntegration {
         home: &Path,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
-            let path = cline_mcp_settings_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+            vec![cline_mcp_settings_path(home)]
         } else {
             Vec::new()
         }
@@ -135,9 +116,7 @@ impl AgentIntegration for ClineIntegration {
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
-        cline_settings_paths(home)
-            .iter()
-            .any(|path| settings_have_tracedecay(path))
+        settings_have_tracedecay(&cline_mcp_settings_path(home))
     }
 }
 
@@ -145,24 +124,9 @@ impl AgentIntegration for ClineIntegration {
 // Healthcheck helpers
 // ---------------------------------------------------------------------------
 
-/// Unlike the plain [`super::doctor_check_mcp_registration`] flow, an absent
-/// primary settings file is not a warning on its own: Cline falls through to
-/// the legacy VS Code extension path first and only then reports a failure.
 fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
     let settings_path = cline_mcp_settings_path(home);
     let registered = settings_have_tracedecay(&settings_path);
-
-    if !registered {
-        let legacy_path = legacy_cline_mcp_settings_path(home);
-        if settings_have_tracedecay(&legacy_path) {
-            dc.warn(&format!(
-                "legacy Cline MCP registration found in {}, configure or remove it through Cline's supported flow",
-                legacy_path.display()
-            ));
-            return;
-        }
-    }
-
     report_mcp_registration(
         dc,
         &settings_path,

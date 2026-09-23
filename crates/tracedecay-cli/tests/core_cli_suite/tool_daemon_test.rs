@@ -18,8 +18,11 @@ use tracedecay_contracts::{
     ApplicationProblem, ApplicationProblemEnvelope, RUNTIME_MOUNTING_REASON_CODE, RequestId,
     ResultContractRef, SafeDiagnostic,
 };
+use tracedecay_daemon_identity::authority::DaemonAuthority;
+use tracedecay_daemon_protocol::{DaemonAuthPreface, DaemonEndpoint};
+use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
-use tracedecay_hooks::{HookEventV2, HookHostV1, HookSpoolConfigV1, HookSpoolV1};
+use tracedecay_hooks::{HookEventV2, HookSpoolConfigV1, HookSpoolV1};
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, StorageMode, default_profile_project_id, pin_fixture_repository_identity,
     profile_sharded_data_root, profile_sharded_layout,
@@ -127,6 +130,17 @@ fn cli_build_version() -> &'static str {
     })
 }
 
+/// Publishes the authority record beside `socket_path` that the CLI resolves
+/// a fake daemon through. Hold it for as long as the fake daemon serves.
+fn seed_fake_daemon_authority(socket_path: &Path) -> DaemonAuthority {
+    DaemonAuthority::acquire(
+        socket_path.parent().expect("socket parent"),
+        &DaemonEndpoint::Unix(socket_path.to_path_buf()),
+        "fake-daemon",
+    )
+    .expect("seed fake daemon authority")
+}
+
 fn spawn_scripted_daemon(
     socket_path: PathBuf,
     expected_tool_name: &'static str,
@@ -137,6 +151,7 @@ fn spawn_scripted_daemon(
 
     std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket_path);
+        let authority = seed_fake_daemon_authority(&socket_path);
         let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
         listener
             .set_nonblocking(true)
@@ -176,6 +191,13 @@ fn spawn_scripted_daemon(
                 match reader.read_line(&mut line) {
                     Ok(0) | Err(_) => break None,
                     Ok(_) => {}
+                }
+                if let Ok(preface) = DaemonAuthPreface::from_line(line.trim()) {
+                    assert!(
+                        preface.authenticate(authority.auth_token()),
+                        "the CLI must present the daemon token"
+                    );
+                    continue;
                 }
                 let value: Value =
                     serde_json::from_str(line.trim()).expect("fake daemon preamble JSON");
@@ -557,6 +579,7 @@ fn spawn_sentinel_daemon_with_notification(
 
     std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket_path);
+        let authority = seed_fake_daemon_authority(&socket_path);
         let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
         listener
             .set_nonblocking(true)
@@ -582,6 +605,14 @@ fn spawn_sentinel_daemon_with_notification(
             .expect("write timeout");
 
         let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+        let mut preface = String::new();
+        reader.read_line(&mut preface).expect("read auth preface");
+        assert!(
+            DaemonAuthPreface::from_line(preface.trim())
+                .expect("fake daemon auth preface")
+                .authenticate(authority.auth_token()),
+            "the CLI must present the daemon token"
+        );
         let mut handshake = String::new();
         reader
             .read_line(&mut handshake)
@@ -603,6 +634,14 @@ fn spawn_sentinel_daemon_with_notification(
         let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
         assert_eq!(request["method"], "tools/call");
         assert_eq!(request["params"]["name"], expected_tool_name);
+        // The one-shot call has no `initialize` session; the daemon serves it
+        // over rmcp only because it carries SEP-2575 per-request context.
+        let meta = &request["params"]["_meta"];
+        assert!(
+            meta["io.modelcontextprotocol/protocolVersion"].is_string()
+                && meta["io.modelcontextprotocol/clientCapabilities"].is_object(),
+            "one-shot tools/call omitted its per-request MCP context: {request}"
+        );
         request_tx
             .send(request.clone())
             .expect("send observed JSON-RPC request");
@@ -697,11 +736,11 @@ fn run_native_capture_hook(
         .expect("hook command should run")
 }
 
-fn native_capture_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
+fn native_capture_spool_root(data_root: &Path, host: NativeHostIdentityV1) -> PathBuf {
     data_root.join("hook-v2-spool").join(host.hook_key())
 }
 
-fn native_capture_pending_records(data_root: &Path, host: HookHostV1) -> u32 {
+fn native_capture_pending_records(data_root: &Path, host: NativeHostIdentityV1) -> u32 {
     HookSpoolV1::open(
         native_capture_spool_root(data_root, host),
         HookSpoolConfigV1::stock(host),
@@ -742,7 +781,7 @@ fn cursor_after_file_edit_hook_captures_bound_spool_record() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    let host = HookHostV1::CursorDesktop;
+    let host = NativeHostIdentityV1::CursorDesktop;
     let data_root = enroll_native_capture_project(
         &home_path,
         &project_path,
@@ -826,7 +865,7 @@ fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    let host = HookHostV1::CursorDesktop;
+    let host = NativeHostIdentityV1::CursorDesktop;
     // Bind every family Cursor natively supports so the absence of a spool
     // record is attributable to the unsupported event, not a missing binding.
     let data_root =
@@ -935,7 +974,7 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    let host = HookHostV1::Kiro;
+    let host = NativeHostIdentityV1::Kiro;
     let data_root = enroll_native_capture_project(&home_path, &project_path, "proj_kiro_capture");
     std::fs::create_dir_all(project_path.join("src")).unwrap();
     std::fs::write(
@@ -1414,7 +1453,7 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
         &home_path.join(".tracedecay"),
         &default_profile_project_id(&project_path),
     );
-    let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+    let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
     common::create_runtime().block_on(async {
         let (db, _) = crate::common::open_test_database(&db_path)
             .await
@@ -1859,6 +1898,7 @@ fn spawn_scripted_result_sequence_daemon(
 
     std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket_path);
+        let authority = seed_fake_daemon_authority(&socket_path);
         let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
         listener
             .set_nonblocking(true)
@@ -1889,6 +1929,13 @@ fn spawn_scripted_result_sequence_daemon(
                 match reader.read_line(&mut line) {
                     Ok(0) | Err(_) => break None,
                     Ok(_) => {}
+                }
+                if let Ok(preface) = DaemonAuthPreface::from_line(line.trim()) {
+                    assert!(
+                        preface.authenticate(authority.auth_token()),
+                        "the CLI must present the daemon token"
+                    );
+                    continue;
                 }
                 let value: Value =
                     serde_json::from_str(line.trim()).expect("fake daemon preamble JSON");
@@ -2137,6 +2184,7 @@ fn spawn_handshake_capturing_daemon(socket_path: PathBuf) -> mpsc::Receiver<Valu
 
     std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket_path);
+        let authority = seed_fake_daemon_authority(&socket_path);
         let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
         listener
             .set_nonblocking(true)
@@ -2161,6 +2209,14 @@ fn spawn_handshake_capturing_daemon(socket_path: PathBuf) -> mpsc::Receiver<Valu
         let _ = stream.set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
 
         let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+        let mut preface = String::new();
+        reader.read_line(&mut preface).expect("read auth preface");
+        assert!(
+            DaemonAuthPreface::from_line(preface.trim())
+                .expect("fake daemon auth preface")
+                .authenticate(authority.auth_token()),
+            "the CLI must present the daemon token"
+        );
         let mut handshake = String::new();
         reader
             .read_line(&mut handshake)
@@ -2396,15 +2452,15 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
 }
 
 #[tokio::test]
-async fn daemon_upgrades_retained_receipts_and_reopens_without_reset() {
+async fn daemon_reopens_retained_receipts_without_reset() {
     let home = TempDir::new().unwrap();
     let db_path = home.path().join(".tracedecay/global.db");
     common::write_empty_global_db_schema(&db_path).await;
     {
         let db = rusqlite::Connection::open(&db_path).unwrap();
-        // Final schema already carries recovery columns. Pre-recovery v4 is
-        // refused without conversion (no sanctioned migration); seed the final
-        // shape and prove reopen retains receipts without reset.
+        // Older schema versions are refused with typed reset-required at
+        // admission; this seeds the final shape and proves reopen retains
+        // receipts without reset.
         db.execute_batch(
             "INSERT INTO session_temporal_generations (
                 session_id, generation, state, frozen_watermarks_json, created_at
@@ -2429,7 +2485,10 @@ async fn daemon_upgrades_retained_receipts_and_reopens_without_reset() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(
+            version,
+            tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION
+        );
     }
     for _ in 0..2 {
         let daemon = spawn_tracedecay_daemon(home.path());

@@ -317,7 +317,7 @@ fn parse_automation_backend(
     use tracedecay_automation_runtime::automation::config::AutomationBackend;
     match value {
         "disabled" => Ok(AutomationBackend::Disabled),
-        "codex-app-server" | "codex_app_server" => Ok(AutomationBackend::CodexAppServer),
+        "codex-app-server" => Ok(AutomationBackend::CodexAppServer),
         _ => Err(config_error(format!(
             "unknown automation backend '{value}' (expected disabled, codex-app-server)"
         ))),
@@ -332,7 +332,7 @@ fn parse_automation_host_mode(
     use tracedecay_automation_runtime::automation::config::AutomationHostMode;
     match value {
         "standalone" => Ok(AutomationHostMode::Standalone),
-        "delegated-host" | "delegated_host" => Ok(AutomationHostMode::DelegatedHost),
+        "delegated-host" => Ok(AutomationHostMode::DelegatedHost),
         _ => Err(config_error(format!(
             "unknown automation host mode '{value}' (expected standalone, delegated-host)"
         ))),

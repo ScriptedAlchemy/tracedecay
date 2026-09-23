@@ -15,10 +15,3 @@ fn unknown_fields_ignored() {
     let parsed: UserConfig = toml::from_str(toml_str).unwrap();
     assert!(parsed.upload_enabled);
 }
-
-#[test]
-fn old_daemon_debounce_field_still_deserializes() {
-    let toml = r#"daemon_debounce = "30s""#;
-    let cfg: tracedecay_session_memory::user_config::UserConfig = toml::from_str(toml).unwrap();
-    assert_eq!(cfg.watcher_debounce, "30s");
-}

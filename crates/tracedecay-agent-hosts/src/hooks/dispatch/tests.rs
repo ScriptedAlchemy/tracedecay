@@ -53,17 +53,17 @@ fn hook_binding_uses_exact_resolved_worktree_and_revision_epoch() {
 #[test]
 fn every_host_with_a_native_advisory_event_receives_a_daemon_binding() {
     let hosts = [
-        HookHostV1::ClaudeCode,
-        HookHostV1::Codex,
-        HookHostV1::CursorDesktop,
-        HookHostV1::CursorCloud,
-        HookHostV1::Hermes,
-        HookHostV1::Kiro,
-        HookHostV1::KimiCode,
-        HookHostV1::OpenCode,
-        HookHostV1::Cline,
-        HookHostV1::RooCode,
-        HookHostV1::Kilo,
+        NativeHostIdentityV1::ClaudeCode,
+        NativeHostIdentityV1::Codex,
+        NativeHostIdentityV1::CursorDesktop,
+        NativeHostIdentityV1::CursorCloud,
+        NativeHostIdentityV1::Hermes,
+        NativeHostIdentityV1::Kiro,
+        NativeHostIdentityV1::KimiCode,
+        NativeHostIdentityV1::OpenCode,
+        NativeHostIdentityV1::Cline,
+        NativeHostIdentityV1::RooCode,
+        NativeHostIdentityV1::Kilo,
     ];
     let families = [
         tracedecay_hooks::HookEventFamily::SessionBoundary,
@@ -162,7 +162,7 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     let current_envelope = HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [1; 16],
-        producer: HookHostV1::ClaudeCode,
+        producer: NativeHostIdentityV1::ClaudeCode,
         protected_session_id: [2; 32],
         project_id: envelope_identity_hash16("project", notice.scope.project_id.as_str()),
         repository_id: envelope_identity_hash16("repository", notice.scope.repository_id.as_str()),
@@ -312,7 +312,7 @@ fn sample_envelope(
     HookEventEnvelopeV2 {
         schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [1; 16],
-        producer: HookHostV1::ClaudeCode,
+        producer: NativeHostIdentityV1::ClaudeCode,
         protected_session_id: [2; 32],
         project_id: envelope_identity_hash16("project", notice.scope.project_id.as_str()),
         repository_id: envelope_identity_hash16("repository", notice.scope.repository_id.as_str()),
@@ -670,7 +670,7 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
     assert_eq!(retry.event_id, first.event_id);
 
     let temporary = tempfile::tempdir().unwrap();
-    let host = HookHostV1::ClaudeCode;
+    let host = NativeHostIdentityV1::ClaudeCode;
     let binding = spool_binding(host, [family]);
     let decoded = tracedecay_hooks::decode_native_hook_event(
         host,
@@ -705,7 +705,7 @@ fn retry_identity_and_timestamp_reuse_are_stable() {
 }
 
 fn spool_binding(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     families: impl IntoIterator<Item = tracedecay_hooks::HookEventFamily>,
 ) -> HookScopeBindingV1 {
     HookScopeBindingV1 {
@@ -788,7 +788,8 @@ fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
     .unwrap();
 
     let lifecycle =
-        native_context_scout_lifecycle(HookHostV1::KimiCode, &fields, material.event_id).unwrap();
+        native_context_scout_lifecycle(NativeHostIdentityV1::KimiCode, &fields, material.event_id)
+            .unwrap();
 
     assert_eq!(lifecycle.session_id.as_str(), "session.kimi.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.kimi.native");
@@ -855,7 +856,8 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     )
     .unwrap();
     let lifecycle =
-        native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, material.event_id).unwrap();
+        native_context_scout_lifecycle(NativeHostIdentityV1::OpenCode, &fields, material.event_id)
+            .unwrap();
     assert_eq!(lifecycle.session_id.as_str(), "session.opencode.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.opencode.native");
 
@@ -865,7 +867,7 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     )
     .unwrap();
     let binding = spool_binding(
-        HookHostV1::OpenCode,
+        NativeHostIdentityV1::OpenCode,
         [tracedecay_hooks::HookEventFamily::SavedEdit],
     );
     let envelope = decoded.into_envelope(&binding, material).unwrap();
@@ -873,7 +875,7 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     assert_eq!(
         append_for_replay(
             temporary.path(),
-            HookHostV1::OpenCode,
+            NativeHostIdentityV1::OpenCode,
             &envelope,
             Some(lifecycle.clone()),
             &binding,
@@ -884,10 +886,10 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     let spool_root = temporary
         .path()
         .join("hook-v2-spool")
-        .join(HookHostV1::OpenCode.hook_key());
+        .join(NativeHostIdentityV1::OpenCode.hook_key());
     let (mut spool, _) = HookSpoolV1::open(
         spool_root,
-        HookSpoolConfigV1::stock(HookHostV1::OpenCode),
+        HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode),
         UtcMicros(10),
     )
     .unwrap();
@@ -902,5 +904,7 @@ fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         .unwrap()["request"]
         .to_string();
     let fields = serde_json::from_str::<NativeIdentityFields>(&file_edit).unwrap();
-    assert!(native_context_scout_lifecycle(HookHostV1::OpenCode, &fields, [1; 16]).is_none());
+    assert!(
+        native_context_scout_lifecycle(NativeHostIdentityV1::OpenCode, &fields, [1; 16]).is_none()
+    );
 }

@@ -61,7 +61,8 @@ impl NativeContextScoutLifecycleV1 {
     pub fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
         matches!(
             envelope.producer,
-            crate::HookHostV1::KimiCode | crate::HookHostV1::OpenCode
+            tracedecay_domain::NativeHostIdentityV1::KimiCode
+                | tracedecay_domain::NativeHostIdentityV1::OpenCode
         ) && <[u8; 32]>::from(Sha256::digest(self.session_id.as_str().as_bytes()))
             == envelope.protected_session_id
             && self.event_id == envelope.event_id

@@ -87,7 +87,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_body", "tracedecay_read"],
+            &["tracedecay_source_outline", "tracedecay_source_body"],
         ),
         input_eval(
             "shell-cat-config-read",
@@ -98,7 +98,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::FileRead),
-            &["tracedecay_outline"],
+            &["tracedecay_source_outline"],
         ),
         input_eval(
             "single-file-read-action",
@@ -108,7 +108,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::FileRead),
-            &["tracedecay_outline", "tracedecay_body", "tracedecay_read"],
+            &["tracedecay_source_outline", "tracedecay_source_body"],
         ),
         input_eval(
             "windows-tool-descriptor-read",
@@ -233,7 +233,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
         input_eval(
             "codex-apply-patch-nudges-redundancy",
             ToolHintInput {
-                agent: HintAgent::Codex,
+                agent: HostIntegrationIdV1::Codex,
                 tool_name: Some("Edit".to_string()),
                 file_path: Some("src/util.rs".to_string()),
                 edit_text: Some(

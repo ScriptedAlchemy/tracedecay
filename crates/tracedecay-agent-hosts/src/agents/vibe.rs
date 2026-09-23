@@ -31,7 +31,7 @@ use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, TextFileMutation,
-    config_backup_path, update_config_file_transactionally,
+    update_text_file_transactionally,
 };
 
 pub struct VibeIntegration;
@@ -52,10 +52,6 @@ pub(super) fn vibe_prompt_path(home: &Path) -> PathBuf {
 
 fn project_vibe_home(project: &Path) -> PathBuf {
     project.join(".vibe")
-}
-
-fn original_config_path(config: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.tracedecay-original", config.display()))
 }
 
 /// Whether one Vibe home (user-level or project-level) carries a live
@@ -190,7 +186,6 @@ impl AgentIntegration for VibeIntegration {
             components,
             &vibe_config_path(&ctx.home),
             &vibe_prompt_path(&ctx.home),
-            &ctx.home,
         )
     }
 
@@ -203,29 +198,21 @@ impl AgentIntegration for VibeIntegration {
         let root = project_vibe_home(project_path);
         let config = root.join("config.toml");
         let prompt = root.join("prompts/cli.md");
-        let original = original_config_path(&config);
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [config.as_path(), prompt.as_path(), original.as_path()],
-        )?;
+        super::ensure_project_local_safe_paths(project_path, [config.as_path(), prompt.as_path()])?;
         activate_components(components, &config, &prompt, ctx)
     }
 
     fn deactivate_project_host_component_registration(
         &self,
         components: &[HostComponentV1],
-        ctx: &InstallContext,
+        _ctx: &InstallContext,
         project_path: &Path,
     ) -> Result<()> {
         let root = project_vibe_home(project_path);
         let config = root.join("config.toml");
         let prompt = root.join("prompts/cli.md");
-        let original = original_config_path(&config);
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [config.as_path(), prompt.as_path(), original.as_path()],
-        )?;
-        deactivate_components(components, &config, &prompt, &ctx.home)
+        super::ensure_project_local_safe_paths(project_path, [config.as_path(), prompt.as_path()])?;
+        deactivate_components(components, &config, &prompt)
     }
 
     fn reports_absence_to_doctor(&self) -> bool {
@@ -279,8 +266,6 @@ fn registration_paths(
     let mut paths = Vec::new();
     if components.contains(&HostComponentV1::ContextMcp) {
         paths.push(config.to_path_buf());
-        paths.push(config_backup_path(config));
-        paths.push(original_config_path(config));
     }
     if components.contains(&HostComponentV1::Core) {
         paths.push(prompt.to_path_buf());
@@ -392,13 +377,8 @@ fn doctor_check_registration(dc: &mut DoctorCounters, config: &Path, prompt: &Pa
 }
 
 fn install_mcp(config: &Path, binary: &str) -> Result<()> {
-    let original = original_config_path(config);
-    update_config_file_transactionally(config, |existing| {
+    update_text_file_transactionally(config, |existing| {
         let mut document = parse_document(config, existing)?;
-        let had_registration = tracedecay_server(&document).is_some();
-        if !had_registration && config.is_file() && !original.exists() {
-            super::safe_write_bytes_file(&original, existing.as_bytes(), None)?;
-        }
         let servers = document
             .entry("mcp_servers")
             .or_insert(Item::ArrayOfTables(ArrayOfTables::new()))
@@ -429,63 +409,33 @@ fn install_mcp(config: &Path, binary: &str) -> Result<()> {
     })
 }
 
-#[derive(Clone, Copy)]
-enum McpRemoval {
-    NoEntry,
-    RestoredOriginal,
-    RemovedFile,
-    Rewritten,
-}
-
 fn uninstall_mcp(config: &Path) -> Result<()> {
     if !config.exists() {
         return Ok(());
     }
-    let original = original_config_path(config);
-    let outcome = update_config_file_transactionally(config, |existing| {
+    update_text_file_transactionally(config, |existing| {
         let mut document = parse_document(config, existing)?;
         let Some(servers) = document
             .get_mut("mcp_servers")
             .and_then(Item::as_array_of_tables_mut)
         else {
-            return Ok((McpRemoval::NoEntry, TextFileMutation::Unchanged));
+            return Ok(((), TextFileMutation::Unchanged));
         };
         let Some(index) = servers
             .iter()
             .position(|server| server.get("name").and_then(Item::as_str) == Some("tracedecay"))
         else {
-            return Ok((McpRemoval::NoEntry, TextFileMutation::Unchanged));
+            return Ok(((), TextFileMutation::Unchanged));
         };
         servers.remove(index);
         if servers.is_empty() {
             document.remove("mcp_servers");
         }
-        if let Ok(bytes) = std::fs::read(&original)
-            && toml::from_slice::<toml::Value>(&bytes).ok()
-                == toml::from_str::<toml::Value>(&document.to_string()).ok()
-        {
-            let original = String::from_utf8(bytes).map_err(|error| TraceDecayError::Config {
-                message: format!("{} is not valid UTF-8: {error}", original.display()),
-            })?;
-            return Ok((
-                McpRemoval::RestoredOriginal,
-                TextFileMutation::Write(original),
-            ));
-        }
         if document.is_empty() {
-            return Ok((McpRemoval::RemovedFile, TextFileMutation::Remove));
+            return Ok(((), TextFileMutation::Remove));
         }
-        Ok((
-            McpRemoval::Rewritten,
-            TextFileMutation::Write(document.to_string()),
-        ))
-    })?;
-    if matches!(outcome, McpRemoval::RestoredOriginal) {
-        super::safe_remove_host_file(&original).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to remove {}: {error}", original.display()),
-        })?;
-    }
-    Ok(())
+        Ok(((), TextFileMutation::Write(document.to_string())))
+    })
 }
 
 fn install_prompt(prompt: &Path, profile_home: &Path) -> Result<()> {
@@ -499,8 +449,8 @@ fn install_prompt(prompt: &Path, profile_home: &Path) -> Result<()> {
     super::install_managed_skill_prompt_index(profile_home, prompt, SkillInstallTarget::Agents)
 }
 
-fn uninstall_prompt(prompt: &Path, profile_home: &Path) -> Result<()> {
-    super::remove_managed_skill_prompt_index(profile_home, prompt, SkillInstallTarget::Agents)?;
+fn uninstall_prompt(prompt: &Path) -> Result<()> {
+    super::remove_managed_skill_prompt_index(prompt, SkillInstallTarget::Agents)?;
     super::prompt_rules::remove_standard_prompt_rules(prompt)
 }
 
@@ -523,10 +473,9 @@ fn deactivate_components(
     components: &[HostComponentV1],
     config: &Path,
     prompt: &Path,
-    profile_home: &Path,
 ) -> Result<()> {
     if components.contains(&HostComponentV1::Core) {
-        uninstall_prompt(prompt, profile_home)?;
+        uninstall_prompt(prompt)?;
     }
     if components.contains(&HostComponentV1::ContextMcp) {
         uninstall_mcp(config)?;
@@ -542,14 +491,13 @@ mod tests {
         InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: binary.to_string(),
-            tool_permissions: Vec::new(),
             project_root: None,
             dashboard: false,
         }
     }
 
     #[test]
-    fn vibe_mcp_lifecycle_preserves_foreign_servers_and_restores_original_bytes() {
+    fn vibe_mcp_lifecycle_preserves_foreign_servers_and_keeps_no_copy() {
         let home = tempfile::tempdir().unwrap();
         let config = vibe_config_path(home.path());
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -578,7 +526,15 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(std::fs::read(&config).unwrap(), original);
+        assert_eq!(
+            toml::from_str::<toml::Value>(&std::fs::read_to_string(&config).unwrap()).unwrap(),
+            toml::from_slice::<toml::Value>(original).unwrap()
+        );
+        let siblings: Vec<_> = std::fs::read_dir(config.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(siblings, vec![std::ffi::OsString::from("config.toml")]);
     }
 
     #[test]
@@ -595,7 +551,7 @@ mod tests {
         );
         assert!(!config.exists());
 
-        deactivate_components(&[HostComponentV1::Core], &config, &prompt, home.path()).unwrap();
+        deactivate_components(&[HostComponentV1::Core], &config, &prompt).unwrap();
         activate_components(&[HostComponentV1::ContextMcp], &config, &prompt, &install).unwrap();
         assert_eq!(
             mcp_registration_state(&config, Some("/tmp/tracedecay")),
@@ -613,7 +569,7 @@ mod tests {
         let components = [HostComponentV1::ContextMcp, HostComponentV1::Core];
 
         activate_components(&components, &config, &prompt, &install).unwrap();
-        deactivate_components(&components, &config, &prompt, home.path()).unwrap();
+        deactivate_components(&components, &config, &prompt).unwrap();
 
         assert!(!config.exists());
         assert!(!prompt.exists());

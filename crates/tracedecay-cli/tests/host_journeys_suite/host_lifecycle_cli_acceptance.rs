@@ -749,24 +749,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             "{} interrupted repair did not preserve its durable receipt",
             case.id
         );
-        assert_success(
-            case.id,
-            "interruption recovery",
-            cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-        );
-        assert_eq!(
-            owned_bytes(&cli, &repaired_receipt, &originals),
-            before_interruption,
-            "{} recovery did not preserve rolled-back configs/artifacts",
-            case.id
-        );
-        assert_eq!(
-            serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
-            receipt_before_interruption,
-            "{} recovery did not preserve the pre-interruption receipt",
-            case.id
-        );
-        assert_success(case.id, "post-recovery repair", cli.run(&["reinstall"]));
+        assert_success(case.id, "post-interruption repair", cli.run(&["reinstall"]));
         let repaired_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &repaired_receipt);
 
@@ -1339,76 +1322,15 @@ fn unadmitted_catalog_hosts_never_fall_back_to_direct_installers() {
     }
 }
 
+/// Rollback bytes live only in the process that staged them, so a killed
+/// install leaves whatever it wrote and nothing to recover from: no journal,
+/// backup, or copy of any host config. The next install converges over it.
 #[test]
-fn killed_registration_mutation_recovers_exact_pre_effect_state() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let receipt = latest_receipt(&cli, case.host);
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["mcp"]["tracedecay"]["command"] = serde_json::json!(["operator-owned", "pending"]);
-    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
-    }
-    let before = owned_bytes(&cli, &receipt, &originals);
-    let receipt_before = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
-
-    let killed = cli.run_with_env(
-        &["reinstall"],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success(), "fault subprocess did not abort");
-    assert_ne!(
-        fs::read(&config_path).unwrap(),
-        before[&PathBuf::from(".config/opencode/opencode.json")],
-        "fault boundary did not cross a real host-config mutation"
-    );
-
-    assert_success(
-        case.id,
-        "restart recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(owned_bytes(&cli, &receipt, &originals), before);
-    assert_eq!(
-        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
-        receipt_before
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert_eq!(
-            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-            0o640
-        );
-    }
-}
-
-#[test]
-fn killed_install_recovers_with_original_journal_operation() {
+fn killed_install_keeps_no_rollback_state_and_the_next_install_converges() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
-    }
     let killed = cli.run_with_env(
         &["install", "--agent", case.id],
         "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
@@ -1422,112 +1344,30 @@ fn killed_install_recovers_with_original_journal_operation() {
         fs::read(&config_path).unwrap(),
         originals[&PathBuf::from(".config/opencode/opencode.json")]
     );
-    assert_success(
-        case.id,
-        "install restart recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_seeded_bytes(&cli, &originals);
-    assert!(
-        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
-            .unwrap()
-            .is_none()
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert_eq!(
-            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-            0o640
+    let control = cli.lifecycle_root().join(".tracedecay-host-bundle-v1");
+    if let Ok(entries) = fs::read_dir(&control) {
+        for entry in entries {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                name.starts_with("receipt.") || name.starts_with("writer."),
+                "a killed install must leave no rollback state: {name}"
+            );
+        }
+    }
+    for entry in fs::read_dir(config_path.parent().unwrap()).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".bak") && !name.ends_with(".tracedecay-original"),
+            "no copy of the host config may remain beside it: {name}"
         );
     }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn recovery_rejects_foreign_metadata_drift_with_unchanged_bytes() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    seed_host(case, &cli);
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
-    let mut original_acl = 2_u32.to_le_bytes().to_vec();
-    for (tag, permissions, id) in [
-        (0x01_u16, 0x06_u16, u32::MAX),
-        (0x02, 0x04, 65_534),
-        (0x04, 0x04, u32::MAX),
-        (0x10, 0x04, u32::MAX),
-        (0x20, 0x00, u32::MAX),
-    ] {
-        original_acl.extend_from_slice(&tag.to_le_bytes());
-        original_acl.extend_from_slice(&permissions.to_le_bytes());
-        original_acl.extend_from_slice(&id.to_le_bytes());
-    }
-    xattr::set(&config_path, "system.posix_acl_access", &original_acl).unwrap();
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
-
-    let bytes_after_kill = fs::read(&config_path).unwrap();
-    let acl_after_drift = xattr::get(&config_path, "system.posix_acl_access").unwrap();
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    assert_eq!(fs::read(&config_path).unwrap(), bytes_after_kill);
-    assert_eq!(
-        fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
-        0o600,
-        "recovery must not overwrite foreign metadata drift"
-    );
-    assert_eq!(
-        xattr::get(&config_path, "system.posix_acl_access").unwrap(),
-        acl_after_drift
-    );
-    assert_ne!(acl_after_drift, Some(original_acl));
-}
-
-#[test]
-fn interrupted_registration_rollback_converges_across_two_restarts() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-
-    let mut recovery = cli.command(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    let interrupted = recovery
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_REGISTRATION_ROLLBACK_WRITE_PATH",
-            &config_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!interrupted.status.success());
-    assert_seeded_bytes(&cli, &originals);
 
     assert_success(
         case.id,
-        "rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
+        "install after the killed install",
+        cli.run(&["install", "--agent", case.id]),
     );
-    assert_seeded_bytes(&cli, &originals);
-    assert_success(
-        case.id,
-        "idempotent rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_seeded_bytes(&cli, &originals);
+    assert_receipt_digests(&cli, &latest_receipt(&cli, case.host));
 }
 
 #[cfg(target_os = "linux")]
@@ -1598,44 +1438,6 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
         "Claude symlink refusal omitted actionable remediation: {stderr}"
     );
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
-}
-
-#[test]
-fn killed_install_recovery_refuses_later_operator_edit() {
-    let cli = IsolatedCli::new();
-    let case = host_case(HostKindV1::OpenCode);
-    let originals = seed_host(case, &cli);
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-
-    let config_path = cli.home.path().join(".config/opencode/opencode.json");
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    config["operatorAfterKill"] = serde_json::json!(true);
-    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-    let config_before = fs::read(&config_path).unwrap();
-    let receipt_before =
-        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    assert_eq!(fs::read(&config_path).unwrap(), config_before);
-    assert_eq!(
-        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host).unwrap(),
-        receipt_before
-    );
-    for relative in originals.keys() {
-        if relative != &PathBuf::from(".config/opencode/opencode.json") {
-            assert_eq!(
-                fs::read(cli.home.path().join(relative)).unwrap(),
-                originals[relative]
-            );
-        }
-    }
 }
 
 #[test]

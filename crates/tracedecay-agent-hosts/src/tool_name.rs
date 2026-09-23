@@ -13,8 +13,3 @@
 /// rather than `tracedecay` so the host UI renders `plugin tracedecay graph`
 /// instead of the redundant `plugin tracedecay tracedecay`.
 pub const PLUGIN_TOOL_PREFIX: &str = "mcp__plugin_tracedecay_graph__";
-
-/// Legacy config-managed namespace. It does NOT match the plugin namespace, so
-/// an install that wrote only these entries prompted interactively on every
-/// plugin tool call; the installer now writes the plugin-namespace twins too.
-pub const LEGACY_TOOL_PREFIX: &str = "mcp__tracedecay__";

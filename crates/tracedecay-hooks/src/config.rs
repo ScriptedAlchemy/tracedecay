@@ -12,7 +12,8 @@ use thiserror::Error;
 use tracedecay_domain::{UtcMicros, encode_lowercase_hex};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write, read_bounded};
 
-use crate::{HookHostV1, HookScopeBindingV1};
+use crate::HookScopeBindingV1;
+use tracedecay_domain::NativeHostIdentityV1;
 
 pub const HOOK_CONFIGURATION_SCHEMA_VERSION: u16 = 1;
 pub const MAX_HOOK_CONFIGURATION_BYTES: usize = 64 * 1024;
@@ -21,7 +22,7 @@ const DIRECTORY_SYNC_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Tolerate
 pub fn hook_configuration_path(
     data_root: &Path,
     worktree_id: [u8; 16],
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
 ) -> PathBuf {
     data_root
         .join("hook-configurations")
@@ -97,7 +98,7 @@ pub trait HookConfigurationPublicationStoreV1 {
 pub trait HookConfigurationReadStoreV1 {
     fn load(
         &self,
-        host: HookHostV1,
+        host: NativeHostIdentityV1,
     ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>;
 }
 
@@ -146,7 +147,11 @@ where
     /// bounded read, so its cost and outcome mix are what separate "hook is
     /// unbound/stale" from a spool refusal when hooks fall silent.
     #[hotpath::measure(label = "hooks.config.load")]
-    pub fn load_current(&self, host: HookHostV1, now: UtcMicros) -> HookConfigurationReadOutcomeV1 {
+    pub fn load_current(
+        &self,
+        host: NativeHostIdentityV1,
+        now: UtcMicros,
+    ) -> HookConfigurationReadOutcomeV1 {
         let outcome = self.load_current_inner(host, now);
         #[cfg(feature = "hotpath")]
         {
@@ -164,7 +169,7 @@ where
 
     fn load_current_inner(
         &self,
-        host: HookHostV1,
+        host: NativeHostIdentityV1,
         now: UtcMicros,
     ) -> HookConfigurationReadOutcomeV1 {
         let snapshot = match self.store.load(host) {
@@ -261,7 +266,7 @@ impl HookConfigurationFileReaderV1 {
 impl HookConfigurationReadStoreV1 for HookConfigurationFileReaderV1 {
     fn load(
         &self,
-        _host: HookHostV1,
+        _host: NativeHostIdentityV1,
     ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError> {
         read_snapshot(&self.path)
     }
@@ -330,7 +335,7 @@ mod tests {
     impl HookConfigurationReadStoreV1 for Store {
         fn load(
             &self,
-            _host: HookHostV1,
+            _host: NativeHostIdentityV1,
         ) -> Result<Option<HookConfigurationSnapshotV1>, HookConfigurationPublicationError>
         {
             Ok(self.0.lock().unwrap().clone())
@@ -367,7 +372,7 @@ mod tests {
             published_at: UtcMicros(1),
             expires_at: UtcMicros(expires_at),
             binding: HookScopeBindingV1 {
-                host: HookHostV1::ClaudeCode,
+                host: NativeHostIdentityV1::ClaudeCode,
                 project_id: [1; 16],
                 repository_id: [2; 16],
                 worktree_id: [3; 16],
@@ -404,7 +409,7 @@ mod tests {
         );
         let restarted_subscriber = HookConfigurationSubscriberV1::new(store);
         assert_eq!(
-            restarted_subscriber.load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+            restarted_subscriber.load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Bound(published)
         );
     }
@@ -428,13 +433,13 @@ mod tests {
         let subscriber = HookConfigurationSubscriberV1::new(store.clone());
         *store.0.lock().unwrap() = Some(snapshot(1, 2));
         assert_eq!(
-            subscriber.load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+            subscriber.load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Stale
         );
 
         *store.0.lock().unwrap() = Some(snapshot(1, 100));
         assert_eq!(
-            subscriber.load_current(HookHostV1::Codex, UtcMicros(2)),
+            subscriber.load_current(NativeHostIdentityV1::Codex, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
         );
     }
@@ -456,7 +461,7 @@ mod tests {
         assert_eq!(value["revision"], 2);
         assert_eq!(
             HookConfigurationSubscriberV1::new(reader.clone())
-                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+                .load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Bound(published)
         );
         assert_eq!(
@@ -482,7 +487,7 @@ mod tests {
         fs::write(&path, vec![b'x'; MAX_HOOK_CONFIGURATION_BYTES + 1]).unwrap();
         assert_eq!(
             HookConfigurationSubscriberV1::new(reader)
-                .load_current(HookHostV1::ClaudeCode, UtcMicros(2)),
+                .load_current(NativeHostIdentityV1::ClaudeCode, UtcMicros(2)),
             HookConfigurationReadOutcomeV1::Corrupted
         );
     }
@@ -496,7 +501,7 @@ mod tests {
     #[test]
     fn a_later_worktree_publication_does_not_replace_an_earlier_worktree_binding() {
         let data_root = TestDir::new();
-        let host = HookHostV1::ClaudeCode;
+        let host = NativeHostIdentityV1::ClaudeCode;
         let earlier = snapshot(10, 100);
         let mut later = snapshot(11, 100);
         later.binding.worktree_id = [7; 16];

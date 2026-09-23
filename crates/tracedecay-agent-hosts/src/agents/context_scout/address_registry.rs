@@ -1,4 +1,5 @@
-//! Daemon-owned canonical ports for Context Scout orchestration.
+//! Daemon-owned durable Context Scout address registry, the configuration and
+//! scope pins that gate it, and canonical input assembly for bound addresses.
 //!
 //! Opaque fixed-size values in [`ContextScoutAddressV1`] are locators only.
 //! Exact identity remains the typed lifecycle tuple retained in the durable
@@ -706,7 +707,7 @@ impl ProjectContextScoutAddressRegistryV1 {
     }
 
     // The shared decode/validate funnel behind every resolve and authorize
-    // port operation on the durable address ledger.
+    // operation on the durable address ledger.
     #[hotpath::measure(
         label = "context_scout_address_ledger_read",
         impl_type = "ProjectContextScoutAddressRegistryV1"
@@ -1097,12 +1098,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tempfile::TempDir;
+    use tracedecay_domain::NativeHostIdentityV1;
     use tracedecay_domain::configuration::{
         CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationLayerIdV1,
         ContextScoutConfigurationLimitsV1, ContextScoutSettingsV1,
     };
     use tracedecay_hooks::{
-        HookCapabilityV1, HookEventFamily, HookHostV1, NativeEnvelopeMaterialV1,
+        HookCapabilityV1, HookEventFamily, NativeEnvelopeMaterialV1,
         decode_bound_native_hook_event, stock_event_support,
     };
 
@@ -1195,7 +1197,7 @@ mod tests {
 
     fn binding() -> HookScopeBindingV1 {
         HookScopeBindingV1 {
-            host: HookHostV1::ClaudeCode,
+            host: NativeHostIdentityV1::ClaudeCode,
             project_id: [1; 16],
             repository_id: [2; 16],
             worktree_id: [3; 16],
@@ -1211,7 +1213,7 @@ mod tests {
             .into_iter()
             .map(|family| HookCapabilityV1 {
                 family,
-                support: stock_event_support(HookHostV1::ClaudeCode, family),
+                support: stock_event_support(NativeHostIdentityV1::ClaudeCode, family),
             })
             .collect(),
         }
@@ -1220,7 +1222,7 @@ mod tests {
     fn admitted_hook() -> AdmittedContextScoutHookV1 {
         let binding = binding();
         let envelope = decode_bound_native_hook_event(
-            HookHostV1::ClaudeCode,
+            NativeHostIdentityV1::ClaudeCode,
             include_bytes!(
                 "../../../../../tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
             ),

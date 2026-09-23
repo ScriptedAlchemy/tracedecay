@@ -33,16 +33,6 @@ const WRAPPER_ENTRY_JS: &str = include_str!("../../../../../dashboard/hermes-wra
 /// Placeholder line in `plugin_api.py` rewritten with the installed binary.
 const BIN_PLACEHOLDER: &str = "DEPLOYED_TRACEDECAY_BIN = None";
 
-/// Basenames of retired generated `dist/` assets: current installs must not
-/// contain them, and deploy/uninstall both remove them.
-const RETIRED_DIST_FILES: [&str; 5] = [
-    "holographic.js",
-    "lcm.js",
-    "graph.js",
-    "savings.js",
-    "style.css",
-];
-
 pub(super) fn is_current(plugin_dir: &Path) -> bool {
     [
         "dashboard/manifest.json",
@@ -51,9 +41,6 @@ pub(super) fn is_current(plugin_dir: &Path) -> bool {
     ]
     .into_iter()
     .all(|relative| plugin_dir.join(relative).is_file())
-        && RETIRED_DIST_FILES
-            .into_iter()
-            .all(|retired| !plugin_dir.join("dashboard/dist").join(retired).exists())
 }
 
 pub(super) fn is_absent(plugin_dir: &Path) -> bool {
@@ -78,11 +65,6 @@ pub(super) fn managed_paths(plugin_dir: &Path) -> Vec<std::path::PathBuf> {
     ]
     .into_iter()
     .map(|relative| plugin_dir.join(relative))
-    .chain(
-        RETIRED_DIST_FILES
-            .into_iter()
-            .map(|retired| plugin_dir.join("dashboard/dist").join(retired)),
-    )
     .collect()
 }
 
@@ -120,9 +102,6 @@ fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
         &plugin_api(tracedecay_bin)?,
     )?;
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
-    for retired in RETIRED_DIST_FILES {
-        super::remove_generated_file(&dist_dir.join(retired))?;
-    }
 
     tracing::debug!(
         dashboard_dir = %dashboard_dir.display(),
@@ -140,9 +119,7 @@ pub(super) fn uninstall(plugin_dir: &Path) -> Result<()> {
         return Ok(());
     }
     let dist_dir = dashboard_dir.join("dist");
-    for file in std::iter::once("index.js").chain(RETIRED_DIST_FILES) {
-        super::remove_generated_file(&dist_dir.join(file))?;
-    }
+    super::remove_generated_file(&dist_dir.join("index.js"))?;
     super::remove_empty_dir(&dist_dir)?;
     super::remove_generated_file(&dashboard_dir.join("manifest.json"))?;
     super::remove_generated_file(&dashboard_dir.join("plugin_api.py"))?;
@@ -334,8 +311,6 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
         apply_install_policy(&plugin_dir, "/old/bin/tracedecay", true).unwrap();
-        let retired = plugin_dir.join("dashboard/dist/holographic.js");
-        std::fs::write(&retired, "retired generated asset").unwrap();
 
         apply_install_policy(&plugin_dir, "/new/bin/tracedecay", true).unwrap();
 
@@ -343,7 +318,6 @@ mod tests {
         assert!(api.contains("/new/bin/tracedecay"));
         assert!(!api.contains("/old/bin/tracedecay"));
         assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
-        assert!(!retired.exists());
     }
 
     #[test]

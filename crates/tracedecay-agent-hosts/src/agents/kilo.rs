@@ -15,8 +15,8 @@ use tracedecay_domain::errors::Result;
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, McpUninstallPolicy, config_backup_path, doctor_check_mcp_registration,
-    install_mcp_server_entry, load_jsonc_file, uninstall_mcp_server_entry,
+    McpDoctorLabels, McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry,
+    load_jsonc_file, uninstall_mcp_server_entry,
 };
 
 pub struct KiloIntegration;
@@ -88,8 +88,7 @@ impl AgentIntegration for KiloIntegration {
         home: &Path,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
-            let path = kilo_config_path(home);
-            vec![path.clone(), config_backup_path(&path)]
+            vec![kilo_config_path(home)]
         } else {
             Vec::new()
         }

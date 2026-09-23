@@ -15,7 +15,7 @@ pub(crate) async fn handle_cost(
     export: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
     let cwd = std::env::current_dir()?;
-    let project_root = tracedecay::config::discover_project_root(&cwd);
+    let project_root = tracedecay_project::config::discover_project_root(&cwd);
     let payload = daemon_tool_json(
         project_root.as_deref(),
         "tracedecay_admin_cli",

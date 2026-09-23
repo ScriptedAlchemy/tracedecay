@@ -5,8 +5,8 @@ use tracedecay_domain::framed_log::checksum as frame_checksum;
 use tracedecay_domain::framed_log::partial_tail_matches_prefix;
 use tracedecay_private_fs::framed_log::atomic_write as shared_atomic_write;
 
-use crate::HookHostV1;
 use serde_json::Value;
+use tracedecay_domain::NativeHostIdentityV1;
 
 use super::frame::decode_complete_frame;
 use super::types::{
@@ -89,7 +89,7 @@ pub(super) fn partial_tail_matches_intent(
 pub(super) fn reconcile_append_intent(
     meta: &mut HookSpoolMetaV1,
     records: &[PendingRecordV1],
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
 ) -> Result<(), HookSpoolError> {
     let Some(intent) = meta.append_intent.clone() else {
         return Ok(());
@@ -118,7 +118,7 @@ pub(super) fn reconcile_append_intent(
 pub(super) fn validate_meta(
     meta: &HookSpoolMetaV1,
     limits: HookSpoolLimitsV1,
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
 ) -> Result<(), HookSpoolError> {
     if meta.next_sequence == 0
         || meta.next_sequence <= meta.committed_through
@@ -142,7 +142,7 @@ pub(super) fn validate_meta(
     Ok(())
 }
 
-pub(super) fn valid_append_intent(intent: &AppendIntentV1, host: HookHostV1) -> bool {
+pub(super) fn valid_append_intent(intent: &AppendIntentV1, host: NativeHostIdentityV1) -> bool {
     let minimum = FRAME_LENGTH_BYTES + FRAME_HEADER_BYTES + FRAME_CHECKSUM_BYTES;
     if intent.sequence == 0
         || intent.frame.len() < minimum

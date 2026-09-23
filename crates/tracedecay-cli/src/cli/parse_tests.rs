@@ -1,8 +1,8 @@
 use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunsAction,
     AutomationSkillsAction, BranchAction, Cli, Commands, DaemonAction, FeedbackRollbackAction,
-    HostBundleAction, LspAction, MemoryAction, PackageHookAction, ProfileStorageAction,
-    RemoteAction, ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
+    LspAction, MemoryAction, PackageHookAction, ProfileStorageAction, RemoteAction,
+    ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
 };
 use clap::{Parser, error::ErrorKind};
 
@@ -128,67 +128,6 @@ fn workflow_command_binds_one_closed_typed_operation() {
 }
 
 #[test]
-fn removed_host_cli_aliases_are_invalid_subcommands() {
-    for alias in ["claude-install", "update-plugins", "claude-uninstall"] {
-        let error = match Cli::try_parse_from(["tracedecay", alias]) {
-            Ok(_) => panic!("removed host CLI alias must fail: {alias}"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "alias: {alias}");
-    }
-}
-
-#[test]
-fn removed_hermes_install_selectors_are_unknown_arguments() {
-    for args in [
-        vec![
-            "tracedecay",
-            "install",
-            "--agent",
-            "hermes",
-            "--profile",
-            "dev",
-        ],
-        vec![
-            "tracedecay",
-            "install",
-            "--agent",
-            "hermes",
-            "--all-profiles",
-        ],
-        vec![
-            "tracedecay",
-            "install",
-            "--agent",
-            "hermes",
-            "--project-root",
-            "/tmp/project",
-        ],
-        vec![
-            "tracedecay",
-            "uninstall",
-            "--agent",
-            "hermes",
-            "--profile",
-            "dev",
-        ],
-        vec![
-            "tracedecay",
-            "uninstall",
-            "--agent",
-            "hermes",
-            "--all-profiles",
-        ],
-    ] {
-        let error = match Cli::try_parse_from(args.clone()) {
-            Ok(_) => panic!("removed flag must fail: {args:?}"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "args: {args:?}");
-    }
-}
-
-#[test]
 fn project_local_lifecycle_commands_require_and_preserve_agent_scope() {
     let reinstall =
         Cli::try_parse_from(["tracedecay", "reinstall", "--local", "--agent", "opencode"]).unwrap();
@@ -268,100 +207,6 @@ fn feedback_rollback_commands_parse_confirmation_and_state_paths() {
         .is_ok(),
         "confirmation is enforced by the handler so dry parsing remains inspectable"
     );
-}
-
-#[test]
-fn host_bundle_recovery_commands_parse_agent_scope_and_quarantine() {
-    let status = Cli::try_parse_from(["tracedecay", "host-bundle", "status"]).unwrap();
-    assert!(matches!(
-        status.command,
-        Some(Commands::HostBundle {
-            action: HostBundleAction::Status
-        })
-    ));
-    let recover = Cli::try_parse_from([
-        "tracedecay",
-        "host-bundle",
-        "recover",
-        "--agent",
-        "opencode",
-        "--quarantine",
-        "--yes",
-    ])
-    .unwrap();
-    assert!(recover.yes);
-    assert!(matches!(
-        recover.command,
-        Some(Commands::HostBundle {
-            action: HostBundleAction::Recover {
-                agent: Some(ref agent),
-                quarantine: true,
-            }
-        }) if agent == "opencode"
-    ));
-    let all_hosts = Cli::try_parse_from(["tracedecay", "host-bundle", "recover", "--dry-run"])
-        .expect("--dry-run needs no --component on the recovery verb");
-    assert!(all_hosts.dry_run);
-    assert!(matches!(
-        all_hosts.command,
-        Some(Commands::HostBundle {
-            action: HostBundleAction::Recover {
-                agent: None,
-                quarantine: false,
-            }
-        })
-    ));
-}
-
-#[test]
-fn host_bundle_artifact_commands_parse_explicit_scope_and_confirmation() {
-    let backup = Cli::try_parse_from([
-        "tracedecay",
-        "host-bundle",
-        "artifact-backup",
-        "--agent",
-        "opencode",
-        "--component",
-        "agent",
-        "--yes",
-    ])
-    .expect("artifact backup is an explicit host-component command");
-    assert!(backup.yes);
-    assert_eq!(backup.component, Some(super::HostBundleComponentArg::Agent));
-    assert!(matches!(
-        backup.command,
-        Some(Commands::HostBundle {
-            action: HostBundleAction::ArtifactBackup { ref agent }
-        }) if agent == "opencode"
-    ));
-
-    let restore = Cli::try_parse_from([
-        "tracedecay",
-        "host-bundle",
-        "artifact-restore",
-        "--agent",
-        "opencode",
-        "--component",
-        "agent",
-        "--backup-id",
-        "01010101010101010101010101010101",
-        "--yes",
-    ])
-    .expect("artifact restore names its durable backup receipt");
-    assert!(restore.yes);
-    assert_eq!(
-        restore.component,
-        Some(super::HostBundleComponentArg::Agent)
-    );
-    assert!(matches!(
-        restore.command,
-        Some(Commands::HostBundle {
-            action: HostBundleAction::ArtifactRestore {
-                ref agent,
-                ref backup_id,
-            }
-        }) if agent == "opencode" && backup_id == "01010101010101010101010101010101"
-    ));
 }
 
 #[test]
@@ -696,7 +541,6 @@ fn init_and_sync_parse_runtime_skip_and_include_folders() {
         "tracedecay",
         "sync",
         "/tmp/project",
-        "--force",
         "--include-folder",
         "dist",
         "vendor/generated",
@@ -706,12 +550,10 @@ fn init_and_sync_parse_runtime_skip_and_include_folders() {
         sync.command,
         Some(Commands::Sync {
             path,
-            force,
             skip_folders,
             include_folders,
             ..
         }) if path.as_deref() == Some("/tmp/project")
-            && force
             && skip_folders.is_empty()
             && include_folders == strings(&["dist", "vendor/generated"])
     ));
@@ -1160,7 +1002,7 @@ fn project_selector_flags_parse_for_cli_read_surfaces() {
 }
 
 #[test]
-fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
+fn storage_subcommands_use_contextual_nouns() {
     let report = Cli::try_parse_from([
         "tracedecay",
         "storage",
@@ -1249,40 +1091,6 @@ fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
         }) if authority == "observations"
             && db.as_deref() == Some("/tmp/profile/user-sessions.db")
     ));
-
-    for args in [
-        vec![
-            "tracedecay",
-            "storage",
-            "storage-report",
-            "--profile-root",
-            "/tmp/profile",
-        ],
-        vec![
-            "tracedecay",
-            "storage",
-            "backup-profile",
-            "--to",
-            "/tmp/backups",
-            "--backup-id",
-            "backup_2026_08_11",
-        ],
-        vec![
-            "tracedecay",
-            "storage",
-            "rehearse-profile-backup",
-            "--backup",
-            "/tmp/backups/backup_2026_08_11",
-            "--restore",
-            "/tmp/restore",
-        ],
-    ] {
-        let error = match Cli::try_parse_from(args.clone()) {
-            Ok(_) => panic!("legacy storage spelling must be rejected: {args:?}"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "args: {args:?}");
-    }
 }
 
 #[test]

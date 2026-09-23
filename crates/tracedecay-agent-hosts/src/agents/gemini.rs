@@ -6,7 +6,8 @@
 //! server entry, a context file, and commands. TraceDecay therefore **adopts
 //! that lifecycle** instead of configuring Gemini by hand:
 //!
-//! 1. TraceDecay stages an extension source it owns outright under
+//! 1. The receipt-backed component transaction deploys an extension source
+//!    TraceDecay owns outright under
 //!    `~/.gemini/tracedecay-extension/`, a `gemini-extension.json` manifest
 //!    naming the tracedecay MCP server (`args: ["serve"]`, `trust: true`, the
 //!    resolved binary substituted through a placeholder) plus the extension's
@@ -23,21 +24,17 @@
 //! requirement for the lifecycle for the same reason: there is no
 //! config-editing fallback, only a typed refusal naming the missing binary.
 //!
-//! Because the doctor previously failed on a *missing* `mcpServers.tracedecay`
-//! entry in `~/.gemini/settings.json`, it would now report a defect for the
-//! correct state. Its checks below were re-pointed at what is actually true
-//! under the extension model: the staged source, the host's installed
-//! extension copy, and, when the binary is present, Gemini's own
-//! `gemini extensions list`. A settings entry is now reported as *legacy
-//! residue*, not as the required registration.
+//! The doctor therefore checks what the extension model makes true: the
+//! staged source, the host's installed extension copy, and, when the binary
+//! is present, Gemini's own `gemini extensions list`. It never requires an
+//! `mcpServers.tracedecay` entry in `~/.gemini/settings.json`.
 
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::Result;
 
 use super::{
-    AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    NonInteractiveInstallOutcome, UpdatePluginOutcome, load_json_file,
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file,
 };
 
 mod extension;
@@ -49,12 +46,11 @@ mod extension;
 pub(crate) use extension::{GEMINI_STAGED_EXTENSION_RELATIVE, rendered_extension_files};
 
 use extension::{
-    EXTENSION_CONTEXT_FILE, EXTENSION_NAME, InstalledExtensionV1, MCP_SERVER_NAME,
-    deploy_extension_bundle, extension_stage_dir, gemini_extension_activate_with,
-    gemini_extension_deactivate_with, host_reported_extensions, installed_extension_dir,
-    installed_extension_is_current, installed_extension_is_present, installed_manifest_path,
-    manifest_declares_current_server, read_installed_extension, require_gemini_cli, settings_path,
-    stage_dir_is_tracedecay, staged_context_path, staged_manifest_path, user_context_path,
+    EXTENSION_NAME, InstalledExtensionV1, MCP_SERVER_NAME, extension_stage_dir, gemini_extension_activate_with, gemini_extension_deactivate_with,
+    host_reported_extensions, installed_extension_dir, installed_extension_is_current,
+    installed_extension_is_present, installed_manifest_path, manifest_declares_current_server,
+    read_installed_extension, require_gemini_cli, settings_path, stage_dir_is_tracedecay,
+    staged_context_path, staged_manifest_path,
 };
 
 pub struct GeminiIntegration;
@@ -81,41 +77,6 @@ impl AgentIntegration for GeminiIntegration {
         false
     }
 
-    /// Read-only readiness: has Gemini already adopted an extension matching
-    /// what this version would stage? Nothing is written here, and the host
-    /// CLI is not required, an absent binary only becomes a hard failure once
-    /// a lifecycle actually needs to run.
-    fn preflight_non_interactive_install(
-        &self,
-        ctx: &InstallContext,
-    ) -> Result<NonInteractiveInstallOutcome> {
-        Ok(gemini_extension_install_state(
-            &ctx.home,
-            &ctx.tracedecay_bin,
-            Vec::new(),
-        ))
-    }
-
-    /// Stage the extension source and drive Gemini's own install command.
-    ///
-    /// The returned outcome is recomputed from the host's installed copy
-    /// *after* the command: a clean exit that did not leave an installed
-    /// extension where Gemini keeps them is reported as still-deferred rather
-    /// than claimed as an activation TraceDecay never observed.
-    fn prepare_non_interactive_install(
-        &self,
-        ctx: &InstallContext,
-    ) -> Result<NonInteractiveInstallOutcome> {
-        let stage_dir = deploy_extension_bundle(&ctx.home, &ctx.tracedecay_bin)?;
-        let gemini = require_gemini_cli()?;
-        gemini_extension_activate_with(&gemini, &ctx.home)?;
-        Ok(gemini_extension_install_state(
-            &ctx.home,
-            &ctx.tracedecay_bin,
-            vec![stage_dir],
-        ))
-    }
-
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         if installed_extension_is_current(&ctx.home, Some(&ctx.tracedecay_bin)) {
             return Ok(());
@@ -135,36 +96,11 @@ impl AgentIntegration for GeminiIntegration {
         gemini_extension_deactivate_with(&gemini, &ctx.home)
     }
 
-    /// Refresh the staged extension source (the only generated artifact: it
-    /// bakes the crate version and the resolved binary path).
-    ///
-    /// Gemini owns the installed copy, so refreshing the source alone cannot
-    /// honestly report an updated extension, the adoption step is reported as
-    /// a deferred host action instead of silently claimed.
-    fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        if !staged_manifest_path(&ctx.home).exists() {
-            return Ok(UpdatePluginOutcome::NotInstalled);
-        }
-        let stage_dir = deploy_extension_bundle(&ctx.home, &ctx.tracedecay_bin)?;
-        Ok(UpdatePluginOutcome::DeferredUserAction(
-            DeferredUserAction {
-                remediation: format!(
-                    "Gemini CLI extension source is staged. Run \
-                 `gemini extensions update {EXTENSION_NAME}` (or re-run \
-                 `tracedecay install --agent gemini`) so Gemini CLI adopts the refreshed source."
-                ),
-                staged_paths: vec![stage_dir],
-            },
-        ))
-    }
-
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         eprintln!("\n\x1b[1mGemini CLI integration\x1b[0m");
         doctor_check_staged_extension(dc, &ctx.home);
         doctor_check_installed_extension(dc, &ctx.home);
         doctor_check_host_reported_extensions(dc, &ctx.home);
-        doctor_check_settings(dc, &ctx.home);
-        doctor_check_prompt(dc, &ctx.home);
     }
 
     /// Read-only registration state, observed from the host's installed
@@ -240,30 +176,6 @@ impl AgentIntegration for GeminiIntegration {
 // ---------------------------------------------------------------------------
 // Lifecycle state
 // ---------------------------------------------------------------------------
-
-/// Whether the host has adopted a current tracedecay extension, expressed as
-/// the non-interactive install outcome the lifecycle expects.
-fn gemini_extension_install_state(
-    home: &Path,
-    tracedecay_bin: &str,
-    staged_paths: Vec<PathBuf>,
-) -> NonInteractiveInstallOutcome {
-    if installed_extension_is_current(home, Some(tracedecay_bin)) {
-        return NonInteractiveInstallOutcome::Ready;
-    }
-    let stage_dir = extension_stage_dir(home);
-    NonInteractiveInstallOutcome::DeferredUserAction(DeferredUserAction {
-        remediation: format!(
-            "Gemini CLI owns extension registration and the installed copy. TraceDecay could not \
-             observe a current tracedecay extension at {}. Run `gemini extensions install {}` \
-             (uninstall an older one first with `gemini extensions uninstall {EXTENSION_NAME}`), \
-             then re-run TraceDecay.",
-            installed_extension_dir(home).display(),
-            stage_dir.display()
-        ),
-        staged_paths,
-    })
-}
 
 /// Registration state from the host's installed extension alone.
 fn gemini_extension_registration_state(
@@ -460,60 +372,6 @@ fn doctor_check_host_reported_extensions(dc: &mut DoctorCounters, home: &Path) {
             "`gemini extensions list` does not report a tracedecay extension, run \
              `tracedecay install --agent gemini`",
         );
-    }
-}
-
-/// `~/.gemini/settings.json` is no longer where tracedecay is registered: the
-/// extension supplies the MCP server. A surviving `mcpServers.tracedecay`
-/// entry is pre-extension residue, and reporting its *absence* as a failure,
-/// as this check once did, would now be a lie.
-fn doctor_check_settings(dc: &mut DoctorCounters, home: &Path) {
-    let settings = settings_path(home);
-    if !settings.exists() {
-        dc.pass(&format!(
-            "{} has no legacy tracedecay MCP entry (the extension supplies the server)",
-            settings.display()
-        ));
-        return;
-    }
-    let has_legacy_entry = load_json_file(&settings)
-        .get("mcpServers")
-        .and_then(|servers| servers.get("tracedecay"))
-        .is_some();
-    if has_legacy_entry {
-        dc.warn(&format!(
-            "{} still declares mcpServers.tracedecay from the pre-extension install; the \
-             extension now supplies that server. Remove the entry so Gemini does not load two \
-             tracedecay servers",
-            settings.display()
-        ));
-    } else {
-        dc.pass(&format!(
-            "{} has no legacy tracedecay MCP entry (the extension supplies the server)",
-            settings.display()
-        ));
-    }
-}
-
-/// The extension carries its own context file, so the operator's
-/// `~/.gemini/GEMINI.md` is expected *not* to contain tracedecay rules. A
-/// managed block there is residue from the marker-append era.
-fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
-    let user_context = user_context_path(home);
-    let has_legacy_block = std::fs::read_to_string(&user_context)
-        .is_ok_and(|contents| contents.contains(super::prompt_rules::PROMPT_RULE_MARKER));
-    if has_legacy_block {
-        dc.warn(&format!(
-            "{} still contains the tracedecay rules block appended by the pre-extension \
-             install; the extension now ships its own {EXTENSION_CONTEXT_FILE}. Remove the block \
-             to avoid duplicated rules",
-            user_context.display()
-        ));
-    } else {
-        dc.pass(&format!(
-            "{} carries no TraceDecay-managed block (the extension ships its own context file)",
-            user_context.display()
-        ));
     }
 }
 

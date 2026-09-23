@@ -16,8 +16,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::host_bundle::HostBundleRegistrationStateV1;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, TextFileMutation, config_backup_path, load_json_file, report_mcp_registration,
-    update_config_file_transactionally,
+    McpDoctorLabels, TextFileMutation, load_json_file, report_mcp_registration,
+    update_text_file_transactionally,
 };
 
 pub struct DevinIntegration;
@@ -34,10 +34,6 @@ fn devin_mcp_config_path(home: &Path) -> PathBuf {
 /// Current project-scoped MCP configuration path documented by Devin.
 fn devin_project_mcp_config_path(project_path: &Path) -> PathBuf {
     project_path.join(".devin/mcp_config.json")
-}
-
-fn devin_original_config_path(config_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
 impl AgentIntegration for DevinIntegration {
@@ -120,12 +116,7 @@ impl AgentIntegration for DevinIntegration {
         home: &Path,
     ) -> Vec<PathBuf> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
-            let path = devin_mcp_config_path(home);
-            vec![
-                path.clone(),
-                config_backup_path(&path),
-                devin_original_config_path(&path),
-            ]
+            vec![devin_mcp_config_path(home)]
         } else {
             Vec::new()
         }
@@ -138,12 +129,7 @@ impl AgentIntegration for DevinIntegration {
         project_path: &Path,
     ) -> Result<Vec<PathBuf>> {
         if components == [super::host_bundle::HostComponentV1::ContextMcp] {
-            let path = devin_project_mcp_config_path(project_path);
-            Ok(vec![
-                path.clone(),
-                config_backup_path(&path),
-                devin_original_config_path(&path),
-            ])
+            Ok(vec![devin_project_mcp_config_path(project_path)])
         } else {
             Ok(Vec::new())
         }
@@ -173,11 +159,7 @@ impl AgentIntegration for DevinIntegration {
         project_path: &Path,
     ) -> Result<()> {
         let config_path = devin_project_mcp_config_path(project_path);
-        let original_path = devin_original_config_path(&config_path);
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [config_path.as_path(), original_path.as_path()],
-        )?;
+        super::ensure_project_local_safe_path(project_path, &config_path)?;
         install_mcp_if_selected(components, &config_path, ctx)
     }
 
@@ -188,11 +170,7 @@ impl AgentIntegration for DevinIntegration {
         project_path: &Path,
     ) -> Result<()> {
         let config_path = devin_project_mcp_config_path(project_path);
-        let original_path = devin_original_config_path(&config_path);
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [config_path.as_path(), original_path.as_path()],
-        )?;
+        super::ensure_project_local_safe_path(project_path, &config_path)?;
         uninstall_mcp_if_selected(components, &config_path)
     }
 
@@ -278,8 +256,7 @@ fn install_mcp_if_selected(
                 ),
             })?;
         }
-        let original_path = devin_original_config_path(config_path);
-        update_config_file_transactionally(config_path, |existing| {
+        update_text_file_transactionally(config_path, |existing| {
             let mut settings = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
             if !settings.is_object() {
                 return Err(TraceDecayError::Config {
@@ -293,10 +270,6 @@ fn install_mcp_if_selected(
                 return Err(TraceDecayError::Config {
                     message: format!("{}.mcpServers must be a JSON object", config_path.display()),
                 });
-            }
-            let has_tracedecay = settings.pointer("/mcpServers/tracedecay").is_some();
-            if !has_tracedecay && config_path.is_file() && !original_path.exists() {
-                super::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
             }
             settings["mcpServers"]["tracedecay"] = json!({
                 "command": ctx.tracedecay_bin.clone(),
@@ -317,12 +290,6 @@ fn install_mcp_if_selected(
     Ok(())
 }
 
-enum DevinMcpRemoval {
-    NoEntry,
-    RestoredOriginal,
-    Rewritten,
-}
-
 fn uninstall_mcp_if_selected(
     components: &[super::host_bundle::HostComponentV1],
     config_path: &Path,
@@ -332,56 +299,32 @@ fn uninstall_mcp_if_selected(
             eprintln!("  {} not found, skipping", config_path.display());
             return Ok(());
         }
-        let original_path = devin_original_config_path(config_path);
-        let outcome = update_config_file_transactionally(config_path, |existing| {
+        let removed = update_text_file_transactionally(config_path, |existing| {
             let mut settings = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
             let Some(servers) = settings
                 .get_mut("mcpServers")
                 .and_then(serde_json::Value::as_object_mut)
             else {
-                return Ok((DevinMcpRemoval::NoEntry, TextFileMutation::Unchanged));
+                return Ok((false, TextFileMutation::Unchanged));
             };
             if servers.remove("tracedecay").is_none() {
-                return Ok((DevinMcpRemoval::NoEntry, TextFileMutation::Unchanged));
-            }
-            if let Ok(original) = std::fs::read(&original_path)
-                && serde_json::from_slice::<serde_json::Value>(&original).ok()
-                    == Some(settings.clone())
-            {
-                let original =
-                    String::from_utf8(original).map_err(|error| TraceDecayError::Config {
-                        message: format!("{} is not valid UTF-8: {error}", original_path.display()),
-                    })?;
-                return Ok((
-                    DevinMcpRemoval::RestoredOriginal,
-                    TextFileMutation::Write(original),
-                ));
+                return Ok((false, TextFileMutation::Unchanged));
             }
             Ok((
-                DevinMcpRemoval::Rewritten,
+                true,
                 TextFileMutation::Write(super::render_json_config(config_path, &settings)?),
             ))
         })?;
-        match outcome {
-            DevinMcpRemoval::NoEntry => eprintln!(
-                "  No tracedecay MCP server in {}, skipping",
-                config_path.display()
-            ),
-            DevinMcpRemoval::RestoredOriginal => {
-                super::safe_remove_host_file(&original_path).map_err(|error| {
-                    TraceDecayError::Config {
-                        message: format!("failed to remove {}: {error}", original_path.display()),
-                    }
-                })?;
-                eprintln!(
-                    "\x1b[32m✔\x1b[0m Restored original Devin configuration in {}",
-                    config_path.display()
-                );
-            }
-            DevinMcpRemoval::Rewritten => eprintln!(
+        if removed {
+            eprintln!(
                 "\x1b[32m✔\x1b[0m Removed tracedecay MCP server from {}",
                 config_path.display()
-            ),
+            );
+        } else {
+            eprintln!(
+                "  No tracedecay MCP server in {}, skipping",
+                config_path.display()
+            );
         }
     }
     Ok(())
@@ -425,7 +368,6 @@ mod tests {
         let install = InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "/tmp/tracedecay".to_string(),
-            tool_permissions: Vec::new(),
             project_root: None,
             dashboard: false,
         };
@@ -482,7 +424,6 @@ mod tests {
         let install = InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "/tmp/tracedecay".to_string(),
-            tool_permissions: Vec::new(),
             project_root: Some(project.path().to_path_buf()),
             dashboard: false,
         };
@@ -513,7 +454,6 @@ mod tests {
         let install = InstallContext {
             home: home.path().to_path_buf(),
             tracedecay_bin: "/tmp/tracedecay-a".to_string(),
-            tool_permissions: Vec::new(),
             project_root: Some(project.path().to_path_buf()),
             dashboard: false,
         };
@@ -521,10 +461,6 @@ mod tests {
         DevinIntegration
             .activate_project_host_component_registration(&components, &install, project.path())
             .unwrap();
-        assert_eq!(
-            std::fs::read(devin_original_config_path(&config)).unwrap(),
-            original
-        );
         let installed = load_json_file(&config);
         assert_eq!(installed["ui"]["theme"], "dark");
         assert_eq!(installed["mcpServers"]["other"]["command"], "other-mcp");
@@ -540,7 +476,10 @@ mod tests {
         assert_eq!(removed["ui"]["theme"], "dark");
         assert_eq!(removed["mcpServers"]["other"]["command"], "other-mcp");
         assert!(removed["mcpServers"].get("tracedecay").is_none());
-        assert_eq!(std::fs::read(&config).unwrap(), original);
-        assert!(!devin_original_config_path(&config).exists());
+        let siblings: Vec<_> = std::fs::read_dir(config.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(siblings, vec![std::ffi::OsString::from("mcp_config.json")]);
     }
 }

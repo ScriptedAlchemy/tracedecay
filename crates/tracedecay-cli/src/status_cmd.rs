@@ -541,7 +541,7 @@ async fn handle_status_command_within(
     }
 
     if !tracedecay_configuration::is_in_gitignore(&project_path) {
-        let dir_name = tracedecay::config::active_data_dir_name(&project_path);
+        let dir_name = tracedecay_project::config::active_data_dir_name(&project_path);
         if stderr_is_terminal {
             eprintln!(
                 "\n\x1b[33mWarning: {dir_name} is not in .gitignore. \

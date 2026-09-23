@@ -226,52 +226,6 @@ fn save_writes_versioned_schema() {
 }
 
 #[test]
-fn legacy_store_migrates_to_versioned_schema() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tool_hints_seen.json");
-    // Legacy v1 file: a bare array of {session_id, category}.
-    std::fs::write(
-        &path,
-        r#"[{"session_id":"s1","category":"search"},{"session_id":"s1","category":"file_read"}]"#,
-    )
-    .unwrap();
-
-    let mut dedupe = ToolHintDedupe::load_or_default(&path);
-    // v1 categories load as already-hinted: they suppress, not re-emit.
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::Search),
-        HintDeliveryDecisionV1::SuppressDuplicate
-    );
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::FileRead),
-        HintDeliveryDecisionV1::SuppressDuplicate
-    );
-    // The two migrated hints already count against s1's budget, so only one
-    // more distinct category can emit before the cap.
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::Impact),
-        HintDeliveryDecisionV1::Deliver
-    );
-    assert_eq!(
-        dedupe.decide("s1", HintCategory::CallGraph),
-        HintDeliveryDecisionV1::SuppressBudget
-    );
-
-    // Persisting rewrites the file in v2 shape.
-    dedupe.save(&path).unwrap();
-    let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(value["version"], 2);
-
-    // Reload from v2 preserves the migrated suppression state.
-    let mut reloaded = ToolHintDedupe::load_or_default(&path);
-    assert_eq!(
-        reloaded.decide("s1", HintCategory::Search),
-        HintDeliveryDecisionV1::SuppressDuplicate
-    );
-}
-
-#[test]
 fn oversized_store_resets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tool_hints_seen.json");
@@ -302,6 +256,15 @@ fn dedupe_load_tolerates_missing_and_corrupt_files() {
     let corrupt = dir.path().join("corrupt.json");
     std::fs::write(&corrupt, "not json").unwrap();
     let mut dedupe = ToolHintDedupe::load_or_default(&corrupt);
+    assert_eq!(
+        dedupe.decide("s1", HintCategory::Search),
+        HintDeliveryDecisionV1::Deliver
+    );
+
+    // A pre-versioned bare-array store is not migrated; it starts over.
+    let old_shape = dir.path().join("old-shape.json");
+    std::fs::write(&old_shape, r#"[{"session_id":"s1","category":"search"}]"#).unwrap();
+    let mut dedupe = ToolHintDedupe::load_or_default(&old_shape);
     assert_eq!(
         dedupe.decide("s1", HintCategory::Search),
         HintDeliveryDecisionV1::Deliver

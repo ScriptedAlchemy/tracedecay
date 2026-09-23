@@ -64,8 +64,9 @@ never a doubled `tracedecay`.
 
 Use `tracedecay_grep` for literal strings, regexes, and config keys inside
 indexed code. Use `tracedecay_search` for symbol names, `tracedecay_context`
-for concepts, `tracedecay_files` for path discovery, and `tracedecay_read` or
-`tracedecay_outline` for bounded reads after a file is known.
+for concepts, `tracedecay_files` for path discovery, and
+`tracedecay_source_outline` or `tracedecay_source_body` for bounded reads after
+a file or symbol is known.
 
 Every MCP tool also has a CLI transport:
 

@@ -21,7 +21,6 @@ use super::{host_bundle_error, host_kind_for_agent, load_host_lifecycle_user_con
 enum FeedbackRollbackCliStatus {
     Prepared,
     Applied,
-    Restored,
 }
 
 const FEEDBACK_ROLLBACK_STATE_SCHEMA_VERSION: u16 = 6;
@@ -171,12 +170,6 @@ struct FeedbackPreviewStorage;
 impl tracedecay_agent_hosts::agents::host_bundle::HostBundleLifecycleStorageV1
     for FeedbackPreviewStorage
 {
-    fn recover_lifecycle(
-        &mut self,
-    ) -> Result<(), tracedecay_agent_hosts::agents::host_bundle::HostBundleError> {
-        Ok(())
-    }
-
     fn execute_lifecycle<
         V: tracedecay_agent_hosts::agents::host_bundle::HostBundleVerificationAdapterV1,
     >(
@@ -742,7 +735,6 @@ fn restore_feedback_registration(
                 tracedecay_agent_hosts::agents::safe_write_bytes_file_with_metadata(
                     path,
                     contents,
-                    None,
                     file.metadata.as_ref(),
                 )?;
                 if file.metadata.is_none()
@@ -1235,7 +1227,6 @@ fn feedback_rollback_apply(
         home: home.clone(),
         tracedecay_bin: tracedecay_agent_hosts::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
-        tool_permissions: tracedecay_agent_hosts::agents::expected_tool_perms()?,
         project_root: None,
         dashboard: state.dashboard_enabled,
     };
@@ -1378,9 +1369,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
             Some(&state.registration_intent_root),
         )?;
         read_feedback_contents(&home, &state.previous_manifest)?;
-        state.status = FeedbackRollbackCliStatus::Restored;
-        persist_feedback_state(state_path, &lifecycle_root, &state)?;
-        return Ok(());
+        return retire_feedback_state(state_path, &lifecycle_root, &state);
     }
     if !state.compensation_preserves_registration {
         validate_feedback_registration_restore(
@@ -1522,9 +1511,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
             )?;
             read_feedback_contents(&home, &state.previous_manifest)?;
             restore_feedback_artifact_permissions(&home, &state.artifact_permissions)?;
-            state.status = FeedbackRollbackCliStatus::Restored;
-            persist_feedback_state(state_path, &lifecycle_root, &state)?;
-            return Ok(());
+            return retire_feedback_state(state_path, &lifecycle_root, &state);
         }
     };
     let verifier = feedback_pair_verifier(&state.previous_manifest, &state.target_manifest)?;
@@ -1590,7 +1577,6 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
         home,
         tracedecay_bin: tracedecay_agent_hosts::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
-        tool_permissions: tracedecay_agent_hosts::agents::expected_tool_perms()?,
         project_root: None,
         dashboard: state.dashboard_enabled,
     };
@@ -1616,12 +1602,47 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay_domain::errors::Re
     writer
         .publish_feedback_component_set_receipt(&state.previous_manifest, &restore.restore_receipt)
         .map_err(host_bundle_error)?;
-    state.status = FeedbackRollbackCliStatus::Restored;
-    persist_feedback_state(state_path, &lifecycle_root, &state)?;
+    retire_feedback_state(state_path, &lifecycle_root, &state)?;
     println!(
-        "\x1b[32m✔\x1b[0m {} feedback route restored; state {}",
-        state.agent_id,
-        state_path.display()
+        "\x1b[32m✔\x1b[0m {} feedback route restored",
+        state.agent_id
     );
     Ok(())
+}
+
+/// A completed restore leaves nothing behind: the state file holds copies of
+/// the prior route and host registration bytes, which serve only an
+/// unfinished restore.
+fn retire_feedback_state(
+    state_path: &Path,
+    lifecycle_root: &Path,
+    state: &FeedbackRollbackCliState,
+) -> tracedecay_domain::errors::Result<()> {
+    for path in [
+        state_path.to_path_buf(),
+        feedback_doctor_state_path(lifecycle_root, &state.agent_id),
+    ] {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!(
+                        "could not remove feedback rollback state {}: {error}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    }
+    match fs::remove_dir_all(&state.registration_intent_root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "could not remove feedback registration intents {}: {error}",
+                state.registration_intent_root.display()
+            ),
+        }),
+    }
 }

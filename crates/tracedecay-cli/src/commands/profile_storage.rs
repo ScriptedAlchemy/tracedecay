@@ -139,7 +139,7 @@ fn project_store_graph_db_paths(
     data_root: &Path,
 ) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
     let mut candidates = Vec::new();
-    let root_db = data_root.join(tracedecay::config::db_filename(data_root));
+    let root_db = data_root.join(tracedecay_project::config::db_filename(data_root));
     if root_db.is_file() {
         candidates.push(root_db);
     }
@@ -248,7 +248,7 @@ fn reset_refused_project_graph_store(
             message: format!(
                 "no project graph store exists at {}; nothing to reset",
                 data_root
-                    .join(tracedecay::config::db_filename(&data_root))
+                    .join(tracedecay_project::config::db_filename(&data_root))
                     .display()
             ),
         });
@@ -708,7 +708,7 @@ mod reset_project_store_tests {
     ) -> PathBuf {
         let data_root =
             tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
-        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
         write_graph_db_with_user_version(&db_path, version);
         db_path
     }
@@ -833,9 +833,9 @@ mod reset_project_store_tests {
             "profile storage exact-shape fixture",
         )
         .unwrap();
-        let graph = tracedecay::project::TraceDecay::init_with_exclusive_maintenance(
+        let graph = tracedecay_project::project::TraceDecay::init_with_exclusive_maintenance(
             &project_root,
-            tracedecay::project::TraceDecayOpenOptions {
+            tracedecay_project::project::TraceDecayOpenOptions {
                 profile_root: Some(profile_root.clone()),
                 global_db_path: Some(profile_root.join("global.db")),
             },
@@ -861,7 +861,7 @@ mod reset_project_store_tests {
         );
         std::fs::create_dir_all(&incompatible_root).unwrap();
         let incompatible_db =
-            incompatible_root.join(tracedecay::config::db_filename(&incompatible_root));
+            incompatible_root.join(tracedecay_project::config::db_filename(&incompatible_root));
         let source = rusqlite::Connection::open_with_flags(
             &healthy_db,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -917,7 +917,7 @@ mod reset_project_store_tests {
             "proj_not_sqlite",
         );
         std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(tracedecay::config::db_filename(&data_root));
+        let db_path = data_root.join(tracedecay_project::config::db_filename(&data_root));
         std::fs::write(&db_path, b"not a database").unwrap();
 
         let error =

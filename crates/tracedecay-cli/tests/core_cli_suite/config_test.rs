@@ -1,76 +1,5 @@
 use tempfile::TempDir;
-use tracedecay_configuration::{
-    TraceDecayConfig, get_config_path, is_excluded, is_excluded_dir, is_in_gitignore, load_config,
-};
-
-#[test]
-fn legacy_config_fixture_load_does_not_rewrite_input() {
-    let dir = TempDir::new().unwrap();
-    let config = TraceDecayConfig::default();
-    let config_path = get_config_path(dir.path());
-    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    let source = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&config_path, &source).unwrap();
-    let loaded = load_config(dir.path()).unwrap();
-    assert_eq!(config.version, loaded.version);
-    assert_eq!(config.exclude, loaded.exclude);
-    assert_eq!(std::fs::read_to_string(config_path).unwrap(), source);
-}
-
-#[test]
-fn test_is_excluded() {
-    let config = TraceDecayConfig::default();
-    assert!(!is_excluded("src/main.rs", &config));
-    assert!(is_excluded("target/debug/foo", &config));
-    assert!(is_excluded("node_modules/foo.rs", &config));
-    assert!(is_excluded("build/classes/App.class", &config));
-    assert!(is_excluded("packages/web/dist/main.js", &config));
-    assert!(is_excluded("packages/web/coverage/lcov.js", &config));
-    assert!(is_excluded("packages/web/.next/server/app.js", &config));
-    assert!(is_excluded("tools/.cache/generated.py", &config));
-}
-
-#[test]
-fn default_generated_excludes_prune_nested_dirs() {
-    let config = TraceDecayConfig::default();
-    for path in [
-        "packages/web/dist",
-        "packages/web/coverage",
-        "packages/web/.next",
-        "packages/web/.turbo",
-        "tools/.cache",
-        "backend/.venv",
-        "backend/__pycache__",
-    ] {
-        assert!(
-            is_excluded_dir(path, &config),
-            "expected default excludes to prune {path}"
-        );
-    }
-}
-
-#[test]
-fn test_legacy_config_with_include_field_still_loads() {
-    let dir = TempDir::new().unwrap();
-    let tracedecay_dir = dir.path().join(".tracedecay");
-    std::fs::create_dir_all(&tracedecay_dir).unwrap();
-    // Simulate an old config that still has an "include" field
-    let legacy_json = r#"{
-        "version": 1,
-        "root_dir": ".",
-        "include": ["**/*.rs"],
-        "exclude": ["target/**", ".git/**", ".tracedecay/**"],
-        "max_file_size": 1048576,
-        "extract_docstrings": true,
-        "track_call_sites": true,
-        "enable_embeddings": false
-    }"#;
-    std::fs::write(tracedecay_dir.join("config.json"), legacy_json).unwrap();
-    let loaded = load_config(dir.path()).unwrap();
-    assert_eq!(loaded.version, 1);
-    assert!(loaded.exclude.contains(&"target/**".to_string()));
-    assert!(loaded.git_ignore);
-}
+use tracedecay_configuration::is_in_gitignore;
 
 // ── is_in_gitignore ─────────────────────────────────────────────────────────
 
@@ -113,18 +42,18 @@ fn test_is_in_gitignore_no_file() {
 fn test_discover_project_root_finds_parent() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path();
-    std::fs::create_dir_all(root.join(".tracedecay")).unwrap();
-    std::fs::write(root.join(".tracedecay/tracedecay.db"), b"fake").unwrap();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, "proj_discover_parent")
+        .unwrap();
     let child = root.join("src/mcp");
     std::fs::create_dir_all(&child).unwrap();
 
-    let found = tracedecay::config::discover_project_root(&child);
+    let found = tracedecay_project::config::discover_project_root(&child);
     assert_eq!(found, Some(root.to_path_buf()));
 }
 
 #[test]
 fn test_discover_project_root_returns_none() {
     let dir = tempfile::TempDir::new().unwrap();
-    let found = tracedecay::config::discover_project_root(dir.path());
+    let found = tracedecay_project::config::discover_project_root(dir.path());
     assert!(found.is_none());
 }

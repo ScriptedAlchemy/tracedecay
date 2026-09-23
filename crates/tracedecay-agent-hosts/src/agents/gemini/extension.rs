@@ -140,12 +140,6 @@ pub(super) fn settings_path(home: &Path) -> PathBuf {
     gemini_home(home).join("settings.json")
 }
 
-/// The operator's own global context file. Read-only for this integration; a
-/// tracedecay block here is legacy residue from the pre-extension model.
-pub(super) fn user_context_path(home: &Path) -> PathBuf {
-    gemini_home(home).join(EXTENSION_CONTEXT_FILE)
-}
-
 // ---------------------------------------------------------------------------
 // Staging
 // ---------------------------------------------------------------------------
@@ -218,24 +212,6 @@ fn context_file_text() -> String {
     )
 }
 
-/// Render the extension source into its stable staging directory and report
-/// that directory. A clean replace, so a file a previous version staged but
-/// this one no longer ships cannot linger into the next `gemini extensions
-/// install`.
-#[hotpath::measure(label = "hosts.agent.gemini.extension_deploy")]
-pub(super) fn deploy_extension_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
-    let stage_dir = extension_stage_dir(home);
-    clean_replace_owned_stage_dir(&stage_dir)?;
-    for (relative, rendered) in rendered_extension_files(tracedecay_bin)? {
-        safe_write_text_file(&stage_dir.join(relative), &rendered, None)?;
-    }
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Staged tracedecay Gemini extension in {}",
-        stage_dir.display()
-    );
-    Ok(stage_dir)
-}
-
 /// True when a staging directory is tracedecay-owned: its manifest names the
 /// tracedecay extension. A missing directory is trivially safe to write into.
 pub(super) fn stage_dir_is_tracedecay(stage_dir: &Path) -> bool {
@@ -243,27 +219,6 @@ pub(super) fn stage_dir_is_tracedecay(stage_dir: &Path) -> bool {
         .get("name")
         .and_then(serde_json::Value::as_str)
         == Some(EXTENSION_NAME)
-}
-
-/// Remove the tracedecay-owned staging directory so the next write is a clean
-/// replace. No-op when it is missing; refuses when it exists but is not
-/// tracedecay-owned, so a directory squatting on the path, an operator's own
-/// hand-written extension source, say, is never deleted.
-fn clean_replace_owned_stage_dir(stage_dir: &Path) -> Result<()> {
-    if !stage_dir.exists() {
-        return Ok(());
-    }
-    if !stage_dir_is_tracedecay(stage_dir) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "refusing to replace non-tracedecay Gemini extension directory {}",
-                stage_dir.display()
-            ),
-        });
-    }
-    std::fs::remove_dir_all(stage_dir).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to remove {}: {error}", stage_dir.display()),
-    })
 }
 
 // ---------------------------------------------------------------------------

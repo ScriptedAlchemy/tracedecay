@@ -1,5 +1,4 @@
 use super::*;
-use sha2::{Digest, Sha256};
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
 /// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`
@@ -292,16 +291,9 @@ trusted_hash = "sha256:foreign"
                 & 0o777,
             0o600
         );
-        // The backup carries the same secrets as the original, so it must
-        // inherit the restrictive mode instead of the umask default.
-        assert_eq!(
-            std::fs::metadata(crate::agents::config_backup_path(&config_path))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600,
-            "config.toml.bak must keep the original 0600 mode"
+        assert!(
+            !config_path.with_extension("toml.bak").exists(),
+            "hook trust must not keep a copy of the secret-bearing config"
         );
     }
 
@@ -428,7 +420,7 @@ fn sync_codex_hook_trust_hashes_the_installed_hook_payload() {
     let hooks_path = plugin_dir.join("hooks/hooks.json");
     let mut hooks = load_json_file_strict(&hooks_path).unwrap();
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
-    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    safe_write_json_file(&hooks_path, &hooks).unwrap();
     let changed_entries = codex_hook_trust_entries(&hooks).unwrap();
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
@@ -464,7 +456,7 @@ fn sync_codex_hook_trust_reads_a_custom_marketplace_cache() {
     let hooks_path = plugin_dir.join("hooks/hooks.json");
     let mut hooks = load_json_file_strict(&hooks_path).unwrap();
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
-    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    safe_write_json_file(&hooks_path, &hooks).unwrap();
     let changed_entries =
         codex_hook_trust_entries_for_marketplace(&hooks, "my-marketplace").unwrap();
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
@@ -490,7 +482,7 @@ fn sync_codex_hook_trust_rejects_tampered_installed_command() {
         .to_string();
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
         json!(format!("{command} && /tmp/untrusted-payload"));
-    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    safe_write_json_file(&hooks_path, &hooks).unwrap();
     std::fs::create_dir_all(home.path().join(".codex")).unwrap();
 
     let outcome = sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
@@ -529,7 +521,7 @@ fn sync_codex_hook_trust_all_skipped_is_ok_without_hollow_state() {
             }
         }
     }
-    safe_write_json_file(&hooks_path, &hooks, None).unwrap();
+    safe_write_json_file(&hooks_path, &hooks).unwrap();
     let config_path = codex_config_path(home.path());
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(
@@ -683,10 +675,23 @@ fn install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
         tracedecay_bin: TEST_BIN.to_string(),
-        tool_permissions: Vec::new(),
         project_root: None,
         dashboard: false,
     }
+}
+
+/// The personal plugin source plus its marketplace entry, as a completed
+/// Core install leaves them.
+fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
+    let install_dir = codex_plugin_install_dir(home);
+    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global, home)?;
+    install_codex_marketplace_entry(
+        &codex_personal_marketplace_path(home),
+        "personal",
+        "Personal",
+        CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
+    )?;
+    Ok(install_dir)
 }
 
 fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
@@ -775,140 +780,35 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
     let old_bin = "/old/bin/tracedecay";
     let new_bin = "/relocated/bin/tracedecay";
     write_exact_native_activation(home.path(), old_bin);
-    let old_ctx = install_ctx(home.path());
-    let old_ctx = InstallContext {
-        tracedecay_bin: old_bin.to_string(),
-        ..old_ctx
-    };
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&old_ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::Ready
-    ));
+    assert!(codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
 
     let retired_skill =
         codex_plugin_current_cached_install_dir(home.path()).join("skills/retired/SKILL.md");
     std::fs::create_dir_all(retired_skill.parent().unwrap()).unwrap();
     std::fs::write(&retired_skill, "# stale auto-discovered skill\n").unwrap();
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&old_ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::DeferredUserAction(_)
-    ));
+    assert!(!codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
     std::fs::remove_file(retired_skill).unwrap();
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&old_ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::Ready
-    ));
+    assert!(codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
 
     std::fs::write(
         codex_plugin_current_cached_install_dir(home.path()).join(".mcp.json"),
         "{}\n",
     )
     .unwrap();
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&old_ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::DeferredUserAction(_)
-    ));
+    assert!(!codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
     copy_rendered_bundle_to_native_cache(home.path(), old_bin);
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&old_ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::Ready
-    ));
+    assert!(codex_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
 
     install_codex_personal_bootstrap(home.path(), new_bin).unwrap();
-    let relocated_ctx = InstallContext {
-        tracedecay_bin: new_bin.to_string(),
-        ..old_ctx
-    };
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&relocated_ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::DeferredUserAction(_)
-    ));
+    assert!(!codex_plugin_is_natively_active(home.path(), Some(new_bin)).unwrap());
     copy_rendered_bundle_to_native_cache(home.path(), new_bin);
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&relocated_ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::Ready
-    ));
-}
-
-#[test]
-fn every_published_retired_discovery_identity_converges_on_redeploy() {
-    #[derive(serde::Deserialize)]
-    struct PublishedRetiredEntrypoint {
-        path: String,
-        digest: String,
-        releases: Vec<String>,
-        contents: String,
-    }
-
-    let variants = serde_json::from_str::<Vec<PublishedRetiredEntrypoint>>(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/fixtures/host_integrations/codex_retired_entrypoints.json"
-    )))
-    .unwrap();
-    assert_eq!(variants.len(), 30);
-    let published_identities = variants
-        .iter()
-        .map(|variant| (variant.path.as_str(), variant.digest.as_str()))
-        .collect::<std::collections::BTreeSet<_>>();
-    let production_identities = retired_entrypoints::CODEX_RETIRED_ENTRYPOINT_IDENTITIES
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(production_identities, published_identities);
-
-    for variant in variants {
-        let observed_digest = hex::encode(Sha256::digest(variant.contents.as_bytes()));
-        assert_eq!(observed_digest, variant.digest);
-        assert!(
-            retired_entrypoints::has_exact_identity(&variant.path, variant.contents.as_bytes()),
-            "published identity missing for {} from {:?}",
-            variant.path,
-            variant.releases
-        );
-
-        let home = tempfile::tempdir().unwrap();
-        write_exact_native_activation(home.path(), TEST_BIN);
-        let ctx = install_ctx(home.path());
-        let retired = codex_plugin_install_dir(home.path()).join(&variant.path);
-        std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
-        std::fs::write(&retired, variant.contents).unwrap();
-        assert!(matches!(
-            CodexIntegration
-                .preflight_non_interactive_install(&ctx)
-                .unwrap(),
-            NonInteractiveInstallOutcome::DeferredUserAction(_)
-        ));
-
-        install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
-        assert!(!retired.exists(), "retained {}", variant.path);
-        assert!(matches!(
-            CodexIntegration
-                .preflight_non_interactive_install(&ctx)
-                .unwrap(),
-            NonInteractiveInstallOutcome::Ready
-        ));
-    }
+    assert!(codex_plugin_is_natively_active(home.path(), Some(new_bin)).unwrap());
 }
 
 #[test]
 fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     let home = tempfile::tempdir().unwrap();
     write_exact_native_activation(home.path(), TEST_BIN);
-    let ctx = install_ctx(home.path());
     let source = codex_plugin_install_dir(home.path());
     let operator_skill = source.join("skills/operator-owned/SKILL.md");
     std::fs::create_dir_all(operator_skill.parent().unwrap()).unwrap();
@@ -929,12 +829,7 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     let helper = source.join("hooks/helper.py");
     let helper_bytes = b"# operator helper for tracedecay_lcm_describe\n";
     std::fs::write(&helper, helper_bytes).unwrap();
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::DeferredUserAction(_)
-    ));
+    assert!(!codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
 
     install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     assert_eq!(
@@ -951,42 +846,14 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     );
     assert_eq!(std::fs::read(&reference).unwrap(), reference_bytes);
     assert_eq!(std::fs::read(&helper).unwrap(), helper_bytes);
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::DeferredUserAction(_)
-    ));
-}
-
-/// Preflight still reports that the cache is not yet active; activation itself
-/// is no longer an interactive deferral. Codex CLI 0.147 drives `plugin add`.
-#[test]
-fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
-    let home = tempfile::tempdir().unwrap();
-    let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = CodexIntegration
-        .preflight_non_interactive_install(&install_ctx(home.path()))
-        .unwrap()
-    else {
-        panic!("inactive Codex cache must still be a typed preflight deferral");
-    };
-    assert!(
-        deferred
-            .remediation
-            .contains("codex plugin add tracedecay@personal")
-    );
-    assert!(CodexIntegration.interactive_activation_guidance().is_none());
-    assert!(CodexIntegration.interactive_removal_guidance().is_none());
+    assert!(!codex_plugin_is_natively_active(home.path(), Some(TEST_BIN)).unwrap());
 }
 
 /// Install an executable `codex` on the host-program search path only.
 ///
-/// Preparation is `Ready` exactly when Codex's own plugin CLI is present, so
-/// the outcome under test is a property of the environment, not of the host
-/// integration. CI runners carry no `codex` binary while a developer box
-/// usually does; pin it here instead of reading whichever the machine has.
-/// Only host program resolution sees this directory, the process `PATH` is
-/// untouched.
+/// CI runners carry no `codex` binary while a developer box usually does;
+/// pin it here instead of reading whichever the machine has. Only host
+/// program resolution sees this directory, the process `PATH` is untouched.
 fn install_fake_codex_cli(
     dir: &Path,
 ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
@@ -1002,65 +869,30 @@ fn install_fake_codex_cli(
     tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
 }
 
+/// `codex plugin add tracedecay@personal` resolves the plugin through the
+/// personal marketplace, so activation writes that entry itself, inside the
+/// transaction's registration boundary, before driving the host CLI.
 #[test]
-fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
+fn activation_registers_the_personal_marketplace_before_plugin_add() {
     let home = tempfile::tempdir().unwrap();
     let cli_dir = tempfile::tempdir().unwrap();
     let _codex_cli = install_fake_codex_cli(cli_dir.path());
-    // Pre-existing user config: preparation runs before the component
-    // transaction stages `config.toml`, so it must not write there, hook
-    // trust is recorded by activation, inside the rollback boundary.
-    let config_path = codex_config_path(home.path());
-    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    std::fs::write(&config_path, "model = \"gpt-5\"\n").unwrap();
+    let marketplace_path = codex_personal_marketplace_path(home.path());
+    assert!(!marketplace_path.exists());
 
-    let outcome = CodexIntegration
-        .prepare_non_interactive_install(&install_ctx(home.path()))
+    CodexIntegration
+        .activate_deployed_host_registration(&install_ctx(home.path()))
         .unwrap();
-    assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
-    assert!(codex_plugin_manifest_path(home.path()).is_file());
-    assert!(codex_personal_marketplace_path(home.path()).is_file());
+
+    let marketplace: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marketplace_path).unwrap()).unwrap();
+    assert_eq!(marketplace["name"], "personal");
     assert_eq!(
-        std::fs::read_to_string(&config_path).unwrap(),
-        "model = \"gpt-5\"\n",
-        "preparation must leave config.toml untouched"
+        marketplace
+            .pointer("/plugins/0/source/path")
+            .and_then(serde_json::Value::as_str),
+        Some(CODEX_GLOBAL_PLUGIN_SOURCE_PATH)
     );
-}
-
-/// `Ready` promises Core apply can drive `codex plugin add`, so an
-/// unresolvable plugin CLI must defer instead.
-///
-/// Answering `Ready` opens a component transaction that can only die in
-/// activation with `HostCliUnavailable`. Its rollback leaves a `RolledBack`
-/// journal pinning `config.toml` and the versioned cache as they were before
-/// the operator runs the remediation the failure prints, and the next
-/// lifecycle command's `recover_host` then refuses the drifted host with
-/// `StalePreview`.
-#[test]
-fn prepare_defers_when_no_plugin_cli_resolves() {
-    let home = tempfile::tempdir().unwrap();
-    // Resolution sees only this empty directory; the process `PATH` (which on
-    // a developer box usually does carry `codex`) is untouched.
-    let empty = tempfile::tempdir().unwrap();
-    let _host_programs =
-        tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty.path());
-
-    let outcome = CodexIntegration
-        .prepare_non_interactive_install(&install_ctx(home.path()))
-        .unwrap();
-    let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = outcome else {
-        panic!("staging Codex without a resolvable plugin CLI must defer, got {outcome:?}");
-    };
-    assert!(
-        deferred
-            .remediation
-            .contains("`codex plugin add tracedecay@personal`"),
-        "the deferral must print the executable remediation: {}",
-        deferred.remediation
-    );
-    // The source is still staged: the operator's `codex plugin add` consumes it.
-    assert!(codex_plugin_manifest_path(home.path()).is_file());
-    assert!(codex_personal_marketplace_path(home.path()).is_file());
 }
 
 /// Activation must record hook trust even when Codex already reports the
@@ -1164,55 +996,6 @@ trusted_hash = "sha256:foreign"
         .deactivate_deployed_host_registration(&install_ctx(home.path()))
         .unwrap();
     assert_eq!(std::fs::read(&config_path).unwrap(), before);
-}
-
-#[test]
-fn codex_update_plugin_refreshes_bundle_and_records_hook_trust() {
-    let home = tempfile::tempdir().unwrap();
-    write_exact_native_activation(home.path(), TEST_BIN);
-    // Re-seed config.toml with the native activation record plus an unrelated
-    // user key the trust write must preserve.
-    let config_path = codex_config_path(home.path());
-    std::fs::write(
-        &config_path,
-        "model = \"gpt-5\"\n\n[plugins.\"tracedecay@personal\"]\nenabled = true\n",
-    )
-    .unwrap();
-    let project_root = home.path().join("workspace");
-    let ctx = InstallContext {
-        project_root: Some(project_root),
-        ..install_ctx(home.path())
-    };
-
-    let outcome = CodexIntegration.update_plugin(&ctx).unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected codex update_plugin to refresh the bundle");
-    };
-    assert_eq!(paths, vec![codex_plugin_install_dir(home.path())]);
-
-    // update-plugin auto-trusts the refreshed hooks by recording their content
-    // hashes in config.toml, while leaving the user's unrelated keys intact.
-    let updated = load_toml_file(&config_path).unwrap();
-    assert_eq!(updated["model"].as_str().unwrap(), "gpt-5");
-    assert_eq!(
-        updated["plugins"]["tracedecay@personal"]["enabled"].as_bool(),
-        Some(true),
-        "update-plugin must preserve Codex's own activation record"
-    );
-    assert!(
-        updated["hooks"]["state"]
-            .as_table()
-            .unwrap()
-            .keys()
-            .any(|key| key.starts_with("tracedecay@personal:hooks/hooks.json:")),
-        "update-plugin should record tracedecay hook trust entries"
-    );
-    let entries = managed_entries(TEST_BIN);
-    assert_eq!(
-        codex_plugin_hook_trust_state(&updated, &entries),
-        CodexHookTrustState::Trusted
-    );
-    assert_eq!(codex_hook_trust_followup(home.path()), None);
 }
 
 #[test]

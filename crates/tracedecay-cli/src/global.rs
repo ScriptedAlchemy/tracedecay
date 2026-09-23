@@ -184,7 +184,6 @@ pub(crate) fn tracedecay_dir_size(dir: &Path) -> u64 {
 /// registry.
 pub(crate) async fn gather_target_projects(
     all: bool,
-    home_tracedecay: &Option<std::path::PathBuf>,
 ) -> tracedecay_domain::errors::Result<Vec<std::path::PathBuf>> {
     if all {
         let payload = daemon_tool_json(
@@ -199,7 +198,7 @@ pub(crate) async fn gather_target_projects(
         .await?;
         registry_project_roots(&payload)
     } else {
-        Ok(gather_local_projects(home_tracedecay))
+        Ok(gather_local_projects())
     }
 }
 
@@ -230,74 +229,46 @@ fn registry_project_roots(
         .collect()
 }
 
-/// Returns project roots whose `.tracedecay` data dir lives in cwd, an
-/// ancestor, or a descendant.
-pub(crate) fn gather_local_projects(
-    home_tracedecay: &Option<std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
+/// Returns initialized project roots at cwd, an ancestor, or a descendant.
+pub(crate) fn gather_local_projects() -> Vec<std::path::PathBuf> {
     let Ok(cwd) = std::env::current_dir() else {
         return Vec::new();
     };
-    gather_local_projects_from(&cwd, home_tracedecay)
+    gather_local_projects_from(&cwd)
 }
 
 /// Same as [`gather_local_projects`] but takes the starting directory explicitly.
 ///
-/// Pure (apart from filesystem reads), easier to test than the cwd-driven wrapper.
-pub(crate) fn gather_local_projects_from(
-    cwd: &Path,
-    home_tracedecay: &Option<std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
-    use std::collections::HashSet;
-    use std::path::PathBuf;
+/// Ancestors count when they host a profile-sharded store or, at a worktree
+/// root, the repository identity marker; ambient roots (filesystem root, the
+/// user's home) never do. Descendants count by repository identity marker.
+pub(crate) fn gather_local_projects_from(cwd: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    // Canonicalize the home data dir once so symlinked HOME paths still
-    // get correctly skipped during the ancestor + descendant walks. A user
-    // whose `$HOME` is `/Users/x` but whose canonical home is
-    // `/private/var/...` would otherwise leak the global DB into the wipe set.
-    let canon_home_ts: Option<PathBuf> =
-        home_tracedecay.as_ref().and_then(|p| p.canonicalize().ok());
-
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-
-    let is_home_tracedecay = |ts: &Path| -> bool {
-        if let Some(ref canon) = canon_home_ts
-            && ts.canonicalize().ok().as_ref() == Some(canon)
+    for dir in cwd.ancestors() {
+        if tracedecay_runtime_core::config::is_initialized_project_root(dir)
+            && !tracedecay_runtime_core::config::is_ambient_project_root(dir)
+            && seen.insert(dir.to_path_buf())
         {
-            return true;
-        }
-        false
-    };
-
-    let is_project_dir = |project_root: &Path, ts: &Path| -> bool {
-        !is_home_tracedecay(ts) && local_project_marker_exists(project_root, ts)
-    };
-
-    let mut cursor: Option<&Path> = Some(cwd);
-    while let Some(dir) = cursor {
-        let ts = dir.join(tracedecay::config::TRACEDECAY_DIR);
-        if is_project_dir(dir, &ts) && seen.insert(dir.to_path_buf()) {
             out.push(dir.to_path_buf());
         }
-        cursor = dir.parent();
     }
 
-    find_descendant_tracedecay(cwd, &canon_home_ts, &mut seen, &mut out);
+    find_descendant_tracedecay(cwd, &mut seen, &mut out);
 
     out
 }
 
-/// Iteratively walks `start` looking for `.tracedecay/tracedecay.db` project
-/// data dirs.
+/// Iteratively walks `start` looking for repository roots carrying the
+/// repository identity marker.
 ///
-/// Skips common heavy directories (node_modules, target, .git, etc.) and never
-/// descends into a data dir once found. Tracks canonicalized directories
-/// to break symlink/junction cycles, and uses an explicit worklist instead of
+/// Skips common heavy directories (node_modules, target, .git, etc.) and
+/// `.tracedecay` data dirs. Tracks canonicalized directories to break
+/// symlink/junction cycles, and uses an explicit worklist instead of
 /// recursion so deep trees can't overflow the stack.
 pub(crate) fn find_descendant_tracedecay(
     start: &Path,
-    canon_home_ts: &Option<std::path::PathBuf>,
     seen: &mut std::collections::HashSet<std::path::PathBuf>,
     out: &mut Vec<std::path::PathBuf>,
 ) {
@@ -330,22 +301,12 @@ pub(crate) fn find_descendant_tracedecay(
             let path = entry.path();
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str == tracedecay::config::TRACEDECAY_DIR {
-                // Only canonicalize when the entry could match the home skip;
-                // doing it for every dir entry would mean one syscall per
-                // entry on tree walks of arbitrary size.
-                if let Some(canon) = canon_home_ts
-                    && path.canonicalize().ok().as_ref() == Some(canon)
-                {
-                    continue;
-                }
-                if let Some(parent) = path.parent()
-                    && local_project_marker_exists(parent, &path)
-                {
-                    let pb = parent.to_path_buf();
-                    if seen.insert(pb.clone()) {
-                        out.push(pb);
-                    }
+            if name_str == tracedecay_project::config::TRACEDECAY_DIR {
+                continue;
+            }
+            if name_str == ".git" {
+                if repository_identity_root_exists(&dir) && seen.insert(dir.clone()) {
+                    out.push(dir.clone());
                 }
                 continue;
             }
@@ -353,7 +314,6 @@ pub(crate) fn find_descendant_tracedecay(
                 name_str.as_ref(),
                 "node_modules"
                     | "target"
-                    | ".git"
                     | "vendor"
                     | "dist"
                     | "build"
@@ -368,26 +328,11 @@ pub(crate) fn find_descendant_tracedecay(
     }
 }
 
-fn local_project_marker_exists(project_root: &Path, data_dir: &Path) -> bool {
-    if !data_dir.is_dir() {
-        return false;
-    }
-    if data_dir
-        .join(tracedecay::config::db_filename(data_dir))
-        .exists()
-    {
-        return true;
-    }
-    // Wipe cleanup still recognizes retired repo-local enrollment markers so
-    // legacy `.tracedecay/` debris is removed alongside the profile store.
-    data_dir.file_name().is_some_and(|name| {
-        name == tracedecay::config::TRACEDECAY_DIR
-            && matches!(
-                tracedecay_runtime_core::storage::read_legacy_enrollment_marker(project_root),
-                Ok(Some(marker))
-                    if marker.storage_mode == tracedecay_runtime_core::storage::StorageMode::ProfileSharded
-            )
-    })
+/// A repository checkout root whose `.git/` carries the repository identity
+/// marker, the only identity a current install writes.
+fn repository_identity_root_exists(dir: &Path) -> bool {
+    dir.join(".git").exists()
+        && tracedecay_runtime_core::storage::has_repository_identity_marker(dir)
 }
 
 /// Prints the big flashing warning shown before a wipe.
@@ -459,52 +404,67 @@ mod gather_tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    use std::path::PathBuf;
-
-    /// Plant a `.tracedecay/tracedecay.db` marker so `is_project_dir` returns true.
-    fn make_project(root: &Path) {
-        let ts = root.join(".tracedecay");
-        fs::create_dir_all(&ts).unwrap();
-        fs::write(ts.join("tracedecay.db"), b"").unwrap();
-    }
 
     fn make_enrolled_project(root: &Path, project_id: &str) {
-        let ts = root.join(".tracedecay");
-        fs::create_dir_all(&ts).unwrap();
-        fs::write(
-            ts.join(tracedecay_runtime_core::storage::ENROLLMENT_FILENAME),
-            format!(
-                r#"{{
-  "project_id": "{project_id}",
-  "storage_mode": "profile_sharded"
-}}"#
-            ),
-        )
-        .unwrap();
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, project_id)
+            .unwrap();
     }
 
     #[test]
     fn finds_project_at_cwd() {
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
-        make_project(&cwd);
+        make_enrolled_project(&cwd, "proj_cwd");
 
-        let out = gather_local_projects_from(&cwd, &None);
+        let out = gather_local_projects_from(&cwd);
         assert_eq!(out, vec![cwd]);
     }
 
     #[test]
+    fn finds_profile_sharded_store_at_cwd() {
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let store = tracedecay_runtime_core::storage::default_profile_sharded_layout(
+            &cwd,
+            &tracedecay_runtime_core::config::user_data_dir().unwrap(),
+        )
+        .unwrap();
+        fs::create_dir_all(&store.data_root).unwrap();
+        fs::write(&store.graph_db_path, b"").unwrap();
+
+        assert_eq!(gather_local_projects_from(&cwd), vec![cwd]);
+    }
+
+    #[test]
+    fn ignores_repo_local_graph_database_directories() {
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let child = cwd.join("child");
+        for root in [&cwd, &child] {
+            fs::create_dir_all(root.join(".tracedecay")).unwrap();
+            fs::write(root.join(".tracedecay/tracedecay.db"), b"").unwrap();
+        }
+
+        let out = gather_local_projects_from(&cwd);
+        assert!(out.is_empty(), "repo-local data dirs are not projects: {out:?}");
+    }
+
+    #[test]
     fn finds_both_ancestor_and_descendant_dedup() {
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let cwd = root.join("mid");
         fs::create_dir_all(&cwd).unwrap();
         let child = cwd.join("child");
         fs::create_dir_all(&child).unwrap();
-        make_project(&root);
-        make_project(&child);
+        make_enrolled_project(&child, "proj_child");
+        make_enrolled_project(&root, "proj_root");
 
-        let out = gather_local_projects_from(&cwd, &None);
+        let out = gather_local_projects_from(&cwd);
         assert!(out.contains(&root));
         assert!(out.contains(&child));
         let unique: std::collections::HashSet<_> = out.iter().collect();
@@ -513,23 +473,44 @@ mod gather_tests {
 
     #[test]
     fn finds_profile_enrolled_projects_without_graph_db() {
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let cwd = root.join("mid");
         let child = cwd.join("child");
+        let unenrolled = cwd.join("unenrolled");
         fs::create_dir_all(&child).unwrap();
-        make_enrolled_project(&root, "proj_root");
+        fs::create_dir_all(&unenrolled).unwrap();
+        // Nested repositories first: pinning the outer root first would make
+        // the children resolve to its `.git/` instead of their own.
         make_enrolled_project(&child, "proj_child");
+        make_enrolled_project(&root, "proj_root");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&unenrolled)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::create_dir_all(unenrolled.join(".tracedecay")).unwrap();
+        fs::write(
+            unenrolled.join(".tracedecay/enrollment.json"),
+            r#"{"project_id":"proj_legacy","storage_mode":"profile_sharded"}"#,
+        )
+        .unwrap();
 
-        let out = gather_local_projects_from(&cwd, &None);
+        let out = gather_local_projects_from(&cwd);
 
         assert!(
             out.contains(&root),
-            "ancestor enrollment marker must be detected, got {out:?}"
+            "ancestor repository identity marker must be detected, got {out:?}"
         );
         assert!(
             out.contains(&child),
-            "descendant enrollment marker must be detected, got {out:?}"
+            "descendant repository identity marker must be detected, got {out:?}"
+        );
+        assert!(
+            !out.contains(&unenrolled),
+            "a retired enrollment file is not an identity, got {out:?}"
         );
     }
 
@@ -587,67 +568,18 @@ mod gather_tests {
 
     #[test]
     fn skips_projects_inside_node_modules() {
+        let _profile = tracedecay_runtime_core::config::PinnedUserDataDir::new();
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().canonicalize().unwrap();
         let buried = cwd.join("node_modules").join("pkg");
         fs::create_dir_all(&buried).unwrap();
-        make_project(&buried);
+        make_enrolled_project(&buried, "proj_buried");
 
-        let out = gather_local_projects_from(&cwd, &None);
+        let out = gather_local_projects_from(&cwd);
         assert!(
             !out.contains(&buried),
             "projects inside node_modules must be skipped, got {out:?}"
         );
-    }
-
-    #[test]
-    fn skips_home_data_dir_via_canonical_path() {
-        // Simulate a symlinked HOME: `home_alias` → `home_real`. The user
-        // passes `home_alias/.tracedecay` as the skip path, but the descendant
-        // walk encounters the directory through `home_real/.tracedecay`.
-        // Canonicalization must resolve them as equal so the global DB
-        // directory is not picked up as a wipe target.
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-
-        let home_real = root.join("home_real");
-        fs::create_dir_all(&home_real).unwrap();
-        make_project(&home_real); // pretend `~/.tracedecay` is a project (it shouldn't be wiped)
-
-        // Try to symlink: home_alias -> home_real. If the platform doesn't
-        // allow symlinks (e.g. Windows without dev mode) we just skip the
-        // canonical-equivalence check and verify the direct-path skip works.
-        let home_alias = root.join("home_alias");
-        let symlink_ok = symlink_dir(&home_real, &home_alias).is_ok();
-
-        let cwd = root.clone();
-        let alias_ts: PathBuf = if symlink_ok {
-            home_alias.join(".tracedecay")
-        } else {
-            home_real.join(".tracedecay")
-        };
-
-        let out = gather_local_projects_from(&cwd, &Some(alias_ts));
-        assert!(
-            !out.contains(&home_real),
-            "home `.tracedecay` (canonical) must be skipped, got {out:?}"
-        );
-        if symlink_ok {
-            assert!(
-                !out.contains(&home_alias),
-                "home `.tracedecay` (alias) must be skipped, got {out:?}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-        std::os::unix::fs::symlink(src, dst)
-    }
-
-    #[cfg(windows)]
-    fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_dir(src, dst)
     }
 
     #[test]

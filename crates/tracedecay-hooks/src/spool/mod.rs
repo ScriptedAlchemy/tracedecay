@@ -22,6 +22,7 @@ use tracedecay_private_fs::framed_log::{
     sync_directory as shared_sync_directory,
     validate_regular_or_missing as shared_validate_regular,
 };
+use tracedecay_private_fs::FileLease;
 
 use crate::{
     HookContractError, HookEventEnvelopeV2, HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES,
@@ -92,7 +93,7 @@ pub struct HookSpoolV1 {
     root: PathBuf,
     config: HookSpoolConfigV1,
     lease: HookSpoolWriterLeaseV1,
-    lease_file: File,
+    _lease_file: FileLease,
     meta: HookSpoolMetaV1,
     checkpoint: Option<CheckpointAnchorV1>,
     observed_records_revision: Option<RecordsFileRevisionV1>,
@@ -187,7 +188,7 @@ impl HookSpoolV1 {
         hotpath::measure_block!("hooks.spool.fsync.directory", {
             shared_sync_directory(&root, DIRECTORY_POLICY).map_err(|_| HookSpoolError::Io)
         })?;
-        lease_file.unlock().map_err(|_| HookSpoolError::Io)?;
+        lease_file.release().map_err(|_| HookSpoolError::Io)?;
         Ok(())
     }
 
@@ -237,7 +238,7 @@ impl HookSpoolV1 {
         root: PathBuf,
         config: HookSpoolConfigV1,
         lease: HookSpoolWriterLeaseV1,
-        lease_file: File,
+        lease_file: FileLease,
         _now: UtcMicros,
     ) -> Result<(Self, HookSpoolOpenReportV1), HookSpoolError> {
         let stored_meta = read_meta(&root)?;
@@ -393,7 +394,7 @@ impl HookSpoolV1 {
             root,
             config,
             lease,
-            lease_file,
+            _lease_file: lease_file,
             meta,
             checkpoint,
             observed_records_revision,
@@ -1009,12 +1010,6 @@ impl HookSpoolV1 {
             return Err(HookSpoolError::RecoveryRequired);
         }
         self.ensure_live_lease(now)
-    }
-}
-
-impl Drop for HookSpoolV1 {
-    fn drop(&mut self) {
-        let _ = self.lease_file.unlock();
     }
 }
 

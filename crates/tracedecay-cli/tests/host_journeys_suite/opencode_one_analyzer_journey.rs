@@ -6,7 +6,7 @@
 //! uninstall while TraceDecay findings still project.
 //!
 //! The journey drives the real CLI lifecycle (`install`, `reinstall`, a
-//! killed mutation recovered by `host-bundle recover`, `uninstall`) against an
+//! killed mutation converged by the next `reinstall`, `uninstall`) against an
 //! isolated home whose OpenCode configuration already declares a real
 //! pre-existing analyzer (`rust-analyzer` for `.rs`), and at every stage
 //! proves single ownership through both consumption paths:
@@ -303,24 +303,15 @@ fn opencode_keeps_exactly_one_analyzer_through_install_repair_rollback_uninstall
         HostAnalyzerOwnership::from_opencode_config(&repaired),
     );
 
-    // ROLLBACK: a mutation killed mid-write is rolled back by recovery to the
-    // exact pre-effect state, which must still hold single ownership.
-    let pre_fault = fs::read(cli.host_config_path()).unwrap();
+    // INTERRUPTION: a mutation killed mid-write leaves what it wrote; the next
+    // reinstall converges, and the result must still hold single ownership.
     let killed = cli.run_with_env(
         &["reinstall"],
         "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
         "1",
     );
     assert!(!killed.status.success(), "fault subprocess did not abort");
-    assert_success(
-        "rollback recovery",
-        cli.run(&["host-bundle", "recover", "--agent", "opencode", "--yes"]),
-    );
-    assert_eq!(
-        fs::read(cli.host_config_path()).unwrap(),
-        pre_fault,
-        "recovery must restore the exact pre-effect registration"
-    );
+    assert_success("converging reinstall", cli.run(&["reinstall"]));
     let recovered = cli.host_config();
     assert_registration_retains_host_analyzer(&recovered);
     assert_broker_enforces_single_ownership(

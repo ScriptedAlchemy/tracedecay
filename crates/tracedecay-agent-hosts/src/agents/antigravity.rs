@@ -29,7 +29,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    McpDoctorLabels, TextFileMutation, config_backup_path, report_mcp_registration,
+    McpDoctorLabels, TextFileMutation, report_mcp_registration,
     update_two_config_files_transactionally,
 };
 
@@ -43,10 +43,6 @@ fn mcp_config_path(home: &Path) -> PathBuf {
 /// the IDE config.
 fn cli_plugin_path(home: &Path) -> PathBuf {
     home.join(".gemini/antigravity-cli/plugins/tracedecay.json")
-}
-
-fn original_config_path(config: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.tracedecay-original", config.display()))
 }
 
 impl AgentIntegration for AntigravityIntegration {
@@ -115,7 +111,7 @@ impl AgentIntegration for AntigravityIntegration {
         if components != [HostComponentV1::ContextMcp] {
             return Vec::new();
         }
-        registration_paths(home)
+        vec![mcp_config_path(home), cli_plugin_path(home)]
     }
 
     #[hotpath::measure(label = "antigravity_mcp_install")]
@@ -142,19 +138,6 @@ impl AgentIntegration for AntigravityIntegration {
     fn has_tracedecay(&self, home: &Path) -> bool {
         antigravity_registration_state(home, None) == HostBundleRegistrationStateV1::Current
     }
-}
-
-fn registration_paths(home: &Path) -> Vec<PathBuf> {
-    let ide = mcp_config_path(home);
-    let cli = cli_plugin_path(home);
-    vec![
-        ide.clone(),
-        config_backup_path(&ide),
-        original_config_path(&ide),
-        cli.clone(),
-        config_backup_path(&cli),
-        original_config_path(&cli),
-    ]
 }
 
 fn document_registration_state(
@@ -275,69 +258,22 @@ fn add_registration(config: &Path, existing: &str, binary: &str) -> Result<TextF
     )?))
 }
 
-fn save_original_if_needed(config: &Path, existing: &str) -> Result<()> {
-    let original = original_config_path(config);
-    let settings = parse_document(config, existing)?;
-    if settings.pointer("/mcpServers/tracedecay").is_none()
-        && config.is_file()
-        && !original.exists()
-    {
-        super::safe_write_bytes_file(&original, existing.as_bytes(), None)?;
-    }
-    Ok(())
-}
-
 fn install_mcp_if_selected(components: &[HostComponentV1], ctx: &InstallContext) -> Result<()> {
     if !components.contains(&HostComponentV1::ContextMcp) {
         return Ok(());
     }
     let ide = mcp_config_path(&ctx.home);
     let cli = cli_plugin_path(&ctx.home);
-    let ide_original = original_config_path(&ide);
-    let cli_original = original_config_path(&cli);
-    let ide_original_existed = ide_original.exists();
-    let cli_original_existed = cli_original.exists();
-    let result =
-        update_two_config_files_transactionally(&ide, &cli, |ide_existing, cli_existing| {
-            save_original_if_needed(&ide, ide_existing)?;
-            save_original_if_needed(&cli, cli_existing)?;
-            Ok((
-                (),
-                add_registration(&ide, ide_existing, &ctx.tracedecay_bin)?,
-                add_registration(&cli, cli_existing, &ctx.tracedecay_bin)?,
-            ))
-        });
-    if result.is_err() {
-        remove_new_original(&ide_original, ide_original_existed)?;
-        remove_new_original(&cli_original, cli_original_existed)?;
-    }
-    result
+    update_two_config_files_transactionally(&ide, &cli, |ide_existing, cli_existing| {
+        Ok((
+            (),
+            add_registration(&ide, ide_existing, &ctx.tracedecay_bin)?,
+            add_registration(&cli, cli_existing, &ctx.tracedecay_bin)?,
+        ))
+    })
 }
 
-fn remove_new_original(path: &Path, existed_before: bool) -> Result<()> {
-    if !existed_before && path.exists() {
-        super::safe_remove_host_file(path).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to remove {} after rollback: {error}",
-                path.display()
-            ),
-        })?;
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum DocumentRemoval {
-    NoEntry,
-    RestoredOriginal,
-    RemovedFile,
-    Rewritten,
-}
-
-fn remove_registration(
-    config: &Path,
-    existing: &str,
-) -> Result<(DocumentRemoval, TextFileMutation)> {
+fn remove_registration(config: &Path, existing: &str) -> Result<TextFileMutation> {
     let mut settings = parse_document(config, existing)?;
     let Some(root) = settings.as_object_mut() else {
         return Err(TraceDecayError::Config {
@@ -348,34 +284,20 @@ fn remove_registration(
         .get_mut("mcpServers")
         .and_then(serde_json::Value::as_object_mut)
     else {
-        return Ok((DocumentRemoval::NoEntry, TextFileMutation::Unchanged));
+        return Ok(TextFileMutation::Unchanged);
     };
     if servers.remove("tracedecay").is_none() {
-        return Ok((DocumentRemoval::NoEntry, TextFileMutation::Unchanged));
+        return Ok(TextFileMutation::Unchanged);
     }
     if servers.is_empty() {
         root.remove("mcpServers");
     }
-    let root_is_empty = root.is_empty();
-    let original = original_config_path(config);
-    if let Ok(bytes) = std::fs::read(&original)
-        && serde_json::from_slice::<serde_json::Value>(&bytes).ok() == Some(settings.clone())
-    {
-        let bytes = String::from_utf8(bytes).map_err(|error| TraceDecayError::Config {
-            message: format!("{} is not valid UTF-8: {error}", original.display()),
-        })?;
-        return Ok((
-            DocumentRemoval::RestoredOriginal,
-            TextFileMutation::Write(bytes),
-        ));
+    if root.is_empty() {
+        return Ok(TextFileMutation::Remove);
     }
-    if root_is_empty {
-        return Ok((DocumentRemoval::RemovedFile, TextFileMutation::Remove));
-    }
-    Ok((
-        DocumentRemoval::Rewritten,
-        TextFileMutation::Write(super::render_json_config(config, &settings)?),
-    ))
+    Ok(TextFileMutation::Write(super::render_json_config(
+        config, &settings,
+    )?))
 }
 
 fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Result<()> {
@@ -384,24 +306,13 @@ fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Res
     }
     let ide = mcp_config_path(home);
     let cli = cli_plugin_path(home);
-    let (ide_outcome, cli_outcome) =
-        update_two_config_files_transactionally(&ide, &cli, |ide_existing, cli_existing| {
-            let (ide_outcome, ide_mutation) = remove_registration(&ide, ide_existing)?;
-            let (cli_outcome, cli_mutation) = remove_registration(&cli, cli_existing)?;
-            Ok(((ide_outcome, cli_outcome), ide_mutation, cli_mutation))
-        })?;
-    remove_restored_original(&ide, ide_outcome)?;
-    remove_restored_original(&cli, cli_outcome)
-}
-
-fn remove_restored_original(config: &Path, outcome: DocumentRemoval) -> Result<()> {
-    if matches!(outcome, DocumentRemoval::RestoredOriginal) {
-        let original = original_config_path(config);
-        super::safe_remove_host_file(&original).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to remove {}: {error}", original.display()),
-        })?;
-    }
-    Ok(())
+    update_two_config_files_transactionally(&ide, &cli, |ide_existing, cli_existing| {
+        Ok((
+            (),
+            remove_registration(&ide, ide_existing)?,
+            remove_registration(&cli, cli_existing)?,
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -414,7 +325,6 @@ mod tests {
         InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: binary.to_string(),
-            tool_permissions: Vec::new(),
             project_root: None,
             dashboard: false,
         }
@@ -426,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_lifecycle_preserves_peers_and_restores_both_documents() {
+    fn antigravity_lifecycle_preserves_peers_and_keeps_no_copies() {
         let home = tempfile::tempdir().unwrap();
         let ide = mcp_config_path(home.path());
         let cli = cli_plugin_path(home.path());
@@ -458,8 +368,17 @@ mod tests {
             .deactivate_deployed_host_component_registration(&components, &install)
             .unwrap();
 
-        assert_eq!(std::fs::read(&ide).unwrap(), ide_original);
-        assert_eq!(std::fs::read(&cli).unwrap(), cli_original);
+        for (path, original) in [(&ide, &ide_original[..]), (&cli, &cli_original[..])] {
+            assert_eq!(
+                super::super::load_json_file(path),
+                serde_json::from_slice::<serde_json::Value>(original).unwrap()
+            );
+            let siblings: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(siblings, vec![path.file_name().unwrap().to_owned()]);
+        }
     }
 
     #[test]

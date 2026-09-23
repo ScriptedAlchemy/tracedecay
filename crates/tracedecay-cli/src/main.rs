@@ -70,7 +70,7 @@ use cli::*;
 use tracedecay_daemon_service::logging::StderrTracingDefault;
 
 pub(crate) fn current_unix_timestamp() -> i64 {
-    tracedecay::project::current_timestamp()
+    tracedecay_runtime_core::tracedecay::current_timestamp()
 }
 
 /// A self-animating spinner that ticks on a background thread.
@@ -544,7 +544,7 @@ impl ProcessHotpathGuard {
     fn install(guard: hotpath::HotpathGuard) -> Result<Self, String> {
         let guard = Arc::new(Mutex::new(Some(guard)));
         let watchdog_guard = Arc::clone(&guard);
-        if !tracedecay::daemon::install_hotpath_shutdown_finalizer(move || {
+        if !tracedecay_daemon_service::shutdown::install_hotpath_shutdown_finalizer(move || {
             let guard = watchdog_guard
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -626,7 +626,9 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // This binary is the sole generator of source provenance and the embedded
     // dashboard bundle; the composition library reads both through this
     // set-once registration.
-    tracedecay::register_product_runtime(crate::product_runtime::provider())?;
+    tracedecay_project::product_runtime::register_product_runtime(
+        crate::product_runtime::provider(),
+    )?;
     crate::cloud::admit_sync_probes();
     // Every process-global runtime port the extracted crates invert back into
     // the composition root. Must precede argument parsing: hook, install, and
@@ -685,7 +687,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         // Pin its profile before Tokio starts worker threads so every canonical
         // configuration authority observes the Task Scheduler argument.
         unsafe {
-            std::env::set_var(tracedecay::config::USER_DATA_DIR_ENV, profile_root);
+            std::env::set_var(tracedecay_project::config::USER_DATA_DIR_ENV, profile_root);
         }
     }
     // Route tracing events (degradation causes, ingest warnings) to stderr.
@@ -872,7 +874,7 @@ async fn run_startup_preamble(command: &Commands) {
         && user_config.pending_upload > 0
         && let Ok(cwd) = std::env::current_dir()
         && let Some(project_root) =
-            tracedecay::config::discover_project_root_with_identity(&cwd).await
+            tracedecay_project::config::discover_project_root_with_identity(&cwd).await
     {
         match commands::canonical_upload_enabled(&project_root).await {
             Ok(upload_enabled) => {
@@ -996,8 +998,7 @@ impl CommandFamily {
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
             | Commands::Uninstall { .. }
-            | Commands::FeedbackRollback { .. }
-            | Commands::HostBundle { .. } => Self::Agent,
+            | Commands::FeedbackRollback { .. } => Self::Agent,
             Commands::HookPreToolUse
             | Commands::HookPromptSubmit
             | Commands::HookStop
@@ -1224,14 +1225,12 @@ async fn dispatch_project_command(
         }
         Commands::Sync {
             path,
-            force,
             skip_folders,
             include_folders,
             doctor,
             verbose,
         } => {
-            commands::handle_sync(path, force, skip_folders, include_folders, doctor, verbose)
-                .await?;
+            commands::handle_sync(path, skip_folders, include_folders, doctor, verbose).await?;
         }
         Commands::Status {
             path,
@@ -1578,10 +1577,8 @@ async fn dispatch_agent_command(
     // mutation, so they normally require `--component` to name the target.
     // Full `reinstall --dry-run` is the read-only exception: it validates the
     // same tracked integration set that post-update will refresh.
-    if !matches!(
-        command,
-        Commands::FeedbackRollback { .. } | Commands::HostBundle { .. }
-    ) && host_bundle.component.is_none()
+    if !matches!(command, Commands::FeedbackRollback { .. })
+        && host_bundle.component.is_none()
         && (host_bundle.dry_run || host_bundle.yes)
         && !full_reinstall_preflight
         && !full_component_set_adoption
@@ -1713,28 +1710,6 @@ async fn dispatch_agent_command(
                 crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
             }
             agent_cmd::handle_feedback_rollback_command(action).await?;
-        }
-        Commands::HostBundle { action } => {
-            if matches!(
-                &action,
-                crate::cli::HostBundleAction::ArtifactBackup { .. }
-                    | crate::cli::HostBundleAction::ArtifactRestore { .. }
-            ) {
-                agent_cmd::handle_host_bundle_artifact_command(action, host_bundle).await?;
-            } else {
-                if host_bundle.component.is_some() {
-                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                        message: "host-bundle recovery operates on the whole component set"
-                            .to_string(),
-                    });
-                }
-                agent_cmd::handle_host_bundle_recovery_command(
-                    action,
-                    host_bundle.dry_run,
-                    host_bundle.yes,
-                )
-                .await?;
-            }
         }
         _ => unreachable!("non-agent command passed to agent dispatcher"),
     }
@@ -1952,7 +1927,7 @@ async fn dispatch_knowledge_command(command: Commands) -> tracedecay_domain::err
             sessions_cmd::handle_sessions_action(action).await?;
         }
         Commands::Analytics { action } => match action {
-            AnalyticsAction::Diagnostics { all, no_sync, .. } => {
+            AnalyticsAction::Diagnostics { all, no_sync } => {
                 hotpath::future!(
                     analytics_cmd::run_analytics_diagnostics(all, no_sync),
                     label = "cli.analytics.diagnostics"
@@ -2004,7 +1979,6 @@ impl CommandStartupPolicy {
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
             | Commands::FeedbackRollback { .. }
-            | Commands::HostBundle { .. }
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }

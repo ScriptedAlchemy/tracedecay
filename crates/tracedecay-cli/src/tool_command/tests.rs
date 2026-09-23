@@ -54,42 +54,12 @@ fn fact_store_tool_lookup_rejects_broad_and_accepts_exact_routes() {
 }
 
 #[test]
-fn canonicalizes_alias_and_strip_prefix() {
-    assert_eq!(canonical_tool_name("query"), "tracedecay_search");
+fn canonicalizes_prefix_and_dashes() {
     assert_eq!(
         canonical_tool_name("tracedecay_search"),
         "tracedecay_search"
     );
     assert_eq!(canonical_tool_name("dead-code"), "tracedecay_dead_code");
-}
-
-#[test]
-fn application_operations_resolve_by_identity_and_by_cli_spelling() {
-    for operation in ApplicationSurfaceOperation::ALL {
-        assert_eq!(
-            cli_application_operation(&canonical_tool_name(operation.as_str())),
-            Some(operation),
-            "{} must resolve by its canonical identity",
-            operation.as_str()
-        );
-        assert_eq!(
-            cli_application_operation(&canonical_tool_name(operation.mcp_operation_name())),
-            Some(operation),
-            "{} must resolve by its CLI binding spelling",
-            operation.as_str()
-        );
-    }
-    for spelling in ["diagnostics_read", "diagnostics", "tracedecay_diagnostics"] {
-        assert_eq!(
-            cli_application_operation(&canonical_tool_name(spelling)),
-            Some(ApplicationSurfaceOperation::DiagnosticsRead),
-            "{spelling}"
-        );
-    }
-    assert_eq!(
-        cli_application_operation(&canonical_tool_name("totally-fake-tool")),
-        None
-    );
 }
 
 #[test]
@@ -491,10 +461,10 @@ fn registry_read_dispatch_honours_an_explicit_ambient_root_verbatim() {
     // process-wide profile discovery variables, and HOME is restored below.
     unsafe { std::env::set_var("HOME", home.path()) };
     assert!(
-        tracedecay::config::is_ambient_project_root(home.path()),
+        tracedecay_project::config::is_ambient_project_root(home.path()),
         "fixture HOME must be an ambient root"
     );
-    let discovered = tracedecay::config::discover_project_root(home.path());
+    let discovered = tracedecay_project::config::discover_project_root(home.path());
     let explicit =
         DaemonToolDispatch::for_tool(Some(home_arg), "tracedecay_project_list", &mut json!({}));
     match previous_home {
@@ -753,21 +723,7 @@ fn dispatch_routing_keys_bypass_unknown_key_gate() {
 }
 
 #[test]
-fn removed_storage_routing_keys_fail_validation() {
-    let d = def("fact_store_list");
-    for removed in ["storage_scope", "hermes_home"] {
-        let payload = format!(r#"{{"{removed}":"removed"}}"#);
-        let error = parse_invocation(&d, &["--args".to_string(), payload]).unwrap_err();
-        let flag = format!("--{}", removed.replace('_', "-"));
-        assert!(
-            error.to_string().contains("unknown parameter") && error.to_string().contains(&flag),
-            "removed argument should fail clearly: {error}"
-        );
-    }
-}
-
-#[test]
-fn lcm_cli_help_exposes_scope_without_hermes_profile_routing() {
+fn lcm_cli_help_exposes_storage_scope() {
     for tool_name in [
         "lcm_status",
         "lcm_load_session",
@@ -776,14 +732,9 @@ fn lcm_cli_help_exposes_scope_without_hermes_profile_routing() {
         "lcm_expand",
         "lcm_expand_query",
         "lcm_doctor",
-        "hermes_skill_bridge",
     ] {
         let help = render_tool_cli_help(&def(tool_name));
-        if tool_name.starts_with("lcm_") {
-            assert!(help.contains("--storage-scope"), "{tool_name}: {help}");
-        }
-        assert!(!help.contains("--hermes-home"), "{tool_name}: {help}");
-        assert!(!help.contains("hermes_profile"), "{tool_name}: {help}");
+        assert!(help.contains("--storage-scope"), "{tool_name}: {help}");
     }
 }
 

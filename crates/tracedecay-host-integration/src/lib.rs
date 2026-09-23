@@ -2,7 +2,7 @@
 //!
 //! The application binary composes its checked-in plugin assets with
 //! `include_bytes!` / `include_str!`, then passes the resulting evidence here.
-//! This crate owns immutable manifest, receipt, journal, and capability-evidence
+//! This crate owns immutable manifest, receipt, and capability-evidence
 //! contracts; root adapters retain CLI dispatch and filesystem mutation.
 
 use thiserror::Error;
@@ -13,8 +13,8 @@ pub use tracedecay_domain::{
 };
 
 mod evidence;
-mod journal;
 mod manifest;
+mod receipt;
 
 #[cfg(test)]
 pub(crate) use evidence::HOST_REGISTRATIONS;
@@ -28,18 +28,15 @@ pub use evidence::{
     native_host_edit_stop_conformance_evidence_from_embedded_assets,
     stock_host_native_fixture_evidence_from_embedded_assets, stock_host_registration_evidence,
 };
-pub use journal::{
-    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleBackupArtifactV1, HostBundleBackupReceiptV1,
-    HostBundleInstallReceiptV1, HostBundleJournalEntryV1, HostBundleJournalStateV1,
-    HostBundleJournalV1, HostBundleReceiptArtifactV1, HostBundleRestoreReceiptV1,
-    HostBundleRollbackBoundaryV1, HostComponentSetJournalComponentV1,
-    HostComponentSetJournalStateV1, HostComponentSetJournalV1, HostComponentSetReceiptV1,
-};
 pub use manifest::{
     HOST_BUNDLE_SCHEMA_VERSION, HostBundleArtifactContentV1, HostBundleArtifactV1,
     HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleVerificationAdapterV1,
     MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS, MAX_IDENTIFIER_BYTES, MAX_MANIFEST_ARTIFACTS,
     MAX_RELATIVE_PATH_BYTES, validate_identifier, validate_relative_install_path,
+};
+pub use receipt::{
+    HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleInstallReceiptV1, HostBundleReceiptArtifactV1,
+    HostComponentSetReceiptV1,
 };
 
 /// Builds a [`HostBundleError::StorageFailure`] tagged with the `file:line` of
@@ -53,25 +50,6 @@ pub use manifest::{
 macro_rules! host_bundle_storage_failure {
     () => {
         $crate::HostBundleError::StorageFailure(::core::concat!(
-            ::core::file!(),
-            ":",
-            ::core::line!()
-        ))
-    };
-}
-
-/// Builds a [`HostBundleError::RecoveryRequired`] tagged with the `file:line` of
-/// the site that refused to mutate.
-///
-/// Dozens of journal, receipt, and rollback probes all fail closed with
-/// `RecoveryRequired`. Without a per-site tag, an operator staring at "requires
-/// recovery before mutation" cannot tell an genuinely interrupted operation from
-/// a probe that misread clean state. Always construct the variant through this
-/// macro.
-#[macro_export]
-macro_rules! host_bundle_recovery_required {
-    () => {
-        $crate::HostBundleError::RecoveryRequired(::core::concat!(
             ::core::file!(),
             ":",
             ::core::line!()
@@ -139,28 +117,25 @@ pub enum HostBundleError {
     InvalidHermesProfileBinding,
     #[error("bundle artifact content is missing, oversized, duplicated, or digest-mismatched")]
     ArtifactContentMismatch,
-    #[error("host bundle receipt or operation journal is invalid")]
+    #[error("host bundle receipt is invalid")]
     ReceiptCorrupted,
+    /// A receipt was written with an older receipt schema. Nothing migrates
+    /// it: the operator reinstalls, which discards the stale receipts.
+    #[error(
+        "host bundle receipts were written by an older TraceDecay; run `tracedecay install --yes --adopt` to replace them"
+    )]
+    ReinstallRequired,
     /// An atomic filesystem step failed. The payload names the source site that
     /// observed the failure so the ~100 construction sites stay distinguishable
     /// in user-facing output and bug reports; build it with
     /// [`host_bundle_storage_failure!`] rather than by hand.
     #[error("host bundle atomic filesystem operation failed at {0}")]
     StorageFailure(&'static str),
-    /// A mutation refused because an earlier operation looks interrupted. The
-    /// payload names the probe that refused, so a false positive on clean state
-    /// is distinguishable from a genuine interrupted operation; build it with
-    /// [`host_bundle_recovery_required!`] rather than by hand.
-    #[error("host bundle interrupted operation requires recovery before mutation (at {0})")]
-    RecoveryRequired(&'static str),
+    /// Another process holds this host's lifecycle writer lock.
     #[error(
-        "a backed-up host configuration directory vanished and could not be recreated safely; restore the directory or its parent and retry recovery"
+        "another TraceDecay process is changing this host's integration; retry when it finishes"
     )]
-    RecoveryDirectoryUnavailable,
-    #[error(
-        "host recovery backup format is unsupported; use the TraceDecay version that created it or restore the host configuration from backup"
-    )]
-    UnsupportedRecoveryFormat,
+    HostWriterBusy,
     /// Apply observed drift from the confirmed preview. The payload names the
     /// matching layer that rejected, so genuine host drift is distinguishable
     /// from a lifecycle bug; build it with [`host_bundle_stale_preview!`] rather
@@ -349,89 +324,5 @@ mod tests {
             evidence.unavailable_reason.as_deref(),
             Some("native_fixture_missing")
         );
-    }
-
-    fn component_set_journal(
-        state: HostComponentSetJournalStateV1,
-        registration_staged: bool,
-        registration_applied: bool,
-    ) -> HostComponentSetJournalV1 {
-        HostComponentSetJournalV1 {
-            schema_version: 1,
-            operation_id: [7; 16],
-            host: HostKindV1::OpenCode,
-            operation: HostBundleLifecycleOpV1::Update,
-            explicit_confirmation: true,
-            hermes_profile_bindings: 0,
-            confirmed_plan_digest: None,
-            base_registration_revision: None,
-            current_registration_revision: None,
-            artifact_state_revision: None,
-            state,
-            registration_staged,
-            registration_applied,
-            components: Vec::new(),
-        }
-    }
-
-    /// The flags are raised before the hook they name and the phase advances
-    /// after it returns, so each phase implies the flags behind it. `RolledBack`
-    /// is the one state that keeps whatever the failed attempt reached.
-    #[test]
-    fn component_set_journal_phases_imply_their_registration_flags() {
-        use HostComponentSetJournalStateV1 as State;
-
-        for (state, staged, applied, representable) in [
-            (State::Prepared, false, false, true),
-            (State::Prepared, true, false, true),
-            (State::Prepared, false, true, false),
-            (State::Prepared, true, true, false),
-            (State::Staged, true, false, true),
-            (State::Staged, true, true, true),
-            (State::Staged, false, false, false),
-            (State::Applied, true, true, true),
-            (State::Applied, true, false, false),
-            (State::Verified, true, true, true),
-            (State::Verified, false, true, false),
-            (State::Committed, true, true, true),
-            (State::Committed, false, false, false),
-            (State::RolledBack, false, false, true),
-            (State::RolledBack, true, false, true),
-            (State::RolledBack, true, true, true),
-            (State::RolledBack, false, true, false),
-        ] {
-            assert_eq!(
-                component_set_journal(state, staged, applied).registration_flags_match_state(),
-                representable,
-                "{state:?} staged={staged} applied={applied}"
-            );
-        }
-    }
-
-    /// Only a `Prepared` journal with both flags clear proves registration was
-    /// never entered. Every other journal - a rolled-back one above all - still
-    /// owes an idempotent compensation attempt.
-    #[test]
-    fn only_an_untouched_prepared_journal_skips_registration_compensation() {
-        use HostComponentSetJournalStateV1 as State;
-
-        assert!(
-            !component_set_journal(State::Prepared, false, false)
-                .registration_compensation_required()
-        );
-        for (state, staged, applied) in [
-            (State::Prepared, true, false),
-            (State::Staged, true, false),
-            (State::Applied, true, true),
-            (State::Verified, true, true),
-            (State::Committed, true, true),
-            (State::RolledBack, false, false),
-            (State::RolledBack, true, true),
-        ] {
-            assert!(
-                component_set_journal(state, staged, applied).registration_compensation_required(),
-                "{state:?} staged={staged} applied={applied}"
-            );
-        }
     }
 }

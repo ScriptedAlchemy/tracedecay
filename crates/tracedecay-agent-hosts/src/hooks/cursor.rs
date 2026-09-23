@@ -12,12 +12,13 @@ use serde_json::Value;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
-use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
+use super::tool_hints::{ToolHint, ToolHintInput, decide_hint};
 use super::{
     deduped_project_hint_with_id, event_session_id, format_tool_hint, mint_hint_id,
     nearest_project_like_root, read_hook_event, record_hint_analytics, record_hook_invoked_parsed,
     text_field,
 };
+use tracedecay_domain::HostIntegrationIdV1;
 
 /// Largest transcript tail a low-priority Cursor catch-up hook will read.
 /// Oversized backlogs stay queued instead of blocking hook execution.
@@ -59,7 +60,7 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     let _hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Cursor,
+        HostIntegrationIdV1::Cursor,
         "postToolUse",
         &event,
         &parsed,
@@ -67,7 +68,7 @@ pub async fn hook_cursor_post_tool_use(runtime: &HookRuntimeV1) -> i32 {
     if let Some(decision) = cursor_post_tool_use_decision(runtime, &event)
         && !super::write_hook_output(
             root.as_deref(),
-            tracedecay_hooks::HookHostV1::CursorDesktop,
+            tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
             &event,
             &decision,
         )
@@ -85,7 +86,7 @@ pub async fn hook_cursor_session_start(runtime: &HookRuntimeV1) -> i32 {
     let (root, output) = cursor_session_start_response(runtime, &event, started).await;
     if !super::write_hook_output(
         root.as_deref(),
-        tracedecay_hooks::HookHostV1::CursorDesktop,
+        tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
         &event,
         &output,
     )
@@ -108,14 +109,14 @@ async fn cursor_session_start_response(
     let hook_telemetry = record_hook_invoked_parsed(
         runtime,
         root.as_deref(),
-        HintAgent::Cursor,
+        HostIntegrationIdV1::Cursor,
         "sessionStart",
         event,
         &parsed,
     );
     let guidance = super::dispatch::dispatch_for_scope(
         runtime,
-        tracedecay_hooks::HookHostV1::CursorDesktop,
+        tracedecay_domain::NativeHostIdentityV1::CursorDesktop,
         event,
         root.as_deref(),
         Some(&hook_telemetry),
@@ -157,7 +158,7 @@ fn prepare_cursor_post_tool_use_hint(event_json: &str) -> Option<(String, ToolHi
     record_hint_analytics(
         root.as_deref(),
         "hint_candidate",
-        HintAgent::Cursor,
+        HostIntegrationIdV1::Cursor,
         event_session_id(&parsed).as_deref(),
         &hint_id,
         &hint,
@@ -191,7 +192,7 @@ fn cursor_hint_root(
         record_hint_analytics(
             None,
             "dropped_no_root",
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             None,
             hint_id,
             hint,
@@ -203,7 +204,7 @@ fn cursor_hint_root(
         record_hint_analytics(
             None,
             "dropped_no_root",
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             session_id.as_deref(),
             hint_id,
             hint,
@@ -224,14 +225,20 @@ fn deduped_cursor_hint(
         record_hint_analytics(
             Some(&root),
             "suppressed_uninitialized",
-            HintAgent::Cursor,
+            HostIntegrationIdV1::Cursor,
             session_id.as_deref(),
             hint_id,
             &hint,
         );
         return None;
     }
-    deduped_project_hint_with_id(Some(&root), HintAgent::Cursor, session_id, hint_id, hint)
+    deduped_project_hint_with_id(
+        Some(&root),
+        HostIntegrationIdV1::Cursor,
+        session_id,
+        hint_id,
+        hint,
+    )
 }
 
 pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
@@ -357,7 +364,7 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
         .or_else(|| parsed.get("input"))
         .unwrap_or(&Value::Null);
     ToolHintInput {
-        agent: HintAgent::Cursor,
+        agent: HostIntegrationIdV1::Cursor,
         session_id: event_session_id(parsed),
         tool_name: text_field(parsed, &["tool_name", "toolName", "name"]),
         command: text_field(tool_input, &["command", "cmd"])

@@ -229,12 +229,12 @@ fn doctor(home: &Path, project: &Path) -> Value {
     tool_envelope(home, project, "tracedecay_lcm_doctor", json!({}))
 }
 
-fn message_search(home: &Path, project: &Path, catch_up: bool) -> Value {
+fn message_search(home: &Path, project: &Path, require_fresh: bool) -> Value {
     tool_envelope(
         home,
         project,
         "tracedecay_message_search",
-        json!({"query": NEEDLE, "provider": "codex", "limit": 5, "catch_up": catch_up}),
+        json!({"query": NEEDLE, "provider": "codex", "limit": 5, "require_fresh": require_fresh}),
     )
 }
 
@@ -288,14 +288,14 @@ fn wait_for_described_session(home: &Path, project: &Path, phase: &str) -> Value
 }
 
 /// A search without the freshness precondition serves the retained projection
-/// and must answer evidence at once. The deprecated `catch_up` flag now only
-/// requires fresh data: while projection catches up it may return a typed
-/// stale result or a historical-convergence refusal, and must settle to the
-/// retained session within the convergence bound.
-fn assert_search_hits(home: &Path, project: &Path, catch_up: bool, phase: &str) {
+/// and must answer evidence at once. `require_fresh` only requires fresh data:
+/// while projection catches up it may return a typed stale result or a
+/// historical-convergence refusal, and must settle to the retained session
+/// within the convergence bound.
+fn assert_search_hits(home: &Path, project: &Path, require_fresh: bool, phase: &str) {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     let envelope = loop {
-        let envelope = message_search(home, project, catch_up);
+        let envelope = message_search(home, project, require_fresh);
         if is_evidence(&envelope) {
             let payload = payload(&envelope);
             let has_session = payload["results"].as_array().is_some_and(|hits| {
@@ -309,7 +309,7 @@ fn assert_search_hits(home: &Path, project: &Path, catch_up: bool, phase: &str) 
                 break envelope;
             }
             assert!(
-                catch_up,
+                require_fresh,
                 "{phase}: message_search must answer retained evidence: {envelope}"
             );
             assert_eq!(payload["status"], "stale", "{phase}: {payload}");
@@ -317,7 +317,7 @@ fn assert_search_hits(home: &Path, project: &Path, catch_up: bool, phase: &str) 
             assert_eq!(payload["refresh_required"], true, "{phase}: {payload}");
         } else {
             assert!(
-                catch_up,
+                require_fresh,
                 "{phase}: message_search must answer evidence: {envelope}"
             );
             let message = problem_message(&envelope);
@@ -371,14 +371,14 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
     );
 
     // Reopening unchanged history must settle without a spurious conflict.
-    assert_search_hits(&home, &project, true, "baseline catch_up");
+    assert_search_hits(&home, &project, true, "baseline require_fresh");
     stop_managed_daemon(&home);
     let reopen_log = home.join("ordinary-reopen.log");
     let daemon = spawn_tracedecay_daemon_with(&home, |command| {
         command.stderr(std::fs::File::create(&reopen_log).unwrap());
     });
     wait_for_described_session(&home, &project, "ordinary reopen");
-    assert_search_hits(&home, &project, true, "ordinary reopen catch_up");
+    assert_search_hits(&home, &project, true, "ordinary reopen require_fresh");
     drop(daemon);
     assert_no_replay_conflicts(&reopen_log);
 
@@ -483,7 +483,7 @@ fn observation_authority_reset_recovers_the_retained_temporal_authority() {
     assert_search_hits(&home, &project, false, "after reset");
     // Historical catch-up must reach a terminal state: the frontier the pass
     // persists is the whole reason a second pass has nothing left to do.
-    assert_search_hits(&home, &project, true, "after reset with catch_up");
+    assert_search_hits(&home, &project, true, "after reset with require_fresh");
 
     let converged = doctor(&home, &project);
     assert!(is_evidence(&converged), "{converged}");

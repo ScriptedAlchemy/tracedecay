@@ -1,5 +1,5 @@
 //! Host configuration file IO shared by every agent integration: lenient and
-//! strict JSON/JSONC/TOML loaders, backup-then-atomic-replace writers with
+//! strict JSON/JSONC/TOML loaders, atomic-replace writers with
 //! durable write intents, host file metadata capture, and the binary and
 //! host-directory probes installers embed into generated config.
 
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use super::text_file_transaction::{self, TextFileMutation, update_config_file_transactionally};
+use super::text_file_transaction::{self, TextFileMutation, update_text_file_transactionally};
 
 #[cfg(test)]
 mod tests;
@@ -82,98 +82,7 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     JsonConfigDialect::Json.parse_for_edit(path, &contents)
 }
 
-pub fn config_backup_path(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.bak", path.display()))
-}
-
-/// Create a backup copy of a config file before modifying it.
-///
-/// The backup itself is written atomically: content is first written to a
-/// staging file (`.bak.new`), then renamed to `.bak`. This ensures the
-/// `.bak` file is never half-written even if the process is killed.
-///
-/// Returns `Ok(Some(backup_path))` when a backup was created, or `Ok(None)`
-/// when the file did not exist (nothing to back up).
-///
-/// # Error conditions
-/// - File exists but cannot be read (permissions, I/O error).
-/// - Staging file cannot be written (disk full, permissions).
-/// - Staging file cannot be renamed to `.bak` (cross-device, permissions).
-#[hotpath::measure(label = "agent_hosts.agents.host_config.backup")]
-pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let backup_path = config_backup_path(path);
-    let staging_path = PathBuf::from(format!("{}.bak.new", path.display()));
-
-    let content = std::fs::read(path).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to read {} for backup: {e}\n  \
-             Hint: check file permissions",
-            path.display()
-        ),
-    })?;
-    std::fs::write(&staging_path, &content).map_err(|e| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to write backup staging file {}: {e}\n  \
-                 Hint: check available disk space and permissions",
-                staging_path.display()
-            ),
-        }
-    })?;
-    // The backup holds the same secrets as the original (host configs can
-    // carry credential env values), so it must not be published with the
-    // umask-default mode: copy the original's permission identity onto the
-    // staging file before it becomes `.bak`.
-    let original_metadata =
-        capture_host_file_metadata(path).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to capture metadata for {} before backup: {error}",
-                path.display()
-            ),
-        })?;
-    restore_host_file_metadata(&staging_path, &original_metadata).map_err(|error| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to apply original permissions to backup staging file {}: {error}",
-                staging_path.display()
-            ),
-        }
-    })?;
-    let backup_metadata =
-        capture_host_file_metadata(&staging_path).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to inspect backup staging file {}: {error}",
-                staging_path.display()
-            ),
-        })?;
-    persist_host_config_write_intent(&backup_path, &content, Some(&backup_metadata))?;
-
-    // Atomic rename staging → .bak
-    std::fs::rename(&staging_path, &backup_path).map_err(|e| {
-        std::fs::remove_file(&staging_path).ok();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to create backup {}: {e}\n  \
-                 Hint: check file permissions",
-                backup_path.display()
-            ),
-        }
-    })?;
-
-    Ok(Some(backup_path))
-}
-
 /// Write a JSON value to a file via atomic rename.
-///
-/// The caller is responsible for creating the backup via
-/// [`backup_config_file`] before loading the config. Pass the backup path
-/// here so that it can be mentioned in error messages and used for restore
-/// if the rename somehow leaves the target in a bad state.
 ///
 /// # Strategy
 ///
@@ -187,13 +96,9 @@ pub fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
 /// - Atomic staging or publication failure (permissions, disk full).
 ///
 /// In every error case the original file remains intact.
-pub fn safe_write_json_file(
-    path: &Path,
-    value: &serde_json::Value,
-    backup: Option<&Path>,
-) -> Result<()> {
+pub fn safe_write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
     let content = render_json_config(path, value)?;
-    safe_write_bytes_file(path, content.as_bytes(), backup)
+    safe_write_bytes_file(path, content.as_bytes())
 }
 
 /// Serialize a JSON config value for publication: pretty-printed, re-parse
@@ -228,14 +133,13 @@ pub(crate) enum JsonConfigMutation {
 /// config. The transform sees the value parsed strictly from the exact bytes
 /// the write lock observed, so a concurrent writer can no longer slip between
 /// load and publish, and a corrupt config is a typed error instead of a
-/// silently-empty object. Rewrites and removals of an existing file leave a
-/// `.bak` (issue #63).
+/// silently-empty object.
 pub(crate) fn update_json_config_transactionally<T>(
     path: &Path,
     dialect: JsonConfigDialect,
     update: impl FnOnce(serde_json::Value) -> Result<(T, JsonConfigMutation)>,
 ) -> Result<T> {
-    update_config_file_transactionally(path, |existing| {
+    update_text_file_transactionally(path, |existing| {
         let settings = dialect.parse_for_edit(path, existing)?;
         let (output, mutation) = update(settings)?;
         let mutation = match mutation {
@@ -257,7 +161,7 @@ pub(crate) fn update_toml_config_transactionally<T>(
     path: &Path,
     update: impl FnOnce(toml::Value) -> Result<(T, TextFileMutation)>,
 ) -> Result<T> {
-    update_config_file_transactionally(path, |existing| {
+    update_text_file_transactionally(path, |existing| {
         let value = parse_toml_config(path, existing)?;
         update(value)
     })
@@ -268,8 +172,8 @@ pub(crate) fn update_toml_config_transactionally<T>(
 /// Mirrors [`safe_write_json_file`] for generated prompt/rule files that are
 /// plain text rather than structured JSON. The target is not opened for writing
 /// until the final rename, so a failed write leaves the original untouched.
-pub fn safe_write_text_file(path: &Path, contents: &str, backup: Option<&Path>) -> Result<()> {
-    safe_write_bytes_file(path, contents.as_bytes(), backup)
+pub fn safe_write_text_file(path: &Path, contents: &str) -> Result<()> {
+    safe_write_bytes_file(path, contents.as_bytes())
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -371,18 +275,17 @@ pub fn restore_host_file_metadata(
 /// that metadata before returning. This authority is shared by every host:
 /// existing config symlinks are always refused so no integration can redirect
 /// a lifecycle write outside its inventoried path.
-pub fn safe_write_bytes_file(path: &Path, contents: &[u8], backup: Option<&Path>) -> Result<()> {
-    safe_write_bytes_file_with_metadata(path, contents, backup, None)
+pub fn safe_write_bytes_file(path: &Path, contents: &[u8]) -> Result<()> {
+    safe_write_bytes_file_with_metadata(path, contents, None)
 }
 
 #[hotpath::measure(label = "agent_hosts.agents.host_config.write")]
 pub fn safe_write_bytes_file_with_metadata(
     path: &Path,
     contents: &[u8],
-    backup: Option<&Path>,
     replacement_metadata: Option<&HostFileMetadataIdentityV1>,
 ) -> Result<()> {
-    text_file_transaction::write_bytes_file_locked(path, contents, backup, replacement_metadata)
+    text_file_transaction::write_bytes_file_locked(path, contents, replacement_metadata)
 }
 
 #[cfg(test)]
@@ -526,11 +429,7 @@ pub(super) fn test_pause_host_config_write(path: &Path, boundary: TestHostConfig
 /// exercised against a real torn install.
 #[cfg(feature = "test-transport")]
 pub(super) fn test_abort_after_host_config_write(path: &Path) {
-    if (std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
-        && !path
-            .file_name()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|name| name.ends_with(".bak") || name.ends_with(".tracedecay-original")))
+    if std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE").is_some()
         || std::env::var_os("TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH")
             .is_some_and(|expected| Path::new(&expected) == path)
     {
@@ -827,77 +726,6 @@ fn path_component_eq(actual: &std::ffi::OsStr, expected: impl AsRef<std::ffi::Os
         (Some(actual), Some(expected)) => actual.eq_ignore_ascii_case(expected),
         _ => actual == expected,
     }
-}
-
-/// Remove explicitly retired sibling plugin trees.
-///
-/// Both the retired suffix and ownership manifest are allow-listed: a name
-/// prefix alone is never ownership evidence. A sibling is removed only when it
-/// is a real directory, its suffix is known to have been created by
-/// `TraceDecay`, and one host-specific manifest parses with `name = "tracedecay"`.
-#[hotpath::measure(label = "agent_hosts.agents.plugin.sweep_siblings")]
-pub(crate) fn sweep_superseded_plugin_siblings(
-    current_dir: &Path,
-    ownership_manifests: &[&str],
-) -> Result<()> {
-    const RETIRED_SUFFIXES: &[&str] = &["pre-v2-adopt"];
-
-    let Some(parent) = current_dir.parent() else {
-        return Ok(());
-    };
-    let Some(current_name) = current_dir.file_name().and_then(|name| name.to_str()) else {
-        return Ok(());
-    };
-    let prefix = format!("{current_name}.");
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to inspect plugin siblings in {}: {error}",
-                    parent.display()
-                ),
-            });
-        }
-    };
-
-    for entry in entries {
-        let entry = entry.map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to inspect a plugin sibling in {}: {error}",
-                parent.display()
-            ),
-        })?;
-        let file_type = entry.file_type().map_err(|error| TraceDecayError::Config {
-            message: format!("failed to inspect {}: {error}", entry.path().display()),
-        })?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let retired = name
-            .strip_prefix(&prefix)
-            .is_some_and(|suffix| RETIRED_SUFFIXES.contains(&suffix));
-        if !file_type.is_dir() || !retired {
-            continue;
-        }
-        let sibling = entry.path();
-        let owned = ownership_manifests.iter().any(|relative| {
-            load_json_file(&sibling.join(relative))
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                == Some("tracedecay")
-        });
-        if !owned {
-            continue;
-        }
-        std::fs::remove_dir_all(&sibling).map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "failed to remove superseded tracedecay plugin {}: {error}",
-                sibling.display()
-            ),
-        })?;
-    }
-    Ok(())
 }
 
 /// Recursively collect every regular file under `root` (following the same

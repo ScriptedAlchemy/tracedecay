@@ -6,12 +6,12 @@
 //! flows have explicit inputs and preserve the historical error messages.
 
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 
 use yaml_edit::{Document, Mapping, Sequence, YamlNode};
 
-use crate::agents::{backup_config_file, safe_write_bytes_file};
+use crate::agents::safe_write_bytes_file;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,16 +68,6 @@ impl ProfileConfigDocument {
     }
 }
 
-/// Reads the removed `plugins.tracedecay.project_root` setting solely as
-/// provenance for one-time data migration and transcript import.
-pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
-    let contents = std::fs::read_to_string(config_path).ok()?;
-    let config = ProfileConfigDocument::parse(&contents).ok()?;
-    let plugins = config.root().get_mapping("plugins")?;
-    let tracedecay = plugins.get_mapping("tracedecay")?;
-    string_value(&tracedecay, "project_root")
-}
-
 pub(super) fn registration_state(
     config_path: &Path,
 ) -> crate::agents::host_bundle::HostBundleRegistrationStateV1 {
@@ -121,10 +111,6 @@ pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
             });
         }
     };
-    let original_path = original_config_path(config_path);
-    if !existing.is_empty() && config_path.is_file() && !original_path.exists() {
-        crate::agents::safe_write_bytes_file(&original_path, existing.as_bytes(), None)?;
-    }
     let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
         message: format!(
             "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
@@ -147,27 +133,10 @@ pub(super) fn disable_plugin(config_path: &Path) -> Result<()> {
             config_path.display()
         ),
     })?;
-    let original_path = original_config_path(config_path);
-    if let Ok(original) = std::fs::read(&original_path)
-        && std::str::from_utf8(&original)
-            .is_ok_and(|original| updated.trim_end() == original.trim_end())
-    {
-        crate::agents::safe_write_bytes_file(config_path, &original, None)?;
-        crate::agents::safe_remove_host_file(&original_path).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("failed to remove {}: {error}", original_path.display()),
-            }
-        })?;
-        return Ok(());
-    }
     if updated != existing {
         write_config_file(config_path, &updated)?;
     }
     Ok(())
-}
-
-pub(super) fn original_config_path(config_path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.tracedecay-original", config_path.display()))
 }
 
 // Error messages preserved from the historical line-oriented implementation so
@@ -204,8 +173,7 @@ fn disable_plugin_config(existing: &str) -> std::result::Result<String, String> 
 }
 
 fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
-    let text = remove_legacy_project_pin(existing)?;
-    let text = remove_seq_item(&text, &["plugins", "disabled"], "tracedecay")?;
+    let text = remove_seq_item(existing, &["plugins", "disabled"], "tracedecay")?;
     let text = ensure_enabled(&text)?;
     let text = ensure_scalar(
         &text,
@@ -230,7 +198,6 @@ fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
 
 fn disable_normalized(existing: &str) -> std::result::Result<String, String> {
     let text = remove_seq_item(existing, &["plugins", "enabled"], "tracedecay")?;
-    let text = remove_legacy_project_pin(&text)?;
     let text = disable_scalar(&text, "context", "engine")?;
     let text = disable_scalar(&text, "memory", "provider")?;
     Ok(text)
@@ -478,43 +445,6 @@ fn insert_block_child(
 
 // ---- removals ----
 
-/// Remove the legacy `plugins.tracedecay.project_root` pin, collapsing an
-/// otherwise-empty `tracedecay` mapping when it carries no comments/anchors.
-fn remove_legacy_project_pin(text: &str) -> std::result::Result<String, String> {
-    let document = parse_profile(text)?;
-    let root = document
-        .as_mapping()
-        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
-    let Some(plugins) = root
-        .get("plugins")
-        .and_then(|node| node.as_mapping().cloned())
-    else {
-        return Ok(text.to_string());
-    };
-    let Some(tracedecay) = plugins
-        .get("tracedecay")
-        .and_then(|node| node.as_mapping().cloned())
-    else {
-        return Ok(text.to_string());
-    };
-    if !tracedecay.contains_key("project_root") {
-        return Ok(text.to_string());
-    }
-    let after = remove_map_entry(text, &tracedecay, "project_root")?;
-
-    let document = parse_profile(&after)?;
-    let root = document
-        .as_mapping()
-        .unwrap_or_else(|| panic!("parse_profile guarantees a mapping"));
-    if let Some(plugins) = root
-        .get("plugins")
-        .and_then(|node| node.as_mapping().cloned())
-    {
-        return collapse_if_empty(&after, &plugins, "tracedecay");
-    }
-    Ok(after)
-}
-
 fn remove_seq_item(text: &str, path: &[&str], value: &str) -> std::result::Result<String, String> {
     let document = parse_profile(text)?;
     let root = document
@@ -733,19 +663,7 @@ fn write_config_file(path: &Path, contents: &str) -> Result<()> {
             message: format!("failed to create {}: {error}", parent.display()),
         })?;
     }
-    let backup = backup_config_file(path)?;
-    safe_write_bytes_file(path, contents.as_bytes(), backup.as_deref()).map_err(|error| {
-        let backup_hint = backup
-            .as_ref()
-            .map(|path| format!(" Backup is at {}.", path.display()))
-            .unwrap_or_default();
-        TraceDecayError::Config {
-            message: format!(
-                "failed to atomically replace {}: {error}.{backup_hint}",
-                path.display()
-            ),
-        }
-    })
+    safe_write_bytes_file(path, contents.as_bytes())
 }
 
 #[cfg(test)]
@@ -795,29 +713,6 @@ mod tests {
                 "    - other\n",
                 "\n",
                 "# authored trailing comment\n",
-            ),
-        );
-    }
-
-    #[test]
-    fn collapse_after_removal_keeps_following_authored_lines() {
-        let text = concat!(
-            "plugins:\n",
-            "  enabled:\n",
-            "    - tracedecay\n",
-            "  tracedecay:\n",
-            "    project_root: /legacy\n",
-            "\n",
-            "memory: keep\n",
-        );
-        assert_eq!(
-            remove_legacy_project_pin(text).unwrap(),
-            concat!(
-                "plugins:\n",
-                "  enabled:\n",
-                "    - tracedecay\n",
-                "\n",
-                "memory: keep\n",
             ),
         );
     }
@@ -885,11 +780,6 @@ mod tests {
                     .get_sequence("enabled")
                     .is_none_or(|enabled| !sequence_contains(&enabled, "tracedecay"))
             );
-            assert!(
-                plugins
-                    .get_mapping("tracedecay")
-                    .is_none_or(|plugin| !plugin.contains_key("project_root"))
-            );
         }
         assert_ne!(
             root.get_mapping("memory")
@@ -914,7 +804,7 @@ mod tests {
                 input: concat!(
                     "# leading comment\n",
                     "\"plugins\": {enabled: [other], disabled: [tracedecay, blocked], ",
-                    "tracedecay: {project_root: \"/legacy\", keep: yes}}\n",
+                    "tracedecay: {keep: yes}}\n",
                     "memory: {note: \"keep me\"}\n",
                     "context: {note: 'keep me too'}\n",
                     "unknown: {quoted: \"value\"}\n",
@@ -928,7 +818,7 @@ mod tests {
                     "note: 'keep me too'",
                     "unknown: {quoted: \"value\"}",
                 ],
-                removed: &["project_root:"],
+                removed: &[],
                 crlf: false,
             },
             CorpusCase {
@@ -939,7 +829,6 @@ mod tests {
                     "plugins:\n",
                     "  enabled: [other]\n",
                     "  tracedecay:\n",
-                    "    project_root: /legacy\n",
                     "    options: *defaults\n",
                     "consumer:\n",
                     "  <<: *defaults\n",
@@ -951,7 +840,7 @@ mod tests {
                     "color: blue",
                     "retries: 3",
                 ],
-                removed: &["project_root:"],
+                removed: &[],
                 crlf: false,
             },
             CorpusCase {
@@ -977,7 +866,6 @@ mod tests {
                     "plugins:\n",
                     "  enabled: [tracedecay, other]\n",
                     "  tracedecay:\n",
-                    "    project_root: /legacy\n",
                     "    summary_model: glm-5\n",
                     "memory: {provider: tracedecay, keep: true}\n",
                     "context: {engine: tracedecay, budget: 42}\n",
@@ -993,7 +881,7 @@ mod tests {
                     "hooks: &hooks",
                     "mcp: {servers: *hooks}",
                 ],
-                removed: &["project_root:"],
+                removed: &[],
                 crlf: false,
             },
         ];
@@ -1077,17 +965,21 @@ mod tests {
     }
 
     #[test]
-    fn enable_plugin_backs_up_existing_config_before_atomic_write() {
+    fn enable_plugin_keeps_no_copy_of_the_prior_config() {
         let dir = TempDir::new().unwrap();
         let config = dir.path().join("config.yaml");
         let original = "theme: dark\nplugins:\n  enabled:\n    - other\n";
         std::fs::write(&config, original).unwrap();
 
         enable_plugin(&config).unwrap();
+        disable_plugin(&config).unwrap();
 
-        let backup = dir.path().join("config.yaml.bak");
-        assert!(backup.exists());
-        assert_eq!(read(&backup), original);
+        assert_eq!(read(&config), original);
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.yaml")]);
     }
 
     #[test]
@@ -1098,6 +990,5 @@ mod tests {
 
         let error = enable_plugin(&config).unwrap_err();
         assert!(error.to_string().contains("failed to read"));
-        assert!(!original_config_path(&config).exists());
     }
 }

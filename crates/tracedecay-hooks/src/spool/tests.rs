@@ -4,9 +4,8 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::{
-    HookCapabilityV1, HookEventFamily, HookEventSupportV1, HookEventV2, HookHostV1, HookOrderingV1,
-};
+use crate::{HookCapabilityV1, HookEventFamily, HookEventSupportV1, HookEventV2, HookOrderingV1};
+use tracedecay_domain::NativeHostIdentityV1;
 
 struct TestDir(PathBuf);
 
@@ -33,7 +32,7 @@ impl Drop for TestDir {
 
 fn config() -> HookSpoolConfigV1 {
     HookSpoolConfigV1 {
-        host: HookHostV1::CursorDesktop,
+        host: NativeHostIdentityV1::CursorDesktop,
         limits: HookSpoolLimitsV1 {
             max_host_records: 8,
             max_host_bytes: 32 * 1024,
@@ -46,7 +45,7 @@ fn config() -> HookSpoolConfigV1 {
 
 fn binding() -> HookScopeBindingV1 {
     HookScopeBindingV1 {
-        host: HookHostV1::CursorDesktop,
+        host: NativeHostIdentityV1::CursorDesktop,
         project_id: [1; 16],
         repository_id: [2; 16],
         worktree_id: [3; 16],
@@ -69,7 +68,7 @@ fn envelope(event: u8, session: u8) -> HookEventEnvelopeV2 {
     HookEventEnvelopeV2 {
         schema_version: crate::HOOK_EVENT_SCHEMA_VERSION,
         event_id: [event; 16],
-        producer: HookHostV1::CursorDesktop,
+        producer: NativeHostIdentityV1::CursorDesktop,
         protected_session_id: [session; 32],
         project_id: [1; 16],
         repository_id: [2; 16],
@@ -122,7 +121,7 @@ fn lifecycle_envelope(event: u32, session: u8) -> HookEventEnvelopeV2 {
 }
 
 fn binding_for_envelopes(
-    host: HookHostV1,
+    host: NativeHostIdentityV1,
     envelopes: &[HookEventEnvelopeV2],
 ) -> HookScopeBindingV1 {
     let mut binding = binding();
@@ -484,7 +483,7 @@ fn checkpoint_rewrites_are_amortized_across_dispatches() {
     const DISPATCHES: u32 = 24;
 
     let root = TestDir::new("checkpoint-amortized");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
     for event in 1..=INITIAL_RECORDS {
         spool
@@ -539,19 +538,19 @@ fn checkpoint_stores_a_fixed_width_index_without_envelopes() {
 
     let compact_root = TestDir::new("checkpoint-fixed-compact");
     let large_root = TestDir::new("checkpoint-fixed-large");
-    let compact_config = HookSpoolConfigV1::stock(HookHostV1::Hermes);
-    let large_config = HookSpoolConfigV1::stock(HookHostV1::Hermes);
+    let compact_config = HookSpoolConfigV1::stock(NativeHostIdentityV1::Hermes);
+    let large_config = HookSpoolConfigV1::stock(NativeHostIdentityV1::Hermes);
     let compact = (1..=RECORDS)
         .map(|event| {
             let mut envelope = numbered_envelope(event, 9);
-            envelope.producer = HookHostV1::Hermes;
+            envelope.producer = NativeHostIdentityV1::Hermes;
             envelope
         })
         .collect::<Vec<_>>();
     let large = (1..=RECORDS)
         .map(|event| {
             let mut envelope = lifecycle_envelope(event, 9);
-            envelope.producer = HookHostV1::Hermes;
+            envelope.producer = NativeHostIdentityV1::Hermes;
             envelope
         })
         .collect::<Vec<_>>();
@@ -606,7 +605,7 @@ fn open_after_one_dispatch_decodes_only_the_appended_suffix() {
     const DISPATCHES: u32 = 5;
 
     let root = TestDir::new("checkpoint-suffix-materialization");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let initial = (1..=INITIAL_RECORDS)
         .map(|event| numbered_envelope(event, (event % 251) as u8 + 1))
         .collect::<Vec<_>>();
@@ -645,7 +644,7 @@ fn open_after_one_dispatch_decodes_only_the_appended_suffix() {
 #[test]
 fn hydration_detects_a_corrupted_checkpointed_frame() {
     let root = TestDir::new("checkpoint-hydration-corruption");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let first = numbered_envelope(1, 9);
     publish_checkpoint(&root.0, config, &[first.clone(), numbered_envelope(2, 9)]);
     let (mut spool, report) = HookSpoolV1::open(&root.0, config, UtcMicros(12)).unwrap();
@@ -684,7 +683,7 @@ fn hydration_detects_a_corrupted_checkpointed_frame() {
 #[test]
 fn hydration_rejects_a_wrong_checkpoint_index_without_poisoning_records() {
     let root = TestDir::new("checkpoint-hydration-index-mismatch");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let first = numbered_envelope(1, 9);
     let envelopes = [first.clone(), numbered_envelope(2, 10)];
     publish_checkpoint(&root.0, config, &envelopes);
@@ -724,7 +723,7 @@ fn hydration_rejects_a_wrong_checkpoint_index_without_poisoning_records() {
 #[test]
 fn checkpoint_body_version_one_is_rejected_and_rewritten() {
     let root = TestDir::new("checkpoint-old-body");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let envelopes = [numbered_envelope(1, 9), numbered_envelope(2, 9)];
     publish_checkpoint(&root.0, config, &envelopes);
 
@@ -750,7 +749,7 @@ fn checkpoint_body_version_one_is_rejected_and_rewritten() {
 #[test]
 fn compaction_copies_surviving_checkpointed_frames_byte_exactly() {
     let root = TestDir::new("checkpoint-compaction-bytes");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let envelopes = [
         numbered_envelope(1, 9),
         numbered_envelope(2, 10),
@@ -801,7 +800,7 @@ fn compaction_copies_surviving_checkpointed_frames_byte_exactly() {
 #[test]
 fn replay_hydrates_only_checkpointed_records_in_the_batch() {
     let root = TestDir::new("checkpoint-replay-hydration");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let envelopes = (1..=6)
         .map(|event| numbered_envelope(event, if event <= 3 { 9 } else { 10 }))
         .collect::<Vec<_>>();
@@ -826,9 +825,9 @@ fn replay_hydrates_only_checkpointed_records_in_the_batch() {
 #[test]
 fn checkpointed_replay_hydrates_native_lifecycle() {
     let root = TestDir::new("checkpoint-native-lifecycle");
-    let config = HookSpoolConfigV1::stock(HookHostV1::OpenCode);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::OpenCode);
     let mut envelope = numbered_envelope(1, 9);
-    envelope.producer = HookHostV1::OpenCode;
+    envelope.producer = NativeHostIdentityV1::OpenCode;
     envelope.protected_session_id = Sha256::digest(b"session.native.checkpoint").into();
     envelope.event = HookEventV2::ToolLifecycle {
         tool_id: [8; 16],
@@ -866,7 +865,7 @@ fn checkpointed_replay_hydrates_native_lifecycle() {
 #[test]
 fn transition_extended_anchor_detects_corrupted_prefix() {
     let root = TestDir::new("checkpoint-extended-corrupt-prefix");
-    let config = HookSpoolConfigV1::stock(HookHostV1::CursorDesktop);
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
     let (mut spool, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
     for event in 1..=CHECKPOINT_REWRITE_FRAME_THRESHOLD {
         spool

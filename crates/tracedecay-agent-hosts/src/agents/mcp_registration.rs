@@ -87,9 +87,8 @@ enum McpUninstallOutcome {
 /// config that exists but cannot be parsed is a typed error, reporting a
 /// clean uninstall over a corrupt config would fabricate state, and callers
 /// decide whether to keep going across the remaining hosts. Every rewrite or
-/// removal of the existing file leaves a `.bak` (issue #63) and publishes
-/// through the durable conditional write/remove shared by every host-file
-/// transaction.
+/// removal publishes through the durable conditional write/remove shared by
+/// every host-file transaction.
 #[hotpath::measure(label = "agent_hosts.agents.mcp.uninstall")]
 pub fn uninstall_mcp_server_entry(
     config_path: &Path,
@@ -320,13 +319,5 @@ pub fn read_only_tool_names() -> tracedecay_domain::errors::Result<Vec<String>> 
         .into_iter()
         .filter(|tool| tool.read_only)
         .map(|tool| tool.name)
-        .collect())
-}
-
-/// Legacy-namespace permission entries for every advertised tool.
-pub fn expected_tool_perms() -> tracedecay_domain::errors::Result<Vec<String>> {
-    Ok(advertised_tools()?
-        .iter()
-        .map(|tool| format!("{}{}", crate::tool_name::LEGACY_TOOL_PREFIX, tool.name))
         .collect())
 }

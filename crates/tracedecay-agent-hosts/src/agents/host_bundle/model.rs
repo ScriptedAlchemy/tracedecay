@@ -23,8 +23,8 @@ pub struct HostBundleExecutionRequestV1 {
 }
 
 /// One verified component in the canonical set for a host lifecycle operation.
-/// The content remains outside receipts and journals; it is staged and checked
-/// against the embedded manifest before any host path is changed.
+/// The content remains outside receipts; it is checked against the embedded
+/// manifest before any host path is changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostComponentSetEntryV1 {
     pub manifest: HostBundleManifestV1,
@@ -55,8 +55,8 @@ pub struct HostComponentSetLifecycleRequestV1 {
     pub explicit_adoption: bool,
 }
 
-/// One operation id spans every component, registration mutation, receipt,
-/// backup, and recovery record in a component-set transaction.
+/// One operation id spans every component, registration mutation, and receipt
+/// in a component-set transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostComponentSetExecutionRequestV1 {
     pub lifecycle: HostComponentSetLifecycleRequestV1,
@@ -96,13 +96,12 @@ pub struct HostBundleRollbackSeamV1 {
     pub operation_id: [u8; 16],
     pub host: HostKindV1,
     pub component: HostComponentV1,
-    pub backup_relative_paths: Vec<String>,
-    pub interrupted_recovery_required: bool,
+    pub replaced_relative_paths: Vec<String>,
 }
 
 /// Read-only lifecycle result. Producing this value verifies the embedded
 /// first-party manifest and exact ownership observations but never opens a
-/// writer, creates a control directory, writes a receipt, or recovers a journal.
+/// writer, creates a control directory, or writes a receipt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostBundleLifecyclePreviewV1 {
     pub plan: HostBundleMutationPlanV1,
@@ -115,8 +114,6 @@ pub struct HostBundleLifecyclePreviewV1 {
 /// implements this trait, while daemon wiring can provide its opened authority
 /// without exposing a filesystem path or mutation capability to callers.
 pub trait HostBundleLifecycleStorageV1 {
-    fn recover_lifecycle(&mut self) -> Result<(), HostBundleError>;
-
     fn execute_lifecycle<V: HostBundleVerificationAdapterV1>(
         &mut self,
         manifest: &HostBundleManifestV1,
@@ -127,9 +124,9 @@ pub trait HostBundleLifecycleStorageV1 {
 }
 
 /// Host-native registration boundary coordinated with an artifact component
-/// set. Implementations persist their own bounded registration backups during
-/// `stage`; the aggregate writer records the state transition in its recovery
-/// journal and invokes these hooks in reverse on failure or restart.
+/// set. Implementations snapshot their bounded registration state in memory
+/// during `stage`; the aggregate writer invokes these hooks in reverse when the
+/// running operation fails.
 pub trait HostComponentSetRegistrationV1 {
     /// Exact revision of the host registration state that this adapter may
     /// mutate. Concrete host adapters hash their bounded native config;
@@ -140,18 +137,6 @@ pub trait HostComponentSetRegistrationV1 {
         _request: &HostComponentSetExecutionRequestV1,
     ) -> Result<[u8; 32], HostBundleError> {
         Ok(Sha256::digest(b"tracedecay.host-registration.none.v1").into())
-    }
-
-    /// Recognize this host component's receiptless deployment as a prior
-    /// first-party install ("legacy provenance"). Pre-receipt installers
-    /// wrote cataloged deploy paths without v2 receipts, so receipt evidence
-    /// alone cannot tell their files from a user's; a cataloged path alone
-    /// must never be treated as ownership. Implementations inspect durable
-    /// host state (for example a bundle's own manifest naming tracedecay)
-    /// and fail closed: the default recognizes nothing, so adoption then
-    /// requires the operator's explicit `--yes --adopt`.
-    fn receiptless_component_provenance(&self, _component: HostComponentV1) -> bool {
-        false
     }
 
     /// Bounded read-only discovery of third-party extensions that already
@@ -169,7 +154,7 @@ pub trait HostComponentSetRegistrationV1 {
 
     /// Bind the adapter to the confirmed preview immediately before staging.
     /// Implementations may retain the revision and recheck it while capturing
-    /// their rollback backup.
+    /// their rollback snapshot.
     fn confirm_preview(
         &mut self,
         component_set: &HostComponentSetV1,

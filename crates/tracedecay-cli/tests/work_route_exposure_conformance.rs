@@ -57,7 +57,6 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 use tower::ServiceExt;
-use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay_application::operation_stream::OperationEventAuthority;
 use tracedecay_contracts::{
     EXECUTION_TOPOLOGY_DESCRIPTOR_REVISION_V1, EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1,
@@ -65,6 +64,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_daemon_service::application_surface::http_application_router;
 use tracedecay_domain::ProjectId;
+use tracedecay_project::config::USER_DATA_DIR_ENV;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_tool_catalog::RouteExposureV1;
 

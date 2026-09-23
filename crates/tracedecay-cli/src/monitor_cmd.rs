@@ -79,7 +79,7 @@ pub fn run() -> std::io::Result<()> {
     execute!(stdout, cursor::Show, LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
 
-    let _ = lock_file.unlock();
+    drop(lock_file);
     let _ = std::fs::remove_file(&lock_path);
 
     result

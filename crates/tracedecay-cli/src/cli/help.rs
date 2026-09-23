@@ -56,14 +56,12 @@ pub(crate) const SYNC_LONG_ABOUT: &str = "\
 Re-parses only files that changed since the last index and updates the code \
 graph in place. Use after editing, switching branches, or pulling; agent \
 hooks usually run it automatically. Incompatible derived lexical staging is \
-replaced automatically. The retained `--force` compatibility flag queues the \
-same authoritative reconciliation; it does not delete or fully rebuild the \
-project store. `--doctor`/`--verbose` explain what a sync actually did.";
+replaced automatically. `--doctor`/`--verbose` explain what a sync actually \
+did.";
 
 pub(crate) const SYNC_AFTER_HELP: &str = "\
 Examples:
   tracedecay sync                                Incremental refresh from cwd
-  tracedecay sync --force                        Compatible explicit refresh
   tracedecay sync --doctor                       List added/modified/removed files
   tracedecay sync --verbose                      Per-phase timings for slow syncs
 
@@ -166,7 +164,7 @@ pub(crate) const INSTALL_LONG_ABOUT: &str = "\
 Writes the MCP server registration, permissions, hooks, and prompt rules for \
 an agent host (Cursor, Codex, Claude Code, Hermes, Kiro, and others). \
 With --component, selects one compiled first-party Core or MCP companion \
-and uses the receipt-based host lifecycle instead of the compatibility installer. \
+through the receipt-based host lifecycle instead of installing the whole host integration. \
 Configures every detected agent when --agent is omitted, without prompting. \
 Safe to re-run; use it after installing a new agent or moving the tracedecay binary. \
 Pass --git-hook to install the global post-commit sync hook; that flag is explicit \
@@ -243,34 +241,6 @@ Examples:
 
 Related: tracedecay doctor (surfaces restart-safe rollback state), tracedecay
 install / update-plugin (refresh Core feedback routes).";
-
-pub(crate) const HOST_BUNDLE_LONG_ABOUT: &str = "\
-Inspects and recovers interrupted first-party host component lifecycle \
-transactions, and snapshots or restores one component's managed artifact files. \
-Artifact backup/restore never captures or changes host registration and refuses \
-components whose lifecycle depends on registration state. Each host keeps its \
-own recovery journal; a host whose journal is pending refuses further mutation \
-until it is rolled back. Recovery converges automatically whenever deployed \
-bytes already equal the pre-transaction backup or this transaction's cataloged \
-output.";
-
-pub(crate) const HOST_BUNDLE_AFTER_HELP: &str = "\
-Examples:
-  tracedecay host-bundle status
-  tracedecay host-bundle recover --dry-run
-  tracedecay host-bundle recover --agent opencode --yes
-  tracedecay host-bundle recover --agent opencode --quarantine --yes
-  tracedecay host-bundle artifact-backup --agent opencode --component agent --yes
-  tracedecay host-bundle artifact-restore --agent opencode --component agent --backup-id <32-hex-id> --yes
-
-Quarantine moves the journal aside into the lifecycle control directory and
-leaves every rollback backup on disk; nothing is deleted.
-
-Artifact restore changes only catalog-verified managed files. It fails closed
-when native registration is part of the selected component lifecycle.
-
-Related: tracedecay doctor (surfaces the pending recovery boundary),
-tracedecay reinstall (re-applies each host component set).";
 
 pub(crate) const DASHBOARD_LONG_ABOUT: &str = "\
 Starts the local web dashboard: holographic memory curation, LCM session \

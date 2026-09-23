@@ -16,7 +16,8 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, RetainedSurfaceExecutionContextV1, RetrievalEvidence, TemporalState,
     retained_receipts, retained_surface_application_operation,
 };
-use tracedecay_daemon_service::application_surface::retained::decode_request;
+use tracedecay_daemon_protocol::{RequestedOutputFormat, separate_application_tool_request};
+use tracedecay_daemon_protocol::decode_retained_request;
 use tracedecay_domain::{
     ActorId, ComponentVersion, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };
@@ -346,14 +347,17 @@ impl SessionRefreshDaemonTransport for FakeDaemonTransport {
 }
 
 /// Every payload the CLI sends must be the exact canonical request the daemon
-/// decodes for that operation: no `action`, no `profile` object, no
-/// transport-only selector.
+/// decodes for that operation once the JSON `format` transport key is
+/// separated: no `action`, no `profile` object, no transport-only selector.
 fn assert_canonical(operation: RetainedSurfaceOperation, payload: &Value) {
-    let decoded = decode_request(operation, payload.clone())
+    let separated = separate_application_tool_request(payload.clone()).unwrap();
+    assert_eq!(separated.requested_format, RequestedOutputFormat::Json);
+    let decoded = decode_retained_request(operation, separated.request.clone())
         .unwrap_or_else(|error| panic!("{} payload must decode: {error}", operation.as_str()));
     assert_eq!(decoded.operation(), operation);
-    let request: SessionRefreshActionRequestV1 = serde_json::from_value(payload.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&request).unwrap(), *payload);
+    let request: SessionRefreshActionRequestV1 =
+        serde_json::from_value(separated.request.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&request).unwrap(), separated.request);
 }
 
 #[tokio::test]

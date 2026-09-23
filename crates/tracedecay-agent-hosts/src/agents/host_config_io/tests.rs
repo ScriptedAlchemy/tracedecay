@@ -43,7 +43,7 @@ mod jsonc_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Regression tests for safe config backup / load / write
+// Regression tests for safe config load / write
 // ---------------------------------------------------------------------------
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod safe_config_tests {
@@ -53,28 +53,6 @@ mod safe_config_tests {
     /// Create a temp directory that is cleaned up on drop.
     fn tmpdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("failed to create temp dir")
-    }
-
-    // ----- backup_config_file -----
-
-    #[test]
-    fn backup_returns_none_when_file_missing() {
-        let dir = tmpdir();
-        let path = dir.path().join("nonexistent.json");
-        let result = backup_config_file(&path).unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn backup_staging_file_is_cleaned_up() {
-        let dir = tmpdir();
-        let path = dir.path().join("config.json");
-        fs::write(&path, "{}").unwrap();
-
-        backup_config_file(&path).unwrap();
-
-        let staging = dir.path().join("config.json.bak.new");
-        assert!(!staging.exists(), ".bak.new staging file should be removed");
     }
 
     // ----- load_json_file_strict -----
@@ -114,7 +92,7 @@ mod safe_config_tests {
     fn safe_write_cleans_up_new_file_on_success() {
         let dir = tmpdir();
         let path = dir.path().join("config.json");
-        safe_write_json_file(&path, &serde_json::json!({}), None).unwrap();
+        safe_write_json_file(&path, &serde_json::json!({})).unwrap();
 
         let new_path = dir.path().join("config.json.new");
         assert!(!new_path.exists(), ".new staging file should be removed");
@@ -122,8 +100,8 @@ mod safe_config_tests {
 
     #[test]
     fn full_install_cycle_preserves_existing_config() {
-        // Simulate the full install cycle: backup → strict load → mutate → safe write.
-        // Existing keys must be preserved.
+        // Simulate the full install cycle: strict load → mutate → safe write.
+        // Existing keys must be preserved and no copy of the prior bytes kept.
         let dir = tmpdir();
         let path = dir.path().join("config.json");
         let original = serde_json::json!({
@@ -136,13 +114,12 @@ mod safe_config_tests {
         fs::write(&path, serde_json::to_string_pretty(&original).unwrap()).unwrap();
 
         // Simulate install
-        let backup = backup_config_file(&path).unwrap();
         let mut config = load_json_file_strict(&path).unwrap();
         config["mcp"]["tracedecay"] = serde_json::json!({
             "type": "local",
             "command": ["tracedecay", "serve"]
         });
-        safe_write_json_file(&path, &config, backup.as_deref()).unwrap();
+        safe_write_json_file(&path, &config).unwrap();
 
         // Verify
         let result: serde_json::Value =
@@ -156,12 +133,11 @@ mod safe_config_tests {
             "http://localhost:8080"
         );
         assert_eq!(result["other_setting"], serde_json::json!([1, 2, 3]));
-
-        // Backup exists with original content
-        let bak_content: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(backup.unwrap()).unwrap()).unwrap();
-        assert!(bak_content.get("tracedecay").is_none());
-        assert_eq!(bak_content["theme"], "dark");
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("config.json")]);
     }
 
     #[test]
@@ -173,21 +149,12 @@ mod safe_config_tests {
         let corrupt_content = "{ this is not valid json at all }}}";
         fs::write(&path, corrupt_content).unwrap();
 
-        // Backup succeeds (it just copies bytes)
-        let backup = backup_config_file(&path).unwrap();
-        assert!(backup.is_some());
-
         // Strict load fails
         let err = load_json_file_strict(&path);
         assert!(err.is_err());
 
         // Original file is byte-for-byte unchanged
         assert_eq!(fs::read_to_string(&path).unwrap(), corrupt_content);
-        // Backup also has the same content
-        assert_eq!(
-            fs::read_to_string(backup.unwrap()).unwrap(),
-            corrupt_content
-        );
     }
 }
 
@@ -369,7 +336,7 @@ mod local_install_safety_tests {
         let pause = pause_next_host_config_write_at_publication(path);
         let path = path.to_path_buf();
         let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&path, contents, None).map_err(|error| error.to_string())
+            safe_write_bytes_file(&path, contents).map_err(|error| error.to_string())
         });
         pause.wait_until_reached();
         (pause, writer)
@@ -487,7 +454,7 @@ mod local_install_safety_tests {
         std::fs::write(&outside, b"operator bytes").unwrap();
         symlink(&outside, &config).unwrap();
 
-        let error = safe_write_bytes_file(&config, b"tracedecay bytes", None).unwrap_err();
+        let error = safe_write_bytes_file(&config, b"tracedecay bytes").unwrap_err();
         assert!(
             error.to_string().contains("unsafe host metadata path"),
             "shared writer must surface its cross-host symlink refusal: {error}"
@@ -504,8 +471,8 @@ mod local_install_safety_tests {
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let second_path = config.clone();
         let second = std::thread::spawn(move || {
-            let result = safe_write_bytes_file(&second_path, b"second", None)
-                .map_err(|error| error.to_string());
+            let result =
+                safe_write_bytes_file(&second_path, b"second").map_err(|error| error.to_string());
             finished_tx.send(()).unwrap();
             result
         });
@@ -530,8 +497,7 @@ mod local_install_safety_tests {
         let pause = pause_next_host_config_write_at_publication(&config);
         let writer_path = config.clone();
         let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&writer_path, b"tracedecay", None)
-                .map_err(|error| error.to_string())
+            safe_write_bytes_file(&writer_path, b"tracedecay").map_err(|error| error.to_string())
         });
         pause.wait_until_reached();
 
@@ -556,8 +522,7 @@ mod local_install_safety_tests {
         let published = pause_next_host_config_write_after_publication(&config);
         let writer_path = config.clone();
         let writer = std::thread::spawn(move || {
-            safe_write_bytes_file(&writer_path, b"tracedecay", None)
-                .map_err(|error| error.to_string())
+            safe_write_bytes_file(&writer_path, b"tracedecay").map_err(|error| error.to_string())
         });
         publication.wait_until_reached();
 
