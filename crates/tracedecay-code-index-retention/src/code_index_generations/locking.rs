@@ -6,6 +6,8 @@ use super::{
     CodeGenerationRetentionErrorV1, GRAPH_REPLAY_POOL_ACQUIRE_BUDGET,
     GRAPH_REPLAY_POOL_ACQUIRE_POLL, SCOPE_RETENTION_LOCK_FILE, STORE_LOCK_FILE, storage,
 };
+#[cfg(windows)]
+use super::{SCOPE_RETENTION_TRANSACTION_FILE, is_code_index_scope_hash, journal, scope_roots};
 
 pub struct CodeGenerationStoreLockV1 {
     file: File,
@@ -71,12 +73,18 @@ pub fn try_acquire_code_generation_store_read_lock(
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock_shared().map_err(std::io::Error::from) {
-        Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            file: lock,
-            store_root,
-            generation_store: true,
-            shared: true,
-        })),
+        Ok(()) => {
+            #[cfg(windows)]
+            if scope_retention_pending(&store_root)? {
+                return Ok(None);
+            }
+            Ok(Some(CodeGenerationStoreLockV1 {
+                file: lock,
+                store_root,
+                generation_store: true,
+                shared: true,
+            }))
+        }
         Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
         Err(error) => Err(storage(error)),
     }
@@ -88,12 +96,18 @@ pub fn try_acquire_code_generation_store_lock(
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock().map_err(std::io::Error::from) {
-        Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
-            file: lock,
-            store_root,
-            generation_store: true,
-            shared: false,
-        })),
+        Ok(()) => {
+            #[cfg(windows)]
+            if scope_retention_pending(&store_root)? {
+                return Ok(None);
+            }
+            Ok(Some(CodeGenerationStoreLockV1 {
+                file: lock,
+                store_root,
+                generation_store: true,
+                shared: false,
+            }))
+        }
         // Windows LockFileEx reports ERROR_LOCK_VIOLATION (33) instead of
         // WouldBlock. AccessDenied and sharing violations stay Storage.
         Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
@@ -130,6 +144,10 @@ fn lock_file(
         let lock = open_lock_file(&store_root.join(lock_file))?;
         match lock.try_lock().map_err(std::io::Error::from) {
             Ok(()) => {
+                #[cfg(windows)]
+                if generation_store && scope_retention_pending(&store_root)? {
+                    return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
+                }
                 return Ok(CodeGenerationStoreLockV1 {
                     file: lock,
                     store_root,
@@ -146,6 +164,36 @@ fn lock_file(
             }
             Err(error) => return Err(storage(error)),
         }
+    }
+}
+
+#[cfg(windows)]
+fn scope_retention_pending(store_root: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
+    let Some(scope_hash) = store_root.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return Ok(false);
+    };
+    if !is_code_index_scope_hash(scope_hash) {
+        return Ok(false);
+    }
+    let parent = store_root.parent().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "code-index scope has no parent for retention journal".to_owned(),
+        )
+    })?;
+    match std::fs::symlink_metadata(parent.join(SCOPE_RETENTION_TRANSACTION_FILE)) {
+        Ok(_) => Ok(
+            journal::load_journal(parent, &scope_roots::SCOPE_TRANSACTION_JOURNAL)?.is_some_and(
+                |transaction| {
+                    transaction
+                        .receipt
+                        .collected_scopes
+                        .iter()
+                        .any(|scope| scope.scope_hash == scope_hash)
+                },
+            ),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(storage(error)),
     }
 }
 

@@ -374,35 +374,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use cap_std::ambient_authority;
-
-    use super::*;
-
-    #[test]
-    fn directory_rename_preserves_a_held_child_lock() {
-        let root = tempfile::tempdir().expect("create rename fixture");
-        let source_path = root.path().join("source");
-        let target_path = root.path().join("target");
-        std::fs::create_dir_all(source_path.join("scope")).expect("create source scope");
-        std::fs::create_dir(&target_path).expect("create target parent");
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(source_path.join("scope/.lock"))
-            .expect("open scope lock");
-        lock.try_lock().expect("hold scope lock");
-        let source =
-            Dir::open_ambient_dir(&source_path, ambient_authority()).expect("open source parent");
-        let target =
-            Dir::open_ambient_dir(&target_path, ambient_authority()).expect("open target parent");
-
-        rename_noreplace(&source, OsStr::new("scope"), &target, OsStr::new("scope"))
-            .expect("move the scope while its child lock is held");
-        assert!(target_path.join("scope/.lock").is_file());
-        assert!(!source_path.join("scope").exists());
-    }
-}

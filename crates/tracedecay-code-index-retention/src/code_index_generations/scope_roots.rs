@@ -720,6 +720,15 @@ pub fn execute_scope_root_retention(
     };
     persist_journal(store_root, &SCOPE_TRANSACTION_JOURNAL, &transaction)?;
 
+    #[cfg(windows)]
+    {
+        // Windows cannot rename a scope while its generation lock file is
+        // open inside it. The durable parent journal is now the fence: every
+        // new generation lock checks it after acquisition and defers until
+        // this collection finishes or recovery removes the journal.
+        scope_locks.clear();
+    }
+
     let result = (|| {
         quarantine.stage(&transaction.receipt.collected_scopes)?;
         receipt_store::write_receipt(
