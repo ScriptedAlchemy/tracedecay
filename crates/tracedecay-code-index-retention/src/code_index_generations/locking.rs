@@ -16,6 +16,14 @@ pub struct CodeGenerationStoreLockV1 {
     shared: bool,
 }
 
+#[cfg(windows)]
+enum GenerationScopeFence {
+    Unscoped,
+    PassBusy,
+    Pending,
+    Acquired { _file: File },
+}
+
 impl CodeGenerationStoreLockV1 {
     pub(super) fn generation_store_root(&self) -> Result<&Path, CodeGenerationRetentionErrorV1> {
         if self.shared {
@@ -70,21 +78,20 @@ pub(super) fn acquire_code_generation_store_lock_checked(
 pub fn try_acquire_code_generation_store_read_lock(
     store_root: &Path,
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
+    #[cfg(windows)]
+    let _scope_fence = match try_acquire_generation_scope_fence(store_root)? {
+        GenerationScopeFence::PassBusy | GenerationScopeFence::Pending => return Ok(None),
+        fence => fence,
+    };
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock_shared().map_err(std::io::Error::from) {
-        Ok(()) => {
-            #[cfg(windows)]
-            if scope_retention_pending(&store_root)? {
-                return Ok(None);
-            }
-            Ok(Some(CodeGenerationStoreLockV1 {
-                file: lock,
-                store_root,
-                generation_store: true,
-                shared: true,
-            }))
-        }
+        Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
+            file: lock,
+            store_root,
+            generation_store: true,
+            shared: true,
+        })),
         Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
         Err(error) => Err(storage(error)),
     }
@@ -93,21 +100,20 @@ pub fn try_acquire_code_generation_store_read_lock(
 pub fn try_acquire_code_generation_store_lock(
     store_root: &Path,
 ) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
+    #[cfg(windows)]
+    let _scope_fence = match try_acquire_generation_scope_fence(store_root)? {
+        GenerationScopeFence::PassBusy | GenerationScopeFence::Pending => return Ok(None),
+        fence => fence,
+    };
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock().map_err(std::io::Error::from) {
-        Ok(()) => {
-            #[cfg(windows)]
-            if scope_retention_pending(&store_root)? {
-                return Ok(None);
-            }
-            Ok(Some(CodeGenerationStoreLockV1 {
-                file: lock,
-                store_root,
-                generation_store: true,
-                shared: false,
-            }))
-        }
+        Ok(()) => Ok(Some(CodeGenerationStoreLockV1 {
+            file: lock,
+            store_root,
+            generation_store: true,
+            shared: false,
+        })),
         // Windows LockFileEx reports ERROR_LOCK_VIOLATION (33) instead of
         // WouldBlock. AccessDenied and sharing violations stay Storage.
         Err(error) if tracedecay_private_fs::is_lock_contended(&error) => Ok(None),
@@ -135,19 +141,30 @@ fn lock_file(
     deadline: Instant,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeGenerationStoreLockV1, CodeGenerationRetentionErrorV1> {
-    let store_root = canonical_store_root(store_root)?;
     let deadline = deadline.min(Instant::now() + GRAPH_REPLAY_POOL_ACQUIRE_BUDGET);
     loop {
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
+        #[cfg(windows)]
+        let scope_fence = if generation_store {
+            match try_acquire_generation_scope_fence(store_root)? {
+                GenerationScopeFence::Pending => {
+                    return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
+                }
+                GenerationScopeFence::PassBusy => {
+                    park_until_retry(deadline)?;
+                    continue;
+                }
+                fence => fence,
+            }
+        } else {
+            GenerationScopeFence::Unscoped
+        };
+        let store_root = canonical_store_root(store_root)?;
         let lock = open_lock_file(&store_root.join(lock_file))?;
         match lock.try_lock().map_err(std::io::Error::from) {
             Ok(()) => {
-                #[cfg(windows)]
-                if generation_store && scope_retention_pending(&store_root)? {
-                    return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
-                }
                 return Ok(CodeGenerationStoreLockV1 {
                     file: lock,
                     store_root,
@@ -156,11 +173,9 @@ fn lock_file(
                 });
             }
             Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
-                if Instant::now() >= deadline {
-                    return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
+                #[cfg(windows)]
+                drop(scope_fence);
+                park_until_retry(deadline)?;
             }
             Err(error) => return Err(storage(error)),
         }
@@ -168,18 +183,39 @@ fn lock_file(
 }
 
 #[cfg(windows)]
-fn scope_retention_pending(store_root: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
+fn try_acquire_generation_scope_fence(
+    store_root: &Path,
+) -> Result<GenerationScopeFence, CodeGenerationRetentionErrorV1> {
     let Some(scope_hash) = store_root.file_name().and_then(std::ffi::OsStr::to_str) else {
-        return Ok(false);
+        return Ok(GenerationScopeFence::Unscoped);
     };
     if !is_code_index_scope_hash(scope_hash) {
-        return Ok(false);
+        return Ok(GenerationScopeFence::Unscoped);
     }
     let parent = store_root.parent().ok_or_else(|| {
         CodeGenerationRetentionErrorV1::UnsafeState(
             "code-index scope has no parent for retention journal".to_owned(),
         )
     })?;
+    let parent = canonical_store_root(parent)?;
+    let lock = open_lock_file(&parent.join(SCOPE_RETENTION_LOCK_FILE))?;
+    match lock.try_lock_shared().map_err(std::io::Error::from) {
+        Ok(()) if scope_retention_pending(&parent, scope_hash)? => {
+            Ok(GenerationScopeFence::Pending)
+        }
+        Ok(()) => Ok(GenerationScopeFence::Acquired { _file: lock }),
+        Err(error) if tracedecay_private_fs::is_lock_contended(&error) => {
+            Ok(GenerationScopeFence::PassBusy)
+        }
+        Err(error) => Err(storage(error)),
+    }
+}
+
+#[cfg(windows)]
+fn scope_retention_pending(
+    parent: &Path,
+    scope_hash: &str,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
     match std::fs::symlink_metadata(parent.join(SCOPE_RETENTION_TRANSACTION_FILE)) {
         Ok(_) => Ok(
             journal::load_journal(parent, &scope_roots::SCOPE_TRANSACTION_JOURNAL)?.is_some_and(
@@ -195,6 +231,15 @@ fn scope_retention_pending(store_root: &Path) -> Result<bool, CodeGenerationRete
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(storage(error)),
     }
+}
+
+fn park_until_retry(deadline: Instant) -> Result<(), CodeGenerationRetentionErrorV1> {
+    if Instant::now() >= deadline {
+        return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
+    Ok(())
 }
 
 fn canonical_store_root(store_root: &Path) -> Result<PathBuf, CodeGenerationRetentionErrorV1> {

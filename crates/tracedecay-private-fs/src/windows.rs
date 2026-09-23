@@ -311,8 +311,14 @@ pub fn create_private_file_retained(
 /// source and destination are required to be siblings, so that one chain
 /// covers both spellings.
 pub fn replace_file_atomically(source: &Path, destination: &Path) -> io::Result<File> {
-    let source = absolute_security_path(source)?;
-    let destination = absolute_security_path(destination)?;
+    let mut source = absolute_security_path(source)?;
+    let mut destination = absolute_security_path(destination)?;
+    if source.parent() != destination.parent()
+        && (is_verbatim_path(&source) || is_verbatim_path(&destination))
+    {
+        source = verbatim_security_path(&source)?;
+        destination = verbatim_security_path(&destination)?;
+    }
     if source == destination {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -641,25 +647,49 @@ fn absolute_security_path(path: &Path) -> io::Result<PathBuf> {
                 if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
         );
     let absolute = if long_plain_absolute {
-        require_exact_long_path(path)?;
         path.to_path_buf()
     } else {
         std::path::absolute(path)
             .map_err(|error| wrap_error("resolve absolute Windows security path", path, error))?
     };
     let wide = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
-    const BACKSLASH: u16 = b'\\' as u16;
-    if wide.len() < 260
-        || wide.starts_with(&[BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH])
-        || wide.starts_with(&[BACKSLASH, BACKSLASH, b'.' as u16, BACKSLASH])
-    {
+    if wide.len() < 260 || is_verbatim_path(&absolute) {
         return Ok(absolute);
     }
 
-    // Raw Win32 opens need the extended spelling for long paths. A long input
-    // bypasses GetFullPathNameW only when it is already fully qualified and
-    // byte-for-byte normalized; verbatim semantics must not reinterpret dots,
-    // separators, or reserved names after that bypass.
+    verbatim_security_path(&absolute)
+}
+
+fn is_verbatim_path(path: &Path) -> bool {
+    const BACKSLASH: u16 = b'\\' as u16;
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.starts_with(&[BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH])
+        || wide.starts_with(&[BACKSLASH, BACKSLASH, b'.' as u16, BACKSLASH])
+}
+
+fn verbatim_security_path(path: &Path) -> io::Result<PathBuf> {
+    if is_verbatim_path(path) {
+        return Ok(path.to_path_buf());
+    }
+    require_exact_verbatim_path(path)?;
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    const BACKSLASH: u16 = b'\\' as u16;
+    if !path.is_absolute()
+        || !matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+        )
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Windows verbatim security path must be fully qualified",
+        ));
+    }
+
+    // Raw Win32 opens need the extended spelling for long paths, and siblings
+    // must use the same spelling. Verbatim semantics must not reinterpret
+    // dots, separators, or reserved names after that conversion.
     let mut extended = Vec::with_capacity(wide.len() + 8);
     extended.extend([BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH]);
     if wide.starts_with(&[BACKSLASH, BACKSLASH]) {
@@ -671,7 +701,7 @@ fn absolute_security_path(path: &Path) -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_wide(&extended)))
 }
 
-fn require_exact_long_path(path: &Path) -> io::Result<()> {
+fn require_exact_verbatim_path(path: &Path) -> io::Result<()> {
     let spelling = path.as_os_str().encode_wide().collect::<Vec<_>>();
     let normalized = path
         .components()
@@ -1167,24 +1197,48 @@ mod tests {
         while parent.as_os_str().encode_wide().count() < 280 {
             parent.push("nested-directory-with-a-stable-long-name");
         }
-        let verbatim_parent = absolute_security_path(&parent).unwrap();
-        std::fs::create_dir_all(&verbatim_parent).unwrap();
-        let source = parent.join("source.tmp");
-        let destination = parent.join("destination");
-        std::fs::write(verbatim_parent.join("source.tmp"), b"published bytes").unwrap();
-        std::fs::write(verbatim_parent.join("destination"), b"old bytes").unwrap();
+        assert_private_atomic_replacement(&parent, "source.tmp", "destination");
+    }
 
-        drop(make_private_file(&source).unwrap());
+    #[test]
+    fn private_atomic_replacement_normalizes_boundary_length_siblings_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut parent = temp.path().to_path_buf();
+        while parent.as_os_str().encode_wide().count() < 245 {
+            parent.push("x");
+        }
+        std::fs::create_dir_all(&parent).unwrap();
+        let source = parent.join("source-name-long-enough-to-cross-max-path.tmp");
+        let destination = parent.join("d");
+        assert!(source.as_os_str().encode_wide().count() >= 260);
+        assert!(destination.as_os_str().encode_wide().count() < 260);
+        assert_private_atomic_replacement(
+            &parent,
+            "source-name-long-enough-to-cross-max-path.tmp",
+            "d",
+        );
+    }
+
+    fn assert_private_atomic_replacement(parent: &Path, source_name: &str, destination_name: &str) {
+        std::fs::create_dir_all(absolute_security_path(parent).unwrap()).unwrap();
+        let source = parent.join(source_name);
+        let destination = parent.join(destination_name);
+        let mut source_file = create_private_file(&source).unwrap();
+        source_file.write_all(b"published bytes").unwrap();
+        drop(source_file);
+        let mut destination_file = create_private_file(&destination).unwrap();
+        destination_file.write_all(b"old bytes").unwrap();
+        drop(destination_file);
         drop(replace_file_atomically(&source, &destination).unwrap());
         assert_eq!(
-            std::fs::read(verbatim_parent.join("destination")).unwrap(),
+            std::fs::read(absolute_security_path(&destination).unwrap()).unwrap(),
             b"published bytes"
         );
     }
 
     #[test]
     fn long_windows_path_fast_path_requires_exact_spelling() {
-        assert!(require_exact_long_path(Path::new(r"C:\safe\regular")).is_ok());
+        assert!(require_exact_verbatim_path(Path::new(r"C:\safe\regular")).is_ok());
         for path in [
             r"C:\safe\..\regular",
             r"C:/safe/regular",
@@ -1194,7 +1248,7 @@ mod tests {
             r"C:\safe\trailing ",
         ] {
             assert!(
-                require_exact_long_path(Path::new(path)).is_err(),
+                require_exact_verbatim_path(Path::new(path)).is_err(),
                 "ambiguous path {path:?} must not bypass Windows normalization"
             );
         }

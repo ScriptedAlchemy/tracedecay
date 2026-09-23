@@ -2570,6 +2570,8 @@ fn pending_scope_journal_refuses_new_generation_locks_until_recovery() {
         .expect("persist the scope fence before releasing generation locks");
 
     let scope_root = store.path().join(&stranded);
+    let pass_lock = locking::acquire_scope_retention_lock(store.path())
+        .expect("hold the collector's parent fence");
     assert!(
         try_acquire_code_generation_store_lock(&scope_root)
             .expect("try writer lock")
@@ -2582,6 +2584,11 @@ fn pending_scope_journal_refuses_new_generation_locks_until_recovery() {
             .is_none(),
         "a reader must not pin the directory while quarantine renames it"
     );
+    assert!(
+        !scope_root.join(STORE_LOCK_FILE).exists(),
+        "a refused opener must not create or pin a descendant lock file"
+    );
+    drop(pass_lock);
     assert!(matches!(
         acquire_code_generation_store_lock(&scope_root),
         Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)
