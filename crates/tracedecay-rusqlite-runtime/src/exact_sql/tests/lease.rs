@@ -226,10 +226,9 @@ fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
     // The non-null predicate is part of the real projected-object migration;
     // dropping its second JSON extraction made this store-sized copy complete
     // inside the test deadline on a fast host.
-    const MOVE: &str = "INSERT OR IGNORE INTO moved (key, mutation_digest, partition_digest)
+    const MOVE: &str = "INSERT OR IGNORE INTO moved (key, mutation_digest)
                         SELECT key,
-                               json_extract(payload, '$.mutation_digest'),
-                               json_extract(payload, '$.partition_digest')
+                               json_extract(payload, '$.mutation_digest')
                         FROM source WHERE key <= ?
                           AND json_extract(payload, '$.mutation_digest') IS NOT NULL";
 
@@ -240,8 +239,7 @@ fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
             "CREATE TABLE source (key INTEGER PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE moved (
                 key INTEGER PRIMARY KEY,
-                mutation_digest TEXT NOT NULL,
-                partition_digest TEXT NOT NULL
+                mutation_digest TEXT NOT NULL
              );"
             .to_owned(),
         )
