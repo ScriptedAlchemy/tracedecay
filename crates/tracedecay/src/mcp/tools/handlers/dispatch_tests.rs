@@ -329,44 +329,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                 "{} has no canonical Workflow operation entry",
                 definition.name
             ),
-            McpToolDispatchGroup::RetainedApplication => {
-                let composition = retained_mcp_composition().unwrap_or_else(|error| {
-                    panic!("{} catalog composition failed: {error}", definition.name)
-                });
-                let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
-                let operation = RetainedSurfaceOperation::from_tool_name(&definition.name)
-                    .unwrap_or_else(|| {
-                        panic!("{} has no retained-surface handler entry", definition.name)
-                    });
-                let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
-                let capability = composition
-                    .snapshot()
-                    .resolve_binding(
-                        &profile,
-                        BindingSurface::Mcp,
-                        &operation_name,
-                        1,
-                        &BTreeSet::new(),
-                    )
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{} action {} catalog binding is not callable",
-                            definition.name,
-                            operation.as_str()
-                        )
-                    });
-                let expected = retained_surface_application_operation(operation).unwrap();
-                assert_eq!(capability.capability_id(), expected.capability_id());
-                assert_eq!(capability.use_case_id(), expected.use_case_id());
-                assert!(
-                    composition
-                        .bind_handler(capability.use_case_id(), &())
-                        .is_some(),
-                    "{} action {} application handler is not registered",
-                    definition.name,
-                    operation.as_str()
-                );
-            }
             group => {
                 assert_eq!(
                     dispatch_group_for_tool(&definition.name),

@@ -157,12 +157,17 @@ fn serve_routed_rmcp_connection_inner(
         let transport = transport
             .with_rmcp_selected_project_responses(adapter.selected_project_responses())
             .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
-        let running = adapter
-            .serve(transport)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("rmcp server initialization failed: {error}"),
-            })?;
+        let running = match adapter.serve(transport).await {
+            Ok(running) => running,
+            // The client left before a request settled the handshake; every
+            // frame it sent was already answered or refused on the wire.
+            Err(rmcp::service::ServerInitializeError::ConnectionClosed(_)) => return Ok(()),
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!("rmcp server initialization failed: {error}"),
+                });
+            }
+        };
         let cancellation = running.cancellation_token();
         let waiting = running.waiting();
         tokio::pin!(waiting);

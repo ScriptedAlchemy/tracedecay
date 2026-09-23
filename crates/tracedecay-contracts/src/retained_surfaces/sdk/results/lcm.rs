@@ -236,7 +236,7 @@ pub enum LcmDoctorProjectionStateV1 {
 
 /// The temporal projection's serving state at diagnosis time. A store whose
 /// schema is healthy can still have nothing to serve while history is being
-/// re-derived (for example after a scoped observation reset); this is where
+/// re-derived (for example on a fresh profile); this is where
 /// that state is named instead of being read as absent data.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

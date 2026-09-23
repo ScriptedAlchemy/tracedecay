@@ -186,8 +186,15 @@ impl McpServer {
         let pump = async move {
             let mut responses = tokio::io::BufReader::new(reader).lines();
             let mut input_open = true;
+            // Until the client's EOF this never resolves; after it, the
+            // client's full close drops both socket halves so the daemon side
+            // observes the same full close.
+            let mut peer_full_close: std::pin::Pin<
+                Box<dyn std::future::Future<Output = ()> + Send>,
+            > = Box::pin(std::future::pending());
             loop {
                 tokio::select! {
+                    biased;
                     incoming = transport.read_line(), if input_open => match incoming? {
                         Some(line) => {
                             writer
@@ -199,8 +206,10 @@ impl McpServer {
                         None => {
                             writer.shutdown().await?;
                             input_open = false;
+                            peer_full_close = Box::pin(transport.peer_fully_closed_after_eof());
                         }
                     },
+                    () = &mut peer_full_close => return Ok::<(), TraceDecayError>(()),
                     response = responses.next_line() => match response? {
                         Some(line) => {
                             transport.write_line(&format!("{line}\n")).await?;
@@ -1001,80 +1010,6 @@ mod cancellable_queue_tests {
             .await
             .expect("join bounded connection")
             .expect("serve bounded connection");
-        fixture.harness.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn notification_is_an_ordering_barrier_for_later_reads() {
-        let fixture = DelayedRouteFixture::new().await;
-        let (mut transport, sender, mut responses) =
-            tracedecay_mcp::transport::ChannelTransport::new();
-        let serving = tokio::spawn({
-            let caller = Arc::clone(&fixture.caller);
-            async move { caller.run_connection(&mut transport).await }
-        });
-
-        sender
-            .send(
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 20,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "tracedecay_grep",
-                        "arguments": {
-                            "pattern": "route_fixture",
-                            "fixed_strings": true,
-                            "project_selector": {
-                                "project_id": fixture.target_project_id.clone()
-                            },
-                            "format": "json"
-                        }
-                    }
-                })
-                .to_string(),
-            )
-            .expect("send read before notification");
-        fixture.wait_for_routes(1).await;
-        sender
-            .send(
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized"
-                })
-                .to_string(),
-            )
-            .expect("send ordering notification");
-        sender
-            .send(
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 21,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "tracedecay_status",
-                        "arguments": {"admission_only": true}
-                    }
-                })
-                .to_string(),
-            )
-            .expect("send read after notification");
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), responses.recv())
-                .await
-                .is_err(),
-            "the later read must not overtake an ordered notification"
-        );
-        fixture.route_release.add_permits(1);
-        assert_eq!(receive_response(&mut responses).await["id"], json!(20));
-        assert_eq!(receive_response(&mut responses).await["id"], json!(21));
-
-        drop(sender);
-        serving
-            .await
-            .expect("join notification barrier connection")
-            .expect("serve notification barrier connection");
         fixture.harness.shutdown().await;
     }
 

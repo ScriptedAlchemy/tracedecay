@@ -101,6 +101,24 @@ pub(crate) fn jsonrpc_request(id: Value, method: &str, params: Value) -> String 
     .unwrap()
 }
 
+/// The protocol version [`spec_initialize_request`] requests; `rmcp` keeps a
+/// supported initialize-era version, so it is also the negotiated version.
+pub(crate) const INITIALIZE_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// A spec-valid MCP `initialize`: `protocolVersion`, `capabilities`, and
+/// `clientInfo` are all required.
+pub(crate) fn spec_initialize_request(id: Value) -> String {
+    jsonrpc_request(
+        id,
+        "initialize",
+        json!({
+            "protocolVersion": INITIALIZE_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "tracedecay-protocol-test", "version": "0"}
+        }),
+    )
+}
+
 pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
     resolve_response_handle_root(cg.project_root())
         .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))

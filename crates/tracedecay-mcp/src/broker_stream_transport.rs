@@ -107,12 +107,6 @@ pub struct BrokerStreamTransport {
     active_requests: Arc<
         std::sync::Mutex<HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>>,
     >,
-    /// Whether this connection ever accepted an identified request. After the
-    /// peer half-closes its request side, a connection that served requests
-    /// and has settled every one of them has nothing left to deliver, while a
-    /// connection that never carried a request keeps waiting for the peer's
-    /// full close.
-    accepted_any_request: Arc<std::sync::atomic::AtomicBool>,
     replay: VecDeque<String>,
     response_lifecycle: Option<Arc<dyn BrokerResponseLifecycle>>,
     selected_project_responses: Option<Arc<dyn BrokerSelectedResponseAuthority>>,
@@ -148,7 +142,6 @@ impl BrokerStreamTransport {
             reader: BoundedLineReader::new(tokio::io::BufReader::new(reader)),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
             active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            accepted_any_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             replay: VecDeque::new(),
             response_lifecycle: None,
             selected_project_responses: None,
@@ -332,18 +325,16 @@ impl BrokerStreamTransport {
                 .as_deref()
                 .and_then(|settlement| settlement.attempt_for_request(value));
             active.insert(request_key, delivery_attempt);
-            self.accepted_any_request
-                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
-    /// Resolves once this connection has accepted at least one request and
-    /// every accepted request has settled, delivered, suppressed, or answered
-    /// with its typed cancellation. After the peer half-closes its request
-    /// side, a connection in that state has nothing left it could ever
-    /// deliver, so waiting for the peer's full close would only strand clients
-    /// that hold their read half open awaiting the daemon's EOF (a cancelling
-    /// client does exactly that).
+    /// Resolves once every accepted request has settled, delivered,
+    /// suppressed, or answered with its typed cancellation. After the peer
+    /// half-closes its request side, a connection in that state, including
+    /// one that only carried notifications or refused frames, has nothing left
+    /// it could ever deliver, so waiting for the peer's full close would only
+    /// strand clients that hold their read half open awaiting the daemon's EOF
+    /// (a cancelling client does exactly that).
     #[hotpath::measure(label = "daemon.broker.eof_settled_wait", future = true)]
     async fn wait_for_accepted_requests_settled(
         active_requests: Arc<
@@ -351,12 +342,9 @@ impl BrokerStreamTransport {
                 HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>,
             >,
         >,
-        accepted_any_request: Arc<std::sync::atomic::AtomicBool>,
     ) {
         loop {
-            if accepted_any_request.load(std::sync::atomic::Ordering::Acquire)
-                && active_requests.lock().is_ok_and(|active| active.is_empty())
-            {
+            if active_requests.lock().is_ok_and(|active| active.is_empty()) {
                 return;
             }
             // Settlement lands through independently spawned response and
@@ -540,10 +528,9 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     // connection has nothing left to deliver, and a client
                     // that reads until daemon EOF, a cancelling client does,
                     // needs this side to close first.
-                    let settled = Self::wait_for_accepted_requests_settled(
-                        Arc::clone(&self.active_requests),
-                        Arc::clone(&self.accepted_any_request),
-                    );
+                    let settled = Self::wait_for_accepted_requests_settled(Arc::clone(
+                        &self.active_requests,
+                    ));
                     let peer_full_close = self.peer_fully_closed_after_eof();
                     tokio::select! {
                         () = peer_full_close => {
@@ -565,19 +552,18 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                 }
             };
             // The envelope rule runs before cancellation matching so a frame
-            // with a foreign protocol version is never treated as work.
+            // with a foreign protocol version is never treated as work, and a
+            // refused frame is answered here rather than registered as an
+            // accepted request that EOF would wait on.
             let decoded = match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(value) => match crate::jsonrpc::validate_envelope(&value) {
-                    Ok(()) => {
-                        self.observe_incoming_message(&value).await;
-                        crate::jsonrpc::decode_envelope(value)
-                    }
-                    Err(error) => Err(error),
-                },
+                Ok(value) => crate::jsonrpc::decode_envelope(&value).map(|message| (value, message)),
                 Err(error) => Err(JsonRpcDecodeError::Parse(error)),
             };
             match decoded {
-                Ok(message) => return Some(message),
+                Ok((value, message)) => {
+                    self.observe_incoming_message(&value).await;
+                    return Some(message);
+                }
                 Err(error) => {
                     if let Ok(line) = serde_json::to_string(&error.into_response()) {
                         let _ = self.write_line(&format!("{line}\n")).await;

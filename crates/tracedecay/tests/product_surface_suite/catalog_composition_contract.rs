@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 
 use tracedecay_api::{
     http_application_full_route_path, http_route_documents, is_http_application_operation_exposed,
-    retained_application_route_path,
 };
 use tracedecay_contracts::catalog_composition::{
     CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
@@ -259,9 +258,6 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
     assert!(documents.iter().all(|document| {
         ApplicationSurfaceOperation::from_catalog_name(&document.operation)
             .is_some_and(|operation| http_application_full_route_path(operation) == document.path)
-            || RetainedSurfaceOperation::from_operation_name(&document.operation).is_some_and(
-                |operation| retained_application_route_path(operation) == document.path,
-            )
     }));
     assert!(documents.iter().all(|document| {
         !matches!(document.operation.as_str(), "git_preview" | "git_apply")

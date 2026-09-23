@@ -352,7 +352,7 @@ where
     async fn dispatch(
         &self,
         context: RequestContext<RoleServer>,
-        method: &'static str,
+        method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let queued_at = std::time::Instant::now();
@@ -385,7 +385,7 @@ where
     async fn dispatch_admitted(
         &self,
         context: RequestContext<RoleServer>,
-        method: &'static str,
+        method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
         // The wire identity is the one value internal dispatch genuinely keys
@@ -540,7 +540,6 @@ where
             GuardedHandshakeTransport {
                 inner: transport,
                 handshake_settled: false,
-                refused_initialize: false,
             },
         )
         .await
@@ -636,14 +635,12 @@ struct GuardedHandshakeTransport<T> {
     inner: T,
     /// Set once a request that ends `rmcp`'s pre-initialize loop is forwarded.
     /// After that the guard is inert: a later stray `initialize` is an ordinary
-    /// request the adapter answers with a typed error of its own.
+    /// request the adapter answers with a typed error of its own. Before it,
+    /// non-request messages are dropped: `rmcp`'s pre-initialize loop fails on
+    /// them, so a pipelined `notifications/initialized` after a refused
+    /// initialize would end the connection the corrected handshake needs.
+    /// JSON-RPC forbids answering them, and nothing is in flight yet.
     handshake_settled: bool,
-    /// Set once a malformed `initialize` was refused. Until the handshake
-    /// settles, non-request messages are then dropped: `rmcp`'s pre-initialize
-    /// loop fails on them, and the client's pipelined
-    /// `notifications/initialized` would otherwise end the connection that
-    /// must stay open for the corrected handshake.
-    refused_initialize: bool,
 }
 
 impl<T> rmcp::transport::Transport<RoleServer> for GuardedHandshakeTransport<T>
@@ -671,10 +668,7 @@ where
                     return Some(message);
                 }
                 let rmcp::model::ClientJsonRpcMessage::Request(request) = &message else {
-                    if self.refused_initialize {
-                        continue;
-                    }
-                    return Some(message);
+                    continue;
                 };
                 let malformed_initialize = request.request.method() == "initialize"
                     && !matches!(
@@ -695,7 +689,6 @@ where
                 if self.inner.send(refusal).await.is_err() {
                     return None;
                 }
-                self.refused_initialize = true;
             }
         }
     }
@@ -830,22 +823,29 @@ where
 
     /// A hook event arrives as a stateless request on its own daemon
     /// connection; it is dispatched exactly like the notification form.
+    /// Any other custom request is an unknown method or a known one whose
+    /// params did not fit its typed DTO; the dispatch authority answers it
+    /// (method not found, invalid params) and accounts for it.
     #[hotpath::skip]
     async fn on_custom_request(
         &self,
         request: CustomRequest,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CustomResult, ErrorData> {
-        if request.method != tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
-            return Err(ErrorData::new(
-                ErrorCode::METHOD_NOT_FOUND,
-                request.method,
-                None,
-            ));
+        if request.method == tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
+            self.dispatch_notification(request.method, request.params)
+                .await;
+            return Ok(CustomResult::new(json!({})));
         }
-        self.dispatch_notification(request.method, request.params)
-            .await;
-        Ok(CustomResult::new(json!({})))
+        rmcp_response_result(
+            self.dispatch(
+                context,
+                &request.method,
+                McpDispatchParams::Raw(request.params.as_ref()),
+            )
+            .await?,
+        )
+        .map(CustomResult::new)
     }
 }
 

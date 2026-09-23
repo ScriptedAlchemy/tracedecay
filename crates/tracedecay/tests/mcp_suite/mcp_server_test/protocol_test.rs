@@ -16,17 +16,15 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 #[tokio::test]
 async fn test_initialize() {
     let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(json!(1), "initialize", json!({}))],
-    )
-    .await;
+    let responses = run_server_with_messages(server, vec![spec_initialize_request(json!(1))]).await;
 
     assert!(!responses.is_empty(), "should have at least one response");
     let resp = parse_response(&responses[0]);
     assert_eq!(resp["id"], 1);
-    assert!(resp["result"]["protocolVersion"].is_string());
-    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(
+        resp["result"]["protocolVersion"], INITIALIZE_PROTOCOL_VERSION,
+        "rmcp keeps the client's supported protocol version: {resp}"
+    );
     assert_eq!(
         resp["result"]["capabilities"]["tools"]["listChanged"],
         json!(true)
@@ -36,13 +34,8 @@ async fn test_initialize() {
 }
 
 #[tokio::test]
-async fn initialize_roots_route_registered_reader_tools_without_explicit_selector() {
-    assert_registered_reader_uses_initialize_root().await;
-}
-
-#[tokio::test]
-async fn initialize_root_route_rejects_caller_project_path_spoof() {
-    assert_legacy_selectors_cannot_spoof_initialize_root().await;
+async fn legacy_project_selectors_are_rejected_instead_of_rerouting() {
+    assert_legacy_selectors_cannot_reroute_the_active_project().await;
 }
 
 #[tokio::test]
@@ -67,28 +60,30 @@ async fn test_any_notification_without_id_produces_no_response() {
     assert!(resp["error"].is_null(), "ping request should succeed");
 }
 
+/// MCP forbids a null request id. It is still answered, with a typed
+/// `InvalidRequest` carrying the null id, never dropped as a notification.
+fn assert_null_id_refused(responses: &[String], label: &str) {
+    assert_eq!(responses.len(), 1, "{label}: {responses:?}");
+    let resp = response_with_id(responses, json!(null));
+    assert_eq!(resp["error"]["code"], -32600, "{label}: {resp}");
+    assert!(resp["result"].is_null(), "{label}: {resp}");
+}
+
 #[tokio::test]
-async fn test_explicit_null_id_is_still_a_request() {
+async fn test_explicit_null_id_is_refused_as_invalid_request() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(json!(null), "ping", json!({}))],
     )
     .await;
-
-    assert_eq!(
-        responses.len(),
-        1,
-        "explicit id=null is a request id and should receive a response"
-    );
-    let resp = parse_response(&responses[0]);
-    assert!(resp["id"].is_null(), "response should preserve null id");
-    assert!(resp["error"].is_null(), "ping request should succeed");
+    assert_null_id_refused(&responses, "ping with id=null");
 }
 
 #[tokio::test]
-async fn test_tools_call_explicit_null_id_is_still_a_request() {
+async fn test_tools_call_explicit_null_id_is_refused_before_dispatch() {
     let (server, _dir) = setup_server().await;
+    let stats_view = Arc::clone(&server);
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(
@@ -101,17 +96,11 @@ async fn test_tools_call_explicit_null_id_is_still_a_request() {
         )],
     )
     .await;
-
+    assert_null_id_refused(&responses, "tools/call with id=null");
     assert_eq!(
-        responses.len(),
-        1,
-        "explicit id=null is a tools/call request id and should receive a response"
-    );
-    let resp = response_with_id(&responses, json!(null));
-    assert!(resp["error"].is_null(), "tools/call request should succeed");
-    assert!(
-        resp["result"].is_object(),
-        "tools/call should return a result"
+        stats_view.server_stats_json().await["tool_calls"],
+        0,
+        "a refused null-id tools/call must not execute"
     );
 }
 
@@ -940,7 +929,7 @@ async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
                 "method": "notifications/initialized"
             }))
             .unwrap(),
-            jsonrpc_request(json!(504), "ping", json!({})),
+            jsonrpc_request(json!(504), "tools/list", json!({})),
         ],
     )
     .await;
@@ -956,11 +945,14 @@ async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
         rejected_notification["error"]["code"], -32600,
         "{rejected_notification}"
     );
-    let ping = response_with_id(&responses, json!(504));
-    assert!(ping["error"].is_null(), "{ping}");
+    let tools_list = response_with_id(&responses, json!(504));
+    assert!(tools_list["error"].is_null(), "{tools_list}");
 
     let stats = stats_view.server_stats_json().await;
-    assert_eq!(stats["total_requests"], 1, "only the ping is work: {stats}");
+    assert_eq!(
+        stats["total_requests"], 1,
+        "only the tools/list is work: {stats}"
+    );
     assert_eq!(stats["tool_calls"], 0, "{stats}");
     assert!(
         stats["method_call_counts"].get("tools/call").is_none(),
@@ -1203,8 +1195,8 @@ async fn test_server_stats_after_run() {
     let responses = run_server_with_messages(
         server,
         vec![
-            jsonrpc_request(json!(200), "initialize", json!({})),
-            jsonrpc_request(json!(201), "ping", json!({})),
+            spec_initialize_request(json!(200)),
+            jsonrpc_request(json!(201), "tools/list", json!({})),
             jsonrpc_request(
                 json!(203),
                 "resources/read",
@@ -1250,7 +1242,7 @@ async fn test_server_stats_after_run() {
     let stats = server_handle.server_stats_json().await;
     assert_eq!(stats["jsonrpc_messages"], 4);
     assert_eq!(stats["method_call_counts"]["initialize"], 1);
-    assert_eq!(stats["method_call_counts"]["ping"], 1);
+    assert_eq!(stats["method_call_counts"]["tools/list"], 1);
     assert_eq!(stats["method_call_counts"]["resources/read"], 1);
     assert_eq!(stats["method_call_counts"]["tools/call"], 1);
     assert_eq!(stats["resource_read_counts"]["tracedecay://status"], 1);
@@ -1316,11 +1308,7 @@ async fn test_error_tracking() {
 #[tokio::test]
 async fn test_initialize_has_resources_capability() {
     let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(json!(1), "initialize", json!({}))],
-    )
-    .await;
+    let responses = run_server_with_messages(server, vec![spec_initialize_request(json!(1))]).await;
 
     let resp = parse_response(&responses[0]);
     assert!(
@@ -1565,11 +1553,8 @@ async fn test_resources_read_missing_uri() {
 #[tokio::test]
 async fn test_initialize_does_not_advertise_logging_capability() {
     let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![jsonrpc_request(json!(800), "initialize", json!({}))],
-    )
-    .await;
+    let responses =
+        run_server_with_messages(server, vec![spec_initialize_request(json!(800))]).await;
 
     let resp_str = responses
         .iter()
@@ -1638,7 +1623,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     let responses = run_server_with_messages(
         server,
         vec![
-            jsonrpc_request(json!(1), "initialize", json!({})),
+            spec_initialize_request(json!(1)),
             jsonrpc_notification("notifications/initialized"),
             lcm_status_call(2),
             lcm_status_call(3),
@@ -1720,7 +1705,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     let responses = run_server_with_messages(
         server,
         vec![
-            jsonrpc_request(json!(1), "initialize", json!({})),
+            spec_initialize_request(json!(1)),
             lcm_status_call(2),
             lcm_status_call(3),
         ],
@@ -1825,20 +1810,6 @@ async fn fixture() -> (
     (isolation, harness, server, target_project)
 }
 
-fn initialize_request(target_project: &Path) -> String {
-    let target_root_uri = url::Url::from_file_path(target_project)
-        .expect("target project has a portable file URI")
-        .to_string();
-    jsonrpc_request(
-        json!(1),
-        "initialize",
-        json!({
-            "clientInfo": {"name": "codex", "version": "test"},
-            "roots": [{"uri": target_root_uri, "name": "target-project"}]
-        }),
-    )
-}
-
 fn files_request(id: u64, arguments: Value) -> String {
     jsonrpc_request(
         json!(id),
@@ -1850,65 +1821,44 @@ fn files_request(id: u64, arguments: Value) -> String {
     )
 }
 
-async fn assert_registered_reader_uses_initialize_root() {
-    let (_isolation, _harness, server, target_project) = fixture().await;
-    let responses = run_server_with_messages(
-        server,
-        vec![
-            initialize_request(&target_project),
-            files_request(2, json!({"layout": "flat"})),
-        ],
-    )
-    .await;
-
-    let files_response = response_with_id(&responses, json!(2));
-    let text = files_response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("files response text");
-    assert!(
-        text.contains("src/target.rs"),
-        "initialize root should route reader tools to target project, got {text}"
-    );
-    assert!(
-        !text.contains("src/active.rs"),
-        "implicit initialize-root routing should not read the active project: {text}"
-    );
-}
-
-async fn assert_legacy_selectors_cannot_spoof_initialize_root() {
-    let (_isolation, _harness, server, target_project) = fixture().await;
-    let active_graph = server.cg().await;
-    let active_root = active_graph.project_root().to_string_lossy().into_owned();
-    let active_project_id = active_graph
+async fn assert_legacy_selectors_cannot_reroute_the_active_project() {
+    let (_isolation, harness, server, target_project) = fixture().await;
+    let target_graph = harness
+        .server(&target_project)
+        .expect("target project server")
+        .cg()
+        .await;
+    let target_root = target_graph.project_root().to_string_lossy().into_owned();
+    let target_project_id = target_graph
         .store_layout()
         .identity
         .project_id
         .clone()
-        .expect("active project has a registered identity");
+        .expect("target project has a registered identity");
 
     let spoof_cases = [
         (
             "top-level project_path",
-            json!({"layout": "flat", "project_path": active_root.clone()}),
+            json!({"layout": "flat", "project_path": target_root.clone()}),
         ),
         (
             "top-level project_root",
-            json!({"layout": "flat", "project_root": active_root.clone()}),
+            json!({"layout": "flat", "project_root": target_root.clone()}),
         ),
         (
             "nested selector path",
-            json!({"layout": "flat", "project_selector": {"path": active_root.clone()}}),
+            json!({"layout": "flat", "project_selector": {"path": target_root.clone()}}),
         ),
         (
             "nested selector project_path",
-            json!({"layout": "flat", "project_selector": {"project_path": active_root}}),
+            json!({"layout": "flat", "project_selector": {"project_path": target_root}}),
         ),
         (
             "top-level project_id alias",
-            json!({"layout": "flat", "project_id": active_project_id}),
+            json!({"layout": "flat", "project_id": target_project_id}),
         ),
     ];
-    let mut messages = vec![initialize_request(&target_project)];
+    let mut messages = Vec::new();
     for (offset, (_, arguments)) in spoof_cases.iter().enumerate() {
         messages.push(files_request(10 + offset as u64, arguments.clone()));
     }
@@ -1919,15 +1869,15 @@ async fn assert_legacy_selectors_cannot_spoof_initialize_root() {
         let response = response_with_id(&responses, json!(10 + offset as u64));
         assert_eq!(
             response["error"]["code"], -32602,
-            "{case} must be rejected as invalid parameters instead of overriding the initialize-root route: {response}"
+            "{case} must be rejected as invalid parameters instead of rerouting: {response}"
         );
         assert!(
             response["result"].is_null(),
             "{case} must not return a tool result after invalid-parameter rejection: {response}"
         );
         assert!(
-            !response.to_string().contains("src/active.rs"),
-            "{case} must not serve spoof-project data: {response}"
+            !response.to_string().contains("src/target.rs"),
+            "{case} must not serve the selected project's data: {response}"
         );
     }
 
@@ -1936,7 +1886,8 @@ async fn assert_legacy_selectors_cannot_spoof_initialize_root() {
         .as_str()
         .unwrap_or_else(|| panic!("clean files response text: {clean_response}"));
     assert!(
-        clean_text.contains("src/target.rs") && !clean_text.contains("src/active.rs"),
-        "rejected spoof attempts must not disturb the initialize-root route: {clean_text}"
+        clean_text.contains("src/active.rs") && !clean_text.contains("src/target.rs"),
+        "rejected selectors must not disturb the active project route: {clean_text}"
     );
+    harness.shutdown().await;
 }

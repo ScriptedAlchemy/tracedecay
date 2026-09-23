@@ -8,8 +8,8 @@ pub use tracedecay_domain::configuration::{
 use crate::{AutomationError, Result, config_error};
 
 pub const DEFAULT_SCHEDULER_TICK_SECS: u64 = 60;
-pub const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
-pub const DEFAULT_SESSION_MESSAGE_RETENTION_DAYS: u32 = 180;
+const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
+const DEFAULT_SESSION_MESSAGE_RETENTION_DAYS: u32 = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionConfig {

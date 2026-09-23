@@ -22,10 +22,7 @@
 use std::fmt;
 
 use serde::Serialize;
-pub use tracedecay_automation::config::{
-    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_SESSION_MESSAGE_RETENTION_DAYS,
-    RetentionConfig,
-};
+pub use tracedecay_automation::config::RetentionConfig;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;

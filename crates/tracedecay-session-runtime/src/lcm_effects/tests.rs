@@ -344,7 +344,7 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
         "cursor-native-session",
         "cursor-summary",
         None,
-        10,
+        (10, 0),
         vec![
             serde_json::json!({
                 "kind": "message",
@@ -391,7 +391,7 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
         "claude-native-session",
         "claude-summary",
         Some("claude-boundary"),
-        11,
+        (11, 0),
         vec![
             serde_json::json!({
                 "kind": "message",
@@ -474,7 +474,7 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
         "claude-native-session",
         "claude-boundary",
         None,
-        12,
+        (12, 1),
         vec![
             serde_json::json!({
                 "kind": "boundary",
@@ -524,7 +524,7 @@ async fn ingest_claude_compact_pair(db: &RegisteredGlobalDb, session_id: &str, l
         session_id,
         &boundary_id,
         None,
-        3,
+        (3, 0),
         vec![
             serde_json::json!({
                 "kind": "boundary",
@@ -541,7 +541,7 @@ async fn ingest_claude_compact_pair(db: &RegisteredGlobalDb, session_id: &str, l
         session_id,
         &summary_id,
         Some(&boundary_id),
-        4,
+        (4, 1),
         vec![
             serde_json::json!({
                 "kind": "message",
@@ -739,52 +739,53 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
         record.message_id = format!("claude-before-first-{ordinal}");
         messages.push(record);
     }
-    let compact_pair = |boundary_id: &str, summary_id: &str, ordinal: u64, text: &str| {
-        let boundary = canonical_record(canonical_envelope(
-            "claude",
-            session_id,
-            boundary_id,
-            None,
-            ordinal,
-            vec![
-                serde_json::json!({
-                    "kind": "boundary",
-                    "boundary_kind": "compaction_boundary"
-                }),
-                serde_json::json!({
-                    "kind": "compaction",
-                    "summary": {"preservedSegment": {"anchorUuid": summary_id}}
-                }),
-            ],
-        ));
-        let summary = canonical_record(canonical_envelope(
-            "claude",
-            session_id,
-            summary_id,
-            Some(boundary_id),
-            ordinal + 1,
-            vec![
-                serde_json::json!({
-                    "kind": "message",
-                    "role": "assistant",
-                    "content": text
-                }),
-                serde_json::json!({
-                    "kind": "compaction",
-                    "summary": {
-                        "isCompactSummary": true,
-                        "isVisibleInTranscriptOnly": true
-                    }
-                }),
-            ],
-        ));
-        (boundary, summary)
-    };
+    let compact_pair =
+        |boundary_id: &str, summary_id: &str, (ordinal, position): (u64, u64), text: &str| {
+            let boundary = canonical_record(canonical_envelope(
+                "claude",
+                session_id,
+                boundary_id,
+                None,
+                (ordinal, position),
+                vec![
+                    serde_json::json!({
+                        "kind": "boundary",
+                        "boundary_kind": "compaction_boundary"
+                    }),
+                    serde_json::json!({
+                        "kind": "compaction",
+                        "summary": {"preservedSegment": {"anchorUuid": summary_id}}
+                    }),
+                ],
+            ));
+            let summary = canonical_record(canonical_envelope(
+                "claude",
+                session_id,
+                summary_id,
+                Some(boundary_id),
+                (ordinal + 1, position + 1),
+                vec![
+                    serde_json::json!({
+                        "kind": "message",
+                        "role": "assistant",
+                        "content": text
+                    }),
+                    serde_json::json!({
+                        "kind": "compaction",
+                        "summary": {
+                            "isCompactSummary": true,
+                            "isVisibleInTranscriptOnly": true
+                        }
+                    }),
+                ],
+            ));
+            (boundary, summary)
+        };
     let first_summary_id = "claude-first-summary";
     let (first_boundary, first_summary) = compact_pair(
         "claude-first-boundary",
         first_summary_id,
-        4,
+        (4, 0),
         "first authoritative Claude compaction",
     );
     ingest_canonical(
@@ -805,7 +806,7 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
     let (second_boundary, second_summary) = compact_pair(
         "claude-second-boundary",
         second_summary_id,
-        521,
+        (521, 2),
         "second authoritative Claude compaction",
     );
     ingest_canonical(
@@ -1911,7 +1912,7 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
             session_id,
             "session-wide-native-summary",
             None,
-            u64::try_from(RAW_ROWS + 1).unwrap(),
+            (u64::try_from(RAW_ROWS + 1).unwrap(), 0),
             vec![serde_json::json!({
                 "kind": "compaction",
                 "summary": native_text
@@ -2816,14 +2817,15 @@ fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
     });
 }
 
-/// A canonical record at transcript `ordinal`; its source range is the
-/// ordinal too, so records of one session must be projected in ordinal order.
+/// A canonical record at transcript `ordinal`, read from source bytes
+/// `[position, position + 1)`. A source's records are projected in position
+/// order from position 0, the contiguity its cursor requires.
 fn canonical_envelope(
     provider: &str,
     session_id: &str,
     message_id: &str,
     parent_message_id: Option<&str>,
-    ordinal: u64,
+    (ordinal, position): (u64, u64),
     facts: Vec<Value>,
 ) -> Value {
     let mut relations = serde_json::json!({
@@ -2842,7 +2844,7 @@ fn canonical_envelope(
         "facts": facts,
         "evidence": {
             "ordering_domain": "file_bytes",
-            "range": {"start": ordinal, "end": ordinal + 1},
+            "range": {"start": position, "end": position + 1},
             "native_sequence": ordinal
         }
     })
