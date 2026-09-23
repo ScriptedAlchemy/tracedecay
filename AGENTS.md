@@ -36,6 +36,15 @@ unauthorized external action after completing independent, authorized work.
 - Multiple agents may work concurrently in a checkout; preserve peer edits and
   stage only the paths owned by the current task.
 
+## No secondary copies
+
+- Never create or retain rollback copies, profile backups, old databases, old
+  binaries, snapshot clones, or any other secondary copy of project or operator
+  data or installed artifacts. Do not keep a prior version "just in case."
+- An operation that inherently requires temporary staging must remove that
+  staging when it finishes; it must not leave a recoverable old copy behind.
+  Never delete the sole active durable copy under the guise of this cleanup.
+
 ## Layout
 
 - The repository root is a **virtual workspace**. It has no package of its
