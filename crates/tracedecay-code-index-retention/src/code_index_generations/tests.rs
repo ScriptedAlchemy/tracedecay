@@ -2394,6 +2394,8 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     assert!(!store.path().join(&stranded).exists());
     assert!(staged_root.join(&stranded).is_dir());
 
+    // A crashed process cannot keep its quarantine directory capability open.
+    drop(quarantine);
     recover_scope_root_retention(store.path()).expect("recover uncommitted reconciliation");
 
     assert!(
@@ -2446,6 +2448,8 @@ fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     )
     .expect("commit reconciliation receipt");
 
+    // A crashed process cannot keep its quarantine directory capability open.
+    drop(quarantine);
     recover_scope_root_retention(store.path()).expect("recover committed reconciliation");
 
     assert!(!store.path().join(&stranded).exists());
