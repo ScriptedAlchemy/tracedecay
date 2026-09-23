@@ -1,10 +1,10 @@
-use std::ffi::c_void;
+use std::ffi::{OsString, c_void};
 use std::fs::File;
 use std::io;
 use std::mem::{MaybeUninit, offset_of, size_of};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::{addr_of, addr_of_mut, copy_nonoverlapping, null, null_mut};
 
 use windows_sys::Win32::Foundation::{
@@ -633,8 +633,91 @@ fn open_raw_handle(
 }
 
 fn absolute_security_path(path: &Path) -> io::Result<PathBuf> {
-    std::path::absolute(path)
-        .map_err(|error| wrap_error("resolve absolute Windows security path", path, error))
+    let long_plain_absolute = path.as_os_str().encode_wide().count() >= 260
+        && path.is_absolute()
+        && matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+        );
+    let absolute = if long_plain_absolute {
+        require_exact_long_path(path)?;
+        path.to_path_buf()
+    } else {
+        std::path::absolute(path)
+            .map_err(|error| wrap_error("resolve absolute Windows security path", path, error))?
+    };
+    let wide = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
+    const BACKSLASH: u16 = b'\\' as u16;
+    if wide.len() < 260
+        || wide.starts_with(&[BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH])
+        || wide.starts_with(&[BACKSLASH, BACKSLASH, b'.' as u16, BACKSLASH])
+    {
+        return Ok(absolute);
+    }
+
+    // Raw Win32 opens need the extended spelling for long paths. A long input
+    // bypasses GetFullPathNameW only when it is already fully qualified and
+    // byte-for-byte normalized; verbatim semantics must not reinterpret dots,
+    // separators, or reserved names after that bypass.
+    let mut extended = Vec::with_capacity(wide.len() + 8);
+    extended.extend([BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH]);
+    if wide.starts_with(&[BACKSLASH, BACKSLASH]) {
+        extended.extend("UNC\\".encode_utf16());
+        extended.extend_from_slice(&wide[2..]);
+    } else {
+        extended.extend(wide);
+    }
+    Ok(PathBuf::from(OsString::from_wide(&extended)))
+}
+
+fn require_exact_long_path(path: &Path) -> io::Result<()> {
+    let spelling = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let normalized = path
+        .components()
+        .map(Component::as_os_str)
+        .collect::<PathBuf>();
+    let ambiguous_component = path.components().any(|component| {
+        if matches!(component, Component::CurDir | Component::ParentDir) {
+            return true;
+        }
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let name_wide = name.encode_wide().collect::<Vec<_>>();
+        if name_wide
+            .last()
+            .is_some_and(|last| *last == b'.' as u16 || *last == b' ' as u16)
+            || name_wide.contains(&(b':' as u16))
+        {
+            return true;
+        }
+        let name = name.to_string_lossy();
+        let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+        let stem = stem.to_ascii_uppercase();
+        matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix).is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        })
+    });
+    if spelling.contains(&(b'/' as u16))
+        || spelling.contains(&0)
+        || normalized.as_os_str() != path.as_os_str()
+        || ambiguous_component
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "long Windows security path must have an exact absolute spelling",
+        ));
+    }
+    Ok(())
 }
 
 fn hold_directory_ancestors(path: &Path) -> io::Result<Vec<File>> {
@@ -1075,6 +1158,71 @@ mod tests {
             )
         };
         assert_eq!(name, expected.as_slice());
+    }
+
+    #[test]
+    fn private_atomic_replacement_accepts_a_long_windows_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut parent = temp.path().to_path_buf();
+        while parent.as_os_str().encode_wide().count() < 280 {
+            parent.push("nested-directory-with-a-stable-long-name");
+        }
+        let verbatim_parent = absolute_security_path(&parent).unwrap();
+        std::fs::create_dir_all(&verbatim_parent).unwrap();
+        let source = parent.join("source.tmp");
+        let destination = parent.join("destination");
+        std::fs::write(verbatim_parent.join("source.tmp"), b"published bytes").unwrap();
+        std::fs::write(verbatim_parent.join("destination"), b"old bytes").unwrap();
+
+        drop(make_private_file(&source).unwrap());
+        drop(replace_file_atomically(&source, &destination).unwrap());
+        assert_eq!(
+            std::fs::read(verbatim_parent.join("destination")).unwrap(),
+            b"published bytes"
+        );
+    }
+
+    #[test]
+    fn long_windows_path_fast_path_requires_exact_spelling() {
+        assert!(require_exact_long_path(Path::new(r"C:\safe\regular")).is_ok());
+        for path in [
+            r"C:\safe\..\regular",
+            r"C:/safe/regular",
+            r"C:\safe\\regular",
+            r"C:\safe\NUL",
+            r"C:\safe\trailing.",
+            r"C:\safe\trailing ",
+        ] {
+            assert!(
+                require_exact_long_path(Path::new(path)).is_err(),
+                "ambiguous path {path:?} must not bypass Windows normalization"
+            );
+        }
+        let short = Path::new(r"C:\safe\regular");
+        assert_eq!(
+            absolute_security_path(short).unwrap(),
+            std::path::absolute(short).unwrap()
+        );
+
+        let mut drive = PathBuf::from(r"C:\safe");
+        while drive.as_os_str().encode_wide().count() < 260 {
+            drive.push("safe-long-component");
+        }
+        assert!(
+            absolute_security_path(&drive)
+                .unwrap()
+                .starts_with(r"\\?\C:\safe")
+        );
+
+        let mut unc = PathBuf::from(r"\\server\share");
+        while unc.as_os_str().encode_wide().count() < 260 {
+            unc.push("safe-long-component");
+        }
+        assert!(
+            absolute_security_path(&unc)
+                .unwrap()
+                .starts_with(r"\\?\UNC\server\share")
+        );
     }
 
     fn snapshot(path: &Path, kind: PathKind) -> SecuritySnapshot {
