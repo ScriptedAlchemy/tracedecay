@@ -8,8 +8,6 @@ use serde_json::Value;
 #[cfg(feature = "test-transport")]
 use serde_json::json;
 use std::ffi::OsString;
-#[cfg(feature = "test-transport")]
-use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-transport")]
@@ -409,7 +407,9 @@ pub(crate) async fn wait_for_current_graph(server: &McpServer) {
 pub(crate) struct ProductionCompositionFixture {
     pub(crate) harness: ProductionProjectCompositionHarnessV1,
     pub(crate) project_root: PathBuf,
-    _isolation: TestTempDir,
+    _data_dir_guard: common::EnvVarGuard,
+    _global_db_guard: common::EnvVarGuard,
+    _environment: common::IsolatedEnv,
 }
 
 /// `git init`, stage everything, and commit. Identity, hooks, and gc come
@@ -432,21 +432,34 @@ pub(crate) async fn production_composition_fixture() -> ProductionCompositionFix
 pub(crate) async fn production_composition_fixture_with_sources(
     write_sources: impl FnOnce(&Path),
 ) -> ProductionCompositionFixture {
-    let isolation = test_temp_dir();
-    let project_root = isolation.path().join("project");
-    fs::create_dir_all(&project_root).expect("production composition project");
+    let (environment, project_root) = common::IsolatedEnv::acquire().await;
+    let profile_root = environment.scratch().join("profile");
+    let data_dir_guard =
+        common::EnvVarGuard::set(tracedecay::config::USER_DATA_DIR_ENV, &profile_root);
+    let global_db_guard =
+        common::EnvVarGuard::set(common::GLOBAL_DB_ENV, profile_root.join("global.db"));
     write_sources(&project_root);
     commit_worktree(&project_root, "production composition fixture");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
-        isolation.path(),
+        environment.scratch(),
         vec![project_root.clone()],
     ))
     .await
     .expect("production composition harness");
+    let response_handle_root =
+        tracedecay_runtime_core::storage::resolve_response_handle_root(&project_root)
+            .expect("production composition response-handle root");
+    assert!(
+        response_handle_root.starts_with(harness.profile_root()),
+        "response handles must stay inside the fixture profile: {}",
+        response_handle_root.display()
+    );
     ProductionCompositionFixture {
         harness,
         project_root,
-        _isolation: isolation,
+        _data_dir_guard: data_dir_guard,
+        _global_db_guard: global_db_guard,
+        _environment: environment,
     }
 }
 

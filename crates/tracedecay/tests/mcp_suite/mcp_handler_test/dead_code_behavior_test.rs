@@ -178,7 +178,6 @@ async fn call_dead_code(
 
 #[tokio::test]
 async fn dead_code_reports_only_the_uncalled_private_symbols() {
-    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("src/lib.rs"), LIB_RS).unwrap();

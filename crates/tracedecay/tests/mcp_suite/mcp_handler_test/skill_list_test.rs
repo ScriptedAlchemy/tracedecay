@@ -6,18 +6,13 @@
 //! without `include_body`, a support-file byte that leaks into the listing,
 //! or a repeat call that invents usage fails.
 
-use std::fs;
-
 use serde_json::{Value, json};
-use tempfile::TempDir;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
     ManagedSupportFile, SkillInstallTarget, create_managed_skill, set_managed_skill_state,
 };
 
-use crate::support::{
-    HomeEnvGuard, ProductionCompositionFixture, lock_process_env, production_composition_fixture,
-};
+use crate::support::{ProductionCompositionFixture, production_composition_fixture};
 
 const ACTOR: &str = "skill-list-proof";
 const CLI_FALLBACK: &str = "This tool is also available from the shell: `tracedecay tool skill_list ...` \
@@ -26,12 +21,9 @@ back to that CLI instead of querying .tracedecay databases directly.";
 
 #[tokio::test]
 async fn skill_list_returns_stored_skills_for_the_requested_state() {
-    let env_lock = lock_process_env().await;
-    let home = TempDir::new().unwrap();
-    let _home_guard = HomeEnvGuard::set(&env_lock, home.path());
-    let profile_root = tracedecay_runtime_core::storage::default_profile_root().unwrap();
+    let fixture = production_composition_fixture().await;
+    let profile_root = fixture.harness.profile_root().to_path_buf();
     let profile_root_text = profile_root.display().to_string();
-    fs::create_dir_all(&profile_root).unwrap();
 
     create_managed_skill(&profile_root, active_draft())
         .await
@@ -56,8 +48,6 @@ async fn skill_list_returns_stored_skills_for_the_requested_state() {
     )
     .await
     .unwrap();
-
-    let fixture = production_composition_fixture().await;
 
     let all = call_skill_list(&fixture, json!({"format": "json"})).await;
     assert_eq!(all["status"], "ok");
