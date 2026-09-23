@@ -28,12 +28,11 @@ import { Panel, Readout } from "../../ui/instrument.tsx";
 import { StateChip } from "../../ui/StateChip.tsx";
 import { Chart } from "../../viz/chart/Chart.tsx";
 import { SearchField } from "../../ui/search/SearchField.tsx";
-import {
-  useMemoryProjection,
-  useMemorySimilarity,
-  type ProjectionPayload,
-  type SimilarityPayload,
-} from "../../data/query/memory.ts";
+import type {
+  MemoryProjectionPayloadV1,
+  MemorySimilarityPayloadV1,
+} from "../../contracts/generated.ts";
+import { useMemoryProjection, useMemorySimilarity } from "../../data/query/memory.ts";
 import { projectionReading, similarityReading } from "./memoryModel.ts";
 
 /**
@@ -128,7 +127,7 @@ function FloorControl({
   );
 }
 
-function ProjectionBody({ data }: { data: ProjectionPayload }) {
+function ProjectionBody({ data }: { data: MemoryProjectionPayloadV1 }) {
   const reading = projectionReading(data);
   const coverageComplete = data.coverage.completeness === "complete";
   const option = useMemo<EChartsOption>(
@@ -235,7 +234,7 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
   );
 }
 
-function SimilarityBody({ data }: { data: SimilarityPayload }) {
+function SimilarityBody({ data }: { data: MemorySimilarityPayloadV1 }) {
   const reading = similarityReading(data);
   if (data.error !== "") {
     return (

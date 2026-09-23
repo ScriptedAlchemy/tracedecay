@@ -36,7 +36,7 @@ describe("RunHistory", () => {
           reviewed: 4,
         }),
         run("run-2", {
-          task: "skill_writing",
+          task: "skill_writer",
           status: "failed",
           error: "backend refused",
         }),
@@ -54,16 +54,16 @@ describe("RunHistory", () => {
   it("preserves the daemon's newest-first run order", async () => {
     stubRuns({
       runs: runsBody([
-        run("run-newest", { task: "newest_run", status: "succeeded" }),
-        run("run-older", { task: "older_run", status: "succeeded" }),
+        run("run-newest", { task: "skill_writer", status: "succeeded" }),
+        run("run-older", { task: "session_reflector", status: "succeeded" }),
       ]),
     });
     renderRunHistory();
 
-    await screen.findByText("newest_run");
+    await screen.findByText("skill_writer");
     const rows = screen.getAllByRole("button");
-    expect(rows[0]?.textContent).toContain("newest_run");
-    expect(rows[1]?.textContent).toContain("older_run");
+    expect(rows[0]?.textContent).toContain("skill_writer");
+    expect(rows[1]?.textContent).toContain("session_reflector");
   });
 
   it("fetches artifacts only when a run is opened, and prints the daemon integrity verdict", async () => {
@@ -120,7 +120,6 @@ describe("RunHistory", () => {
             validation_report: { decision: "automatic" },
           },
         },
-        error: "",
       },
     });
     renderRunHistory();
@@ -149,12 +148,12 @@ describe("RunHistory", () => {
   it("says when an opened run recorded no artifacts instead of issuing a read", async () => {
     const fetchMock = stubRuns({
       runs: runsBody([
-        run("run-1", { task: "session_reflection", status: "completed" }),
+        run("run-1", { task: "session_reflector", status: "succeeded" }),
       ]),
     });
     renderRunHistory();
     await userEvent.click(
-      await screen.findByRole("button", { name: /session_reflection/ }),
+      await screen.findByRole("button", { name: /session_reflector/ }),
     );
 
     expect(await screen.findByText(/recorded no artifacts/i)).toBeTruthy();
@@ -203,7 +202,6 @@ function runsBody(rows: unknown[]) {
     has_more: false,
     malformed_row_count: 0,
     completeness: "known",
-    error: "",
   };
 }
 
@@ -219,6 +217,7 @@ function run(
   },
 ) {
   return {
+    schema_version: 2,
     run_id: id,
     task: options.task,
     task_key: options.task,
@@ -245,6 +244,7 @@ function artifactsBody(runId: string, integrity: string) {
     run_id: runId,
     artifacts: [
       {
+        schema_version: 1,
         kind: "traces",
         path: `runs/${runId}/traces.json`,
         sha256: "a".repeat(64),
@@ -259,7 +259,6 @@ function artifactsBody(runId: string, integrity: string) {
       integrity_status: integrity,
     },
     count: 1,
-    error: "",
   };
 }
 

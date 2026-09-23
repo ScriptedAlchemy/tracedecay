@@ -17,7 +17,7 @@
       "tracedecay_ast_grep_search",
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
+      "tracedecay_source_body",
       "Read",
       "Edit"
     ],

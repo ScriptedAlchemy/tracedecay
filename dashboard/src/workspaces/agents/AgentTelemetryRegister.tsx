@@ -1,5 +1,5 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { ReadFailure } from '../../ui/LegacyStates.tsx';
+import { ReadFailure } from '../../ui/ReadFailure.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';

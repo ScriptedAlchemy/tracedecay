@@ -85,6 +85,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["backup",
 # resolve the same object database and status implementation, so a feature
 # added for one is never missing for the other.
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+schemars = "1.2.1"
 
 [profile.bench]
 opt-level = 3

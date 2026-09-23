@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { ReadFailure } from '../../ui/LegacyStates.tsx';
+import { ReadFailure } from '../../ui/ReadFailure.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { MeterRow, Panel, WorkspaceHeader } from '../../ui/instrument.tsx';

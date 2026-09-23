@@ -294,7 +294,7 @@ export function useExplorerController(): ExplorerController {
   );
   const memory = useEnvelope(
     ['explorer', 'memory-overview'],
-    '/api/plugins/holographic/?limit=25',
+    '/api/plugins/holographic?limit=25',
     MemoryOverviewPayloadV1Schema,
     { enabled: !searching },
   );

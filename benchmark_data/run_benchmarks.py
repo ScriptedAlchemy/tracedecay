@@ -342,14 +342,20 @@ def benchmark_tracedecay(name: str, root: Path, sample_symbols: list[str]) -> di
             ]
             out["find_symbol_avg_ms"] = avg_ms(find_us)
 
-            body_us = [
-                d
-                for q in queries
-                if (
-                    d := handler_us(mcp.call_tool("tracedecay_body", {"symbol": q, "limit": 1}))
+            # Name-to-source is an exact lookup followed by `tracedecay_source_body`.
+            body_us: list[int] = []
+            for q in queries:
+                fresp = mcp.call_tool(
+                    "tracedecay_find_exact_symbol", {"name": q, "limit": 1, "format": "json"}
                 )
-                is not None
-            ]
+                try:
+                    matches = json.loads(fresp["result"]["content"][0]["text"])["matches"]
+                    node_id = matches[0]["id"]
+                except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+                    continue
+                bus = handler_us(mcp.call_tool("tracedecay_source_body", {"node_id": node_id}))
+                if bus is not None:
+                    body_us.append((handler_us(fresp) or 0) + bus)
             out["get_function_source_avg_ms"] = avg_ms(body_us)
 
             impact_us: list[int] = []

@@ -43,7 +43,6 @@ import {
   KeyText,
   ORIGIN_WORD,
   OriginMark,
-  PathText,
   ProvenanceChip,
   ValueCell,
   WriteCell,
@@ -290,11 +289,7 @@ function SectionRow({ section, count }: { section: ConfigSection; count: number 
         </span>
         {section.location ? (
           <span className="td-value min-w-0 truncate text-3xs" title={section.location}>
-            {section.locationKind === 'path' ? (
-              <PathText value={section.location} />
-            ) : (
-              <span className="text-text-secondary">{section.location}</span>
-            )}
+            <span className="text-text-secondary">{section.location}</span>
           </span>
         ) : null}
         {section.notes.map((note) => (
@@ -441,10 +436,7 @@ function OriginCell({ section }: { section: ConfigSection }) {
   }
   return (
     <span
-      className={cn(
-        'td-value block min-w-0 truncate text-2xs',
-        section.locationKind === 'path' ? 'text-text-primary' : 'text-text-secondary',
-      )}
+      className="td-value block min-w-0 truncate text-2xs text-text-secondary"
       title={section.location}
     >
       {elideStart(section.location, 26)}

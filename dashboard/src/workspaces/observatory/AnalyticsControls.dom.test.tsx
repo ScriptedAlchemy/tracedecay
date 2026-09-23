@@ -12,7 +12,7 @@ import type { ObservatoryAccountingReads } from './accountingReads.ts';
  * The Plan 26 `analytics-controls` view.
  *
  * Two real reads back parts of it, `/api/settings` for the profile upload
- * setting and `/api/storage/findings` for the typed retention-backlog status,
+ * setting and `/api/doctor/findings?family=storage` for the typed retention-backlog status,
  * and they are read independently. The assertions pin the two reassuring
  * falsehoods this surface could most easily tell: that an unpublished
  * collection mode is `Off`, and that an absent exporter means zero egress
@@ -72,7 +72,7 @@ function renderControls(
         }
         return new Response(JSON.stringify(envelope(settingsPayload())), { status: 200 });
       }
-      if (url.includes('/api/storage/findings')) {
+      if (url.includes('/api/doctor/findings?family=storage')) {
         if (options.findingsStatus != null) {
           return new Response('{}', { status: options.findingsStatus });
         }
@@ -175,7 +175,7 @@ function findingsPayload(kindStatuses: unknown[]) {
   return {
     entries: [],
     family_filter: null,
-    kind_statuses: kindStatuses,
+    storage_kind_statuses: kindStatuses,
     known_families: ['storage'],
     schema_convergences: [],
     note: 'doctor storage findings',
@@ -211,11 +211,8 @@ function settingsPayload() {
         telemetry: { timings: false },
         track_call_sites: true,
       },
-      config_path: '/repo/.tracedecay/config.json',
       configuration_revision_id: 'revision-1',
       configuration_snapshot_id: 'snapshot-1',
-      legacy_config_path: '/repo/.tracedecay/config.json',
-      legacy_config_read_only: true,
       pr_autotrack: { tracked: [] },
       tracedecay_dir_gitignored: true,
     },
@@ -249,8 +246,6 @@ function settingsPayload() {
       configuration_snapshot_id: 'snapshot-1',
       extraction_timeout_secs: 30,
       installed_agents: ['claude'],
-      legacy_config_path: '/home/agent/.tracedecay/config.json',
-      legacy_config_read_only: true,
       upload_enabled: false,
       watcher_debounce: '500ms',
     },

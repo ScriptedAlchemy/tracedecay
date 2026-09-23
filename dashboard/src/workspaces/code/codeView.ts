@@ -69,13 +69,10 @@ export interface CodeViewBlocker {
 
 const VIEW_PARAM = 'view';
 const FOCUS_PARAM = 'symbol';
-const LEGACY_VIEW_PARAM = 'structureLens';
-const LEGACY_FOCUS_PARAM = 'structureFocus';
-/** The default lens's former id; published links may still carry it. */
-const LEGACY_DEFAULT_VIEW = 'topology';
 
+/** Unknown views open Cortex. */
 export function readCodeLocation(params: URLSearchParams): CodeLocation {
-  const focusId = params.get(FOCUS_PARAM) ?? params.get(LEGACY_FOCUS_PARAM);
+  const focusId = params.get(FOCUS_PARAM);
   const requested = params.get(VIEW_PARAM);
   switch (requested) {
     case 'atlas':
@@ -83,16 +80,6 @@ export function readCodeLocation(params: URLSearchParams): CodeLocation {
     case 'shared-code':
     case 'compare':
       return { view: requested, focusId };
-    case 'cortex':
-    case LEGACY_DEFAULT_VIEW:
-      return { view: 'cortex', focusId };
-    default:
-      if (requested !== null) return { view: 'cortex', focusId };
-  }
-  switch (params.get(LEGACY_VIEW_PARAM)) {
-    case 'trace':
-    case 'core':
-      return focusId === null ? { view: 'cortex', focusId } : { view: 'trace', focusId };
     default:
       return { view: 'cortex', focusId };
   }
@@ -103,8 +90,6 @@ export function writeCodeLocation(
   location: CodeLocation,
 ): URLSearchParams {
   const next = new URLSearchParams(current);
-  next.delete(LEGACY_VIEW_PARAM);
-  next.delete(LEGACY_FOCUS_PARAM);
   if (location.view === 'cortex') next.delete(VIEW_PARAM);
   else next.set(VIEW_PARAM, location.view);
   if (location.focusId === null) next.delete(FOCUS_PARAM);

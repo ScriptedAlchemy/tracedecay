@@ -104,11 +104,11 @@ exposes health-focused MCP tools that have no token-savior equivalent:
 
 Plus dedicated tools for cross-cutting agent workflows, `tracedecay_diagnose`
 (triages a stuck session), `tracedecay_run_affected_tests`,
-`tracedecay_diagnostics` (TypeScript LSP integration), `tracedecay_outline`,
+`tracedecay_diagnostics` (TypeScript LSP integration), `tracedecay_source_outline`,
 `tracedecay_signature_search`, `tracedecay_type_hierarchy`,
 `tracedecay_field_sites`, `tracedecay_constructors`,
 `tracedecay_unsafe_patterns`,
-`tracedecay_implementations`, `tracedecay_impls`, `tracedecay_derives`.
+`tracedecay_implementations`, `tracedecay_derives`.
 
 ### 1.4 On-demand index freshness
 

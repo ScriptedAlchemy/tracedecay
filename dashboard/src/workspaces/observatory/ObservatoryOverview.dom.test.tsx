@@ -247,7 +247,7 @@ function stubRoutes(routes: Record<string, () => unknown>) {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), 'http://localhost');
-      const route = url.pathname.replace(/^\/api\/projects\/[^/]+/, '/api');
+      const route = (url.pathname + url.search).replace(/^\/api\/projects\/[^/]+/, '/api');
       const body = routes[route];
       if (body) return json(body());
       return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
@@ -270,7 +270,7 @@ function mixedRoutes(): Record<string, () => unknown> {
         coverage: coverage('complete', 1, 1, 'stores'),
         legal_actions: [{ kind: 'refresh', operation: 'use-case.dashboard.storage.telemetry.refresh' }],
       }),
-    '/api/storage/findings': () =>
+    '/api/doctor/findings?family=storage': () =>
       envelope(findingsPayload(), {
         domain_state: 'partial',
         coverage: coverage('partial', 1, 2, 'producers'),
@@ -379,7 +379,7 @@ function findingsPayload() {
         storage_kind: 'over_budget_store',
       },
     ],
-    kind_statuses: [
+    storage_kind_statuses: [
       { kind: 'over_budget_store', state: 'real', reason: 'measured', observed_entries: 1 },
       { kind: 'orphan_store', state: 'partial', reason: 'one store unreadable', observed_entries: 0 },
     ],

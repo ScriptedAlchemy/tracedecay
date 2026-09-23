@@ -140,18 +140,16 @@ describe("AutomationsPage ledgers", () => {
     expect(within(digest).getByText("disabled")).toBeTruthy();
   });
 
-  it("prints skill state and provenance, and a typed absence where provenance is not served", async () => {
+  it("prints skill state, provenance, and an empty target set as such", async () => {
     stubAutomation({
       skills: skillsBody([
-        {
-          metadata: {
-            id: "code-slop",
-            title: "Code Slop Cleanup",
-            state: "active",
-            provenance: { source: "automation_run", actor: "skill_writer", run_id: "run-sw-1" },
-          },
-        },
-        { metadata: { id: "bare", title: "Bare Skill", state: "disabled" } },
+        skill({
+          id: "code-slop",
+          title: "Code Slop Cleanup",
+          state: "active",
+          provenance: { source: "automation_run", actor: "skill_writer", run_id: "run-sw-1" },
+        }),
+        skill({ id: "bare", title: "Bare Skill", state: "disabled", targets: [] }),
       ]),
     });
     renderAutomations();
@@ -161,7 +159,8 @@ describe("AutomationsPage ledgers", () => {
     expect(within(slop).getByText(/skill_writer · run-sw-1/)).toBeTruthy();
     const bare = within(skills).getByTestId("skill-row-bare");
     expect(within(bare).getByText("disabled")).toBeTruthy();
-    expect(within(bare).getAllByText(/not served/).length).toBe(2);
+    expect(within(bare).getByText("user")).toBeTruthy();
+    expect(within(bare).getByText("no install targets")).toBeTruthy();
   });
 
   it("renders terminal fact receipts with their state and files them under their run", async () => {
@@ -313,7 +312,6 @@ describe("AutomationsPage inspector", () => {
         run_id: "run-mc-1",
         artifact: artifacts.artifacts[0],
         payload: { applied_ops: [{ op: "normalize_tags", fact_id: "fact.v1.test" }] },
-        error: "",
       },
     });
     renderAutomations();
@@ -424,21 +422,42 @@ function jobsBody(jobs: unknown[], count = jobs.length) {
   return { jobs, count };
 }
 
-function skillsBody(skills: unknown[], count = skills.length) {
+function job(overrides: Record<string, unknown> & { id: string; name: string }) {
   return {
-    profile_root: "/home/x/.tracedecay",
-    skills_root: "/home/x/.tracedecay/managed-skills",
-    count,
-    skills,
-    skill_metadata: [],
-    usage_summaries: [],
-    stale_recommendations: [],
-    improvement_recommendations: [],
+    prompt: "Summarize the day's changes.",
+    enabled: true,
+    delivery: { mode: "file" },
+    created_at: NOW - 86_400,
+    updated_at: NOW - 3600,
+    ...overrides,
+  };
+}
+
+function skillsBody(skills: unknown[], count = skills.length) {
+  return { count, skills };
+}
+
+function skill(metadata: Record<string, unknown> & { id: string; title: string; state: string }) {
+  return {
+    metadata: {
+      summary: "Managed skill fixture.",
+      routing_description: "Use when the fixture applies.",
+      category: "workflow",
+      targets: ["cursor"],
+      pinned: false,
+      checksum: "sha256:fixture",
+      created_at: NOW - 86_400,
+      updated_at: NOW - 3600,
+      provenance: { source: "user", actor: "dashboard-test", run_id: null },
+      ...metadata,
+    },
+    body_markdown: "Body.",
+    support_files: [],
   };
 }
 
 function receiptsBody(receipts: unknown[], count = receipts.length) {
-  return { receipts, count, limit: 50, error: "" };
+  return { receipts, count, limit: 50 };
 }
 
 function receipt(id: string, state: "applied" | "quarantined" = "applied") {
@@ -448,7 +467,15 @@ function receipt(id: string, state: "applied" | "quarantined" = "applied") {
     run_id: "run-mc-1",
     state,
     evidence_hash: `evidence.${id}`,
-    add_fact_request: { content: "A recorded project fact.", category: "preference" },
+    add_fact_request: {
+      content: "A recorded project fact.",
+      category: "user_pref",
+      source_label: null,
+      tags: [],
+      entities: [],
+      trust: null,
+      metadata: {},
+    },
     quarantine_reason: state === "quarantined" ? "validation failed" : undefined,
     validation: { disposition: state === "applied" ? "accepted" : "rejected", policy: "automatic-memory-v1" },
     applied_fact_id: state === "applied" ? `fact.${id}` : undefined,
@@ -473,6 +500,7 @@ function run(
   const task = options.task ?? "memory_curator";
   const started = options.startedAt ?? NOW - 2 * 86_400;
   return {
+    schema_version: 2,
     run_id: id,
     task,
     task_key: options.taskKey === undefined ? task : options.taskKey,
@@ -495,13 +523,15 @@ function run(
 }
 
 function runsBody(rows: unknown[]) {
-  return { runs: rows, count: rows.length, limit: 50, has_more: false, malformed_row_count: 0, completeness: "known", error: "" };
+  return { runs: rows, count: rows.length, limit: 50, has_more: false, malformed_row_count: 0, completeness: "known" };
 }
 
 function artifactsBody(runId: string, integrity: string) {
   return {
     run_id: runId,
-    artifacts: [{ kind: "traces", path: `runs/${runId}/traces.json`, sha256: "a".repeat(64), created_at: String(NOW) }],
+    artifacts: [
+      { schema_version: 1, kind: "traces", path: `runs/${runId}/traces.json`, sha256: "a".repeat(64), created_at: String(NOW) },
+    ],
     artifact_chain: {
       expected_kinds: ["traces", "feedback"],
       present_kinds: ["traces"],
@@ -510,7 +540,6 @@ function artifactsBody(runId: string, integrity: string) {
       integrity_status: integrity,
     },
     count: 1,
-    error: "",
   };
 }
 
@@ -527,21 +556,17 @@ function stubAutomation(overrides: Record<string, Reply> = {}) {
   const fallbacks: Record<string, unknown> = {
     "scheduler/status": scheduler(),
     jobs: jobsBody([
-      {
+      job({
         id: "nightly-sweep",
         name: "Nightly sweep",
         schedule: "0 3 * * *",
-        enabled: true,
         interval_secs: null,
         cooldown_secs: 1800,
         skill_ids: ["code-slop"],
-        delivery: { mode: "file" },
-        created_at: NOW - 86_400,
-        updated_at: NOW - 3600,
-      },
-      { id: "pr-digest", name: "PR digest", schedule: null, enabled: false, interval_secs: 3600 },
+      }),
+      job({ id: "pr-digest", name: "PR digest", schedule: null, enabled: false, interval_secs: 3600 }),
     ]),
-    skills: skillsBody([{ metadata: { id: "code-slop", title: "Code Slop Cleanup", state: "active" } }]),
+    skills: skillsBody([skill({ id: "code-slop", title: "Code Slop Cleanup", state: "active" })]),
     "automatic-fact-receipts": receiptsBody([receipt("apply-1"), receipt("apply-2", "quarantined")]),
     runs: runsBody([
       run("run-nightly-1", {

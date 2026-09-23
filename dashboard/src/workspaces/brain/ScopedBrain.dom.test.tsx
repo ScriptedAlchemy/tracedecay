@@ -194,6 +194,7 @@ describe('ScopedBrain', () => {
             report_coverage: null,
             known_families: ['storage'],
             schema_convergences: schemaConvergences,
+            storage_kind_statuses: [],
             note: 'schema convergence state',
           }, 'partial'),
         },

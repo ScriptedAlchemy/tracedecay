@@ -4,7 +4,7 @@
  * failures.
  *
  * Two real reads back parts of this surface, `GET /api/settings` for the
- * `user.upload_enabled.v1` profile setting, and `GET /api/storage/findings` for
+ * `user.upload_enabled.v1` profile setting, and `GET /api/doctor/findings?family=storage` for
  * the typed `retention_backlog` status. They are read independently: a failed
  * settings read must not blank the retention evidence, and neither may stand in
  * for the analytics collection mode, which nothing publishes.
@@ -124,7 +124,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
           title="retention and deletion"
           state={
             findingsState.kind === 'ready'
-              ? retentionBacklogReading(findingsState.value.payload.kind_statuses).state
+              ? retentionBacklogReading(findingsState.value.payload.storage_kind_statuses).state
               : findingsState.state
           }
           detail={findingsState.kind === 'ready' ? 'retention backlog' : findingsState.detail}
@@ -133,7 +133,7 @@ export function AnalyticsControls({ reads }: { reads: ObservatoryAccountingReads
         >
           {findingsState.kind === 'ready' ? (
             <RetentionBacklog
-              reading={retentionBacklogReading(findingsState.value.payload.kind_statuses)}
+              reading={retentionBacklogReading(findingsState.value.payload.storage_kind_statuses)}
             />
           ) : (
             <p className="text-3xs leading-snug text-text-muted">

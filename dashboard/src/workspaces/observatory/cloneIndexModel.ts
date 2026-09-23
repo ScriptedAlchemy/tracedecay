@@ -7,7 +7,6 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
 const cloneIndexStates = {
   unavailable: 'unavailable',
-  backfilling: 'loading',
   partial: 'partial',
   ready: 'ready',
   stale: 'stale',
@@ -27,8 +26,6 @@ export function cloneIndexDetail(status: CodeCloneIndexStatusV1): string {
   switch (status.state) {
     case 'unavailable':
       return status.reason;
-    case 'backfilling':
-      return 'clone fingerprints are backfilling from the sealed lexical source';
     case 'partial':
       return status.omission_reasons.join(' · ');
     case 'ready':

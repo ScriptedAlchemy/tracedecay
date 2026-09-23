@@ -245,9 +245,9 @@ const SEARCH_ROUTES = {
     status: 200,
     body: FIXTURES['/api/plugins/hermes-lcm/overview'],
   },
-  '/api/plugins/holographic/': {
+  '/api/plugins/holographic': {
     status: 200,
-    body: FIXTURES['/api/plugins/holographic/'],
+    body: FIXTURES['/api/plugins/holographic'],
   },
 };
 

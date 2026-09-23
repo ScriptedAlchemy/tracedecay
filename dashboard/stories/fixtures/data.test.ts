@@ -26,7 +26,11 @@ import {
   AnalyticsAgentsPayloadV1Schema,
   AnalyticsSubagentTreePayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
+  AutomaticFactReceiptsPayloadV1Schema,
+  AutomationJobsPayloadV1Schema,
+  AutomationRunsPayloadV1Schema,
   AutomationSchedulerStatusV1Schema,
+  AutomationSkillsPayloadV1Schema,
   CodeIndexFreshnessPayloadV1Schema,
   CostsReadModelV1Schema,
   DeliveryInboxV1Schema,
@@ -53,9 +57,7 @@ import {
   RemoteOperationalStatusPayloadV1Schema,
   SavingsModelsPayloadV1Schema,
   SavingsOverviewPayloadV1Schema,
-  SavingsSessionsPayloadV1Schema,
   SettingsPayloadV1Schema,
-  StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   StructureReadV12Schema,
   ListTaskHandoffsResultV1Schema,
@@ -64,6 +66,7 @@ import {
   WorkGraphReadV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
+import { AutomationOutcomesPayloadSchema } from '../../src/data/query/automation.ts';
 import { TrustHistoryPayloadSchema } from '../../src/data/query/memory.ts';
 
 /** Parse one resolved fixture, surfacing zod's issues on failure. The same
@@ -93,15 +96,9 @@ function expectValue(schema: ZodType<unknown>, value: unknown, what: string): vo
 const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/projects': DashboardEnvelopeV1Schema(ProjectsPayloadV1Schema),
   '/api/storage/telemetry': DashboardEnvelopeV1Schema(StorageTelemetryPayloadV1Schema),
-  '/api/storage/findings': DashboardEnvelopeV1Schema(StorageFindingsPayloadV1Schema),
   '/api/doctor/findings': DashboardEnvelopeV1Schema(DoctorFindingsPayloadV1Schema),
   '/api/settings': DashboardEnvelopeV1Schema(SettingsPayloadV1Schema),
-  // `memory_api::overview` is bound at both the trailing-slash and bare paths.
-  // The `/overview` key is a fixture convenience with no route behind it; it
-  // holds the same payload, so it is held to the same contract.
-  '/api/plugins/holographic/': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
-  '/api/plugins/holographic/overview': DashboardEnvelopeV1Schema(MemoryOverviewPayloadV1Schema),
   '/api/plugins/holographic/status': DashboardEnvelopeV1Schema(MemoryStatusPayloadV1Schema),
   '/api/plugins/hermes-lcm/overview': DashboardEnvelopeV1Schema(LcmOverviewPayloadV1Schema),
   '/api/plugins/hermes-lcm/timeline': DashboardEnvelopeV1Schema(LcmTimelinePayloadV1Schema),
@@ -119,7 +116,6 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/delivery/overview': DashboardEnvelopeV1Schema(DeliveryOverviewV1Schema),
   '/api/delivery/inbox': DashboardEnvelopeV1Schema(DeliveryInboxV1Schema),
   '/api/plugins/savings/overview': DashboardEnvelopeV1Schema(SavingsOverviewPayloadV1Schema),
-  '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
   '/api/plugins/savings/models': SavingsModelsPayloadV1Schema,
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
   '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
@@ -128,6 +124,11 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
     AnalyticsSubagentTreePayloadV1Schema,
   ),
   '/api/automation/scheduler/status': AutomationSchedulerStatusV1Schema,
+  '/api/automation/jobs': AutomationJobsPayloadV1Schema,
+  '/api/automation/skills': AutomationSkillsPayloadV1Schema,
+  '/api/automation/automatic-fact-receipts': AutomaticFactReceiptsPayloadV1Schema,
+  '/api/automation/runs': AutomationRunsPayloadV1Schema,
+  '/api/automation/outcomes': AutomationOutcomesPayloadSchema,
   '/api/application/retained/fact_store_curate': z.object({
     kind: z.literal('success'),
     value: z.object({
@@ -247,6 +248,12 @@ const DYNAMIC: ReadonlyArray<{
     pathname: '/api/plugins/savings/models',
     search: '?range=30d',
     schema: SavingsModelsPayloadV1Schema,
+  },
+  {
+    label: 'doctor_findings_api::findings storage family',
+    pathname: '/api/doctor/findings',
+    search: '?family=storage',
+    schema: DashboardEnvelopeV1Schema(DoctorFindingsPayloadV1Schema),
   },
 ];
 

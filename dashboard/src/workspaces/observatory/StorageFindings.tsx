@@ -2,7 +2,7 @@ import type {
   DashboardEnvelopeV1,
   DoctorReportEntryV1,
   StorageFindingKindStatusV1,
-  StorageFindingsPayloadV1,
+  DoctorFindingsPayloadV1,
 } from '../../contracts/generated.ts';
 import { EnvelopeTruth } from '../../ui/EnvelopeTruth.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
@@ -12,7 +12,7 @@ import { doctorEvidencePresentation } from './doctorModel.ts';
 import { storageFindingLabel, storageSourcePresentation } from './storageModel.ts';
 import { ReadModelNotes } from './StorageTelemetry.tsx';
 
-/** `/api/storage/findings` is the storage-family projection of the admitted
+/** `/api/doctor/findings?family=storage` is the storage-family projection of the admitted
  * canonical Doctor report. The browser preserves its typed subclass, evidence,
  * and coverage without recomputing health. */
 export function FindingsReadModel({
@@ -20,14 +20,14 @@ export function FindingsReadModel({
   refreshing,
   onRefresh,
 }: {
-  envelope: DashboardEnvelopeV1<StorageFindingsPayloadV1>;
+  envelope: DashboardEnvelopeV1<DoctorFindingsPayloadV1>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
   return (
     <>
       <EnvelopeTruth envelope={envelope} refreshing={refreshing} onRefresh={onRefresh} />
-      <StorageSourceStatuses statuses={envelope.payload.kind_statuses} />
+      <StorageSourceStatuses statuses={envelope.payload.storage_kind_statuses} />
       {envelope.payload.entries.length === 0 ? (
         <ReadModelState kind={envelope.domain_state} detail={envelope.payload.note} />
       ) : (

@@ -13,9 +13,9 @@
     "required_first": [
       "tracedecay_context",
       "tracedecay_search",
-      "tracedecay_body",
-      "tracedecay_outline",
-      "tracedecay_read",
+      "tracedecay_find_exact_symbol",
+      "tracedecay_source_body",
+      "tracedecay_source_outline",
       "tracedecay_grep"
     ],
     "acceptable": [
@@ -42,5 +42,5 @@
     "compute_grand_total"
   ],
   "max_tool_calls": 3,
-  "notes": "file structure; tracedecay_outline is a table-of-contents call, cheaper than a full read."
+  "notes": "file structure; tracedecay_source_outline is a table-of-contents call, cheaper than a full read."
 }

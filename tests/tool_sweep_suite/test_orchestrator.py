@@ -82,7 +82,7 @@ class WholeRunDeadlineTests(unittest.TestCase):
         """A stalled isolated phase must never leave CI without a final report."""
         orchestrator = load_orchestrator()
         manifest = {
-            "tools": [{"name": "tracedecay_read"}],
+            "tools": [{"name": "tracedecay_grep"}],
             "resources": [{"uri": "tracedecay://health"}],
             "prompts": [{"name": "triage"}],
         }
@@ -103,7 +103,7 @@ class WholeRunDeadlineTests(unittest.TestCase):
         orchestrator = load_orchestrator()
         report = {
             "entries": [{
-                "kind": "tool", "name": "tracedecay_read", "verdict": "FAIL",
+                "kind": "tool", "name": "tracedecay_grep", "verdict": "FAIL",
                 "note": "typed failure", "problem_code": "store.offline",
                 "elapsed_ms": 0, "deadline_ms": 1,
             }],

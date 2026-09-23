@@ -138,7 +138,7 @@ export interface RetentionBacklogReading {
 /**
  * The one retention signal with a real read route behind it.
  *
- * `/api/storage/findings` publishes a typed status per Doctor storage finding
+ * `/api/doctor/findings?family=storage` publishes a typed status per Doctor storage finding
  * kind. `retention_backlog` says whether retention work is falling behind, and
  * its `state` distinguishes a real reading from a partial one from a kind this
  * build does not support, three different things that a single count would

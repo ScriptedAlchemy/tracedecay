@@ -4,8 +4,9 @@ import { Pause, Play } from 'lucide-react';
 import type {
   AutomationSchedulerStatusV1,
   AutomationTaskStatusV1,
+  AutomationRunRowV1,
 } from '../../contracts/generated.ts';
-import type { RunRow, SchedulerControlResult } from '../../data/query/automation.ts';
+import type { SchedulerControlResult } from '../../data/query/automation.ts';
 import { scopeWriteSentence, type ScopeWritability } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
 import { Panel, ReadoutBar, type ReadoutItem } from '../../ui/instrument.tsx';
@@ -17,7 +18,6 @@ import {
   formatUtc,
   latestRunForTask,
   observedSchedulerActivity,
-  readLastSchedulerRun,
   runStatusTone,
   sameInspected,
   schedulerReading,
@@ -53,7 +53,7 @@ export function SchedulerBay({
     onToggle: (paused: boolean) => void;
   };
   /** Loaded ledger rows, or null while that read is blocked. */
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   inspected: Inspected | null;
   pinned: Inspected | null;
   onInspect: (next: Inspected) => void;
@@ -154,16 +154,16 @@ function TaskLine({
   onSelect,
 }: {
   task: AutomationTaskStatusV1;
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   inspected: boolean;
   selected: boolean;
   onInspect: () => void;
   onSelect: () => void;
 }) {
-  const last = readLastSchedulerRun(task.last_scheduler_run);
+  const last = task.last_scheduler_run;
   // The scheduler's own last-run record is the authority for this row; the
   // loaded ledger page is consulted only when the scheduler attached none.
-  const fallback = last.kind === 'none' && runs !== null ? latestRunForTask(runs, task.task) : undefined;
+  const fallback = last == null && runs !== null ? latestRunForTask(runs, task.task) : undefined;
   return (
     <InspectRow
       testId={`task-row-${task.task}`}
@@ -183,10 +183,8 @@ function TaskLine({
         )}
       </Cell>
       <Cell numeric>
-        {last.kind === 'run' ? (
-          <LastRunStamp completedAt={last.run.completed_at} />
-        ) : last.kind === 'unreadable' ? (
-          <Absent>record unreadable</Absent>
+        {last != null ? (
+          <LastRunStamp completedAt={last.completed_at} />
         ) : fallback ? (
           <span className="flex flex-col gap-0.5">
             <LastRunStamp completedAt={fallback.completed_at} />
@@ -197,8 +195,8 @@ function TaskLine({
         )}
       </Cell>
       <Cell>
-        {last.kind === 'run' ? (
-          <ToneWord tone={runStatusTone(last.run.status)} word={last.run.status} />
+        {last != null ? (
+          <ToneWord tone={runStatusTone(last.status)} word={last.status} />
         ) : fallback ? (
           <ToneWord tone={runStatusTone(fallback.status)} word={fallback.status} />
         ) : (

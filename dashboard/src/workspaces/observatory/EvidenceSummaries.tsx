@@ -9,7 +9,6 @@ import type {
   DoctorFindingsPayloadV1,
   ExecutionTopologyMetricsV1,
   ObservatoryReadModelV1,
-  StorageFindingsPayloadV1,
   StorageTelemetryPayloadV1,
 } from '../../contracts/generated.ts';
 import { envelopePayload } from '../../data/query/useEnvelope.ts';
@@ -646,7 +645,7 @@ export function AnalyticsBody({
 }: {
   summary: EvidenceSummary;
   observatory: EvidenceRead<ObservatoryReadModelV1>;
-  findings: EvidenceRead<StorageFindingsPayloadV1>;
+  findings: EvidenceRead<DoctorFindingsPayloadV1>;
 }) {
   const model = envelopePayload(observatory.result);
   if (!model) return <BlockedBody summary={summary} />;
@@ -655,7 +654,7 @@ export function AnalyticsBody({
   const staging = shareStagingReading(model.metrics);
   const findingsPayload = envelopePayload(findings.result);
   const retention = findingsPayload
-    ? retentionBacklogReading(findingsPayload.kind_statuses)
+    ? retentionBacklogReading(findingsPayload.storage_kind_statuses)
     : null;
   const rows: { label: string; word: string; state: DomainStateKind; attr: string }[] = [
     { label: 'collection mode', word: mode.label, state: mode.state, attr: 'mode' },
@@ -759,7 +758,7 @@ export function FindingsBody({
   onSelectFinding,
 }: {
   summary: EvidenceSummary;
-  findings: EvidenceRead<StorageFindingsPayloadV1>;
+  findings: EvidenceRead<DoctorFindingsPayloadV1>;
   selectedFinding: number | null;
   onSelectFinding: (index: number) => void;
 }) {
@@ -768,7 +767,7 @@ export function FindingsBody({
   return (
     <>
       <Rows label="Storage finding producers">
-        {payload.kind_statuses.map((status) => (
+        {payload.storage_kind_statuses.map((status) => (
           <div
             key={status.kind}
             role="listitem"

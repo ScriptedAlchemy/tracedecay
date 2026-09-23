@@ -37,35 +37,10 @@ describe('Code view locations', () => {
     });
   });
 
-  it('reads a published Topology link as Cortex with the same symbol', () => {
-    expect(readCodeLocation(new URLSearchParams('view=topology&symbol=symbol-42'))).toEqual({
-      view: 'cortex',
-      focusId: 'symbol-42',
-    });
-    expect(readCodeLocation(new URLSearchParams('view=cortex'))).toEqual({
-      view: 'cortex',
-      focusId: null,
-    });
-  });
-
-  it('maps published Trace and Core links into Trace with the same symbol', () => {
-    for (const legacyView of ['trace', 'core'] as const) {
-      expect(
-        readCodeLocation(
-          new URLSearchParams(
-            `structureLens=${legacyView}&structureFocus=symbol-42`,
-          ),
-        ),
-      ).toEqual({ view: 'trace', focusId: 'symbol-42' });
-    }
-  });
-
-  it('writes the default view without old or redundant query parameters', () => {
+  it('writes the default view without redundant query parameters', () => {
     expect(
       writeCodeLocation(
-        new URLSearchParams(
-          'view=trace&symbol=symbol-42&structureLens=core&structureFocus=old',
-        ),
+        new URLSearchParams('view=trace&symbol=symbol-42'),
         {
           view: 'cortex',
           focusId: null,

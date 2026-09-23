@@ -3,15 +3,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { relativeAge } from "../../ui/time.ts";
 import { cn } from "../../ui/cn";
-import {
-  automationRunsReading,
-  useAutomationRunArtifactPayload,
-  useAutomationRunArtifacts,
-  useAutomationRuns,
-  type RunArtifactRow,
-  type RunArtifactsPayload,
-  type RunRow,
-} from "../../data/query/automation.ts";
+import type { AutomationRunArtifact, AutomationRunArtifactsPayloadV1, AutomationRunRowV1 } from "../../contracts/generated.ts";
+import { automationRunsReading, useAutomationRunArtifactPayload, useAutomationRunArtifacts, useAutomationRuns } from "../../data/query/automation.ts";
 import { artifactPayloadBelongsTo, missingArtifactKinds } from "./ledger.ts";
 
 /**
@@ -77,7 +70,7 @@ export function RunHistory() {
 
 /** One run: a disclosure row whose panel holds the artifact reading. The
  * artifact request is issued only when the row first opens. */
-function RunLine({ run }: { run: RunRow }) {
+function RunLine({ run }: { run: AutomationRunRowV1 }) {
   const [open, setOpen] = useState(false);
   const started = Number(run.started_at);
   const age = Number.isFinite(started)
@@ -163,7 +156,7 @@ function RunArtifacts({
   );
 }
 
-function ArtifactList({ data }: { data: RunArtifactsPayload }) {
+function ArtifactList({ data }: { data: AutomationRunArtifactsPayloadV1 }) {
   const chain = data.artifact_chain;
   const missing = missingArtifactKinds(chain);
   return (
@@ -193,7 +186,7 @@ function ArtifactLine({
   artifact,
 }: {
   runId: string;
-  artifact: RunArtifactRow;
+  artifact: AutomationRunArtifact;
 }) {
   const [open, setOpen] = useState(false);
   const payload = useAutomationRunArtifactPayload(runId, artifact.kind, open);

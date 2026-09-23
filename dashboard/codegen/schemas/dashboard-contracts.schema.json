@@ -230,6 +230,61 @@
       "description": "Strongly typed canonical identity: `AgentInstanceId`.",
       "type": "string"
     },
+    "AgentTaskFailureClass": {
+      "enum": [
+        "retryable",
+        "permanent",
+        "timeout",
+        "unavailable",
+        "denied",
+        "disconnected",
+        "malformed_output"
+      ],
+      "type": "string"
+    },
+    "AgentTaskKind": {
+      "enum": [
+        "memory_curator",
+        "session_reflector",
+        "skill_writer",
+        "combined_review",
+        "user_job"
+      ],
+      "type": "string"
+    },
+    "AgentTaskRetryAttempt": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "backoff_millis": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failure_classification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentTaskFailureClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "succeeded": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "attempt",
+        "succeeded",
+        "backoff_millis"
+      ],
+      "type": "object"
+    },
     "AnalyticsAgentUsageV1": {
       "properties": {
         "agent": {
@@ -1408,7 +1463,7 @@
     },
     "AuthorizedScopeSet": {
       "additionalProperties": false,
-      "description": "Immutable canonical set of exact roots admitted by their existing request\ncontexts. A registered locator participates only as frozen reopening\nevidence; its paired [`ResolvedScope`] remains the root identity authority.",
+      "description": "Immutable canonical set of exact roots admitted by their existing request\ncontexts. A registered locator participates only as frozen reopening\nevidence; its paired [`ResolvedScope`](crate::context::ResolvedScope) remains\nthe root identity authority.",
       "properties": {
         "actor_id": {
           "$ref": "#/$defs/ActorId"
@@ -1458,6 +1513,95 @@
         "selection"
       ],
       "type": "object"
+    },
+    "AutomaticFactReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "add_fact_request": {
+          "$ref": "#/$defs/ProjectMemoryFactAddRequest"
+        },
+        "applied_fact_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "apply_id": {
+          "type": "string"
+        },
+        "evidence_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item": true,
+        "quarantine_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recorded_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/AutomaticFactState"
+        },
+        "validation": true
+      },
+      "required": [
+        "schema_version",
+        "apply_id",
+        "run_id",
+        "state",
+        "add_fact_request",
+        "recorded_at_micros"
+      ],
+      "type": "object"
+    },
+    "AutomaticFactReceiptsPayloadV1": {
+      "description": "`GET /api/automation/automatic-fact-receipts`, newest first under `limit`.",
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "receipts": {
+          "items": {
+            "$ref": "#/$defs/AutomaticFactReceipt"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "receipts",
+        "count",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "AutomaticFactState": {
+      "enum": [
+        "applied",
+        "quarantined"
+      ],
+      "type": "string"
     },
     "AutomaticWorktreeGcV1": {
       "oneOf": [
@@ -1593,6 +1737,501 @@
       ],
       "type": "object"
     },
+    "AutomationJob": {
+      "additionalProperties": true,
+      "properties": {
+        "cooldown_secs": {
+          "description": "Cooldown after a retryable failure before the scheduler retries.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "created_at": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "delivery": {
+          "$ref": "#/$defs/JobDelivery",
+          "default": {
+            "mode": "file"
+          }
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "interval_secs": {
+          "description": "Interval when `schedule` is `\"interval\"`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "pre_run_command": {
+          "description": "Optional shell command whose stdout is injected as context. Refused\nunless the automation config sets `allow_job_commands` (default off).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "schedule": {
+          "description": "Parsed with [`parse_schedule`]: `manual`, `interval`, `hourly`,\n`daily`, `weekly`, `every <duration>`, or a 5-field cron expression\nevaluated against the wall clock (UTC).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill_ids": {
+          "description": "Managed skill ids whose bodies are prepended to the prompt.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updated_at": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "prompt",
+        "enabled",
+        "delivery",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "AutomationJobsPayloadV1": {
+      "description": "`GET /api/automation/jobs`.",
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/AutomationJob"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "jobs",
+        "count"
+      ],
+      "type": "object"
+    },
+    "AutomationOutcomesPayloadV1": {
+      "description": "`GET /api/automation/outcomes`.",
+      "properties": {
+        "error": {
+          "description": "Why the snapshot could not be read; empty when it was.",
+          "type": "string"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/FactOutcomeRecord"
+          },
+          "type": "array"
+        },
+        "generated_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillOutcomeRecord"
+          },
+          "type": "array"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/AutomationOutcomesSnapshotStatusV1"
+        }
+      },
+      "required": [
+        "generated_at",
+        "skills",
+        "facts",
+        "snapshot",
+        "error"
+      ],
+      "type": "object"
+    },
+    "AutomationOutcomesSnapshotStatusV1": {
+      "description": "Refresh watermarks of the persisted outcomes snapshot. `available` is\nfalse when the snapshot could not be read, which differs from a snapshot\nthat was never refreshed.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "facts_refreshed_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "skills_refreshed_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "skills_refreshed_at",
+        "facts_refreshed_at"
+      ],
+      "type": "object"
+    },
+    "AutomationRunArtifact": {
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "path",
+        "sha256",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "AutomationRunArtifactChainV1": {
+      "properties": {
+        "complete": {
+          "description": "Every expected kind is present and the chain verified.",
+          "type": "boolean"
+        },
+        "expected_kinds": {
+          "items": {
+            "$ref": "#/$defs/AutomationRunArtifactKind"
+          },
+          "type": "array"
+        },
+        "integrity_status": {
+          "$ref": "#/$defs/AutomationRunArtifactIntegrityV1"
+        },
+        "metadata_complete": {
+          "type": "boolean"
+        },
+        "present_kinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expected_kinds",
+        "present_kinds",
+        "metadata_complete",
+        "complete",
+        "integrity_status"
+      ],
+      "type": "object"
+    },
+    "AutomationRunArtifactIntegrityV1": {
+      "description": "Whether the ledger's artifact list matches the published artifact chain.",
+      "enum": [
+        "verified",
+        "ledger_publication_mismatch",
+        "publication_unavailable",
+        "verification_failed"
+      ],
+      "type": "string"
+    },
+    "AutomationRunArtifactKind": {
+      "enum": [
+        "traces",
+        "feedback",
+        "generated_evals",
+        "validation_gate",
+        "optimizer_diagnosis",
+        "codex_handoff"
+      ],
+      "type": "string"
+    },
+    "AutomationRunArtifactPayloadV1": {
+      "description": "`GET /api/automation/runs/{id}/artifacts/{kind}`. The artifact kind owns its\npayload shape, so it is served as opaque JSON.",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/AutomationRunArtifact"
+        },
+        "payload": true,
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "artifact",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "AutomationRunArtifactsPayloadV1": {
+      "description": "`GET /api/automation/runs/{id}/artifacts`.",
+      "properties": {
+        "artifact_chain": {
+          "$ref": "#/$defs/AutomationRunArtifactChainV1"
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/AutomationRunArtifact"
+          },
+          "type": "array"
+        },
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "artifacts",
+        "artifact_chain",
+        "count"
+      ],
+      "type": "object"
+    },
+    "AutomationRunLedgerCompletenessV1": {
+      "description": "`known` only when the ledger page holds every row and none was malformed.",
+      "enum": [
+        "known",
+        "partial"
+      ],
+      "type": "string"
+    },
+    "AutomationRunLedgerRecord": {
+      "properties": {
+        "accepted_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "applied_ops": true,
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/AutomationRunArtifact"
+          },
+          "type": "array"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "backend_attempt_count": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "backend_attempts": {
+          "items": {
+            "$ref": "#/$defs/AgentTaskRetryAttempt"
+          },
+          "type": "array"
+        },
+        "backend_identity": {
+          "description": "The durable backend/configuration identity this run executed under.\n\nA settled deterministic failure stays suppressed only while this\nmatches the identity now configured, so the scheduler can re-admit the\ntask the moment the backend or configuration changes. Records written\nbefore this field existed carry `None` and never suppress: an\nunidentified failure cannot be shown to have failed under the current\nidentity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completed_at": {
+          "type": "string"
+        },
+        "completed_at_micros": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_classification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentTaskFailureClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_retryable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "evidence_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fallback_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposed_ops": true,
+        "rejected_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rejected_ops": true,
+        "report_ref": true,
+        "response_schema": true,
+        "reviewed_count": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped_count": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/AutomationRunStatus"
+        },
+        "strict_json": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "task": {
+          "$ref": "#/$defs/AgentTaskKind"
+        },
+        "task_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trigger": {
+          "$ref": "#/$defs/AutomationTrigger"
+        },
+        "validation_report": true
+      },
+      "required": [
+        "schema_version",
+        "run_id",
+        "trigger",
+        "task",
+        "backend",
+        "status",
+        "reviewed_count",
+        "accepted_count",
+        "rejected_count",
+        "skipped_count",
+        "backend_attempt_count",
+        "started_at",
+        "completed_at"
+      ],
+      "type": "object"
+    },
     "AutomationRunProblemV1": {
       "additionalProperties": false,
       "description": "Canonical admitted problem for one automation run.\n\nThe generic application receipt binds the outer operation. The ordered\nreceipts retain the exact canonical memory effects needed to reconcile a\npartial terminal without inventing an endpoint-specific payload.",
@@ -1671,6 +2310,128 @@
       ],
       "type": "object"
     },
+    "AutomationRunRowV1": {
+      "description": "One ledger record as the run-history row. `task_key` is the exact per-job\nidentity (`user_job:<id>`); rows written before it existed carry `null` and\ncannot be joined to a job.",
+      "properties": {
+        "accepted_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "artifact_kinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "backend_attempt_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completed_at": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_classification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentTaskFailureClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_retryable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rejected_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reviewed_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "skipped_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/AutomationRunStatus"
+        },
+        "task": {
+          "$ref": "#/$defs/AgentTaskKind"
+        },
+        "task_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trigger": {
+          "$ref": "#/$defs/AutomationTrigger"
+        }
+      },
+      "required": [
+        "run_id",
+        "task",
+        "task_key",
+        "trigger",
+        "backend",
+        "model",
+        "status",
+        "reviewed_count",
+        "accepted_count",
+        "rejected_count",
+        "skipped_count",
+        "error",
+        "error_classification",
+        "error_retryable",
+        "backend_attempt_count",
+        "started_at",
+        "completed_at",
+        "artifact_kinds"
+      ],
+      "type": "object"
+    },
+    "AutomationRunStatus": {
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped"
+      ],
+      "type": "string"
+    },
     "AutomationRunSummaryV1": {
       "additionalProperties": false,
       "properties": {
@@ -1744,6 +2505,47 @@
           "type": "object"
         }
       ]
+    },
+    "AutomationRunsPayloadV1": {
+      "description": "`GET /api/automation/runs`, newest first under `limit`.",
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/AutomationRunLedgerCompletenessV1"
+        },
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "malformed_row_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/AutomationRunRowV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runs",
+        "count",
+        "limit",
+        "has_more",
+        "malformed_row_count",
+        "completeness"
+      ],
+      "type": "object"
     },
     "AutomationSchedulerAvailabilityV1": {
       "description": "Closed availability vocabulary for the scheduler status reading.\n\nWire tokens stay the historical labels. A new state is a compile error in\n[`scheduler_status_label`] until this enum gains a variant.",
@@ -1850,6 +2652,27 @@
       ],
       "type": "object"
     },
+    "AutomationSkillsPayloadV1": {
+      "description": "`GET /api/automation/skills`.",
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/ManagedSkill"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "skills",
+        "count"
+      ],
+      "type": "object"
+    },
     "AutomationSkipReasonV1": {
       "enum": [
         "automation_disabled",
@@ -1891,8 +2714,7 @@
         "session_evidence_budget_suppressed",
         "session_evidence_timed_out",
         "session_evidence_cancelled",
-        "no_session_evidence",
-        "shipped_fact_proposal_history_retired"
+        "no_session_evidence"
       ],
       "type": "string"
     },
@@ -1902,6 +2724,14 @@
           "type": "boolean"
         },
         "last_scheduler_run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutomationRunLedgerRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "description": "The most recent scheduler-triggered ledger record. Its run artifacts\nremain the canonical detailed receipt surface."
         },
         "skip_reason": {
@@ -1934,6 +2764,17 @@
         "skill_writer",
         "combined_review",
         "user_job"
+      ],
+      "type": "string"
+    },
+    "AutomationTrigger": {
+      "enum": [
+        "manual_cli",
+        "manual_mcp",
+        "dashboard",
+        "application",
+        "scheduler",
+        "host_receipt"
       ],
       "type": "string"
     },
@@ -2291,12 +3132,6 @@
     "CodeCloneIndexCoverageV1": {
       "description": "Coverage retained by one clone-index artifact or in-progress successor.\n\nCounts are `None` until the clone artifact has observed the corresponding\ndenominator. A complete empty repository reports `Some(0)`, which keeps a\ndesigned zero distinct from unavailable coverage.",
       "properties": {
-        "completed_source_pages": {
-          "description": "Sealed source pages committed to clone indexing.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "conservative_normalized_bodies": {
           "description": "Eligible bodies with a conservative exact posting.",
           "format": "uint64",
@@ -2432,12 +3267,6 @@
             "null"
           ]
         },
-        "total_source_pages": {
-          "description": "Sealed source pages in the generation.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "unique_payloads": {
           "description": "Distinct content-addressed payloads retained by the artifact.",
           "format": "uint64",
@@ -2464,9 +3293,7 @@
         "excluded_too_large_bodies",
         "excluded_incomplete_tokenization_bodies",
         "rename_partial_bodies",
-        "rename_unsupported_bodies",
-        "completed_source_pages",
-        "total_source_pages"
+        "rename_unsupported_bodies"
       ],
       "type": "object"
     },
@@ -2528,7 +3355,7 @@
       "description": "Measured resources and update accounting for one clone-index generation.",
       "properties": {
         "bytes_on_disk": {
-          "description": "Current durable artifact or staging-file bytes.",
+          "description": "Durable artifact bytes.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -2589,23 +3416,6 @@
           "required": [
             "state",
             "reason"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "A restartable clone successor is consuming sealed source pages.",
-          "properties": {
-            "observation": {
-              "$ref": "#/$defs/CodeCloneIndexObservationV1"
-            },
-            "state": {
-              "const": "backfilling",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state",
-            "observation"
           ],
           "type": "object"
         },
@@ -9483,7 +10293,7 @@
         },
         {
           "const": "storage",
-          "description": "Storage retention, size, and efficiency over canonical observability\nread models. Distinct from [`Self::StorageRuntime`] health: this\nfamily surfaces over-budget stores, identity-drift orphans, quarantined\nincident debris, and retention backlog. The typed\nsubclass vocabulary is [`DoctorStorageFindingKindV1`].",
+          "description": "Storage retention, size, and efficiency over canonical observability\nread models. Distinct from [`Self::StorageRuntime`] health: this\nfamily surfaces over-budget stores, identity-drift orphans, incident\ndebris, and retention backlog. The typed\nsubclass vocabulary is [`DoctorStorageFindingKindV1`].",
           "type": "string"
         },
         {
@@ -9573,6 +10383,13 @@
             "$ref": "#/$defs/SchemaConvergenceFindingV1"
           },
           "type": "array"
+        },
+        "storage_kind_statuses": {
+          "description": "Source coverage for each typed storage finding producer. Empty when the\nfamily filter excludes storage or the family filter was rejected.",
+          "items": {
+            "$ref": "#/$defs/StorageFindingKindStatusV1"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -9581,6 +10398,7 @@
         "report_coverage",
         "known_families",
         "schema_convergences",
+        "storage_kind_statuses",
         "note"
       ],
       "type": "object"
@@ -9646,7 +10464,7 @@
         },
         {
           "const": "incident_debris_present",
-          "description": "Quarantined recovery/corruption artifacts are present and awaiting\ncollection.",
+          "description": "Recovery/corruption artifacts are present beside a store and awaiting\ndeletion.",
           "type": "string"
         },
         {
@@ -11431,6 +12249,103 @@
       ],
       "type": "object"
     },
+    "FactOutcomeRecord": {
+      "properties": {
+        "access_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "apply_id": {
+          "description": "Immutable identity of the terminal automatic-fact receipt.",
+          "type": "string"
+        },
+        "canonical_fact_id": {
+          "description": "Present only for receipts whose terminal effect applied a canonical fact.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "days_since_recorded": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "helpful_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_recalled_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "recorded_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "retrieval_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/ProjectMemoryAutomaticFactStateV1"
+        },
+        "still_exists": {
+          "type": "boolean"
+        },
+        "unhelpful_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "verdict": {
+          "$ref": "#/$defs/FactOutcomeVerdict"
+        }
+      },
+      "required": [
+        "apply_id",
+        "state",
+        "recorded_at",
+        "days_since_recorded",
+        "still_exists",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "FactOutcomeVerdict": {
+      "enum": [
+        "recalled_and_helpful",
+        "recalled",
+        "never_recalled",
+        "deleted",
+        "quarantined",
+        "unavailable"
+      ],
+      "type": "string"
+    },
     "FactSearchGraphCoverageV1": {
       "oneOf": [
         {
@@ -13187,6 +14102,44 @@
       ],
       "type": "object"
     },
+    "JobDelivery": {
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "file",
+              "type": "string"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "webhook",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "url"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "LatencyDistributionReadModelV1": {
       "description": "p50/p95/p99 for one provider operation latency stage.",
       "properties": {
@@ -14715,6 +15668,188 @@
       ],
       "type": "object"
     },
+    "ManagedSkill": {
+      "properties": {
+        "body_markdown": {
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/$defs/ManagedSkillMetadata"
+        },
+        "support_files": {
+          "items": {
+            "$ref": "#/$defs/ManagedSupportFile"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "metadata",
+        "body_markdown",
+        "support_files"
+      ],
+      "type": "object"
+    },
+    "ManagedSkillMaterializationScope": {
+      "enum": [
+        "global",
+        "project"
+      ],
+      "type": "string"
+    },
+    "ManagedSkillMetadata": {
+      "properties": {
+        "absorbed_into": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "activated_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "archived_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "checksum": {
+          "type": "string"
+        },
+        "created_at": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "materialization_scope": {
+          "$ref": "#/$defs/ManagedSkillMaterializationScope"
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ManagedSkillProvenance"
+        },
+        "routing_description": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ManagedSkillState"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "targets": {
+          "default": [
+            "cursor",
+            "codex",
+            "claude",
+            "agents",
+            "opencode",
+            "kimi",
+            "kiro",
+            "hermes"
+          ],
+          "items": {
+            "$ref": "#/$defs/SkillInstallTarget"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "summary",
+        "routing_description",
+        "category",
+        "targets",
+        "state",
+        "pinned",
+        "checksum",
+        "created_at",
+        "updated_at",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "ManagedSkillProvenance": {
+      "properties": {
+        "actor": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/ManagedSkillSource"
+        }
+      },
+      "required": [
+        "source",
+        "actor",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "ManagedSkillSource": {
+      "enum": [
+        "automation_run",
+        "user",
+        "import"
+      ],
+      "type": "string"
+    },
+    "ManagedSkillState": {
+      "enum": [
+        "active",
+        "disabled",
+        "archived"
+      ],
+      "type": "string"
+    },
+    "ManagedSupportFile": {
+      "properties": {
+        "bytes": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "bytes"
+      ],
+      "type": "object"
+    },
     "ManifestDigest": {
       "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
       "type": "string"
@@ -15618,6 +16753,29 @@
       ],
       "type": "object"
     },
+    "MemoryDerivedScanV1": {
+      "description": "Cache provenance of one derived (projection or similarity) read.",
+      "properties": {
+        "cache_scope": {
+          "type": "string"
+        },
+        "cache_state": {
+          "type": "string"
+        },
+        "vector_rows_read": {
+          "description": "Vector rows loaded for this response; zero on a cache hit.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cache_scope",
+        "cache_state",
+        "vector_rows_read"
+      ],
+      "type": "object"
+    },
     "MemoryEntityRowV1": {
       "additionalProperties": false,
       "properties": {
@@ -15863,6 +17021,22 @@
         "limit"
       ],
       "type": "object"
+    },
+    "MemoryFeedbackActionV1": {
+      "enum": [
+        "helpful",
+        "unhelpful"
+      ],
+      "type": "string"
+    },
+    "MemoryFeedbackDetailsAvailabilityV1": {
+      "description": "How much of a feedback event this store can still account for. Redacted\ndetail was withheld; unknown detail was never recorded.",
+      "enum": [
+        "available",
+        "redacted",
+        "unknown"
+      ],
+      "type": "string"
     },
     "MemoryFeedbackFunnelV1": {
       "additionalProperties": false,
@@ -16234,6 +17408,82 @@
       ],
       "type": "object"
     },
+    "MemoryOplogEventV1": {
+      "description": "One canonical lineage operation. Operations without a fact target carry no\n`fact_id`; the route does not expose mutation detail.",
+      "properties": {
+        "fact_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "op": {
+          "type": "string"
+        },
+        "ts": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "ts",
+        "op",
+        "fact_id"
+      ],
+      "type": "object"
+    },
+    "MemoryOplogPayloadV1": {
+      "description": "`GET /api/plugins/holographic/oplog`, newest first.",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/MemoryOplogEventV1"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardDomainStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Request lifecycle state when the read ended before a result."
+        }
+      },
+      "required": [
+        "events",
+        "count",
+        "limit",
+        "error"
+      ],
+      "type": "object"
+    },
     "MemoryOverviewPayloadV1": {
       "additionalProperties": false,
       "properties": {
@@ -16301,6 +17551,234 @@
       ],
       "type": "object"
     },
+    "MemoryProjectionCompletenessV1": {
+      "enum": [
+        "complete",
+        "bounded",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "MemoryProjectionCoverageV1": {
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/MemoryProjectionCompletenessV1"
+        },
+        "examined": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "omission_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "completeness",
+        "examined",
+        "limit",
+        "omission_reasons"
+      ],
+      "type": "object"
+    },
+    "MemoryProjectionMethodV1": {
+      "description": "`pca` only when the decomposition succeeded over at least two equal-length\nvectors; every other outcome is `none` and is not a semantic map.",
+      "enum": [
+        "pca",
+        "none"
+      ],
+      "type": "string"
+    },
+    "MemoryProjectionPayloadV1": {
+      "description": "`GET /api/plugins/holographic/projection`.",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/MemoryProjectionCoverageV1"
+        },
+        "dim": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "method": {
+          "$ref": "#/$defs/MemoryProjectionMethodV1"
+        },
+        "points": {
+          "items": {
+            "$ref": "#/$defs/MemoryProjectionPointV1"
+          },
+          "type": "array"
+        },
+        "scan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryDerivedScanV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardDomainStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Request lifecycle state when the read ended before a result."
+        }
+      },
+      "required": [
+        "exists",
+        "dim",
+        "limit",
+        "method",
+        "points",
+        "coverage",
+        "error"
+      ],
+      "type": "object"
+    },
+    "MemoryProjectionPointV1": {
+      "description": "One projected fact placed in the 2D phase projection.",
+      "properties": {
+        "access_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "category": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "entities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entity_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fact_id": {
+          "$ref": "#/$defs/FactId"
+        },
+        "helpful_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_recalled_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "metadata": true,
+        "payload_access": {
+          "$ref": "#/$defs/PayloadAccessState"
+        },
+        "projected_as_of": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "retrieval_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trust_score": {
+          "format": "double",
+          "type": "number"
+        },
+        "unhelpful_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updated_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "fact_id",
+        "payload_access",
+        "trust_score",
+        "retrieval_count",
+        "access_count",
+        "helpful_count",
+        "unhelpful_count",
+        "created_at",
+        "updated_at",
+        "projected_as_of",
+        "last_recalled_at",
+        "content",
+        "category",
+        "tags",
+        "entities",
+        "metadata",
+        "entity_count",
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
     "MemoryReadStatusV1": {
       "additionalProperties": false,
       "properties": {
@@ -16322,6 +17800,204 @@
       },
       "required": [
         "state"
+      ],
+      "type": "object"
+    },
+    "MemoryScoreBinV1": {
+      "description": "One fixed-width similarity histogram bin.",
+      "properties": {
+        "count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "end": {
+          "format": "double",
+          "type": "number"
+        },
+        "start": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "count"
+      ],
+      "type": "object"
+    },
+    "MemoryScoreDistributionV1": {
+      "description": "Similarity score distribution over every finite scored pair. Every\nstatistic is `None` when no finite pair was scored, never zero.",
+      "properties": {
+        "average_score": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "bin_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bins": {
+          "items": {
+            "$ref": "#/$defs/MemoryScoreBinV1"
+          },
+          "type": "array"
+        },
+        "max_score": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "min_score": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_pairs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bin_count",
+        "total_pairs",
+        "min_score",
+        "max_score",
+        "average_score",
+        "bins"
+      ],
+      "type": "object"
+    },
+    "MemorySimilarityPairV1": {
+      "description": "One scored fact pair above the requested similarity floor.",
+      "properties": {
+        "a_category": {
+          "type": "string"
+        },
+        "a_content": {
+          "type": "string"
+        },
+        "a_id": {
+          "type": "string"
+        },
+        "b_category": {
+          "type": "string"
+        },
+        "b_content": {
+          "type": "string"
+        },
+        "b_id": {
+          "type": "string"
+        },
+        "classification": {
+          "type": "string"
+        },
+        "similarity": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "a_id",
+        "b_id",
+        "a_content",
+        "b_content",
+        "a_category",
+        "b_category",
+        "similarity",
+        "classification"
+      ],
+      "type": "object"
+    },
+    "MemorySimilarityPayloadV1": {
+      "description": "`GET /api/plugins/holographic/similarity`.\n\n`count` is the number of vectored facts scored, `total_pairs` the finite\npairs scored before the floor and cap, and `pairs` what survived both.",
+      "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dim": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_similarity": {
+          "format": "double",
+          "type": "number"
+        },
+        "pairs": {
+          "items": {
+            "$ref": "#/$defs/MemorySimilarityPairV1"
+          },
+          "type": "array"
+        },
+        "scan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryDerivedScanV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "score_distribution": {
+          "$ref": "#/$defs/MemoryScoreDistributionV1"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardDomainStateV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Request lifecycle state when the read ended before a result."
+        },
+        "total_pairs": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "exists",
+        "dim",
+        "count",
+        "limit",
+        "min_similarity",
+        "total_pairs",
+        "score_distribution",
+        "pairs",
+        "error"
       ],
       "type": "object"
     },
@@ -16440,6 +18116,126 @@
         "bucket",
         "label",
         "count"
+      ],
+      "type": "object"
+    },
+    "MemoryTrustHistoryCompletenessV1": {
+      "enum": [
+        "complete",
+        "partial"
+      ],
+      "type": "string"
+    },
+    "MemoryTrustHistoryCursorV1": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "occurred_at",
+        "event_id"
+      ],
+      "type": "object"
+    },
+    "MemoryTrustHistoryEventV1": {
+      "description": "One append-only feedback event. `source` and `note` are absent when the\nevent carried none, which differs from an unknown value.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/MemoryFeedbackActionV1"
+        },
+        "delta": {
+          "format": "double",
+          "type": "number"
+        },
+        "details_availability": {
+          "$ref": "#/$defs/MemoryFeedbackDetailsAvailabilityV1"
+        },
+        "event_id": {
+          "type": "string"
+        },
+        "new_trust": {
+          "format": "double",
+          "type": "number"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_trust": {
+          "format": "double",
+          "type": "number"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "event_id",
+        "timestamp",
+        "action",
+        "old_trust",
+        "new_trust",
+        "delta",
+        "details_availability"
+      ],
+      "type": "object"
+    },
+    "MemoryTrustHistoryPayloadV1": {
+      "description": "`GET /api/plugins/holographic/fact/{fact_id}/trust-history`. `partial`\nexactly when `next_after` names the continuation.",
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/MemoryTrustHistoryCompletenessV1"
+        },
+        "error": {
+          "type": "string"
+        },
+        "fact_id": {
+          "type": "string"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "next_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryTrustHistoryCursorV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trust_history": {
+          "items": {
+            "$ref": "#/$defs/MemoryTrustHistoryEventV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "fact_id",
+        "trust_history",
+        "limit",
+        "completeness",
+        "next_after",
+        "error"
       ],
       "type": "object"
     },
@@ -17617,6 +19413,62 @@
       "description": "Strongly typed canonical identity: `ProjectId`.",
       "type": "string"
     },
+    "ProjectMemoryAutomaticFactStateV1": {
+      "description": "The only durable outcomes of an automatic fact apply. Candidate discovery\nand in-flight work are owned by the automation run receipt, never this\nterminal audit record.",
+      "enum": [
+        "applied",
+        "quarantined"
+      ],
+      "type": "string"
+    },
+    "ProjectMemoryFactAddRequest": {
+      "additionalProperties": false,
+      "description": "Transport-neutral input accepted before privacy sanitization.\n\nTransport adapters own their wire DTOs. This single use-case request owns\nthe boundary between unsanitized user intent and the canonical store\ncommand, so callers cannot accidentally bypass payload sanitization.",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FactCategoryV1"
+        },
+        "content": {
+          "type": "string"
+        },
+        "entities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "metadata": true,
+        "source_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trust": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "content",
+        "category",
+        "source_label",
+        "tags",
+        "entities",
+        "trust",
+        "metadata"
+      ],
+      "type": "object"
+    },
     "ProjectMemoryGraphRelationKindV1": {
       "description": "The finite relationship vocabulary exposed by the verified project-memory graph.",
       "enum": [
@@ -17853,20 +19705,11 @@
         "config": {
           "$ref": "#/$defs/ProjectEditableSettingsV1"
         },
-        "config_path": {
-          "type": "string"
-        },
         "configuration_revision_id": {
           "type": "string"
         },
         "configuration_snapshot_id": {
           "type": "string"
-        },
-        "legacy_config_path": {
-          "type": "string"
-        },
-        "legacy_config_read_only": {
-          "type": "boolean"
         },
         "pr_autotrack": {
           "$ref": "#/$defs/PrAutoTrackPayloadV1"
@@ -17876,9 +19719,6 @@
         }
       },
       "required": [
-        "config_path",
-        "legacy_config_path",
-        "legacy_config_read_only",
         "configuration_snapshot_id",
         "configuration_revision_id",
         "config",
@@ -19540,17 +21380,6 @@
           ],
           "default": null
         },
-        "lifetime_counters": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SavingsLifetimeCountersV1"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "recording": true
       },
       "required": [
@@ -19558,8 +21387,7 @@
         "db",
         "recording",
         "error",
-        "ledger",
-        "lifetime_counters"
+        "ledger"
       ],
       "type": "object"
     },
@@ -19583,61 +21411,6 @@
         "last_7d",
         "last_30d",
         "all_time"
-      ],
-      "type": "object"
-    },
-    "SavingsLifetimeCountersV1": {
-      "properties": {
-        "project_total": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "projects": {
-          "items": {
-            "$ref": "#/$defs/SavingsLifetimeProjectV1"
-          },
-          "type": "array"
-        },
-        "projects_limit": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "projects_truncated": {
-          "type": "boolean"
-        },
-        "total_tokens_saved": {
-          "format": "int64",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "total_tokens_saved",
-        "project_total",
-        "projects_limit",
-        "projects_truncated",
-        "projects"
-      ],
-      "type": "object"
-    },
-    "SavingsLifetimeProjectV1": {
-      "properties": {
-        "path": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "tokens_saved": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "path",
-        "tokens_saved"
       ],
       "type": "object"
     },
@@ -20199,138 +21972,6 @@
       ],
       "type": "object"
     },
-    "SavingsSessionModelV1": {
-      "properties": {
-        "cost_basis": {
-          "type": "string"
-        },
-        "estimated": {
-          "$ref": "#/$defs/TokenPairV1"
-        },
-        "estimated_messages": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "messages": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "model": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "provider_actual": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TokenActualV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "provider_usage_events": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "tokenized": {
-          "$ref": "#/$defs/TokenPairV1"
-        },
-        "tokenized_messages": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "tokenizer": true
-      },
-      "required": [
-        "model",
-        "tokenizer",
-        "messages",
-        "provider_usage_events",
-        "tokenized_messages",
-        "estimated_messages",
-        "cost_basis",
-        "provider_actual",
-        "tokenized",
-        "estimated"
-      ],
-      "type": "object"
-    },
-    "SavingsSessionRowV1": {
-      "properties": {
-        "cost_basis": {
-          "type": "string"
-        },
-        "estimated_messages": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "is_subagent": {
-          "type": "boolean"
-        },
-        "last_message_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "messages": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "models": {
-          "items": {
-            "$ref": "#/$defs/SavingsSessionModelV1"
-          },
-          "type": "array"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "provider_usage_events": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "session_id": {
-          "type": "string"
-        },
-        "started_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "tokenized_messages": {
-          "format": "int64",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "provider",
-        "session_id",
-        "title",
-        "started_at",
-        "last_message_at",
-        "is_subagent",
-        "messages",
-        "provider_usage_events",
-        "tokenized_messages",
-        "estimated_messages",
-        "cost_basis",
-        "models"
-      ],
-      "type": "object"
-    },
     "SavingsSessionSummaryV1": {
       "properties": {
         "available": {
@@ -20485,54 +22126,6 @@
       ],
       "type": "object"
     },
-    "SavingsSessionsPayloadV1": {
-      "properties": {
-        "available": {
-          "type": "boolean"
-        },
-        "db": {
-          "type": "string"
-        },
-        "range": {
-          "type": "string"
-        },
-        "scope": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "sessions": {
-          "items": {
-            "$ref": "#/$defs/SavingsSessionRowV1"
-          },
-          "type": "array"
-        },
-        "since": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "total": {
-          "format": "int64",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "available",
-        "db",
-        "scope",
-        "range",
-        "since",
-        "total",
-        "sessions"
-      ],
-      "type": "object"
-    },
     "SavingsSumV1": {
       "properties": {
         "calls": {
@@ -20649,8 +22242,7 @@
     },
     "SchemaConvergenceStageV1": {
       "enum": [
-        "registered_schema",
-        "runtime_writer_ledger"
+        "registered_schema"
       ],
       "type": "string"
     },
@@ -21499,6 +23091,70 @@
       ],
       "type": "object"
     },
+    "SkillInstallTarget": {
+      "enum": [
+        "cursor",
+        "codex",
+        "claude",
+        "agents",
+        "opencode",
+        "kimi",
+        "kiro",
+        "hermes"
+      ],
+      "type": "string"
+    },
+    "SkillOutcomeRecord": {
+      "properties": {
+        "activated_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "days_since_activation": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "skill_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uses_since_activation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "verdict": {
+          "$ref": "#/$defs/SkillOutcomeVerdict"
+        },
+        "views_since_activation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "skill_id",
+        "activated_at",
+        "days_since_activation",
+        "views_since_activation",
+        "uses_since_activation",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "SkillOutcomeVerdict": {
+      "enum": [
+        "adopted",
+        "ignored",
+        "too_early"
+      ],
+      "type": "string"
+    },
     "SourceSpan": {
       "additionalProperties": false,
       "description": "Byte range inside one sanitized source file. Mutable line numbers are\nnever part of identity.",
@@ -21624,68 +23280,6 @@
         "unsupported"
       ],
       "type": "string"
-    },
-    "StorageFindingsPayloadV1": {
-      "description": "Route-specific payload for `/api/storage/findings`.\n\nStorage producer coverage is required here rather than an optional field on\nthe general Doctor payload, so generated consumers cannot mistake one route\nfor the other.",
-      "properties": {
-        "entries": {
-          "items": {
-            "$ref": "#/$defs/DoctorReportEntryV1"
-          },
-          "type": "array"
-        },
-        "family_filter": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DoctorFindingFamilyV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "kind_statuses": {
-          "items": {
-            "$ref": "#/$defs/StorageFindingKindStatusV1"
-          },
-          "type": "array"
-        },
-        "known_families": {
-          "items": {
-            "$ref": "#/$defs/DoctorFindingFamilyV1"
-          },
-          "type": "array"
-        },
-        "note": {
-          "type": "string"
-        },
-        "report_coverage": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DoctorReportCoverageV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "schema_convergences": {
-          "items": {
-            "$ref": "#/$defs/SchemaConvergenceFindingV1"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "family_filter",
-        "entries",
-        "report_coverage",
-        "known_families",
-        "schema_convergences",
-        "note",
-        "kind_statuses"
-      ],
-      "type": "object"
     },
     "StorageSettingsPayloadV1": {
       "properties": {
@@ -23340,12 +24934,6 @@
           },
           "type": "array"
         },
-        "legacy_config_path": {
-          "type": "string"
-        },
-        "legacy_config_read_only": {
-          "type": "boolean"
-        },
         "upload_enabled": {
           "type": "boolean"
         },
@@ -23354,8 +24942,6 @@
         }
       },
       "required": [
-        "legacy_config_path",
-        "legacy_config_read_only",
         "configuration_snapshot_id",
         "configuration_revision_id",
         "code_index_worker_configuration_snapshot_id",
@@ -30676,7 +32262,7 @@
         "retention_expired",
         "unauthorized",
         "locked",
-        "unverifiable_legacy"
+        "unverifiable"
       ],
       "type": "string"
     },
@@ -32436,15 +34022,36 @@
     "analytics_usage": {
       "$ref": "#/$defs/DashboardEnvelopeV118"
     },
+    "automation_fact_receipts": {
+      "$ref": "#/$defs/AutomaticFactReceiptsPayloadV1"
+    },
+    "automation_jobs": {
+      "$ref": "#/$defs/AutomationJobsPayloadV1"
+    },
+    "automation_outcomes": {
+      "$ref": "#/$defs/AutomationOutcomesPayloadV1"
+    },
     "automation_problem": {
       "$ref": "#/$defs/AutomationRunProblemV1"
     },
     "automation_run": {
       "$ref": "#/$defs/AutomationRunResultV1"
     },
+    "automation_run_artifact": {
+      "$ref": "#/$defs/AutomationRunArtifactPayloadV1"
+    },
+    "automation_run_artifacts": {
+      "$ref": "#/$defs/AutomationRunArtifactsPayloadV1"
+    },
+    "automation_runs": {
+      "$ref": "#/$defs/AutomationRunsPayloadV1"
+    },
     "automation_scheduler_status": {
       "$ref": "#/$defs/AutomationSchedulerStatusV1",
       "description": "Served identically by `GET /api/automation/scheduler/status` and by the\n`pause`/`resume` controls, which re-read rather than acknowledge."
+    },
+    "automation_skills": {
+      "$ref": "#/$defs/AutomationSkillsPayloadV1"
     },
     "code_index_freshness": {
       "$ref": "#/$defs/CodeIndexFreshnessPayloadV1"
@@ -32543,11 +34150,23 @@
     "memory_fact_detail": {
       "$ref": "#/$defs/DashboardEnvelopeV116"
     },
+    "memory_oplog": {
+      "$ref": "#/$defs/MemoryOplogPayloadV1"
+    },
     "memory_overview": {
       "$ref": "#/$defs/DashboardEnvelopeV114"
     },
+    "memory_projection": {
+      "$ref": "#/$defs/MemoryProjectionPayloadV1"
+    },
+    "memory_similarity": {
+      "$ref": "#/$defs/MemorySimilarityPayloadV1"
+    },
     "memory_status": {
       "$ref": "#/$defs/DashboardEnvelopeV115"
+    },
+    "memory_trust_history": {
+      "$ref": "#/$defs/MemoryTrustHistoryPayloadV1"
     },
     "multi_root_capability": {
       "$ref": "#/$defs/MultiRootCapabilityV1"
@@ -32598,9 +34217,6 @@
     "savings_overview": {
       "$ref": "#/$defs/DashboardEnvelopeV124"
     },
-    "savings_sessions": {
-      "$ref": "#/$defs/SavingsSessionsPayloadV1"
-    },
     "settings": {
       "$ref": "#/$defs/SettingsPayloadV1"
     },
@@ -32615,9 +34231,6 @@
     },
     "shared_code_family": {
       "$ref": "#/$defs/DashboardEnvelopeV112"
-    },
-    "storage_findings": {
-      "$ref": "#/$defs/StorageFindingsPayloadV1"
     },
     "storage_telemetry": {
       "$ref": "#/$defs/StorageTelemetryPayloadV1"
@@ -32819,7 +34432,6 @@
   "required": [
     "envelope",
     "storage_telemetry",
-    "storage_findings",
     "doctor_findings",
     "remote_operational_status",
     "explorer_query_run",
@@ -32838,6 +34450,10 @@
     "memory_overview",
     "memory_status",
     "memory_fact_detail",
+    "memory_trust_history",
+    "memory_projection",
+    "memory_similarity",
+    "memory_oplog",
     "analytics_overview",
     "analytics_usage",
     "analytics_agents",
@@ -32848,7 +34464,6 @@
     "analytics_underused",
     "analytics_diagnostics",
     "savings_overview",
-    "savings_sessions",
     "savings_models",
     "lcm_session",
     "lcm_timeline",
@@ -32944,6 +34559,13 @@
     "multi_root_execute_request",
     "multi_root_query",
     "automation_scheduler_status",
+    "automation_jobs",
+    "automation_skills",
+    "automation_fact_receipts",
+    "automation_runs",
+    "automation_run_artifacts",
+    "automation_run_artifact",
+    "automation_outcomes",
     "fact_store_curate_request",
     "automation_run",
     "automation_problem"

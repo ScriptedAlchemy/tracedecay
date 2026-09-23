@@ -1,11 +1,5 @@
-import {
-  tallied,
-  talliedFactReceipts,
-  type AutomaticFactReceipt,
-  type JobRow,
-  type RunRow,
-  type SkillRow,
-} from '../../data/query/automation.ts';
+import type { AutomaticFactReceipt, AutomationJob, AutomationRunRowV1, ManagedSkill } from '../../contracts/generated.ts';
+import { tallied, talliedFactReceipts } from '../../data/query/automation.ts';
 import { Panel } from '../../ui/instrument.tsx';
 import { Absent, Cell, InspectRow, LedgerTable, ToneWord } from './LedgerTable.tsx';
 import {
@@ -55,10 +49,10 @@ export function UserJobsLedger({
   runs,
   ...inspect
 }: {
-  jobs: readonly JobRow[];
+  jobs: readonly AutomationJob[];
   count: number;
   /** Loaded ledger rows, or null while that read is blocked. */
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
 } & InspectProps) {
   const reading = tallied(jobs, count, 'jobs');
   return (
@@ -126,7 +120,7 @@ function Stamp({ stamp }: { stamp: string }) {
 
 /* ---- managed skills ----------------------------------------------------- */
 
-export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; count: number }) {
+export function SkillsLedger({ skills, count }: { skills: readonly ManagedSkill[]; count: number }) {
   const reading = tallied(skills, count, 'managed skills');
   return (
     <Panel legend="Skills · managed" elevation="well" bodyClassName="p-0">
@@ -144,7 +138,7 @@ export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; c
                     <span className="truncate text-2xs text-text-primary">{meta.title}</span>
                     <span className="td-value truncate text-3xs text-text-muted">
                       {meta.id}
-                      {meta.category ? ` · ${meta.category}` : ''}
+                      {` · ${meta.category}`}
                     </span>
                   </span>
                 </Cell>
@@ -152,23 +146,19 @@ export function SkillsLedger({ skills, count }: { skills: readonly SkillRow[]; c
                   <ToneWord tone={skillStateTone(meta.state)} word={meta.state} />
                 </Cell>
                 <Cell>
-                  {meta.provenance ? (
-                    <span className="flex min-w-0 flex-col gap-0.5">
-                      <span className="td-value text-2xs text-text-secondary">{meta.provenance.source.replaceAll('_', ' ')}</span>
-                      <span className="truncate text-3xs text-text-muted">
-                        {meta.provenance.actor}
-                        {meta.provenance.run_id ? ` · ${meta.provenance.run_id}` : ''}
-                      </span>
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="td-value text-2xs text-text-secondary">{meta.provenance.source.replaceAll('_', ' ')}</span>
+                    <span className="truncate text-3xs text-text-muted">
+                      {meta.provenance.actor}
+                      {meta.provenance.run_id ? ` · ${meta.provenance.run_id}` : ''}
                     </span>
-                  ) : (
-                    <Absent>not served</Absent>
-                  )}
+                  </span>
                 </Cell>
                 <Cell>
-                  {meta.targets && meta.targets.length > 0 ? (
+                  {meta.targets.length > 0 ? (
                     <span className="td-value text-3xs text-text-secondary">{meta.targets.join(' · ')}</span>
                   ) : (
-                    <Absent>not served</Absent>
+                    <Absent>no install targets</Absent>
                   )}
                 </Cell>
               </tr>

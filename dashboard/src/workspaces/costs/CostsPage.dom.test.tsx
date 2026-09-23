@@ -337,7 +337,6 @@ describe('CostsPage provider spend attribution', () => {
       db: '/fast/projects/tracedecay/.tracedecay/savings.db',
       error: 'failed to read savings ledger',
       ledger: null,
-      lifetime_counters: null,
       recording: null,
     };
     renderCosts({ overview: failed });

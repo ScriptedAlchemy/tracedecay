@@ -91,36 +91,16 @@ function CloneIndexCard({
       <p className="mt-1 truncate font-mono text-3xs text-text-muted" title={worktree}>
         {worktree}
       </p>
-      {observation ? <CloneIndexObservation observation={observation} status={status} /> : null}
+      {observation ? <CloneIndexObservation observation={observation} /> : null}
     </article>
   );
 }
 
-function CloneIndexObservation({
-  observation,
-  status,
-}: {
-  observation: CodeCloneIndexObservationV1;
-  status: CodeCloneIndexStatusV1;
-}) {
+function CloneIndexObservation({ observation }: { observation: CodeCloneIndexObservationV1 }) {
   const coverage = observation.coverage;
   const resources = observation.resources;
   return (
     <>
-      {status.state === 'backfilling' ? (
-        <div className="mt-2">
-          <p className="text-3xs text-text-muted">
-            {figure(coverage.completed_source_pages)} / {figure(coverage.total_source_pages)} sealed
-            pages
-          </p>
-          <progress
-            aria-label={`Clone backfill for ${observation.generation_id}`}
-            className="mt-1 h-1.5 w-full accent-accent"
-            max={Math.max(coverage.total_source_pages, 1)}
-            value={coverage.completed_source_pages}
-          />
-        </div>
-      ) : null}
       <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-3xs leading-snug sm:grid-cols-4">
         <Field label="eligible bodies">
           {ratio(coverage.eligible_source_bodies, coverage.source_bodies)}

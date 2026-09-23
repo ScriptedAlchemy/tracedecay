@@ -210,7 +210,7 @@ function useDoctorHealth(): DoctorHealth {
   const findings = useStorageFindings();
   const result = findings.data;
   if (!result || result.outcome === 'transport') return 'unknown';
-  const statuses = result.envelope.payload.kind_statuses;
+  const statuses = result.envelope.payload.storage_kind_statuses;
   // A report naming no producers has established nothing about this store.
   if (statuses.length === 0) return 'unknown';
   const readings = statuses.map(kindHealth);

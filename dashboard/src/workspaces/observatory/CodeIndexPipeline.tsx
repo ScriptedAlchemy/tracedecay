@@ -175,9 +175,7 @@ export function hasActiveCodeIndexBuild(
     result?.outcome === 'envelope' &&
     (result.envelope.domain_state !== 'ready' ||
       result.envelope.payload.worktrees.some(
-        (worktree) =>
-          (worktree.progress != null && worktree.progress.phase !== 'ready') ||
-          worktree.clone_index?.state === 'backfilling',
+        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
       ))
   );
 }

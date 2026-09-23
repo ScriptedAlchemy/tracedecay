@@ -1,8 +1,5 @@
-import {
-  useAutomationRunArtifacts,
-  type ListReading,
-  type RunRow,
-} from '../../data/query/automation.ts';
+import type { AutomationRunRowV1 } from '../../contracts/generated.ts';
+import { useAutomationRunArtifacts, type ListReading } from '../../data/query/automation.ts';
 import { Panel } from '../../ui/instrument.tsx';
 import { Absent, Cell, InspectRow, LedgerTable, ToneWord } from './LedgerTable.tsx';
 import {
@@ -37,7 +34,7 @@ export function RunLedger({
   onSelect,
   onLeave,
 }: {
-  reading: ListReading<RunRow>;
+  reading: ListReading<AutomationRunRowV1>;
   window: LedgerWindow;
   /** Fact receipts filed by run id, or null when that read is blocked. */
   receipts: ReadonlyMap<string, RunReceipts> | null;
@@ -119,7 +116,7 @@ function RunLine({
   onInspect,
   onSelect,
 }: {
-  run: RunRow;
+  run: AutomationRunRowV1;
   receipts: ReadonlyMap<string, RunReceipts> | null;
   inspected: boolean;
   selected: boolean;

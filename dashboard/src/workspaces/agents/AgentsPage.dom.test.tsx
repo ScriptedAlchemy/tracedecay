@@ -177,7 +177,7 @@ describe('AgentsPage read coverage', () => {
         recent_events: [
           {
             timestamp: 1_700_000_000,
-            tool_name: 'tracedecay_read',
+            tool_name: 'tracedecay_source_lines',
             outcome: 'error',
             event_kind: 'post_tool_use',
             hook_name: 'post_tool_use',

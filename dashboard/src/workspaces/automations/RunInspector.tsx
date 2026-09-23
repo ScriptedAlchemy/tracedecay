@@ -1,15 +1,15 @@
 import { useState, type ReactNode } from 'react';
 
-import type { AutomationTaskStatusV1 } from '../../contracts/generated.ts';
-import {
-  useAutomationRunArtifactPayload,
-  useAutomationRunArtifacts,
-  type AutomaticFactReceipt,
-  type JobRow,
-  type RunArtifactRow,
-  type RunArtifactsPayload,
-  type RunRow,
-} from '../../data/query/automation.ts';
+import type {
+  AutomaticFactReceipt,
+  AutomationJob,
+  AutomationRunArtifact,
+  AutomationRunArtifactsPayloadV1,
+  AutomationRunLedgerRecord,
+  AutomationRunRowV1,
+  AutomationTaskStatusV1,
+} from '../../contracts/generated.ts';
+import { useAutomationRunArtifactPayload, useAutomationRunArtifacts } from '../../data/query/automation.ts';
 import { cn } from '../../ui/cn';
 import { Corners } from '../../ui/instrument.tsx';
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
@@ -25,7 +25,6 @@ import {
   jobTaskKey,
   latestRunForKey,
   missingArtifactKinds,
-  readLastSchedulerRun,
   receiptStateTone,
   runStatusTone,
   runTiming,
@@ -57,9 +56,9 @@ export function RunInspector({
   pinned: boolean;
   /** Each source is null while its read is blocked, so the inspector can say
    * "not readable" rather than "not found". */
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   tasks: readonly AutomationTaskStatusV1[] | null;
-  jobs: readonly JobRow[] | null;
+  jobs: readonly AutomationJob[] | null;
   receipts: readonly AutomaticFactReceipt[] | null;
   receiptsByRun: ReadonlyMap<string, RunReceipts> | null;
   onSelect: (next: Inspected) => void;
@@ -119,9 +118,9 @@ function InspectedBody({
   onSelect,
 }: {
   inspected: Inspected;
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   tasks: readonly AutomationTaskStatusV1[] | null;
-  jobs: readonly JobRow[] | null;
+  jobs: readonly AutomationJob[] | null;
   receipts: readonly AutomaticFactReceipt[] | null;
   receiptsByRun: ReadonlyMap<string, RunReceipts> | null;
   onSelect: (next: Inspected) => void;
@@ -205,7 +204,7 @@ function RunDetail({
   receipts,
   onSelect,
 }: {
-  run: RunRow;
+  run: AutomationRunRowV1;
   receipts: RunReceipts | null;
   onSelect: (next: Inspected) => void;
 }) {
@@ -329,7 +328,7 @@ function RunArtifacts({ runId, recordedKinds }: { runId: string; recordedKinds: 
   );
 }
 
-function ArtifactList({ runId, data }: { runId: string; data: RunArtifactsPayload }) {
+function ArtifactList({ runId, data }: { runId: string; data: AutomationRunArtifactsPayloadV1 }) {
   const [selectedKind, setSelectedKind] = useState<string | null>(null);
   const chain = data.artifact_chain;
   const missing = missingArtifactKinds(chain);
@@ -370,7 +369,7 @@ function ArtifactLine({
   selected,
   onSelect,
 }: {
-  artifact: RunArtifactRow;
+  artifact: AutomationRunArtifact;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -400,7 +399,7 @@ function ArtifactLine({
   );
 }
 
-function ArtifactPayload({ runId, artifact }: { runId: string; artifact: RunArtifactRow }) {
+function ArtifactPayload({ runId, artifact }: { runId: string; artifact: AutomationRunArtifact }) {
   const payload = useAutomationRunArtifactPayload(runId, artifact.kind, true);
   return (
     <Box legend="selected artifact payload">
@@ -437,10 +436,10 @@ function TaskDetail({
   onSelect,
 }: {
   task: AutomationTaskStatusV1;
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
-  const last = readLastSchedulerRun(task.last_scheduler_run);
+  const last = task.last_scheduler_run;
   return (
     <>
       <div className="flex min-w-0 flex-col gap-1 border-b border-edge-subtle pb-2">
@@ -454,12 +453,10 @@ function TaskDetail({
         </Term>
       </dl>
       <Box legend="last scheduler run">
-        {last.kind === 'none' ? (
+        {last == null ? (
           <p className="text-2xs text-text-muted">no scheduler-triggered run is recorded for this task</p>
-        ) : last.kind === 'unreadable' ? (
-          <Gap>the scheduler attached a last-run record this build cannot read</Gap>
         ) : (
-          <LastRunSummary run={last.run} runs={runs} onSelect={onSelect} />
+          <LastRunSummary run={last} runs={runs} onSelect={onSelect} />
         )}
       </Box>
     </>
@@ -471,8 +468,8 @@ function LastRunSummary({
   runs,
   onSelect,
 }: {
-  run: { run_id: string; status: string; started_at: string; completed_at: string; error?: string | null | undefined };
-  runs: readonly RunRow[] | null;
+  run: Pick<AutomationRunLedgerRecord, 'run_id' | 'status' | 'started_at' | 'completed_at' | 'error'>;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
   const completed = epochSeconds(run.completed_at);
@@ -511,8 +508,8 @@ function JobDetail({
   runs,
   onSelect,
 }: {
-  job: JobRow;
-  runs: readonly RunRow[] | null;
+  job: AutomationJob;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
   const key = jobTaskKey(job.id);
@@ -539,21 +536,18 @@ function JobDetail({
           {job.skill_ids && job.skill_ids.length > 0 ? job.skill_ids.join(', ') : <Absent>none attached</Absent>}
         </Term>
         <Term label="delivery" mono>
-          {job.delivery ? (
-            <>
-              {job.delivery.mode}
-              {job.delivery.path ? ` · ${job.delivery.path}` : ''}
-              {job.delivery.url ? ` · ${job.delivery.url}` : ''}
-            </>
-          ) : (
-            <Absent>not served</Absent>
-          )}
+          {job.delivery.mode}
+          {job.delivery.mode === 'file'
+            ? job.delivery.path
+              ? ` · ${job.delivery.path}`
+              : ''
+            : ` · ${job.delivery.url}`}
         </Term>
         <Term label="pre-run command" mono>
           {job.pre_run_command ?? <Absent>none</Absent>}
         </Term>
         <Term label="updated" mono>
-          {job.updated_at != null ? formatUtc(job.updated_at) : <Absent>not served</Absent>}
+          {formatUtc(job.updated_at)}
         </Term>
       </dl>
       <Box legend="latest run in loaded page">
@@ -577,7 +571,7 @@ function ReceiptDetail({
   onSelect,
 }: {
   receipt: AutomaticFactReceipt;
-  runs: readonly RunRow[] | null;
+  runs: readonly AutomationRunRowV1[] | null;
   onSelect: (next: Inspected) => void;
 }) {
   const recorded = Math.floor(receipt.recorded_at_micros / 1_000_000);

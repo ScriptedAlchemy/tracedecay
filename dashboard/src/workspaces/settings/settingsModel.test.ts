@@ -111,8 +111,10 @@ describe('Settings read model', () => {
     const model = buildSettingsModel(payload);
     const rows = model.sections.find((s) => s.id === 'project')?.rows ?? [];
     const kind = (id: string) => rows.find((row) => row.id === id)?.kind;
-    expect(kind('config_path')).toBe('path');
-    expect(kind('legacy_config_read_only')).toBe('boolean');
+    expect(kind('config_path')).toBeUndefined();
+    const storageRows = model.sections.find((s) => s.id === 'storage')?.rows ?? [];
+    expect(storageRows.find((row) => row.id === 'store_root')?.kind).toBe('path');
+    expect(kind('tracedecay_dir_gitignored')).toBe('boolean');
     expect(kind('config.max_file_size')).toBe('number');
     expect(kind('config.include')).toBe('list');
     expect(kind('config')).toBe('group');

@@ -1388,46 +1388,6 @@ function graphPathPayload(): Record<string, unknown> {
  * ========================================================================== */
 
 /**
- * Per-project lifetime savings at the SHAPE the real ledger has, not a smooth
- * ramp.
- *
- * On a machine where every worktree of one repository shares a cache, every
- * worktree records almost exactly the same lifetime saving: twenty of the
- * owner's twenty-five rows sit within a few percent of 1.80B. The fixture used
- * to ramp evenly from 8.4M down to 1.1M, which made twenty-five equal-length
- * rails look like a legitimate ranking in every audit shot. Two rows genuinely
- * deviate. The primary checkout above and a small unrelated repository well
- * below, and those are the only rows worth drawing.
- */
-const SAVINGS_PROJECTS: ReadonlyArray<readonly [string, number]> = [
-  ['/fast/projects/tracedecay', 2_939_894_592],
-  ['/fast/projects/tracedecay/.worktrees/sqlite-storage-runtime', 2_140_723_247],
-  ['/fast/projects/tracedecay/.worktrees/live-repair', 2_078_590_272],
-  ['/fast/projects/tracedecay/.worktrees/runtime-hardening', 1_946_100_344],
-  ['/fast/projects/tracedecay/.worktrees/pr8-migration', 1_831_192_520],
-  ['/fast/projects/tracedecay/.worktrees/pr8-acceptance-runner', 1_824_171_535],
-  ['/fast/projects/tracedecay/.worktrees/pr8-live-tools', 1_824_065_209],
-  ['/fast/projects/tracedecay/.worktrees/pr8-move-symbol', 1_802_722_260],
-  ['/fast/projects/tracedecay/.worktrees/pr8-kernel', 1_801_796_023],
-  ['/fast/projects/tracedecay/.worktrees/plan-topology-integration', 1_799_923_909],
-  ['/fast/projects/tracedecay/.worktrees/pr8-refresh', 1_799_813_188],
-  ['/fast/projects/tracedecay/.worktrees/pr8-runtime', 1_799_356_160],
-  ['/fast/projects/tracedecay/.worktrees/pr8-compat', 1_796_821_496],
-  ['/fast/projects/tracedecay/.worktrees/plan-dashboard', 1_799_400_112],
-  ['/fast/projects/tracedecay/.worktrees/plan-task-runtime', 1_799_402_004],
-  ['/fast/projects/tracedecay/.worktrees/plan-lsp-hooks', 1_799_398_771],
-  ['/fast/projects/tracedecay/.worktrees/plan-git-stack', 1_799_401_330],
-  ['/fast/projects/tracedecay/.worktrees/plan-policy-anchors', 1_799_399_006],
-  ['/fast/projects/tracedecay/.worktrees/pr8-automation', 1_799_400_845],
-  ['/fast/projects/tracedecay/.worktrees/pr8-benchmark', 1_799_397_612],
-  ['/fast/projects/tracedecay/.worktrees/pr8-transport', 1_799_400_501],
-  ['/fast/projects/tracedecay/.worktrees/pr8-context', 1_799_400_009],
-  ['/fast/projects/lynx', 1_802_004_118],
-  ['/fast/projects/hermes', 1_796_100_530],
-  ['/fast/projects/tracedecay-astgrep', 380_112_004],
-];
-
-/**
  * `unavailable_provider_latency` from the canonical Costs projector. The
  * mounted Savings/Costs callers do not pass a project scope to the latency
  * projector; that absence must remain a typed latency result, never an
@@ -1499,16 +1459,6 @@ function savingsPayload(): Record<string, unknown> {
         last_7d: sum(1_850_569_717, 52_371),
         last_30d: sum(4_410_909_252, 134_767),
         all_time: sum(4_902_796_408, 147_230),
-      },
-      lifetime_counters: {
-        total_tokens_saved: SAVINGS_PROJECTS.reduce((sum, [, saved]) => sum + saved, 0),
-        projects: SAVINGS_PROJECTS.map(([path, tokens_saved]) => ({ path, tokens_saved })),
-        // `savings_api` lists at most `PROJECT_LIMIT` (25) project rows and
-        // reports the true distinct-project count beside them, so the surface
-        // can say how many it is not showing.
-        project_total: SAVINGS_PROJECTS.length,
-        projects_limit: 25,
-        projects_truncated: false,
       },
     },
     // Session content sizing and provider billing evidence remain separate.
@@ -2103,8 +2053,11 @@ function schedulerStatusPayload(): Record<string, unknown> {
           task_key: 'memory_curator',
           backend: 'claude',
           status: 'succeeded',
+          reviewed_count: 6,
           accepted_count: 4,
           rejected_count: 2,
+          skipped_count: 0,
+          backend_attempt_count: 1,
           started_at: String(nowSecs - 2 * DAY),
           completed_at: String(nowSecs - 2 * DAY + 240),
         },
@@ -2235,7 +2188,6 @@ function automationRunsPayload(): Record<string, unknown> {
     has_more: false,
     malformed_row_count: 0,
     completeness: 'known',
-    error: '',
   };
 }
 
@@ -2305,15 +2257,14 @@ const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
   ['multi-agent-model-orchestration', 'Multi-Agent Model Orchestration', 'disabled', 'orchestration'],
 ];
 
-/** Wire-true ManagedSkill rows (managed_skill_model.rs): id/title/state nest
- * under `metadata`. AutomationsPage reads those top-level, so titles render as
- * index fallbacks. Flagged in the report as a component/wire mismatch. */
+/** `AutomationSkillsPayloadV1` (automation_skills_api.rs list). */
 function skillsPayload(): Record<string, unknown> {
   const skills = SKILL_ROWS.slice(0, 4).map(([id, title, state, category]) => ({
     metadata: {
       id,
       title,
       summary: `${title}: managed automation skill.`,
+      routing_description: `Use when ${title.toLowerCase()} applies.`,
       category,
       targets: ['claude', 'codex'],
       state,
@@ -2321,21 +2272,12 @@ function skillsPayload(): Record<string, unknown> {
       checksum: `sha256:${id}`,
       created_at: nowSecs - 40 * DAY,
       updated_at: nowSecs - 3 * DAY,
-      provenance: { source: 'skill_writer', actor: 'automation', run_id: null },
+      provenance: { source: 'automation_run', actor: 'skill_writer', run_id: null },
     },
     body_markdown: `# ${title}\n\nManaged skill body.`,
     support_files: [],
   }));
-  return {
-    profile_root: '/home/zack/.tracedecay',
-    skills_root: '/home/zack/.tracedecay/managed-skills',
-    count: skills.length,
-    skills,
-    skill_metadata: skills.map((s) => s.metadata),
-    usage_summaries: [],
-    stale_recommendations: [],
-    improvement_recommendations: [],
-  };
+  return { count: skills.length, skills };
 }
 
 /** Wire-true automatic fact receipt rows. */
@@ -2350,12 +2292,17 @@ function automaticFactReceiptsPayload(): Record<string, unknown> {
     add_fact_request: {
       content: FACT_CONTENTS[i % FACT_CONTENTS.length],
       category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
+      source_label: null,
+      tags: [],
+      entities: [],
+      trust: null,
+      metadata: {},
     },
     quarantine_reason: i === 2 ? 'validation failed' : undefined,
     applied_fact_id: i === 2 ? undefined : `fact.project.story.${i}`,
     recorded_at_micros: (nowSecs - i * DAY) * 1_000_000,
   }));
-  return { receipts, count: receipts.length, limit: 50, error: '' };
+  return { receipts, count: receipts.length, limit: 50 };
 }
 
 /* ==========================================================================
@@ -2499,6 +2446,30 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
     },
     known_families: [...DOCTOR_FAMILIES],
     schema_convergences: [],
+    storage_kind_statuses: [
+      {
+        kind: 'over_budget_store',
+        state: 'partial',
+        observed_entries: 1,
+        reason:
+          'canonical Doctor producer returned 1 entries, but coverage or evidence state was incomplete',
+      },
+      ...(
+        [
+          'orphan_store',
+          'incident_debris_present',
+          'retention_backlog',
+          'table_growth',
+          'pending_schema_migration',
+        ] as const
+      ).map((kind) => ({
+        kind,
+        state: 'partial',
+        observed_entries: 0,
+        reason:
+          'the storage family was consulted, but the canonical report returned no typed entry for this producer; absence does not prove clean per-producer coverage',
+      })),
+    ],
     note: 'five of seven finding families were consulted; two reported no evidence source',
   };
   return envelope(payload, 'partial', [
@@ -2800,9 +2771,10 @@ const storageTelemetryEnvelope = {
   ],
 };
 
-/** GET /api/storage/findings. Observatory canonical Doctor projection plus
- * per-producer source coverage. This fixture follows the production parser
- * path; source state is not inferred from an empty finding list. */
+/** GET /api/doctor/findings?family=storage. Observatory canonical Doctor
+ * projection plus per-producer source coverage. This fixture follows the
+ * production parser path; source state is not inferred from an empty finding
+ * list. */
 const storageFindings = envelope({
   family_filter: 'storage',
   entries: [],
@@ -2818,7 +2790,7 @@ const storageFindings = envelope({
   ],
   schema_convergences: [],
   note: 'storage producers reported independent source coverage',
-  kind_statuses: [
+  storage_kind_statuses: [
     {
       kind: 'over_budget_store',
       state: 'partial',
@@ -2862,9 +2834,6 @@ const storageFindings = envelope({
 
 const settingsPayload: Record<string, unknown> = {
   project: {
-    config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
-    legacy_config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
-    legacy_config_read_only: true,
     configuration_snapshot_id: 'snap-42',
     configuration_revision_id: 'rev-42',
     config: {
@@ -2882,9 +2851,6 @@ const settingsPayload: Record<string, unknown> = {
     pr_autotrack: { tracked: [] },
   },
   user: {
-    config_path: '/home/zack/.tracedecay/config.toml',
-    legacy_config_path: '/home/zack/.tracedecay/config.toml',
-    legacy_config_read_only: true,
     configuration_snapshot_id: 'user-snap-7',
     configuration_revision_id: 'user-rev-7',
     code_index_worker_configuration_snapshot_id: 'profile-worker-snap-7',
@@ -3004,10 +2970,9 @@ const capabilities: Record<string, unknown> = {
 };
 
 /* ==========================================================================
- * /api/plugins/savings/sessions (savings_api.rs::sessions) and
  * /api/plugins/hermes-lcm/session/{id} (lcm_api.rs::session).
  *
- * The Loom weave's two sources, mirrored from a real daemon response captured
+ * The Loom weave's session rows, mirrored from a real daemon response captured
  * on 2026-07-25 (`tracedecay dashboard --port 7341`, profile-sharded store,
  * 6,053 sessions). Shapes are exact; the population is shaped to the same
  * DISTRIBUTION the real store has.
@@ -3094,18 +3059,6 @@ function loomSessionRows(count = 34): Record<string, unknown>[] {
       ],
     };
   });
-}
-
-function loomSessionsPayload(): Record<string, unknown> {
-  return {
-    available: true,
-    db: '/home/zack/.tracedecay/projects/proj_a5b3d7e3ebe14ca7/sessions.db',
-    scope: 'profile_sharded',
-    range: 'all',
-    since: 0,
-    total: 6053,
-    sessions: loomSessionRows(),
-  };
 }
 
 /* ==========================================================================
@@ -3927,15 +3880,11 @@ export const CODE_INDEX_FRESHNESS_FIXTURES = {
 export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/projects': envelope(projectsPayload),
   '/api/storage/telemetry': storageTelemetryEnvelope,
-  '/api/storage/findings': storageFindings,
   '/api/doctor/findings': doctorFindingsEnvelope(),
   '/api/settings': settings,
   '/api/capabilities': capabilities,
-  // Memory (holographic). Consumed with a trailing slash by KnowledgePage and
-  // ExplorerPage (`/api/plugins/holographic/?...`).
-  '/api/plugins/holographic/': envelope(memoryPayload()),
+  // Memory (holographic), consumed by KnowledgePage and ExplorerPage.
   '/api/plugins/holographic': envelope(memoryPayload()),
-  '/api/plugins/holographic/overview': envelope(memoryPayload()),
   // LCM standing reads model a MOUNTED temporal-retrieval store, so the
   // Sessions ledger renders populated; search stays explicitly unavailable so
   // the refusal state remains a modeled, reachable surface.
@@ -3961,7 +3910,6 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/delivery/inbox': envelope(deliveryInboxPayload(), 'partial'),
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
-  '/api/plugins/savings/sessions': loomSessionsPayload(),
   // The bare-path entry is the parse gate's; `resolveFixture` answers the
   // route itself range-by-range above.
   '/api/plugins/savings/models': savingsModelsPayload('all'),
@@ -5298,6 +5246,9 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (pathname === '/api/plugins/savings/models') {
     return savingsModelsPayload(new URLSearchParams(search).get('range') ?? 'all');
   }
+  if (pathname === '/api/doctor/findings' && new URLSearchParams(search).get('family') === 'storage') {
+    return storageFindings;
+  }
   // Must also precede the prefix sweep: the family read is keyed by match class
   // and cursor, and each class is a separate digest group on the wire.
   if (pathname === '/api/plugins/graph/shared-code/family') {
@@ -5414,11 +5365,11 @@ function analyticsUnderusedPayload(): Record<string, unknown> {
 function analyticsDiagnosticsPayload(): Record<string, unknown> {
   const AGENT_TOOL_CALLS: ReadonlyArray<readonly [string, number]> = [
     ['tracedecay_grep', 1945],
-    ['tracedecay_read', 1180],
-    ['tracedecay_body', 1152],
+    ['tracedecay_source_lines', 1180],
+    ['tracedecay_source_body', 1152],
     ['tracedecay_fact_store', 644],
     ['tracedecay_hook_runtime', 587],
-    ['tracedecay_outline', 460],
+    ['tracedecay_source_outline', 460],
     ['tracedecay_search', 306],
     ['tracedecay_context', 200],
     ['tracedecay_status', 183],
@@ -5439,20 +5390,20 @@ function analyticsDiagnosticsPayload(): Record<string, unknown> {
     [0, 'tracedecay_fact_store', 'success'],
     [4, 'tracedecay_hook_runtime', 'success'],
     [11, 'tracedecay_grep', 'success'],
-    [17, 'tracedecay_body', 'success'],
+    [17, 'tracedecay_source_body', 'success'],
     [23, 'tracedecay_grep', 'error'],
-    [29, 'tracedecay_read', 'success'],
-    [38, 'tracedecay_outline', 'success'],
+    [29, 'tracedecay_source_lines', 'success'],
+    [38, 'tracedecay_source_outline', 'success'],
     [44, 'tracedecay_context', 'success'],
     [51, 'tracedecay_grep', 'success'],
-    [63, 'tracedecay_body', 'success'],
+    [63, 'tracedecay_source_body', 'success'],
     [70, 'tracedecay_search', 'success'],
-    [82, 'tracedecay_read', 'success'],
+    [82, 'tracedecay_source_lines', 'success'],
     [96, 'tracedecay_hook_runtime', 'success'],
     [109, 'tracedecay_grep', 'success'],
-    [124, 'tracedecay_body', 'success'],
+    [124, 'tracedecay_source_body', 'success'],
     [141, 'tracedecay_status', 'success'],
-    [163, 'tracedecay_read', 'error'],
+    [163, 'tracedecay_source_lines', 'error'],
     [188, 'tracedecay_hook_runtime', 'success'],
     [222, 'tracedecay_status', 'success'],
   ];
