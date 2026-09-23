@@ -231,6 +231,13 @@ async fn run_scope_set_cas_with_registered_cold_root() {
         "registry discovery must not pretend the cold project runtime is mounted"
     );
 
+    let capacity_gate = super::super::project_open_capacity_gate(&engine.project_open_gates).await;
+    let capacity_guard = capacity_gate.lock_owned().await;
+    let release_capacity = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        drop(capacity_guard);
+    });
+
     let scope_set_id = ScopeSetId::new("scope-set.cold-roots").expect("scope set id");
     let roots = vec![
         RegisteredRootSelectorV1::new(
@@ -259,6 +266,9 @@ async fn run_scope_set_cas_with_registered_cold_root() {
         ),
     )
     .await;
+    release_capacity
+        .await
+        .expect("release cold-root capacity gate");
     let DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { outcome, .. } = cas.outcome
     else {
         panic!("cold-root CAS must reach storage: {:?}", cas.outcome);
