@@ -174,7 +174,7 @@ fn active_transaction_hits_absolute_lease_and_releases_writer() {
 /// batches that each fit inside one execution, so the fixture itself never
 /// depends on the limit the test is about.
 fn seed_migration_source(channel: &ExactSqlHandle, rows: i64) {
-    const BATCH: i64 = 250_000;
+    const BATCH: i64 = 25_000;
     let mut seeded = 0;
     while seeded < rows {
         let batch = BATCH.min(rows - seeded);
