@@ -22,7 +22,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 pub(super) use super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    JsonConfigMutation, load_json_file, safe_write_text_file, update_json_config_transactionally,
+    JsonConfigMutation, load_json_file, update_json_config_transactionally,
 };
 
 pub struct ClaudeIntegration;

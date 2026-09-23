@@ -634,6 +634,7 @@ export const AutomationRunLedgerRecordSchema = z.object({
   reviewed_count: z.number().int().safe().min(0),
   run_id: z.string(),
   schema_version: z.number().int().min(0),
+  session_evidence_budget_stage: z.union([z.lazy(() => SessionRetrievalBudgetStageV1Schema), z.null()]).optional(),
   skipped_count: z.number().int().safe().min(0),
   started_at: z.string(),
   status: z.lazy(() => AutomationRunStatusSchema),

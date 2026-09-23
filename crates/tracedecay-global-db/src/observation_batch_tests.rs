@@ -18,9 +18,8 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
-    AnchoredObservationWrite, FOREGROUND_BATCH_MAX_OPERATIONS,
-    ObservationBatchPersistOutcome, ObservationPersistOutcome, ObservationStore,
-    ObservationStoreError, ObservationWrite,
+    AnchoredObservationWrite, FOREGROUND_BATCH_MAX_OPERATIONS, ObservationBatchPersistOutcome,
+    ObservationPersistOutcome, ObservationStore, ObservationStoreError, ObservationWrite,
 };
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -529,7 +528,13 @@ async fn assert_batch_settles_like_sequential_writes(
             .await
         }
         Err(error) => {
-            admission_effect(&batch_store, &writes, Vec::new(), Some(format!("{error:?}"))).await
+            admission_effect(
+                &batch_store,
+                &writes,
+                Vec::new(),
+                Some(format!("{error:?}")),
+            )
+            .await
         }
     };
 

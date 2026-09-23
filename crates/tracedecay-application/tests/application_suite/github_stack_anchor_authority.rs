@@ -1,7 +1,6 @@
 use tracedecay_contracts::retrieval::{
-    GitTopologyAnchorAuthority, GitTopologyAnchorPublicationOutcome,
-    GitTopologyAnchorPublication, GitTopologyAnchorResolutionOutcome,
-    GitTopologyAnchorResolution,
+    GitTopologyAnchorAuthority, GitTopologyAnchorPublication, GitTopologyAnchorPublicationOutcome,
+    GitTopologyAnchorResolution, GitTopologyAnchorResolutionOutcome,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRef, AnchorProvenanceRelation,
@@ -115,11 +114,8 @@ async fn degraded_capability_persists_through_the_git_topology_authority() {
     assert_eq!(
         authority
             .publish(
-                GitTopologyAnchorPublication::new(
-                    owner.clone(),
-                    vec![source, capability_record],
-                )
-                .unwrap(),
+                GitTopologyAnchorPublication::new(owner.clone(), vec![source, capability_record],)
+                    .unwrap(),
             )
             .await,
         Ok(GitTopologyAnchorPublicationOutcome::Published)

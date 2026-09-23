@@ -3,11 +3,8 @@ use tracedecay_runtime_core::{
     ports::registered_schema::RegisteredSchemaInstallationV1,
 };
 
-/// Final V4 observation-projection DDL. Shared with the scoped observation
-/// reset in `crate::observation::reset`, which recreates these tables after
-/// dropping a refused authority, so the installer and the reset can never
-/// produce different shapes.
-pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
+/// Final V4 observation-projection DDL.
+const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
     "CREATE TABLE IF NOT EXISTS observation_projection_provenance (
             projector_version TEXT NOT NULL,
             observation_id TEXT NOT NULL,
@@ -292,13 +289,12 @@ pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );";
 
-/// Anchor-binding triggers, shared with the scoped observation reset like
-/// [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
-pub(crate) const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
+/// Anchor-binding triggers of [`OBSERVATION_PROJECTION_SCHEMA_SQL`].
+const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
     include_str!("projection_binding_triggers.sql");
 
 /// Historical-data indexes the schema contract requires on the projection
-/// authority, shared with the scoped observation reset.
+/// authority.
 pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
      ON observation_projection_provenance

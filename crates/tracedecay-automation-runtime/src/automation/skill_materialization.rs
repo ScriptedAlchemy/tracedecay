@@ -479,7 +479,10 @@ fn lock_package(package_dir: &Path) -> Result<FileLease> {
         .truncate(false)
         .open(&path)?;
     tracedecay_runtime_core::storage::retry_transient_file_op(|| file.lock())?;
-    Ok(FileLease::held(file, "automation.skill_materialization.package"))
+    Ok(FileLease::held(
+        file,
+        "automation.skill_materialization.package",
+    ))
 }
 
 fn relative_artifact_path(relative: &str) -> Result<&Path> {

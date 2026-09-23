@@ -497,21 +497,6 @@ fn record_codex_cached_plugin_registration_intents(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn codex_exact_cache_manifest_path(home: &Path) -> Result<Option<PathBuf>> {
-    let marketplace_name =
-        codex_exact_personal_marketplace_name(home).map_err(|()| TraceDecayError::Config {
-            message: format!(
-                "could not read exact Codex marketplace identity at {}",
-                codex_personal_marketplace_path(home).display()
-            ),
-        })?;
-    Ok(marketplace_name.map(|marketplace_name| {
-        codex_plugin_cached_root(home, &marketplace_name)
-            .join(crate::PRODUCT_VERSION)
-            .join(".codex-plugin/plugin.json")
-    }))
-}
-
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut marketplace_names = vec![

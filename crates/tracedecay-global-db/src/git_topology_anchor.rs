@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use tracedecay_contracts::retrieval::{
-    GitTopologyAnchorAuthorityError, GitTopologyAnchorAuthority, GitTopologyAnchorFuture,
-    GitTopologyAnchorPublicationOutcome, GitTopologyAnchorPublication,
-    GitTopologyAnchorResolutionOutcome, GitTopologyAnchorResolution,
+    GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorFuture,
+    GitTopologyAnchorPublication, GitTopologyAnchorPublicationOutcome, GitTopologyAnchorResolution,
+    GitTopologyAnchorResolutionOutcome,
 };
 use tracedecay_domain::{ObservationScopeV1, RetrievalAnchorRecord, RetrievalAnchorTarget};
 use tracedecay_runtime_core::db::engine::{params, params_from_iter};

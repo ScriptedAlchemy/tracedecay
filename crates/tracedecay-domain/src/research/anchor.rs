@@ -527,31 +527,39 @@ pub struct RetrievalAnchorRecordParts {
     pub durability: AnchorDurabilityClass,
 }
 
-/// The encoded record omits what it can re-derive: a default `coverage`, and
-/// the namespace-constant fields of an `authorization` that is exactly its
-/// namespace's derivation.
+/// The encoded record omits what it can re-derive: empty or default optional
+/// fields, and the namespace-constant fields of an `authorization` that is
+/// exactly its namespace's derivation.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalAnchorRecord {
     anchor_id: RetrievalAnchorId,
     target: RetrievalAnchorTarget,
     owner: ObservationScopeV1,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     aliases: Vec<NativeAlias>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     occurred_at: Option<TimeInterval>,
     ingested_at: UtcMicros,
     evidence_class: EvidenceClass,
     source_generation: AnchorSourceGeneration,
     projection_generation: ProjectionGenerationId,
+    #[serde(skip_serializing_if = "watermark_is_default")]
     projection_watermark: VectorWatermark,
     #[serde(skip_serializing_if = "coverage_is_default")]
     coverage: CoverageReportV1,
     source_observations: Vec<CanonicalObservationIdV1>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     source_anchors: Vec<AnchorLineageRef>,
     #[serde(serialize_with = "serialize_anchor_authorization")]
     authorization: ResolutionAuthorizationV1,
     payload_access: PayloadAccessState,
     retention_class: RetentionClass,
     durability: AnchorDurabilityClass,
+}
+
+fn watermark_is_default(watermark: &VectorWatermark) -> bool {
+    *watermark == VectorWatermark::default()
 }
 
 fn coverage_is_default(coverage: &CoverageReportV1) -> bool {
@@ -853,16 +861,20 @@ impl<'de> Deserialize<'de> for RetrievalAnchorRecord {
             anchor_id: RetrievalAnchorId,
             target: RetrievalAnchorTarget,
             owner: ObservationScopeV1,
+            #[serde(default)]
             aliases: Vec<NativeAlias>,
+            #[serde(default)]
             occurred_at: Option<TimeInterval>,
             ingested_at: UtcMicros,
             evidence_class: EvidenceClass,
             source_generation: AnchorSourceGeneration,
             projection_generation: ProjectionGenerationId,
+            #[serde(default)]
             projection_watermark: VectorWatermark,
             #[serde(default)]
             coverage: CoverageReportV1,
             source_observations: Vec<CanonicalObservationIdV1>,
+            #[serde(default)]
             source_anchors: Vec<AnchorLineageRef>,
             authorization: AnchorAuthorizationWire,
             payload_access: PayloadAccessState,

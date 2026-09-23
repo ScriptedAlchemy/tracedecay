@@ -27,11 +27,12 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, EphemeralSanitizedQueryViewV1,
-    ExactAdmissionRuleRevision, FreshnessVectorDigest, ManifestDigest, PrincipalId, PrivacyDomainId, ProjectId,
-    ProviderEvaluationStateV1, PublicRetrieverStatus, QueryNormalizationRevision,
-    RelationEdgeKindV1, RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    TemporalModeV1, UtcMicros, VectorWatermark, encode_lowercase_hex, sha256_hex_suffix,
+    ExactAdmissionRuleRevision, FreshnessVectorDigest, ManifestDigest, PrincipalId,
+    PrivacyDomainId, ProjectId, ProviderEvaluationStateV1, PublicRetrieverStatus,
+    QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    ScoreDomainId, SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark,
+    encode_lowercase_hex, sha256_hex_suffix,
 };
 use tracedecay_query::retrieval::{
     RetrievalPortError,
@@ -1470,7 +1471,13 @@ fn published_text_artifact_with_stale_search_revision_is_rebuilt() {
         .expect("historical metadata remains readable");
         latest
             .text_artifact_store
-            .publish(&staging, &generation_id, &sealed_identity, &test_content_key(), &control)
+            .publish(
+                &staging,
+                &generation_id,
+                &sealed_identity,
+                &test_content_key(),
+                &control,
+            )
             .expect("publish previous-revision artifact");
         active_text_artifact_path(store.path())
     };

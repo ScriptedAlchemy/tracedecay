@@ -1007,6 +1007,7 @@ pub fn production_doctor_report_reader(
                         })
                 })
             });
+            let project_temporal = SessionTemporalAccess::new(&*project_sessions);
             let (
                 quick_check,
                 authority_audit_ok,
@@ -1028,7 +1029,7 @@ pub fn production_doctor_report_reader(
                         tokio::join!(
                     graph.quick_check_report(),
                     observation_authority_audit_ok(registry.as_ref()),
-                    SessionTemporalAccess::new(&*project_sessions).session_temporal_doctor_health(),
+                    project_temporal.session_temporal_doctor_health(),
                     profile_storage_reads,
                     collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
                     tracedecay_maintenance::retention::diagnostics::collect_session_retention_findings(

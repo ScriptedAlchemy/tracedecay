@@ -73,7 +73,6 @@ mod registered_analytics;
 mod registered_dashboard;
 mod registered_lcm;
 mod registered_lcm_privacy;
-mod registered_legacy_relations;
 mod registered_session_sync;
 mod registered_sessions;
 pub mod registry_maintenance;

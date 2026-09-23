@@ -451,17 +451,13 @@ struct RegisteredSchemaAdmissionClassification {
 #[hotpath::measure(future = true, label = "global_db.schema.query.classify")]
 async fn classify_registered_schema_admission(
     connection: &impl QueryExecutor,
-    binding: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
-    Box::pin(classify_registered_schema_authorities(connection, binding)).await
+    Box::pin(classify_registered_schema_authorities(connection)).await
 }
 
 async fn classify_registered_schema_authorities(
     connection: &impl QueryExecutor,
-    binding: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmissionClassification> {
-    crate::registered_legacy_relations::reject_legacy_session_relation_shape(connection, binding)
-        .await?;
     // The LCM authority classifies profile content first: a legacy or
     // version-skewed session store must surface its own ProfileResetRequired
     // state instead of being masked by the coarser workflow/configuration
@@ -537,7 +533,7 @@ pub async fn ensure_registered_schema_for_admission(
         configuration_fresh,
         temporal_admission,
         workflow_admission,
-    } = classify_registered_schema_admission(installation, installation.binding()).await?;
+    } = classify_registered_schema_admission(installation).await?;
     let is_fresh = configuration_fresh.is_some();
     let force_exhaustive = !authority_invariant_triggers_intact(installation).await?;
     let transaction = installation
@@ -976,8 +972,7 @@ pub async fn ensure_attached_registered_schema(
         configuration_fresh,
         temporal_admission,
         workflow_admission,
-    } = classify_registered_schema_admission(&read_connection, database.registered_binding())
-        .await?;
+    } = classify_registered_schema_admission(&read_connection).await?;
     let force_exhaustive = !authority_invariant_triggers_intact(&read_connection).await?;
     let transaction = database
         .begin_bulk_write_transaction("install attached registered global database schema")

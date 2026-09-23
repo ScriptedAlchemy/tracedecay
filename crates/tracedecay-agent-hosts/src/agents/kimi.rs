@@ -32,9 +32,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
-    JsonConfigDialect, McpUninstallPolicy, NonInteractiveInstallOutcome,
-    host_home_override, install_mcp_server_entry, load_json_file, load_json_file_strict,
-    mcp_config_has_tracedecay, uninstall_mcp_server_entry,
+    JsonConfigDialect, McpUninstallPolicy, NonInteractiveInstallOutcome, host_home_override,
+    install_mcp_server_entry, load_json_file, load_json_file_strict, mcp_config_has_tracedecay,
+    uninstall_mcp_server_entry,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -78,7 +78,10 @@ impl AgentIntegration for KimiIntegration {
         // The component transaction deploys the staged source; Kimi's own
         // `/plugins install` must then copy it into the managed registry.
         Ok(NonInteractiveInstallOutcome::DeferredUserAction(
-            kimi_official_lifecycle_unavailable("install", Some(&kimi_staged_plugin_dir(&ctx.home))),
+            kimi_official_lifecycle_unavailable(
+                "install",
+                Some(&kimi_staged_plugin_dir(&ctx.home)),
+            ),
         ))
     }
 

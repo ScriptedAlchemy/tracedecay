@@ -9,10 +9,10 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadAccessState, PayloadDigestV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
-    ProjectionGenerationId, ResolutionAuthorizationV1, RetrievalAnchorId,
-    RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
-    SanitizationReceiptId, SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros,
-    VectorWatermark, authority_access_policy_digest,
+    ProjectionGenerationId, ResolutionAuthorizationV1, RetrievalAnchorId, RetrievalAnchorRecord,
+    RetrievalAnchorRecordParts, RetrievalAnchorTarget, SanitizationReceiptId,
+    SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros, VectorWatermark,
+    authority_access_policy_digest,
 };
 
 mod anchored_write;
@@ -168,7 +168,9 @@ fn build_resolution_authorization_v1(
 ) -> ObservationStoreResult<ResolutionAuthorizationV1> {
     hotpath::measure_block!("store.observation.access_policy_digest", {
         PrivacyDomainBoundLocatorDigest::new(canonical_request_digest)
-            .and_then(|digest| ResolutionAuthorizationV1::for_authority(authority_namespace, digest))
+            .and_then(|digest| {
+                ResolutionAuthorizationV1::for_authority(authority_namespace, digest)
+            })
             .map_err(ObservationStoreError::RetrievalAnchorContract)
     })
 }

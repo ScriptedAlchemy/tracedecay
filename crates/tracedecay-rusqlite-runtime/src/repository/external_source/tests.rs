@@ -878,7 +878,10 @@ fn projected_history_shrinks_to_replay_summaries() {
         connection.query_row(sql, [], |row| row.get(0)).unwrap()
     };
     assert_eq!(
-        count(&connection, "SELECT COUNT(*) FROM external_source_commit_receipts_v2"),
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_commit_receipts_v2"
+        ),
         20
     );
     assert_eq!(
@@ -890,10 +893,18 @@ fn projected_history_shrinks_to_replay_summaries() {
         "only the current receipt stays hydratable once every commit is projected"
     );
     assert_eq!(
-        count(&connection, "SELECT COUNT(*) FROM external_source_projection_publications_v2"),
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_projection_publications_v2"
+        ),
         1
     );
-    assert!(count(&connection, "SELECT COUNT(*) FROM external_source_frontiers_v1") <= 3);
+    assert!(
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_frontiers_v1"
+        ) <= 3
+    );
 
     let summary = load_commit_receipt_summary(&connection, &binding, first.idempotency_key())
         .unwrap()
@@ -904,7 +915,10 @@ fn projected_history_shrinks_to_replay_summaries() {
     let current = load_state(&connection, &binding).unwrap().unwrap();
     assert!(current.projection().is_some());
     assert_eq!(
-        count(&connection, "SELECT COUNT(*) FROM external_source_commit_receipts_v2"),
+        count(
+            &connection,
+            "SELECT COUNT(*) FROM external_source_commit_receipts_v2"
+        ),
         20,
         "replaying a superseded commit settles from its summary without a new receipt"
     );

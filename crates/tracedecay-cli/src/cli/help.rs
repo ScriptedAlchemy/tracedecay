@@ -161,11 +161,11 @@ Examples:
 Related: tracedecay dashboard (uses these servers for diagnostics).";
 
 pub(crate) const INSTALL_LONG_ABOUT: &str = "\
-Writes the MCP server registration, permissions, hooks, and prompt rules for \
-an agent host (Cursor, Codex, Claude Code, Hermes, Kiro, and others). \
-With --component, selects one compiled first-party Core or MCP companion \
-through the receipt-based host lifecycle instead of installing the whole host integration. \
-Configures every detected agent when --agent is omitted, without prompting. \
+Installs an agent host's canonical first-party component set (MCP registration, \
+permissions, hooks, prompt rules) for Cursor, Codex, Claude Code, Hermes, Kiro, and \
+others through one receipt-backed host lifecycle. --component narrows that same \
+lifecycle to one named component; --dry-run prints the signed plan without mutating. \
+Configures every newly detected agent when --agent is omitted, without prompting. \
 Safe to re-run; use it after installing a new agent or moving the tracedecay binary. \
 Pass --git-hook to install the global post-commit sync hook; that flag is explicit \
 because setting core.hooksPath can redirect every repository away from .git/hooks.";
@@ -174,6 +174,7 @@ pub(crate) const INSTALL_AFTER_HELP: &str = "\
 Examples:
   tracedecay install                             Configure every detected agent
   tracedecay install --agent cursor              One agent only
+  tracedecay install --agent cursor --dry-run    Preview the full component-set plan
   tracedecay install --git-hook                  Also install the post-commit hook
   tracedecay install --agent cursor --component core --dry-run
   tracedecay install --agent cursor --component core
@@ -184,38 +185,40 @@ Examples:
   tracedecay install --agent hermes --profile dev
   tracedecay install --local                     Project-local config in cwd
 
-Related: tracedecay uninstall, tracedecay reinstall (refresh settings),
-tracedecay update-plugin (refresh generated assets only), tracedecay doctor.";
+Related: tracedecay uninstall, tracedecay reinstall (repair installed agents),
+tracedecay update-plugin (update installed agents), tracedecay doctor.";
 
 pub(crate) const REINSTALL_LONG_ABOUT: &str = "\
-Re-runs the installer for every agent that already has tracedecay configured, \
-rewriting MCP registrations, hooks, and prompt rules with current settings. \
-Use after upgrading the binary manually or when agent config drifted; it \
-never adds integration to agents that were not installed before.";
+Repairs every agent that already has tracedecay configured by re-running its \
+component-set lifecycle, rewriting artifacts, MCP registrations, hooks, and prompt \
+rules with current settings. Use after upgrading the binary manually or when agent \
+config drifted; it never adds integration to agents that were not installed before. \
+--dry-run previews each tracked agent's repair plan without mutating.";
 
 pub(crate) const REINSTALL_AFTER_HELP: &str = "\
 Examples:
-  tracedecay reinstall                           Refresh all installed agents
+  tracedecay reinstall                           Repair all installed agents
+  tracedecay reinstall --dry-run                 Preview every repair plan
   tracedecay reinstall --component core --dry-run
   tracedecay reinstall --component core          Repair signed Core components
 
 Related: tracedecay install (add an agent), tracedecay update-plugin
-(refresh generated plugin assets without touching config files).";
+(update installed agents to this binary).";
 
 pub(crate) const UPDATE_PLUGIN_AFTER_HELP: &str = "\
 Examples:
-  tracedecay update-plugin                       Refresh generated plugin assets
+  tracedecay update-plugin                       Update all installed agents
   tracedecay update-plugin --component context-mcp --dry-run
   tracedecay update-plugin --component context-mcp
 
-Related: tracedecay reinstall (also rewrites agent config files),
+Related: tracedecay reinstall (repair installed agents),
 tracedecay update (binary + plugins + daemon + health pass).";
 
 pub(crate) const UNINSTALL_LONG_ABOUT: &str = "\
 Removes tracedecay's MCP server registration, permissions, hooks, and prompt \
-rules from agent configuration. Removes every detected agent's integration \
-when --agent is omitted. Project indexes under .tracedecay/ are left intact. \
-use `tracedecay wipe` to delete data.";
+rules from agent configuration through the same component-set lifecycle. Removes \
+every installed agent's integration when --agent is omitted. Project indexes under \
+.tracedecay/ are left intact. use `tracedecay wipe` to delete data.";
 
 pub(crate) const UNINSTALL_AFTER_HELP: &str = "\
 Examples:

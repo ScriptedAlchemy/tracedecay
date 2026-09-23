@@ -96,7 +96,7 @@ pub(super) enum DeliveryRecorderSpoolError {
 /// One process lease over the durable, bounded source receipts for a project.
 pub(super) struct DeliveryRecorderSpoolV1 {
     root: PathBuf,
-    lease: FileLease,
+    _lease: FileLease,
     state: Mutex<DeliveryRecorderSpoolState>,
 }
 
@@ -137,7 +137,7 @@ impl DeliveryRecorderSpoolV1 {
         let receipt_paths = scan_receipt_paths(&root)?;
         let spool = Self {
             root,
-            lease,
+            _lease: lease,
             state: Mutex::new(DeliveryRecorderSpoolState {
                 receipt_paths: receipt_paths.into_iter().collect(),
             }),

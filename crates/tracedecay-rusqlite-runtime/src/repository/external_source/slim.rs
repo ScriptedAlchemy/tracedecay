@@ -70,12 +70,26 @@ pub(super) fn slim_mutation(
     drop_if_equal(
         observation,
         NATIVE_OBJECT,
-        &Value::String(mutation.observation().native_object().digest().as_str().to_owned()),
+        &Value::String(
+            mutation
+                .observation()
+                .native_object()
+                .digest()
+                .as_str()
+                .to_owned(),
+        ),
     );
     drop_if_equal(
         observation,
         REVISION,
-        &Value::String(mutation.observation().revision().digest().as_str().to_owned()),
+        &Value::String(
+            mutation
+                .observation()
+                .revision()
+                .digest()
+                .as_str()
+                .to_owned(),
+        ),
     );
     drop_if_equal(
         root,
@@ -103,10 +117,22 @@ fn hydrate_mutation_value(
         serde_json::from_str(slim).map_err(|error| invalid(error.to_string()))?;
     let binding = serde_json::to_value(binding).map_err(|error| invalid(error.to_string()))?;
     let root = object(&mut value)?;
-    restore(root, MUTATION_DIGEST, Value::String(keys.mutation_digest.to_owned()));
+    restore(
+        root,
+        MUTATION_DIGEST,
+        Value::String(keys.mutation_digest.to_owned()),
+    );
     let observation = nested(root, OBSERVATION)?;
-    restore(observation, NATIVE_OBJECT, Value::String(keys.native_object.to_owned()));
-    restore(observation, REVISION, Value::String(keys.revision.to_owned()));
+    restore(
+        observation,
+        NATIVE_OBJECT,
+        Value::String(keys.native_object.to_owned()),
+    );
+    restore(
+        observation,
+        REVISION,
+        Value::String(keys.revision.to_owned()),
+    );
     let observation = observation.clone();
     let evidence = nested(root, EVIDENCE)?;
     restore(evidence, BINDING, binding);

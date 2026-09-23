@@ -28,9 +28,9 @@ use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
 use super::persist::persist_occurrences;
 use super::record_canonical_observation_effect;
-use crate::SessionTemporalStore;
 use crate::handle::SessionTemporalRegisteredDb;
 use crate::test_support::QueryCountingConnection;
+use crate::{SessionTemporalAccess, SessionTemporalStore};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
@@ -2087,14 +2087,16 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     );
     assert_eq!(filtered, 1, "one output-producing effect is pending");
 
-    let pending = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("profile registered database")
-        .pending_session_temporal_refresh_page_result(128, 1, None)
-        .await
-        .unwrap()
-        .into_parts()
-        .0;
+    let pending = SessionTemporalAccess::new(
+        &*runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile registered database"),
+    )
+    .pending_session_temporal_refresh_page_result(128, 1, None)
+    .await
+    .unwrap()
+    .into_parts()
+    .0;
 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].session_id(), &session_id);
@@ -2159,7 +2161,7 @@ async fn explicit_discovery_rediscovery_is_bounded_and_non_mutating() {
     let mut active_rows_scanned = 0usize;
     let mut pages = 0usize;
     loop {
-        let page = db
+        let page = SessionTemporalAccess::new(db)
             .pending_session_temporal_refresh_page_result(2, 1, cursor.as_ref())
             .await
             .expect("discover missing native relation projection");

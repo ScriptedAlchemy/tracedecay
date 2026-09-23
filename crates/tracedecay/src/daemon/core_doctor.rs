@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use tokio::time::{Duration, timeout};
 
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
-use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
 use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 #[path = "core_doctor_schema.rs"]
 mod schema;
@@ -471,10 +471,11 @@ async fn doctor_runtime_value_inner(
         });
     if let Some(db) = session_db.as_ref() {
         let health_budget = Duration::from_secs(8);
+        let session_temporal = SessionTemporalAccess::new(&**db);
         let (temporal, cursor_ingest, placeholder_paths) = tokio::join!(
             Box::pin(timeout(
                 health_budget,
-                SessionTemporalAccess::new(&**db).session_temporal_doctor_health()
+                session_temporal.session_temporal_doctor_health()
             )),
             Box::pin(timeout(health_budget, db.cursor_session_ingest_health())),
             Box::pin(timeout(

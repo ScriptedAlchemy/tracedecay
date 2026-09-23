@@ -34,8 +34,6 @@ use rows::{
 };
 use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
-pub(crate) use triggers::{invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables};
-
 const OPERATION: &str = "ensure global database authority invariants";
 const INCOMPLETE_EXHAUSTIVE_PASS: i64 = -1;
 const FOREIGN_KEY_AUDIT_PROGRESS: &str = "authority-invariants";

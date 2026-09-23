@@ -346,3 +346,46 @@ fn deserialization_rejects_a_tampered_anchor_identity() {
 
     assert!(serde_json::from_value::<RetrievalAnchorRecord>(wire).is_err());
 }
+
+#[test]
+fn stored_anchor_omits_derivable_authorization_and_default_coverage() {
+    let mut parts = record_parts(
+        RetrievalAnchorTarget::ExactObservation(observation('a')),
+        owner("project.fixture"),
+    );
+    parts.authorization = ResolutionAuthorizationV1::for_authority(
+        "observation-capture.v1",
+        PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
+    )
+    .unwrap();
+    let derived = RetrievalAnchorRecord::new(parts).unwrap();
+    let encoded = serde_json::to_value(&derived).unwrap();
+    for omitted in ["coverage", "aliases", "projection_watermark", "source_anchors"] {
+        assert!(encoded.get(omitted).is_none(), "{omitted}: {encoded}");
+    }
+    assert_eq!(
+        encoded["authorization"],
+        json!({"authority": "observation-capture.v1", "canonical_request_digest": DIGEST_B})
+    );
+    assert_eq!(
+        serde_json::from_value::<RetrievalAnchorRecord>(encoded).unwrap(),
+        derived
+    );
+
+    // A fixture authorization is not its namespace's derivation, so it keeps
+    // every field.
+    let explicit = RetrievalAnchorRecord::new(record_parts(
+        RetrievalAnchorTarget::ExactObservation(observation('a')),
+        owner("project.fixture"),
+    ))
+    .unwrap();
+    let encoded = serde_json::to_value(&explicit).unwrap();
+    assert_eq!(
+        encoded["authorization"],
+        serde_json::to_value(authorization()).unwrap()
+    );
+    assert_eq!(
+        serde_json::from_value::<RetrievalAnchorRecord>(encoded).unwrap(),
+        explicit
+    );
+}

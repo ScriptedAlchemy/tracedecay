@@ -22,8 +22,8 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceIdentityV1, SanitizationReceiptV1,
 };
-use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::ParseOffset;
+use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,

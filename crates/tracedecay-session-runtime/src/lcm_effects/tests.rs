@@ -14,8 +14,8 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ParseOffset, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor, derive_canonical_projection,
+    ParseOffset, build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
+    derive_canonical_projection,
 };
 
 mod compression_ownership;
@@ -253,14 +253,15 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
     assert_eq!(relations.len(), 1);
     assert_eq!(relations[0].sources.len(), summary.source_refs.len());
     assert_eq!(
-        SessionTemporalAccess::new(&*db).recover_pending_session_relation_projections(
-            1,
-            tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
-                &read_control,
-            ),
-        )
-        .await
-        .unwrap(),
+        SessionTemporalAccess::new(&*db)
+            .recover_pending_session_relation_projections(
+                1,
+                tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
+                    &read_control,
+                ),
+            )
+            .await
+            .unwrap(),
         0,
         "compress applies the graph projection in the same journey"
     );
@@ -786,7 +787,13 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
         4,
         "first authoritative Claude compaction",
     );
-    ingest_canonical(&db, session_id, &messages, &[&first_boundary, &first_summary]).await;
+    ingest_canonical(
+        &db,
+        session_id,
+        &messages,
+        &[&first_boundary, &first_summary],
+    )
+    .await;
     let mut between = Vec::new();
     for ordinal in 6..=520 {
         let mut record = message(session_id, ordinal);
@@ -801,7 +808,13 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
         521,
         "second authoritative Claude compaction",
     );
-    ingest_canonical(&db, session_id, &between, &[&second_boundary, &second_summary]).await;
+    ingest_canonical(
+        &db,
+        session_id,
+        &between,
+        &[&second_boundary, &second_summary],
+    )
+    .await;
 
     let snapshot = db.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -1771,12 +1784,13 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
         .unwrap();
     transaction.commit().await.unwrap();
 
-    SessionTemporalAccess::new(&*db).recover_pending_session_relation_projection_page(
-        16,
-        std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
-    )
-    .await
-    .unwrap();
+    SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            16,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
     let snapshot = db.read_snapshot().await.unwrap();
     let mut rows = snapshot
         .query(

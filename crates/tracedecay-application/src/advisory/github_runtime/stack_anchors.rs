@@ -10,9 +10,9 @@ use tracedecay_contracts::feedback::{
     GitHubReviewReadRequestV1,
 };
 use tracedecay_contracts::retrieval::{
-    GitTopologyAnchorAuthorityError, GitTopologyAnchorAuthority,
-    GitTopologyAnchorPublicationOutcome, GitTopologyAnchorPublication,
-    GitTopologyAnchorResolutionOutcome, GitTopologyAnchorResolution,
+    GitTopologyAnchorAuthority, GitTopologyAnchorAuthorityError, GitTopologyAnchorPublication,
+    GitTopologyAnchorPublicationOutcome, GitTopologyAnchorResolution,
+    GitTopologyAnchorResolutionOutcome,
 };
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_domain::{
@@ -87,9 +87,7 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
     pub fn new(database: RegisteredGlobalDbLeaseV1, scope: FeedbackScopeV1) -> Option<Self> {
         scope.validate().ok()?;
         (database.binding().shard_id.scope.project_id() == Some(&scope.project_id)).then(|| Self {
-            anchors: Arc::new(RegisteredGitTopologyAnchorAuthority::new(
-                database.clone(),
-            )),
+            anchors: Arc::new(RegisteredGitTopologyAnchorAuthority::new(database.clone())),
             database,
             scope,
         })
@@ -296,8 +294,7 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             let owner = ObservationScopeV1::Project {
                 project_id: self.scope.project_id.clone(),
             };
-            let Ok(resolution) =
-                GitTopologyAnchorResolution::new(owner.clone(), anchor_id.clone())
+            let Ok(resolution) = GitTopologyAnchorResolution::new(owner.clone(), anchor_id.clone())
             else {
                 return GitHubStackAnchorReadOutcomeV1::Denied;
             };

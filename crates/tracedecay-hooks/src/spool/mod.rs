@@ -17,12 +17,12 @@ use tracedecay_domain::{
     UtcMicros,
     framed_log::{self, checksum as frame_checksum},
 };
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, atomic_write as shared_atomic_write, read_bounded as shared_read_bounded,
     sync_directory as shared_sync_directory,
     validate_regular_or_missing as shared_validate_regular,
 };
-use tracedecay_private_fs::FileLease;
 
 use crate::{
     HookContractError, HookEventEnvelopeV2, HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES,

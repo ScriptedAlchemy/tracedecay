@@ -123,24 +123,24 @@ pub enum FeedbackRollbackAction {
     version = crate::product_runtime::PRODUCT_BUILD_VERSION
 )]
 pub struct Cli {
-    /// Select one compiled first-party host component; without it, lifecycle commands apply
-    /// the host's canonical component set atomically
+    /// Select one compiled first-party host component; without it, lifecycle commands run
+    /// the same receipt-backed lifecycle over the host's whole canonical component set
     #[arg(long, global = true, value_enum)]
     pub component: Option<HostBundleComponentArg>,
     /// Verify and print the exact signed lifecycle plan without mutating.
-    /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
-    /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `storage report`).
+    /// Valid only alongside the agent-lifecycle commands; dispatch enforces
+    /// that scope so this global flag never leaks onto unrelated subcommands
+    /// (e.g. `branch gc`, `storage report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
-    /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
+    /// Confirm a host lifecycle mutation, or a `wipe`. Scope is enforced
     /// in dispatch, not by a global clap `requires`, so it does not leak onto
     /// other commands.
     #[arg(long, global = true)]
     pub yes: bool,
     /// Confirm taking ownership of an existing file that no
-    /// TraceDecay receipt records. Required alongside `--yes` for
-    /// `reinstall --component`; the previous bytes are replaced and not kept,
+    /// TraceDecay receipt records. Required alongside `--yes` for install,
+    /// update-plugin, or reinstall; the previous bytes are replaced and not kept,
     /// and a file another owner claims is refused regardless of this flag.
     #[arg(long, global = true)]
     pub adopt: bool,
@@ -320,16 +320,12 @@ pub enum Commands {
         #[arg(long, value_parser = agent_value_parser(), requires = "local")]
         agent: Option<String>,
     },
-    /// Refresh generated plugin code/assets for detected installs without
-    /// touching agent config files.
+    /// Update every installed agent's component set to this binary
     ///
-    /// Rewrites only tracedecay-generated artifacts, the Hermes plugin
-    /// (.py files, schemas.json, dashboard page) for the user integration,
-    /// the Cursor plugin bundle, the Codex plugin bundle/cache, and the Kiro
-    /// managed agent, re-baking the current binary path and version. Config
-    /// files (Hermes config.yaml, mcp.json, settings,
-    /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
-    /// to refresh those.
+    /// Runs the receipt-backed update lifecycle over each tracked agent's
+    /// canonical component set (or the one `--component` names), re-baking
+    /// the current binary path and version into its artifacts and host
+    /// registration.
     #[command(name = "update-plugin", after_help = UPDATE_PLUGIN_AFTER_HELP)]
     UpdatePlugin {
         /// Update one project-local integration in the current directory
@@ -1284,22 +1280,6 @@ pub enum ProfileStorageAction {
         /// New isolated restore directory.
         #[arg(long)]
         restore: String,
-    },
-    /// Reset exactly one refused authority so the next open recreates it at
-    /// the canonical schema. Applies only to a store whose open failed with
-    /// the typed ResetRequired state naming that authority; healthy
-    /// authorities are refused and nothing else in the store is touched.
-    /// Requires the global `--yes` confirmation and an exclusive maintenance
-    /// lease (the daemon cannot open a refused store, so recovery runs
-    /// offline).
-    #[command(name = "reset-authority")]
-    ResetAuthority {
-        /// Authority named by the ResetRequired state ("observations").
-        authority: String,
-        /// Sessions store carrying the refused authority (defaults to the
-        /// profile-scope user sessions store).
-        #[arg(long = "db")]
-        db: Option<String>,
     },
     /// Reset a project graph store whose open failed with the typed
     /// ResetRequired state (an incompatible schema this binary cannot upgrade

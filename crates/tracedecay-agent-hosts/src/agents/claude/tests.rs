@@ -1,4 +1,4 @@
-use super::super::{load_json_file_strict, safe_write_json_file};
+use super::super::{load_json_file_strict, safe_write_json_file, safe_write_text_file};
 use super::*;
 use serde_json::json;
 

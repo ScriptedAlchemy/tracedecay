@@ -20,21 +20,17 @@ fn normalize_trigger_sql(sql: &str) -> String {
 
 pub(crate) use definitions::SESSION_RELATION_RECEIPT_RECOVERY_COLUMNS;
 pub(crate) use invariants::{
-    authority_invariant_triggers_intact,
-    validate_authority_rows_exhaustive,
+    authority_invariant_triggers_intact, validate_authority_rows_exhaustive,
 };
 pub use invariants::{
     ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,
     require_foreign_key_audit,
 };
-pub(crate) use invariants::{
-    ensure_authority_invariants, ensure_fresh_authority_invariants,
-    invariant_trigger_names_for_tables, invariant_trigger_sql_for_tables,
-};
+pub(crate) use invariants::{ensure_authority_invariants, ensure_fresh_authority_invariants};
 pub use validation::validate_registry_schema_contract;
 pub(crate) use validation::{
-    validate_authority_schema_contract,
-    validate_remote_deletion_schema_contract, validate_session_graph_publication_schema_contract,
+    validate_authority_schema_contract, validate_remote_deletion_schema_contract,
+    validate_session_graph_publication_schema_contract,
     validate_session_relation_receipts_without_recovery_contract,
     validate_session_temporal_schema_contract,
 };

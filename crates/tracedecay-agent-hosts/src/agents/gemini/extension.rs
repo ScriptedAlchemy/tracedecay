@@ -31,9 +31,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
-use crate::agents::{
-    host_cli, load_json_file, record_host_config_observation_bytes, safe_write_text_file,
-};
+use crate::agents::{host_cli, load_json_file, record_host_config_observation_bytes};
 
 /// Name of Gemini CLI's lifecycle binary.
 pub(super) const GEMINI_CLI: &str = "gemini";

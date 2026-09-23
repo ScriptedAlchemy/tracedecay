@@ -7,7 +7,7 @@
 
 use super::extension::{
     EXTENSION_CONTEXT_FILE, EXTENSION_MANIFEST_FILE, TRACEDECAY_BIN_PLACEHOLDER,
-    rendered_extension_files,
+    installed_extension_dir, rendered_extension_files,
 };
 use super::*;
 

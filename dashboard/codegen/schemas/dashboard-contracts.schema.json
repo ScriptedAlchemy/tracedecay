@@ -2183,6 +2183,17 @@
           "minimum": 0,
           "type": "integer"
         },
+        "session_evidence_budget_stage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionRetrievalBudgetStageV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exhausted retrieval boundary of a `session_evidence_budget_exhausted`\nskip; present exactly on those skips."
+        },
         "skipped_count": {
           "default": 0,
           "format": "uint",

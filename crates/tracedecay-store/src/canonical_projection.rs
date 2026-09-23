@@ -387,7 +387,21 @@ fn canonical_message_metadata_for(
     envelope: &CanonicalObservationEnvelopeV1,
     session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ProjectionStoreResult<Option<String>> {
-    let mut metadata = session_metadata.cloned().unwrap_or_default();
+    let mut metadata = match rendering {
+        // Released rows embedded the whole envelope.
+        CanonicalRendering::ShippedRelease => match serde_json::to_value(envelope) {
+            Ok(serde_json::Value::Object(envelope)) => envelope,
+            _ => {
+                return Err(ProjectionStoreError::Contract(
+                    ObservationContractError::CanonicalEncoding,
+                ));
+            }
+        },
+        CanonicalRendering::Current => serde_json::Map::new(),
+    };
+    if let Some(session_metadata) = session_metadata {
+        metadata.extend(session_metadata.clone());
+    }
     if let Some(normalize) =
         tool_metadata_normalizer(metadata.get("source").and_then(serde_json::Value::as_str))
     {
@@ -1379,9 +1393,12 @@ mod tests {
             "Codex active goal: finish canonical projection"
         );
         assert_eq!(fields.kind, "goal_context");
-        let metadata: serde_json::Value =
-            serde_json::from_str(&canonical_message_metadata(&envelope, None).unwrap().unwrap())
-                .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(
+            &canonical_message_metadata(&envelope, None)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(metadata["source"], "codex_rollout");
         assert_eq!(metadata["codex_internal_context"], "goal");
         assert_eq!(
@@ -1471,7 +1488,8 @@ mod tests {
             .unwrap();
         let stored_metadata: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert!(
-            stored_metadata.get("stable_record_id").is_none() && stored_metadata.get("facts").is_none(),
+            stored_metadata.get("stable_record_id").is_none()
+                && stored_metadata.get("facts").is_none(),
             "the envelope is stored once, in its observation row: {stored}"
         );
         let message_metadata: serde_json::Value = serde_json::from_str(

@@ -630,9 +630,8 @@ mod tests {
 
     use super::{
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
-        install_pass_covers_tracked_agents,
-        partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, restart_daemon_service_with,
+        install_pass_covers_tracked_agents, partition_reinstall_results, post_update_binary,
+        post_update_binary_from, prepare_post_update_lease, restart_daemon_service_with,
         run_install_then_refresh,
     };
     use crate::upgrade::UpgradeOutcome;

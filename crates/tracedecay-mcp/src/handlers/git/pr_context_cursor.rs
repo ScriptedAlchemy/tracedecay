@@ -245,9 +245,9 @@ pub(super) async fn pr_context_cursor_authority(
         ));
     };
     let session_db: &RegisteredGlobalDb = session_db;
+    let session_temporal = SessionTemporalAccess::new(session_db);
     let authenticator = hotpath::future!(
-        SessionTemporalAccess::new(session_db)
-            .load_preprovisioned_session_cursor_key_provider_result(),
+        session_temporal.load_preprovisioned_session_cursor_key_provider_result(),
         label = "mcp.git.cursor.key_provider"
     )
     .await

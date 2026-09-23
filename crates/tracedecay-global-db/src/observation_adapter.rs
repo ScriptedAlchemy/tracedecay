@@ -24,20 +24,20 @@ use tracedecay_store::{
     BACKGROUND_BATCH_MAX_BYTES, BACKGROUND_BATCH_MAX_OPERATIONS, CommandDigestV1,
     ConsistencyModeV1, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
     DurabilityClassV1, FOREGROUND_BATCH_MAX_BYTES, IdempotencyIdentityV1,
-    ObservationBatchPersistOutcome, ObservationCommitReceipt,
-    ObservationPersistOutcome, ObservationProjectionStatus, ObservationProjectionStore,
-    ObservationReadOperationV1, ObservationReadResultV1, ObservationReplayRequest,
-    ObservationStore, ObservationStoreError, ObservationStoreResult, OperationPriorityV1,
-    ProjectReadOperationV1, ProjectReadResultV1, ProjectionCheckpoint, ProjectionPersistOutcome,
-    ProjectionPredecessorConvergence, ProjectionRebuildOutcome, ProjectionStoreResult,
-    RepositoryOperationEnvelopeV1, RepositoryProvenanceAttachmentV1, RepositoryReadOperationV1,
-    RepositoryReadResultV1, RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1,
-    StorageRuntimeErrorV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
-    StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    ObservationBatchPersistOutcome, ObservationCommitReceipt, ObservationPersistOutcome,
+    ObservationProjectionStatus, ObservationProjectionStore, ObservationReadOperationV1,
+    ObservationReadResultV1, ObservationReplayRequest, ObservationStore, ObservationStoreError,
+    ObservationStoreResult, OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1,
+    ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionPredecessorConvergence,
+    ProjectionRebuildOutcome, ProjectionStoreResult, RepositoryOperationEnvelopeV1,
+    RepositoryProvenanceAttachmentV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1,
+    StoreIdempotencyKeyV1, StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation,
+    StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
@@ -507,7 +507,9 @@ impl GlobalDbObservationStore {
             && !canonical_payload_revision
         {
             if pending.is_some() {
-                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(Box::new(write)));
+                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                    Box::new(write),
+                ));
             }
             let retained_digest = pending
                 .as_ref()
@@ -546,7 +548,9 @@ impl GlobalDbObservationStore {
                     ));
                 }
                 if known_cursor.is_some() {
-                    return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(Box::new(write)));
+                    return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                        Box::new(write),
+                    ));
                 }
                 if let RefusalCoverageOutcome::NotAtFrontier { actual } = self
                     .record_refusal_with_coverage(&write, retained_digest, cursor.as_ref())
@@ -596,7 +600,9 @@ impl GlobalDbObservationStore {
                 ));
             }
             if known_cursor.is_some() {
-                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(Box::new(write)));
+                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                    Box::new(write),
+                ));
             }
             let mut advance = ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
                 identity.source().clone(),
@@ -655,7 +661,9 @@ impl GlobalDbObservationStore {
                 }))
         {
             if pending.is_some() {
-                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(Box::new(write)));
+                return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                    Box::new(write),
+                ));
             }
             return Err(ObservationStoreError::SanitizationReceiptCollision);
         }
@@ -663,7 +671,9 @@ impl GlobalDbObservationStore {
             .pending_receipt(observation.receipt())
             .is_some_and(|retained| retained != observation.receipt())
         {
-            return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(Box::new(write)));
+            return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                Box::new(write),
+            ));
         }
         for alias in write.retrieval_anchor().aliases() {
             if let Some(existing) =
@@ -671,7 +681,9 @@ impl GlobalDbObservationStore {
                 && existing.anchor_id != *write.retrieval_anchor_id()
             {
                 if existing.pending {
-                    return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(Box::new(write)));
+                    return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
+                        Box::new(write),
+                    ));
                 }
                 if !preflight.accepts_pending_cline_alias(&write, &existing.anchor_id)? {
                     return Err(ObservationStoreError::RetrievalAnchorAliasCollision {

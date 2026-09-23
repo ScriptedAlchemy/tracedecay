@@ -33,9 +33,7 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::Result;
 
-use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file,
-};
+use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file};
 
 mod extension;
 
@@ -46,11 +44,11 @@ mod extension;
 pub(crate) use extension::{GEMINI_STAGED_EXTENSION_RELATIVE, rendered_extension_files};
 
 use extension::{
-    EXTENSION_NAME, InstalledExtensionV1, MCP_SERVER_NAME, extension_stage_dir, gemini_extension_activate_with, gemini_extension_deactivate_with,
-    host_reported_extensions, installed_extension_dir, installed_extension_is_current,
-    installed_extension_is_present, installed_manifest_path, manifest_declares_current_server,
-    read_installed_extension, require_gemini_cli, settings_path, stage_dir_is_tracedecay,
-    staged_context_path, staged_manifest_path,
+    EXTENSION_NAME, InstalledExtensionV1, MCP_SERVER_NAME, extension_stage_dir,
+    gemini_extension_activate_with, gemini_extension_deactivate_with, host_reported_extensions,
+    installed_extension_is_current, installed_extension_is_present, installed_manifest_path,
+    manifest_declares_current_server, read_installed_extension, require_gemini_cli, settings_path,
+    stage_dir_is_tracedecay, staged_context_path, staged_manifest_path,
 };
 
 pub struct GeminiIntegration;

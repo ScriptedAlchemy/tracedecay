@@ -148,8 +148,7 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
     use tracedecay_contracts::retrieval::{
-        GitTopologyAnchorAuthority, GitTopologyAnchorResolutionOutcome,
-        GitTopologyAnchorResolution,
+        GitTopologyAnchorAuthority, GitTopologyAnchorResolution, GitTopologyAnchorResolutionOutcome,
     };
     use tracedecay_contracts::{RequestContext, now_micros};
     use tracedecay_domain::ObservationScopeV1;

@@ -36,10 +36,10 @@ never replaced wholesale.
 - **Cursor cloud, Codex, Hermes, and Kiro:** only their evidenced hook, MCP,
   and CLI routes are declared. Missing LSP/native-diagnostics APIs stay typed
   unavailable.
-- **Cline:** the evidenced user MCP path is
-  `~/.cline/data/settings/cline_mcp_settings.json`, honoring
-  `CLINE_DATA_DIR`. The legacy VS Code extension path is migration/removal
-  only. Roo Code and Kilo are not inferred compatible from Cline branding or
+- **Cline:** the lifecycle owns only `mcpServers.tracedecay` in the user MCP
+  registry `~/.cline/mcp.json`; it never writes the VS Code extension's
+  `globalStorage`, which is read only for transcript ingest. Roo Code and
+  Kilo are not inferred compatible from Cline branding or
   transcript shape; native edit/stop delivery remains typed unavailable until
   checked-in host fixtures exist.
 - **Kimi Code:** the managed plugin manifest keeps skills, commands, and

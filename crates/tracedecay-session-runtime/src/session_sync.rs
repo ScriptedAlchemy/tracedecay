@@ -762,11 +762,11 @@ impl DaemonSessionSyncService {
                 .max_begin_requests_per_pass;
         let active_scan_slots = page_limit / 2;
 
+        let temporal = SessionTemporalAccess::new(&**database);
         let mut active_after: Option<SessionId> = None;
         loop {
             let page = {
-                let discovery = SessionTemporalAccess::new(&**database)
-                    .pending_session_temporal_refresh_page_result(
+                let discovery = temporal.pending_session_temporal_refresh_page_result(
                     page_limit,
                     active_scan_slots,
                     active_after.as_ref(),

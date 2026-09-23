@@ -5,10 +5,9 @@ use super::{
     ScoopPackageHookAction, StderrTracingDefault, async_runtime_flavor, command_profile_label,
     daemon_cpu_threads_from, hotpath_focus_is_valid, hotpath_output_format_is_none,
     hotpath_output_format_is_valid, hotpath_output_path_is_valid,
-    hotpath_requires_protocol_safe_output, is_full_component_set_adoption,
-    normalize_tool_reserved_global_flags, runs_worldwide_counter_flush,
-    should_skip_agent_install_check, should_skip_startup_maintenance, stderr_tracing_default,
-    validate_host_bundle_options,
+    hotpath_requires_protocol_safe_output, normalize_tool_reserved_global_flags,
+    runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
+    stderr_tracing_default, validate_host_bundle_options,
 };
 use clap::{CommandFactory, Parser};
 use std::iter;
@@ -217,7 +216,7 @@ fn storage_resets_still_reject_component_and_dry_run() {
 }
 
 #[test]
-fn default_component_set_adoption_requires_confirmation_and_reaches_dispatch() {
+fn default_component_set_adoption_requires_confirmation() {
     for args in [
         &[
             "tracedecay",
@@ -240,11 +239,7 @@ fn default_component_set_adoption_requires_confirmation_and_reaches_dispatch() {
         };
         validate_host_bundle_options(&command, CommandFamily::for_command(&command), &options)
             .expect("confirmed default component-set adoption must pass validation");
-        assert!(
-            is_full_component_set_adoption(&command, &options),
-            "confirmed default adoption must reach the full component-set handler path"
-        );
-        assert!(options.yes && options.adopt);
+        assert!(options.component.is_none() && options.yes && options.adopt);
     }
 }
 

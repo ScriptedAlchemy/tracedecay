@@ -18,7 +18,6 @@ use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
 use super::DaemonInvocationState;
 use crate::mcp::McpServer;
-use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_agent_hosts::native_integration::{
     DaemonNativeIntegrationAnalysisV1, DaemonNativeIntegrationServiceRegistry,
     NativeIntegrationTargetV1,
@@ -39,6 +38,7 @@ use tracedecay_daemon_service::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 mod advisory_runtime;
 mod automation_effect_recovery;

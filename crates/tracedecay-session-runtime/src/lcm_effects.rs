@@ -4,10 +4,10 @@ use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::execution::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_lcm::{LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 pub(super) const LCM_EFFECT_CEILING: Duration =
     tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE;

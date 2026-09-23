@@ -6552,7 +6552,6 @@ dependencies = [
  "hotpath",
  "memmap2",
  "regex",
- "rusqlite",
  "schemars",
  "serde",
  "serde_json",

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::*;
-use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_agent_hosts::agents::AgentIntegration;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 #[test]
 fn supported_optional_host_absences_reach_doctor_without_host_directories() {

@@ -27,11 +27,11 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ProjectId, ProviderId, RetentionClass, SessionId,
 };
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_store::ParseOffset;
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationIdentityCollisionDispositionV1,
 };
-use tracedecay_store::ParseOffset;
 
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::admission::{

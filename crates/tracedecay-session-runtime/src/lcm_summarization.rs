@@ -340,9 +340,13 @@ pub(super) fn decode_message_envelope(
 ) -> Result<Option<Box<CanonicalObservationEnvelopeV1>>, LcmError> {
     envelope
         .map(|envelope| {
-            serde_json::from_str(envelope).map(Box::new).map_err(|error| {
-                LcmError::Db(format!("message observation envelope decode failed: {error}"))
-            })
+            serde_json::from_str(envelope)
+                .map(Box::new)
+                .map_err(|error| {
+                    LcmError::Db(format!(
+                        "message observation envelope decode failed: {error}"
+                    ))
+                })
         })
         .transpose()
 }

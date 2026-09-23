@@ -5,7 +5,6 @@ use std::sync::{LazyLock, RwLock};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::coverage::CoverageReportV1;
-use crate::observation::PayloadReferenceV1;
 use super::error::DomainError;
 use super::id::{
     AccessPolicyDigest, CapabilityId, ManifestDigest, PrivacyDomainId, RetrievalAnchorId,
@@ -13,6 +12,7 @@ use super::id::{
 };
 use super::retrieval::{PayloadAccessState, PrivacyDomainBoundLocatorDigest};
 use super::watermark::VectorWatermark;
+use crate::observation::PayloadReferenceV1;
 
 /// Deterministic relationship between an observed store state and the state
 /// frozen into a retrieval anchor.
