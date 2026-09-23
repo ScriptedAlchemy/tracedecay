@@ -186,10 +186,9 @@ impl WorktreeChangeClassificationV1 {
 ///
 /// `TraceDecay` no longer writes anything into a checkout, but projects enrolled
 /// before the working-tree cutover may still carry a legacy
-/// `.tracedecay/` directory (e.g. `enrollment.json`, see
-/// `tracedecay_runtime_core::storage::identity::legacy_enrollment_marker_path`).
-/// Those bytes were produced by `TraceDecay`, are never checkout content, and
-/// are not indexable source. Unless the user happens to ignore
+/// `.tracedecay/` directory (e.g. `enrollment.json`). Those bytes were
+/// produced by `TraceDecay`, are never checkout content, and are not
+/// indexable source. Unless the user happens to ignore
 /// `.tracedecay/`, gix reports them as untracked, so treating them as a
 /// worktree change makes *every* legacy checkout look permanently dirty: no
 /// capture can then seal an exact HEAD tree, no published generation carries a

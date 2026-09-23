@@ -8,7 +8,7 @@ use std::time::Duration;
 use tracedecay_domain::{
     ContentDigest, FileOccurrenceId, ManifestDigest, ProjectionKeyV1, ProjectionKindV1,
     RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1, SnapshotFileDispositionV1,
-    WorktreeId, canonical_text::sha256_hex,
+    canonical_text::sha256_hex,
 };
 
 use crate::code_index::chunks::content_digest;
@@ -66,9 +66,13 @@ where
         .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))
 }
 
+/// File (and so symbol) occurrences name repository content, not the
+/// worktree holding it: linked worktrees sealing identical files mint
+/// identical occurrences and share every artifact derived from them. Each
+/// worktree's manifest and generation bind its snapshot authority, and every
+/// read selects its exact worktree route before resolving an occurrence.
 fn file_occurrence_id(
     repository: &RepositoryId,
-    worktree: &WorktreeId,
     logical_path: &str,
     digest: &ContentDigest,
     receipt: &SanitizationReceiptId,
@@ -77,9 +81,8 @@ fn file_occurrence_id(
         "file.daemon.{}",
         sha256_hex(
             format!(
-                "{}\0{}\0{logical_path}\0{}\0{}",
+                "{}\0{logical_path}\0{}\0{}",
                 repository.as_str(),
-                worktree.as_str(),
                 digest.as_str(),
                 receipt.as_str(),
             )
@@ -90,7 +93,6 @@ fn file_occurrence_id(
 
 fn omitted_file_occurrence_id(
     repository: &RepositoryId,
-    worktree: &WorktreeId,
     logical_path: &str,
     digest: &ContentDigest,
     disposition: SnapshotFileDispositionV1,
@@ -112,9 +114,8 @@ fn omitted_file_occurrence_id(
         "file.daemon.omitted.{}",
         sha256_hex(
             format!(
-                "{}\0{}\0{logical_path}\0{}\0{disposition}",
+                "{}\0{logical_path}\0{}\0{disposition}",
                 repository.as_str(),
-                worktree.as_str(),
                 digest.as_str(),
             )
             .as_bytes()
@@ -238,21 +239,19 @@ pub use reconcile::{
     ReconcilePassGuard,
 };
 pub(crate) use reconcile::{ServingSourceWitnessV1, SourceFreshnessFenceV1};
-pub use serving::{
-    CloneSimilarityWarmupForRequestV1, CodeIndexBuildProgressSlotStateV1,
-    CodeIndexBuildProgressSlotV1, DaemonCodeTextArtifactStoreV1, LatestCodeTextGenerationV1,
-    LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
-};
 use serving::{
     CodeGraphActivationStateV1, CodeGraphServingAuthorityV1, CodeIndexBuildProgressStateV1,
     CodeTextProjectionStateV1, DurableActiveSealedGenerationBindingV1, GenerationServingCachesV1,
     GenerationTextControlV1, TEXT_ARTIFACT_MAXIMUM_WORK_PER_ADVANCE_V1, try_publish_build_progress,
 };
+pub use serving::{
+    CodeIndexBuildProgressSlotStateV1, CodeIndexBuildProgressSlotV1, DaemonCodeTextArtifactStoreV1,
+    LatestCodeTextGenerationV1, LatestCompleteCodeIndexV1, ProductionCodeIndexQueryOwnersV1,
+};
 #[cfg(test)]
 use serving::{
     CodeIndexCommittedProgressSampleV1, CodeTextProjectionSlotV1, TEXT_ARTIFACT_PAGE_CHUNKS_V1,
-    clone_successor_source_batch_limits_from_charges, map_sealed_page_source_error,
-    sha256_private_file_and_size, text_artifact_admitted_build_budget,
-    text_artifact_builder_budget, text_artifact_resident_memory_charges,
-    text_artifact_source_batch_limits,
+    map_sealed_page_source_error, sha256_private_file_and_size,
+    text_artifact_admitted_build_budget, text_artifact_builder_budget,
+    text_artifact_resident_memory_charges, text_artifact_source_batch_limits,
 };

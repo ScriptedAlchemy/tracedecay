@@ -2,7 +2,7 @@ use tracedecay_code_extraction::{LanguageExtractor, ScalaExtractor};
 use tracedecay_domain::{EdgeKind, NodeKind};
 
 fn extract(source: &str) -> tracedecay_domain::ExtractionResult {
-    ScalaExtractor.extract("test.scala", source)
+    ScalaExtractor.extract_artifact("test.scala", source).result
 }
 
 #[test]

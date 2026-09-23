@@ -1,6 +1,7 @@
 mod adjacency_id_index;
 mod backup;
 mod bundle;
+mod corrupt_store;
 mod epoch_cache;
 mod error;
 mod generation;
@@ -22,7 +23,6 @@ mod runtime;
 mod schema;
 mod sealed_store;
 mod state;
-mod store_quarantine;
 mod traversal;
 mod verified_marker;
 
@@ -31,6 +31,7 @@ pub use bundle::{
     MAX_SEALED_READ_BUNDLE_ARTIFACT_BYTES_V1, SEALED_READ_BUNDLE_FORMAT_V1,
     SealedReadBundleArtifactStateV1, SealedReadBundleArtifactV1, SealedReadBundleManifestV1,
     SealedReadBundleWriterV1, load_sealed_read_bundle_artifact, retire_sealed_read_bundle,
+    sealed_read_bundle_artifact_file_digest, sealed_read_bundle_manifest_artifact_digests,
     sweep_aborted_sealed_read_bundle_temporaries,
 };
 pub use error::{
@@ -88,9 +89,7 @@ pub(crate) use publication::{
 };
 pub use recovery::VerifiedGraphCommit;
 pub use registry::{
-    CODE_GRAPH_SHARD_NAMESPACE_PREFIX, LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX,
-    code_graph_shard_namespace, is_code_graph_shard_namespace,
-    is_legacy_per_generation_code_graph_namespace,
+    CODE_GRAPH_SHARD_NAMESPACE_PREFIX, code_graph_shard_namespace, is_code_graph_shard_namespace,
 };
 pub use registry::{
     GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,

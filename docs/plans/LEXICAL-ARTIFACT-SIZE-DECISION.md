@@ -1,97 +1,177 @@
 # Lexical artifact size decision
 
-Status: options only; no design decision is made here.
+Status: decided. Revision 25 replaces every earlier revision. Older
+artifacts are refused as incompatible and rebuilt from the sealed
+generation; there is no migration.
+
+## Layout
+
+- Every posting family is one delta-varint list per serving key, clustered by
+  that key, with no secondary index: `term_postings` per `(term, field)` with
+  frequencies and the document frequency, `exact_postings` per
+  `(exact term, field)`, `ngram_postings` per `(kind, ngram)`. Dense n-gram
+  lists are stored as a bitset over the range they span when that is smaller.
+- Batches append page-ordered term and exact staging runs so appends stay at
+  the tree tail; finalization merges each in one sorted pass and drops it.
+  N-gram lists are never staged: finalization rebuilds them from the stored
+  rows in key order, spilling to further passes only past a quarter of the
+  builder's memory budget. Freed pages are released
+  (`auto_vacuum = INCREMENTAL`).
+- Annotation-use symbols (attributes such as `#[inline]`) mint no lexical
+  document; their text stays searchable through the item they annotate and
+  they remain graph symbols. Documents keep their source chunk ordinals.
+- Row chunk text is raw deflate when that is smaller.
+- `term_stats` and `ngram_statistics` are gone; the lists carry their
+  document frequencies. `document_integrity` and `import_integrity` are gone;
+  their digests are pure functions of stored rows and imports, and the
+  per-page base-section receipts still attest them. `import_evidence` keeps
+  only its canonical key, which is the evidence.
+- `vocabulary` is keyed by term alone; term-id collisions are refused once at
+  finalization. Rows store chunker-minted chunk ids as 32 digest bytes;
+  symbol dictionary entries store canonical symbol ids as digest bytes and
+  qualified names relative to the row's file path.
+- Candidate sets are Roaring bitmaps (at most one bit per document); per-row
+  term frequencies come from one ascending walk over the request's lists.
 
 ## Measurement
 
-The September 13, 2026 cold run used the `c91b8e3c1d` hotpath binary, an
-isolated profile, and `/fast/projects/tracedecay` as the source checkout. The
-checkout contained 6,456 tracked files and 224,585,869 tracked bytes; code
-index admission retained 5,295 files and 92,735,119 sanitized source bytes.
-The finalized revision-14 lexical SQLite artifact was 2,741,256,192 bytes:
-29.56 times the admitted source.
+Cold index of `/fast/projects/tracedecay` (6,468 tracked files, ~140 MB) in an
+isolated profile with the release daemon, September 23, 2026. The worktree
+moved slightly between runs (409,398 → 407,739 chunk documents).
 
-`dbstat` accounts for every 4 KiB page:
+| Section | Revision 14 | Revision 17 |
+| --- | ---: | ---: |
+| `ngram_postings` (+ index, statistics) | 1,470,275,584 | 241,299,456 |
+| `term_postings` (+ index, `term_stats`) | 1,220,493,312 | 71,905,280 |
+| `rows` + `rows_by_chunk` | 291,549,184 | 247,988,224 |
+| `row_dictionary` | 111,218,688 | 65,638,400 |
+| `import_evidence` + `import_integrity` | 159,010,816 | 44,310,528 |
+| `vocabulary` (+ unique index) | 78,381,056 | 38,686,720 |
+| `exact_postings` (+ index) | 48,025,600 | 5,144,576 |
+| `document_integrity` | 16,965,632 | 0 |
+| everything else | 24,514,560 | 24,407,040 |
+| **File** | **3,420,438,528** | **740,286,464** |
 
-| Section | Bytes | Artifact | Source multiple |
-| --- | ---: | ---: | ---: |
-| `ngram_postings` | 859,471,872 | 31.35% | 9.27x |
-| `ngram_postings_by_ngram` | 473,128,960 | 17.26% | 5.10x |
-| `term_postings` | 375,259,136 | 13.69% | 4.05x |
-| `term_postings_by_term` | 329,756,672 | 12.03% | 3.56x |
-| `rows` | 258,244,608 | 9.42% | 2.78x |
-| Import evidence and integrity | 162,938,880 | 5.94% | 1.76x |
-| Row dictionary and row lookup index | 84,926,464 | 3.10% | 0.92x |
-| Vocabulary and its unique index | 86,421,504 | 3.15% | 0.93x |
-| Exact postings and lookup index | 49,246,208 | 1.80% | 0.53x |
-| Statistics, receipts, integrity, metadata, and free page | 61,861,888 | 2.26% | 0.67x |
+Per document the file fell from 8,355 to 1,816 bytes (−78%). The staging peak
+during the build fell from ~3.4 GB to ~1.9 GB.
 
-The two posting tables and their serving indexes hold 74.33% of the file.
-The 32,039,149 n-gram rows contain 248,947,156 bytes of bitmap payload; the
-remaining 610,524,716 bytes in that table are SQLite keys, records, and page
-slack. The row table contains 190,591,951 payload bytes, and the row
-dictionary contains 42,012,311 payload bytes.
+Revision 20 on the same journey (407,774 source chunks, 352,172 documents):
 
-## Duplication boundaries
+| Section | Revision 17 | Revision 20 |
+| --- | ---: | ---: |
+| `ngram_postings` | 241,299,456 | 233,578,496 |
+| `rows` + `rows_by_chunk` | 247,988,224 | 140,324,864 |
+| `term_postings` | 71,905,280 | 68,993,024 |
+| `row_dictionary` | 65,638,400 | 59,482,112 |
+| everything else | 112,549,888 | 111,857,664 |
+| **File** | **740,286,464** | **614,989,824** |
 
-The artifact is a derived serving projection, not source authority.
+Staging never exceeds the sealed size (peak 615 MB, down from ~1.9 GB), and
+finalization takes ~70 s instead of spending ~2 min relocating freed pages.
+The file is 18% of the revision-14 artifact.
 
-- `rows` re-encodes sanitized chunks already authenticated by the sealed code
-  generation. The lexical copy is needed by current reads, but it is duplicate
-  content rather than new evidence.
-- `row_dictionary`, `document_integrity`, and `source_pages` repeat identities,
-  digests, and page receipts derivable from the sealed generation.
-- `import_evidence` and `import_integrity` repeat parser-attested import records
-  retained by the code generation and represented in the graph projection.
-- Term, exact, and n-gram postings are lexical-only derived data. Their base
-  tables do not duplicate graph rows, but the three secondary serving indexes
-  duplicate their keys and row locators inside this artifact.
-- The graph's 1,637,478,400-byte `generation.grafeo` is separate. Removing
-  lexical duplicates does not remove graph-store storage.
+Revision 23 on the same journey (348,769 documents; the worktree moved):
 
-## Bounded options
+| Section | Revision 20 | Revision 23 |
+| --- | ---: | ---: |
+| `ngram_postings` | 233,578,496 | 231,690,240 |
+| `rows` + `rows_by_chunk` → `row_blocks` + `row_chunks` | 140,324,864 | 84,905,984 |
+| `term_postings` + `vocabulary` → `term_postings` | 107,196,416 | 78,487,552 |
+| `row_dictionary` | 59,482,112 | 58,863,616 |
+| everything else (lexical) | 74,407,936 | 73,986,048 |
+| clone index (payloads, occurrences, exact, fingerprints) | not built | 270,721,024 |
+| **File** | **614,989,824** | **798,654,464** |
 
-### Keep revision 14
+- Rows are stored in deflated blocks of up to 32 consecutive documents (or
+  64 KiB); a read inflates one block, and ascending visits reuse it. A
+  signature chunk stores its text as the prefix length it shares with its
+  body chunk in the same block (154,703 rows).
+- `term_postings` is keyed by term text and carries every field's list and
+  the fuzzy flag; the separate `vocabulary` tree and term ids are gone.
+- The clone index seals with the lexical rows in one build, so there is no
+  clone successor. Its payloads and occurrences are deflated canonical JSON
+  in rowid tables (a WITHOUT ROWID row over ~1 KB spills to a mostly empty
+  overflow page), and fingerprint postings are one delta-coded list of
+  `(occurrence ordinal, position)` per fingerprint with its count. In the old
+  layout the same clone rows took ~3.8 GB (payloads 2.35 GB, fingerprint rows
+  1.1 GB, occurrences 311 MB) and their verification ran for over 20 minutes.
+- Cold index to sealed artifact: 262 s with the clone index (215 s for
+  revision 20 without it); finalization ~77 s.
 
-Cost on this corpus: 2,741,256,192 bytes (29.56x source). This preserves
-resume-in-place construction and current query plans. It requires no format
-cutover, but leaves storage proportional to SQLite row overhead as well as
-posting payload.
+Revision 24 makes the file a function of its content and shares it across
+linked worktrees:
 
-### Separate build order from serving order
+- Nothing route-specific is sealed. `artifact_state.metadata` holds only
+  logical paths and retriever revisions; generation, repository, freshness,
+  and each clone occurrence's project, worktree, generation, and snapshot
+  come from the opener. The receipt drops the sealed source's state and
+  chunk-chain digests (both hash the building generation into every chunk
+  anchor), and `source_pages` keeps only content columns: the per-page
+  cursors sit in `source_page_cursors`, dropped before the seal, and the
+  finalization state table is dropped at the seal.
+- Physical layout follows batch arrival order, so finalization `VACUUM`s the
+  file before sealing and normalizes SQLite's commit counters; the same
+  content staged through different batch sizes seals the same bytes.
+- Completed artifacts live in the project's `code-text-artifacts-v1/` beside
+  the shared generation segments; staging stays per scope in
+  `code-text-artifact-staging-v1/`. Retention marks every scope's
+  descriptors (including quarantined scopes) before collecting, publication
+  holds the project lock shared from finding or placing the file until its
+  descriptor is durable, and a scope's old `code-text-artifacts-v1/` is
+  removed whole.
+- Clone payloads are a deflated binary record without digests (re-derived
+  and checked against the row's content address on decode), with each
+  syntax kind stored once per payload and the rename stream stored as its
+  difference from the conservative stream. Occurrences store only their
+  eligibility beside the content columns.
 
-Build resumable staging tables in page order, then publish final posting tables
-clustered by serving key so the term, n-gram, exact, row, and vocabulary
-secondary indexes are unnecessary. Those indexes occupy 906,018,816 bytes.
-The measured upper estimate is therefore 1,835,237,376 bytes (19.79x source)
-before accounting for final-table rewrite scratch space. Publication would
-temporarily need approximately one old artifact plus one 1.84 GB successor;
-the final write must remain atomic and resumable.
+Two linked worktrees of HEAD `37d94657c0` (354,853 documents) in one
+isolated profile, built one after the other; the second build sealed the
+same bytes and publication kept the first file:
 
-### Keep only derived lexical data
+| | Revision 23 | Revision 24 |
+| --- | ---: | ---: |
+| text artifacts stored | 2 per-scope files, 798,654,464 each (~1.60 GB) | 1 shared file, 672,530,432 |
+| `clone_body_payloads` | 124,735,488 | 56,737,792 |
+| `clone_occurrences` | 60,919,808 | 18,178,048 |
+| clone index total (with fingerprints, exact postings, unique indexes) | 270,721,024 | 152,420,352 |
+| `source_pages` | 14,761,984 | 9,973,760 |
 
-Hydrate chunk rows and imports through the sealed-generation authority instead
-of storing lexical copies, while retaining compact document locators and all
-postings needed for bounded query latency. Removing the measured import tables
-from the clustered estimate yields 1,672,298,496 bytes (18.03x source);
-removing row copies needs a replacement locator format and cannot be estimated
-as a simple subtraction because postings currently address row document IDs.
+The revision-23 row is the single-worktree measurement above (the tree
+differs slightly); per-scope stamps made each worktree's file distinct. The
+seal-time `VACUUM` also compacts the file (692.9 MB staged, 672.5 MB
+sealed); it takes ~15 s of the 255 s cold build and briefly holds a
+rollback journal and a temporary copy (~1.3 GB) beside the staging file.
 
-### Replace row-per-page n-grams with a compact immutable index
+Revision 25 interns the clone index's identities and skips redundant
+builds:
 
-The n-gram table stores 248,947,156 bitmap bytes in 859,471,872 bytes of SQLite
-pages, plus a 473,128,960-byte serving index. A bounded immutable layout could
-store one ordered key directory and paged bitmap payload, with checksummed
-blocks and a fixed query-read budget. The measured payload floor is 249 MB.
-Adding current row, dictionary, and document-digest payloads gives a 495 MB
-known floor before term/exact postings, directories, checksums, and alignment.
-An 8x-source envelope would allow 742 MB total, leaving about 247 MB for those
-unmeasured requirements. This option needs a prototype before that envelope
-can be accepted or rejected.
+- `clone_body_payloads` is keyed by an integer ordinal with its digest as 32
+  bytes; `clone_occurrences` stores its symbol id as 32 digest bytes and
+  names its payload by ordinal; `clone_exact_postings` is
+  `(class, revision, digest bytes, occurrence ordinal)`. Exact pages page by
+  occurrence ordinal.
+- Before building, a worktree derives the artifact's content key from the
+  sealed source (the format and every file segment's key, occurrence,
+  content address, and symbol identities) and the projection's content
+  metadata. A descriptor any scope published under that key is adopted once
+  its file opens against its content address and this projection; a failed
+  verification builds, and publication replaces a shared file that no longer
+  hashes to its name.
 
-## Decision still required
+Same journey, HEAD `37d94657c0`:
 
-Choose only after measuring query p95/p99, cold build time, peak scratch and
-resident memory, crash-resume behavior, and byte-stable rebuilds for a
-prototype. This memo deliberately does not select an option or assign a new
-format revision.
+| | Revision 24 | Revision 25 |
+| --- | ---: | ---: |
+| `clone_body_payloads` (+ unique index) | 62,369,792 | 56,389,632 |
+| `clone_occurrences` (+ unique index) | 25,071,616 | 11,730,944 |
+| `clone_exact_postings` | 16,777,216 | 3,010,560 |
+| clone index total | 152,420,352 | 119,332,864 |
+| **File** | **672,530,432** | **639,401,984** |
+| second worktree, same tree | builds (~255 s), publication dedupes | adopts after its generation seals, no text build |
+
+## Remaining levers
+
+- `ngram_postings` (234 MB) is now over a third of the file.
+- `clone_fingerprint_postings` (48 MB) and `clone_body_payloads` (54 MB)
+  are now the bulk of the clone index.

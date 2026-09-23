@@ -71,6 +71,7 @@ lang-lean = ["tracedecay-code-extraction/lang-lean"]
 
 [dependencies]
 ast-grep-core = "0.44"
+flate2 = "1"
 hex = "0.4"
 hotpath.workspace = true
 ignore = "0.4"
@@ -89,6 +90,9 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tree-sitter = "0.26"
 
 [dev-dependencies]
+# Self dev-dependency: the integration suite forces indexing width through
+# the `test-helpers` hooks; production builds never select them.
+tracedecay-code-index = { path = ".", default-features = false, features = ["test-helpers"] }
 criterion = "0.5"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
@@ -121,6 +125,11 @@ name = "partitioned_codec"
 harness = false
 test = false
 required-features = ["hotpath"]
+
+[[bench]]
+name = "sealed_storage"
+harness = false
+test = false
 
 [[bench]]
 name = "restore_generation"

@@ -4,7 +4,7 @@ use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
     let extractor = KotlinExtractor;
-    extractor.extract("test.kt", source)
+    extractor.extract_artifact("test.kt", source).result
 }
 
 // -----------------------------------------------------------------------

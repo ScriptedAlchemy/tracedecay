@@ -25,12 +25,12 @@ use tracedecay_runtime_core::resident_memory::{
 use super::{
     ALPHA_LIB_V1, GitFixture, RETAINED_REVISION_0, SERVING_SEAT_FAILURE_CEILING,
     advance_pointer_to_unseated_successor, application_context, clear_pending_wake_until_quiet,
-    committed_capture_corpus_files, core_search_request, drain_clone_backfill, git, git_stdout,
-    hold_scheduler_for_root, mounted_core_query_worktree,
-    mounted_core_query_worktree_with_one_permit, published, query_authority, query_meta,
-    quiesced_background_reconcile_admission, replace_scheduler_chunker_revision,
-    replace_scheduler_policy_revision, rewrite_active_rust_extractor_revision,
-    rewrite_preserving_stat, scheduler, scheduler_with_policy, served_lexical_texts,
+    committed_capture_corpus_files, core_search_request, git, git_stdout, hold_scheduler_for_root,
+    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit, published,
+    query_authority, query_meta, quiesced_background_reconcile_admission,
+    replace_scheduler_chunker_revision, replace_scheduler_policy_revision,
+    rewrite_active_rust_extractor_revision, rewrite_preserving_stat, scheduler,
+    scheduler_with_policy, served_lexical_texts, settle_text_projection,
     settled_owner_with_idle_admission, test_project_id, wait_for_dashboard_ready,
     wait_for_event_to_ready, wait_for_generation_change, wait_for_initial_generation,
     wait_for_live_complete_generation, wait_for_live_complete_generation_by_polling,
@@ -42,8 +42,8 @@ use crate::{
     code_index::{
         chunks::content_digest,
         production::{
-            CodeIndexExecutionControlV1, DAEMON_CODE_INDEX_CHUNKER_REVISION,
-            UninterruptibleCodeIndexControlV1,
+            CodeIndexExecutionControlV1, CodeIndexPublishedGenerationV1,
+            DAEMON_CODE_INDEX_CHUNKER_REVISION, UninterruptibleCodeIndexControlV1,
         },
     },
     code_index_scheduler::{
@@ -674,11 +674,9 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
 /// Poll a mounted worktree's dashboard clone-index status until it reports
 /// ready coverage.
 ///
-/// `clone_index_status` reads the clone-successor slot with `try_lock` so a
-/// freshness read never joins a running backfill. A single sample therefore
-/// reports `Unavailable { "clone-index status is being updated" }` whenever a
-/// freshly published generation's successor still holds the slot, which is a
-/// truthful transient, not the settled answer a caller is asking for.
+/// Clone status is `Unavailable` until the published generation's owners
+/// serve, which is a truthful transient, not the settled answer a caller is
+/// asking for.
 async fn wait_for_ready_clone_index(
     registry: &CodeIndexSchedulerRegistryV1,
     path: &Path,
@@ -696,7 +694,7 @@ async fn wait_for_ready_clone_index(
             }) => return observation,
             transient => assert!(
                 Instant::now() <= deadline,
-                "the V16 artifact never reported ready clone coverage: {transient:?}"
+                "the artifact never reported ready clone coverage: {transient:?}"
             ),
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1464,9 +1462,16 @@ fn occurrence_graph_store_is_available_before_catalog_warm() {
     );
 }
 
+/// Linked worktrees sealing identical content share its occurrence identity
+/// and physical artifacts; each worktree still seals its own snapshot and
+/// generation, and a worktree's generation never names content only its
+/// sibling holds.
 #[test]
-fn cross_worktree_byte_reuse_without_identity_alias() {
-    let first = GitFixture::new(&[("src/lib.rs", "pub fn shared() -> u32 { 7 }\n")]);
+fn linked_worktrees_share_identity_for_identical_content_and_never_serve_divergent_content() {
+    let first = GitFixture::new(&[
+        ("src/lib.rs", "pub fn shared() -> u32 { 7 }\n"),
+        ("src/other.rs", "pub fn other() -> u32 { 9 }\n"),
+    ]);
     let linked_root = TempDir::new().expect("linked worktree root");
     let linked = linked_root.path().join("linked");
     let linked_arg = linked.to_str().expect("linked worktree path");
@@ -1502,30 +1507,31 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         "matching parse/chunk artifacts must be physically shared"
     );
     assert_eq!(first_publish.repository_id, second_publish.repository_id);
-    assert_eq!(first_generation.manifest().project_id, project_id);
-    assert_eq!(second_generation.manifest().project_id, project_id);
+    assert_eq!(
+        first_publish.file_occurrence_ids, second_publish.file_occurrence_ids,
+        "identical content shares its occurrence identity across linked worktrees"
+    );
+    let symbol_occurrences = |generation: &CodeIndexPublishedGenerationV1| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        symbol_occurrences(&first_generation),
+        symbol_occurrences(&second_generation)
+    );
+    // Snapshot authority stays with each worktree's own generation.
     assert_ne!(
         first_generation.snapshot().worktree,
         second_generation.snapshot().worktree
-    );
-    assert_eq!(
-        first_publish.snapshot_content_identity,
-        second_publish.snapshot_content_identity
-    );
-    assert_ne!(
-        first_publish.file_occurrence_ids, second_publish.file_occurrence_ids,
-        "shared artifacts must never alias worktree occurrence identity"
     );
     assert_ne!(first_publish.generation_id, second_publish.generation_id);
     assert_ne!(
         first_generation.manifest().snapshot_digest,
         second_generation.manifest().snapshot_digest
-    );
-    assert_eq!(
-        first_generation.capability().manifest_digest,
-        second_generation.capability().manifest_digest,
-        "byte-identical capability evidence is generation-free; generation, occurrence, \
-         snapshot, and publication identities remain worktree-local above and below"
     );
     assert_ne!(
         first_generation.projection().publication_digest(),
@@ -1533,41 +1539,71 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         "publication identity remains generation-local"
     );
 
+    // Divergent content in the linked worktree mints its own identity and is
+    // never part of what the primary worktree's generation serves.
+    write(
+        &linked,
+        "src/lib.rs",
+        "pub fn only_in_linked() -> u32 { 8 }\n",
+    );
+    second_scheduler.notify_path(linked.join("src/lib.rs"));
+    let diverged_publish = published(
+        second_scheduler
+            .reconcile_now()
+            .expect("diverged linked-worktree publish"),
+    );
+    let shared = first_publish
+        .file_occurrence_ids
+        .iter()
+        .filter(|occurrence| diverged_publish.file_occurrence_ids.contains(occurrence))
+        .count();
+    assert_eq!(
+        shared, 1,
+        "only the unchanged file keeps a shared identity: {:?} vs {:?}",
+        first_publish.file_occurrence_ids, diverged_publish.file_occurrence_ids
+    );
+    let names = |generation: &CodeIndexPublishedGenerationV1| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .map(|symbol| symbol.simple_name.clone())
+            .collect::<BTreeSet<_>>()
+    };
+    let primary = first_scheduler
+        .latest_complete()
+        .expect("first worktree remains current")
+        .generation;
+    let diverged = second_scheduler
+        .latest_complete()
+        .expect("diverged linked generation")
+        .generation;
+    assert_eq!(
+        primary.manifest().generation_id,
+        first_publish.generation_id,
+        "editing one linked worktree must not invalidate its sibling"
+    );
+    assert!(names(&diverged).contains("only_in_linked"));
+    assert!(
+        !names(&primary).contains("only_in_linked"),
+        "a read routed to the primary worktree's generation never sees linked-only symbols"
+    );
+    assert!(names(&primary).contains("shared"));
+    assert!(!names(&diverged).contains("shared"));
+
     git(&linked, &["mv", "src/lib.rs", "src/renamed.rs"]);
     second_scheduler.notify_path(linked.join("src/lib.rs"));
     second_scheduler.notify_path(linked.join("src/renamed.rs"));
+    let before_rename = registry.byte_pool_stats();
     published(
         second_scheduler
             .reconcile_now()
             .expect("renamed linked-worktree publish"),
     );
-    let after_rename = registry.byte_pool_stats();
     assert_eq!(
-        after_rename.parse_chunk_reused, reuse.parse_chunk_reused,
+        registry.byte_pool_stats().parse_chunk_reused,
+        before_rename.parse_chunk_reused,
         "same content at a new logical path must not reuse path-bound parse/chunk artifacts"
-    );
-
-    write(&linked, "src/renamed.rs", "pub fn shared() -> u32 { 8 }\n");
-    second_scheduler.notify_path(linked.join("src/renamed.rs"));
-    published(
-        second_scheduler
-            .reconcile_now()
-            .expect("edited linked-worktree publish"),
-    );
-    let after_edit = registry.byte_pool_stats();
-    assert_eq!(
-        after_edit.parse_chunk_reused, after_rename.parse_chunk_reused,
-        "changed source content must not reuse the prior parse/chunk artifact"
-    );
-    assert_eq!(
-        first_scheduler
-            .latest_complete()
-            .expect("first worktree remains current")
-            .generation
-            .manifest()
-            .generation_id,
-        first_publish.generation_id,
-        "editing one linked worktree must not invalidate its sibling"
     );
 }
 
@@ -2690,9 +2726,9 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     })
     .await;
     let generation = ready.generation().manifest().generation_id.clone();
-    // The seat precedes the clone-fingerprint backfill; settle it so the pass
-    // observed below is the source-verification Noop alone.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // Settle the mount-era passes so the pass observed below is the
+    // source-verification Noop alone.
+    settle_text_projection(&registry, fixture.path()).await;
 
     // Exercise the ordinary expiry path too. The existing seat keeps its exact
     // witness while the source-verification Noop renews the proof.
@@ -2889,7 +2925,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
     // Draining leaves the busy follow-up wake armed, and every pass it starts
     // owns the single global admission permit this test needs idle. Settle
     // that chain and burn the banked permit behind it before sampling.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    settle_text_projection(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let generation = latest.generation();
     let verified_import = generation
@@ -3713,13 +3749,11 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
     // `refresh_in_flight` is the pass counter *or* the pending-wake slot, and
-    // `wait_for_dashboard_ready` only joins the running pass. The seat no
-    // longer waits for the clone successor, so the mount leaves backfill work
-    // behind, and the wakes that drain it leave a banked permit whose no-op
-    // pass projects Verifying instead of Fresh. Settle the whole mount-era
-    // chain, then hold the admission so no further pass can start under the
-    // sample below.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // `wait_for_dashboard_ready` only joins the running pass; a banked
+    // permit's no-op pass projects Verifying instead of Fresh. Settle the
+    // whole mount-era chain, then hold the admission so no further pass can
+    // start under the sample below.
+    settle_text_projection(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root = fixture
@@ -3812,7 +3846,7 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    drain_clone_backfill(&registry, fixture.path()).await;
+    settle_text_projection(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical_root = fixture
@@ -4012,12 +4046,11 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
         .await
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
-    // The seat no longer waits for the clone successor, so the mount leaves
-    // pending backfill behind. Draining it is a wake of its own, and every
-    // wake posts its own receipt, so settle the whole mount-era chain first:
-    // a pass that ends with a wake still pending re-arms a busy follow-up
-    // whose receipt would otherwise land inside the probe's window below.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // Every wake posts its own receipt, so settle the whole mount-era chain
+    // first: a pass that ends with a wake still pending re-arms a busy
+    // follow-up whose receipt would otherwise land inside the probe's window
+    // below.
+    settle_text_projection(&registry, fixture.path()).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
@@ -4193,12 +4226,11 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    // The mount leaves clone backfill behind, and the wakes that drain it
-    // leave a banked permit whose no-op pass projects `Verifying` instead of
-    // `Fresh` (CI run 35425541839). Settle the mount-era chain, hold the
-    // admission so no pass can start under the sample, and prove the
-    // pending-wake slot stays empty, exactly as the text-progress test does.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // A banked permit's no-op pass projects `Verifying` instead of `Fresh`.
+    // Settle the mount-era chain, hold the admission so no pass can start
+    // under the sample, and prove the pending-wake slot stays empty, exactly
+    // as the text-progress test does.
+    settle_text_projection(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     let canonical = fixture.path().canonicalize().expect("canonical fixture");
@@ -4251,16 +4283,10 @@ async fn dashboard_freshness_reports_pending_rebuild_liveness() {
         .expect("mount daemon-owned scheduler");
     wait_for_initial_generation(&registry, fixture.path()).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    // The mount seats exact/lexical before the clone successor is built, so
-    // `wait_for_dashboard_ready` returns with that backfill still pending, and
-    // the admission below only parks a *new* pass at its dequeue point. A
-    // backfill slice advances under the clone-successor slot lock, which
-    // `clone_index_status` takes with `try_lock`: a sample that lands inside
-    // one reports `Unavailable { "clone-index status is being updated" }`
-    // before the source-stale branch can answer `Stale` (CI run 35432037843).
-    // Drain the mount-era backfill and burn the wake permits it banks, so the
+    // The admission below only parks a *new* pass at its dequeue point.
+    // Settle the mount-era passes and burn the wake permits they bank, so the
     // held admission is the only scheduling this sample can observe.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    settle_text_projection(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
 
     let admission = registry
@@ -4310,9 +4336,9 @@ async fn a_fresh_seat_declines_query_admission_during_source_verification() {
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
     wait_for_dashboard_ready(&registry, fixture.path()).await;
-    // Pending clone work is a reason to admit a background pass; settle it so
-    // the freshness gate alone decides this admission.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // Settle the mount-era passes so the freshness gate alone decides this
+    // admission.
+    settle_text_projection(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&scope).await;
 
     let pass = registry
@@ -5434,10 +5460,10 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
-    // Clone backfill owns the same coalesced pending-wake slot. This test is
-    // about simultaneous query admissions, so finish that independent
-    // production journey before establishing the empty-slot precondition.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // The mount's own passes own the same coalesced pending-wake slot. This
+    // test is about simultaneous query admissions, so settle them before
+    // establishing the empty-slot precondition.
+    settle_text_projection(&registry, fixture.path()).await;
     // Take the shared admission first, through the helper that also waits out
     // an in-flight pass: from here no new pass can start, so the quiet window
     // established below stays quiet. A raw `acquire_owned` returns the instant
@@ -5732,9 +5758,9 @@ async fn foreign_wake_arriving_during_query_claim_drop_is_retained() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
-    // A query over pending clone work is admitted for that work and never
-    // reaches the claim gate under test; settle the backfill first.
-    drain_clone_backfill(&registry, fixture.path()).await;
+    // A query over pending text work is admitted for that work and never
+    // reaches the claim gate under test; settle it first.
+    settle_text_projection(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
     // Same hang: a tail's `BusyFollowUp` stamp declines the request before the
     // claim gate this test waits on.
@@ -9736,34 +9762,46 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
             tracedecay_contracts::code_index_freshness::CodeIndexBuildPhaseV1::Ready
         );
     }
-    assert!(
-        registry
-            .latest_complete_serving_for_scope(&scope)
-            .await
-            .is_none(),
-        "retryable graph activation must not expose an unactivated graph owner"
+    // A retryable failure still seats the changed generation; its graph stays
+    // typed pending until a retry activates it.
+    let seat_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let seated = loop {
+        if let Some(latest) = registry.latest_complete_serving_for_scope(&scope).await
+            && latest.generation().manifest().generation_id == refreshed_generation_id
+        {
+            break latest;
+        }
+        assert!(
+            std::time::Instant::now() <= seat_deadline,
+            "graph retry backoff withheld the changed generation's seat"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(
+        seated.code_graph_serving_readiness(),
+        tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Pending,
+        "retryable graph activation must not expose an activated graph"
     );
 
     // Clearing the injected failure lets the scheduled backoff activate the
-    // changed generation without resealing it.
+    // seated generation without resealing it.
     super::super::graph_activation::set_injected_activation_failures(&sealed_worktree_id, 0);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if registry
-            .latest_complete_serving_for_scope(&scope)
-            .await
-            .is_some_and(|latest| {
-                latest.generation().manifest().generation_id == refreshed_generation_id
-            })
-        {
-            break;
-        }
+    while seated.code_graph_serving_readiness()
+        != tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Ready
+    {
         assert!(
             std::time::Instant::now() <= deadline,
             "the backoff retry did not activate the sealed generation"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        Some(refreshed_generation_id),
+        "activation must not reseal the changed generation"
+    );
+    assert_eq!(generation_files(&scoped_store), 2);
     registry.shutdown().await;
 }
 
@@ -10093,6 +10131,20 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
         let _ = release_rx.recv();
     });
     held_rx.recv().expect("lock acquired");
+    // Busy means a pass owns the worktree: wake one and let it park on the
+    // held scheduler before the read.
+    let _ = registry.notify_hook_overflow(fixture.path()).await;
+    let busy_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !registry
+        .reconcile_in_progress_for_test(fixture.path())
+        .await
+    {
+        assert!(
+            std::time::Instant::now() <= busy_deadline,
+            "the woken pass never took the worktree"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let latest = tokio::time::timeout(
         Duration::from_millis(250),

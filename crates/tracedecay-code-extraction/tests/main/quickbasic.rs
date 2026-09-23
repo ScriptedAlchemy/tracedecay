@@ -8,7 +8,7 @@ mod quickbasic_tests {
     fn extract_fixture() -> ExtractionResult {
         let source = std::fs::read_to_string("../../tests/fixtures/sample.bi").unwrap();
         let extractor = QuickBasicExtractor;
-        let result = extractor.extract("sample.bi", &source);
+        let result = extractor.extract_artifact("sample.bi", &source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         result
     }
@@ -161,7 +161,7 @@ SUB Test
 END SUB
 "#;
         let extractor = QuickBasicExtractor;
-        let result = extractor.extract("test.bi", source);
+        let result = extractor.extract_artifact("test.bi", source).result;
         assert!(
             result.errors.is_empty(),
             "QB4.5 statements should parse without errors: {:?}",

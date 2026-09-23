@@ -4,17 +4,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
     CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    CodeIndexRepositoryParseIdentityV1, VerifiedSealedLexicalPageReadV1,
+    CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1,
+    CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+    SealedGenerationSegmentPublicationV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
     VerifiedSealedLexicalSourceReceiptV1,
 };
@@ -33,7 +34,7 @@ use tracedecay_domain::{
 };
 use tracedecay_query::retrieval::lexical::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
-    CodeLexicalProjectionMetadataV1, VerifiedCodeLexicalArtifactV1,
+    CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, VerifiedCodeLexicalArtifactV1,
 };
 
 const FIXTURE_FILE_COUNT: usize = 48;
@@ -166,7 +167,7 @@ struct RunReport {
     sqlite_ingestion_commits: u64,
     artifact_bytes: u64,
     artifact_digest: String,
-    source_cumulative_digest: String,
+    artifact_file_digest: String,
 }
 
 struct RunResult {
@@ -182,7 +183,7 @@ struct ComparisonReport {
     bounded_batch: RunReport,
     final_receipt_equal: bool,
     artifact_digest_equal: bool,
-    source_cumulative_digest_equal: bool,
+    artifact_file_digest_equal: bool,
 }
 
 fn main() {
@@ -197,8 +198,8 @@ fn main() {
     let final_receipt_equal = one_page.receipt == bounded_batch.receipt;
     let artifact_digest_equal =
         one_page.receipt.artifact_digest() == bounded_batch.receipt.artifact_digest();
-    let source_cumulative_digest_equal = one_page.receipt.source_cumulative_digest()
-        == bounded_batch.receipt.source_cumulative_digest();
+    let artifact_file_digest_equal =
+        one_page.report.artifact_file_digest == bounded_batch.report.artifact_file_digest;
     let report = ComparisonReport {
         fixture_pages: fixture.pages.len(),
         batch_page_limit: BATCH_PAGE_LIMIT,
@@ -206,7 +207,7 @@ fn main() {
         bounded_batch: bounded_batch.report,
         final_receipt_equal,
         artifact_digest_equal,
-        source_cumulative_digest_equal,
+        artifact_file_digest_equal,
     };
 
     println!(
@@ -214,8 +215,8 @@ fn main() {
         serde_json::to_string_pretty(&report).expect("serialize benchmark report")
     );
     assert!(
-        final_receipt_equal && artifact_digest_equal && source_cumulative_digest_equal,
-        "the compared ingestion paths must produce the exact same final receipt and digests"
+        final_receipt_equal && artifact_digest_equal && artifact_file_digest_equal,
+        "the compared ingestion paths must produce the exact same final receipt and bytes"
     );
 }
 
@@ -316,17 +317,32 @@ fn build_fixture() -> Fixture {
     let generation = owner
         .build_and_publish(request, &control)
         .expect("build deterministic sealed generation");
-    let sealed = generation
-        .encode_sealed()
+    let mut segments = BTreeMap::new();
+    let mut evidence_pack = Vec::new();
+    let manifest = generation
+        .encode_partitioned_sealed(|publication| {
+            match publication {
+                SealedGenerationSegmentPublicationV1::File { digest, bytes } => {
+                    segments.insert(digest.as_str().to_owned(), bytes.to_vec());
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidencePage { bytes, .. } => {
+                    evidence_pack.extend_from_slice(bytes);
+                }
+                SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                    segment_digest,
+                    ..
+                } => {
+                    segments.insert(
+                        segment_digest.as_str().to_owned(),
+                        std::mem::take(&mut evidence_pack),
+                    );
+                }
+            }
+            Ok(())
+        })
         .expect("encode deterministic sealed generation");
-    let sealed_len = u64::try_from(sealed.len()).expect("sealed generation length");
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&sealed).expect("decode sealed generation envelope");
-    let state_digest = id::<ManifestDigest>(
-        envelope["state_digest"]
-            .as_str()
-            .expect("sealed generation state digest"),
-    );
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
+        .expect("sealed manifest digest");
     let metadata = CodeLexicalProjectionMetadataV1 {
         generation: generation.manifest().generation_id.clone(),
         repository_id: Some(repository),
@@ -342,14 +358,25 @@ fn build_fixture() -> Fixture {
             "retriever.lexical.catchup-benchmark.v1",
         ),
         exact_score_domain: id::<ScoreDomainId>("score.exact.catchup-benchmark.v1"),
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     };
-    let mut source = VerifiedSealedLexicalPageSourceV1::open(
-        Cursor::new(sealed),
-        sealed_len,
+    let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
+        &manifest,
         state_digest,
+        move |digest, _, buffer, _control| {
+            let bytes = segments.get(digest.as_str()).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract("benchmark segment is missing".to_owned())
+            })?;
+            buffer.clear();
+            buffer.extend_from_slice(bytes);
+            Ok(())
+        },
         1,
         1024 * 1024,
-        &control,
     )
     .expect("open verified lexical page source");
     let mut pages = Vec::new();
@@ -425,7 +452,9 @@ fn run(fixture: &Fixture, mode: IngestionMode) -> RunResult {
             sqlite_ingestion_commits,
             artifact_bytes: receipt.file_size_bytes(),
             artifact_digest: receipt.artifact_digest().as_str().to_owned(),
-            source_cumulative_digest: receipt.source_cumulative_digest().as_str().to_owned(),
+            artifact_file_digest: hex::encode(Sha256::digest(
+                std::fs::read(&artifact_path).expect("read finalized benchmark artifact"),
+            )),
         },
         receipt,
     }

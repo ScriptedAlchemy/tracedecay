@@ -13,13 +13,19 @@
 //! Plus the invariant none of the above may weaken: a corrupt sealed store
 //! still fails every request, with no memoized verdict.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision, sha256_hex_suffix};
+use tracedecay_code_index_retention::code_index_generations::{
+    CodeGenerationRetentionModeV1, run_code_generation_retention,
+};
+use tracedecay_domain::{
+    CodeGenerationId, ProjectId, SanitizerRevision, UtcMicros, sha256_hex_suffix,
+};
 use tracedecay_runtime_core::path_safety::{
     canonical_root_identity, plain_git_args, plain_host_path,
 };
@@ -566,5 +572,63 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
         publication.sealed_decode_count(),
         2,
         "the next request must repeat the full check rather than trust a verdict"
+    );
+}
+
+/// The decoded-generation LRU is an in-memory decode cache, never a retention
+/// mark: a superseded generation it still holds loses its sealed manifest and
+/// the segment only it named on the first retention pass.
+#[test]
+fn decoded_generation_cache_never_keeps_a_superseded_generation_on_disk() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = open(project.path(), store.path());
+    let superseded = publish(&mut scheduler);
+    write(project.path(), "src/lib.rs", 1);
+    let active = publish(&mut scheduler);
+    assert_ne!(superseded, active);
+    scheduler
+        .generation(&superseded)
+        .expect("pinned generation read")
+        .expect("superseded generation is decoded into the cache");
+
+    let file_count = |directory: &str| {
+        fs::read_dir(store.path().join(directory))
+            .expect("read store directory")
+            .count()
+    };
+    let segments_before = file_count("code-generation-segments-v1");
+    assert_eq!(file_count("code-generations-v1"), 2);
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(1),
+        None,
+    )
+    .expect("apply retention");
+
+    assert_eq!(
+        report
+            .deleted_generations
+            .iter()
+            .map(|generation| &generation.generation_id)
+            .collect::<Vec<_>>(),
+        vec![&superseded]
+    );
+    assert_eq!(file_count("code-generations-v1"), 1);
+    assert!(
+        file_count("code-generation-segments-v1") < segments_before,
+        "the edited file's superseded segment is collected with its manifest"
+    );
+    assert_eq!(
+        scheduler
+            .latest_complete()
+            .expect("active generation still serves")
+            .generation()
+            .manifest()
+            .generation_id,
+        active
     );
 }

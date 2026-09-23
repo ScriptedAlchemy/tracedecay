@@ -12,7 +12,7 @@ Class MyClass
 End Class
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
     let class = result
         .nodes
         .iter()
@@ -34,7 +34,7 @@ Interface ISerializable
 End Interface
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
     let interfaces: Vec<_> = result
         .nodes
         .iter()
@@ -53,7 +53,7 @@ Structure Point
 End Structure
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
     let structs: Vec<_> = result
         .nodes
         .iter()
@@ -73,7 +73,7 @@ Module Helpers
 End Module
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
     let modules: Vec<_> = result
         .nodes
         .iter()
@@ -93,7 +93,7 @@ Enum LogLevel
 End Enum
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
 
     let enums: Vec<_> = result
         .nodes
@@ -128,7 +128,7 @@ Class Foo
 End Class
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
 
     let methods: Vec<_> = result
         .nodes
@@ -154,7 +154,7 @@ Class Foo
 End Class
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
 
     let ctors: Vec<_> = result
         .nodes
@@ -174,7 +174,7 @@ Class Foo
 End Class
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
 
     let props: Vec<_> = result
         .nodes
@@ -196,7 +196,7 @@ fn test_vb_const() {
 Const MaxConnections As Integer = 100
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
 
     let consts: Vec<_> = result
         .nodes
@@ -219,7 +219,7 @@ Class Foo
 End Class
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
 
     let pub_method = result
         .nodes
@@ -244,7 +244,7 @@ Class Foo
 End Class
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("test.vb", source);
+    let result = extractor.extract_artifact("test.vb", source).result;
 
     let fields: Vec<_> = result
         .nodes
@@ -270,7 +270,7 @@ Class MyClass
 End Class
 "#;
     let extractor = VbNetExtractor;
-    let result = extractor.extract("attr.vb", source);
+    let result = extractor.extract_artifact("attr.vb", source).result;
 
     // Should have 3 AnnotationUsage nodes: Serializable, Obsolete, TestMethod
     let annots: Vec<_> = result

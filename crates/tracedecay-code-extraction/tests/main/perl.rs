@@ -6,7 +6,7 @@ use tracedecay_domain::*;
 fn test_perl_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
-    let result = extractor.extract("sample.pl", &source);
+    let result = extractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -64,7 +64,7 @@ fn test_perl_call_sites() {
 fn test_perl_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
-    let result = extractor.extract("sample.pl", &source);
+    let result = extractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let log_fn = result
@@ -118,7 +118,7 @@ fn test_perl_docstrings() {
 fn test_perl_signatures() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.pl").unwrap();
     let extractor = PerlExtractor;
-    let result = extractor.extract("sample.pl", &source);
+    let result = extractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let log_fn = result

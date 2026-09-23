@@ -1,6 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Transaction, params};
 use sha2::{Digest, Sha256};
 
 use super::super::LexicalFieldV1;
@@ -9,40 +7,29 @@ use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
-/// Revision 10 is the last TEXT-term posting layout. Revision 11 interns
-/// terms, stores integer field codes, drops redundant serving indexes, and
-/// writes compact row payloads. Revision 12 delta-encodes n-gram document
-/// lists and interns exact terms. Revision 13 clusters `term_postings` by
-/// `(document_id, term_id, field)` so every batch appends to the tail of the
-/// tree instead of rewriting leaves across the whole hashed term-id space,
-/// and derives the term-leading serving index once at finalization.
-/// Revision 14 replaces the JSON row payload with a binary one whose
-/// per-file and per-symbol strings (paths, occurrence identities, display
-/// names, descriptor revisions) are interned once as `row_dictionary`
-/// entries and referenced by content-addressed id. Revision 15 adds
-/// content-addressed clone payloads, source-bound occurrences, and exact
-/// conservative/rename postings. Revision 16 adds signature and documentation
-/// fields without changing the shipped revision-14/15 row codec, positional
-/// winnowed fingerprint postings, and stored posting-list counts. Readers
-/// accept all shipped layouts; writers emit 16 unless an explicit benchmark
-/// revision is selected.
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10: u32 = 10;
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11: u32 = 11;
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12: u32 = 12;
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13: u32 = 13;
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14: u32 = 14;
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15: u32 = 15;
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16: u32 = 16;
-pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 =
-    CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16;
+/// Revision 26 is the only layout this build serves: interned exact terms,
+/// integer field codes, rows stored as deflated blocks of consecutive
+/// documents (per-file and per-symbol strings interned once as
+/// `row_dictionary` entries, a signature chunk's text stored as the prefix
+/// it shares with its body chunk), one `term_postings` row per term text
+/// carrying every field's delta-varint list, one `exact_postings` list per
+/// exact term and field, one `ngram_postings` list per n-gram rebuilt from
+/// the stored rows (the case-preserving kind holds only windows with an ASCII
+/// uppercase byte; every other raw window is its normalized window), and the clone index (binary payloads keyed by 32-byte
+/// digest, content-only occurrences keyed by symbol digest, and exact and
+/// positional winnowed fingerprint postings, each naming its payload or
+/// occurrence by integer ordinal) sealed by the same build. Batches append
+/// page-ordered staging that finalization merges and drops, so no secondary
+/// index duplicates a posting. Annotation uses mint no document. The sealed
+/// file holds content only: route identity (generation, repository,
+/// freshness, clone occurrence project/worktree/snapshot) and the sealed
+/// source's resume cursors are supplied by the opener or dropped before the
+/// seal, so identical trees in different worktrees seal byte-identical
+/// files. Every other revision is refused as incompatible and rebuilt from
+/// the sealed generation.
+pub(super) const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 26;
 
-const DIGEST_DOMAIN_V10: &[u8] = b"tracedecay.code-lexical-artifact.v10\0";
-const DIGEST_DOMAIN_V11: &[u8] = b"tracedecay.code-lexical-artifact.v11\0";
-const DIGEST_DOMAIN_V12: &[u8] = b"tracedecay.code-lexical-artifact.v12\0";
-const DIGEST_DOMAIN_V13: &[u8] = b"tracedecay.code-lexical-artifact.v13\0";
-const DIGEST_DOMAIN_V14: &[u8] = b"tracedecay.code-lexical-artifact.v14\0";
-const DIGEST_DOMAIN_V15: &[u8] = b"tracedecay.code-lexical-artifact.v15\0";
-const DIGEST_DOMAIN_V16: &[u8] = b"tracedecay.code-lexical-artifact.v16\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v26\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;
@@ -54,234 +41,27 @@ const FIELD_SUBTOKEN: i64 = 7;
 const FIELD_SIGNATURE: i64 = 8;
 const FIELD_DOCUMENTATION: i64 = 9;
 
-pub(super) const REQUIRED_ARTIFACT_INDEXES_V10: [(&str, &str, &[&str]); 7] = [
-    ("rows", "rows_by_chunk", &["chunk_id"]),
-    (
-        "term_postings",
-        "term_postings_by_term",
-        &["term", "field", "document_id"],
-    ),
-    (
-        "term_postings",
-        "term_postings_by_document",
-        &["document_id", "field", "term", "frequency"],
-    ),
-    (
-        "term_postings",
-        "term_postings_by_document_term",
-        &["document_id", "term", "field", "frequency"],
-    ),
-    ("term_stats", "term_stats_by_term", &["term", "field"]),
-    (
-        "exact_postings",
-        "exact_postings_by_document",
-        &["document_id", "field", "term"],
-    ),
-    (
-        "ngram_postings",
-        "ngram_postings_by_ngram",
-        &["kind", "ngram", "page_ordinal", "cardinality"],
-    ),
-];
+/// Index wakes: row dictionary with the chunk lookup table, then the three
+/// posting merges. Statistics wakes: field totals, then releasing every
+/// dropped staging page.
+pub(super) const STATISTICS_STEP_COUNT_V11: u64 = 2;
+pub(super) const SERVING_INDEX_STEP_COUNT_V11: u64 = 4;
 
-/// Serving indexes retained after EXPLAIN QUERY PLAN on the live read
-/// shapes: chunk lookup, one document-leading posting probe, exact
-/// document membership, and n-gram page shards. The revision-10
-/// term-leading and duplicate document-term indexes are covered by the
-/// interned primary key `(term_id, field, document_id)`.
-pub(super) const REQUIRED_ARTIFACT_INDEXES_V11: [(&str, &str, &[&str]); 4] = [
-    ("rows", "rows_by_chunk", &["chunk_id"]),
-    (
-        "term_postings",
-        "term_postings_by_document",
-        &["document_id", "term_id", "field", "frequency"],
-    ),
-    (
-        "exact_postings",
-        "exact_postings_by_document",
-        &["document_id", "field", "term"],
-    ),
-    (
-        "ngram_postings",
-        "ngram_postings_by_ngram",
-        &["kind", "ngram", "page_ordinal", "cardinality"],
-    ),
-];
-
-pub(super) const REQUIRED_ARTIFACT_INDEXES_V12: [(&str, &str, &[&str]); 4] = [
-    ("rows", "rows_by_chunk", &["chunk_id"]),
-    (
-        "term_postings",
-        "term_postings_by_document",
-        &["document_id", "term_id", "field", "frequency"],
-    ),
-    (
-        "exact_postings",
-        "exact_postings_by_document",
-        &["document_id", "field", "term_id"],
-    ),
-    (
-        "ngram_postings",
-        "ngram_postings_by_ngram",
-        &["kind", "ngram", "page_ordinal", "cardinality"],
-    ),
-];
-
-/// Revision 13 keeps the interned exact layout of revision 12 but clusters
-/// `term_postings` by document, so the term-leading probe index replaces the
-/// document-leading one.
-pub(super) const REQUIRED_ARTIFACT_INDEXES_V13: [(&str, &str, &[&str]); 4] = [
-    ("rows", "rows_by_chunk", &["chunk_id"]),
-    (
-        "term_postings",
-        "term_postings_by_term",
-        &["term_id", "field", "document_id", "frequency"],
-    ),
-    (
-        "exact_postings",
-        "exact_postings_by_document",
-        &["document_id", "field", "term_id"],
-    ),
-    (
-        "ngram_postings",
-        "ngram_postings_by_ngram",
-        &["kind", "ngram", "page_ordinal", "cardinality"],
-    ),
-];
-
-/// Statistics wakes stay at three steps (field, term, fuzzy flag). Index
-/// wakes are the four serving indexes plus n-gram selectivity.
-pub(super) const STATISTICS_STEP_COUNT_V11: u64 = 3;
-pub(super) const SERVING_INDEX_STEP_COUNT_V11: u64 = 5;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CodeLexicalArtifactWriterRevisionV1 {
-    V11,
-    V12,
-    V13,
-    V14,
-    V15,
-    #[default]
-    V16,
-}
-
-impl CodeLexicalArtifactWriterRevisionV1 {
-    pub(super) const fn layout(self) -> LexicalArtifactLayoutV1 {
-        match self {
-            Self::V11 => LexicalArtifactLayoutV1::V11,
-            Self::V12 => LexicalArtifactLayoutV1::V12,
-            Self::V13 => LexicalArtifactLayoutV1::V13,
-            Self::V14 => LexicalArtifactLayoutV1::V14,
-            Self::V15 => LexicalArtifactLayoutV1::V15,
-            Self::V16 => LexicalArtifactLayoutV1::V16,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LexicalArtifactLayoutV1 {
-    V10,
-    V11,
-    V12,
-    V13,
-    V14,
-    V15,
-    V16,
-}
-
-impl LexicalArtifactLayoutV1 {
-    pub(super) fn from_revision(revision: u32) -> Result<Self, CodeLexicalArtifactErrorV1> {
-        match revision {
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10 => Ok(Self::V10),
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11 => Ok(Self::V11),
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12 => Ok(Self::V12),
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13 => Ok(Self::V13),
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14 => Ok(Self::V14),
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15 => Ok(Self::V15),
-            CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16 => Ok(Self::V16),
-            _ => Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
-                "format revision {revision} is unsupported"
-            ))),
-        }
-    }
-
-    pub(super) fn revision(self) -> u32 {
-        match self {
-            Self::V10 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10,
-            Self::V11 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
-            Self::V12 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12,
-            Self::V13 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
-            Self::V14 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14,
-            Self::V15 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15,
-            Self::V16 => CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16,
-        }
-    }
-
-    pub(super) fn digest_domain(self) -> &'static [u8] {
-        match self {
-            Self::V10 => DIGEST_DOMAIN_V10,
-            Self::V11 => DIGEST_DOMAIN_V11,
-            Self::V12 => DIGEST_DOMAIN_V12,
-            Self::V13 => DIGEST_DOMAIN_V13,
-            Self::V14 => DIGEST_DOMAIN_V14,
-            Self::V15 => DIGEST_DOMAIN_V15,
-            Self::V16 => DIGEST_DOMAIN_V16,
-        }
-    }
-
-    pub(super) fn required_indexes(
-        self,
-    ) -> &'static [(&'static str, &'static str, &'static [&'static str])] {
-        match self {
-            Self::V10 => &REQUIRED_ARTIFACT_INDEXES_V10,
-            Self::V11 => &REQUIRED_ARTIFACT_INDEXES_V11,
-            Self::V12 => &REQUIRED_ARTIFACT_INDEXES_V12,
-            // Revision 14 changes only the row payload and its string
-            // dictionary; the serving indexes are revision 13's.
-            Self::V13 | Self::V14 | Self::V15 | Self::V16 => &REQUIRED_ARTIFACT_INDEXES_V13,
-        }
-    }
-
-    /// Revisions 12 and later intern exact terms through `exact_vocabulary`.
-    pub(super) fn interns_exact_terms(self) -> bool {
-        matches!(
-            self,
-            Self::V12 | Self::V13 | Self::V14 | Self::V15 | Self::V16
-        )
-    }
-
-    /// Revisions 13 and later cluster `term_postings` by `(document_id,
-    /// term_id, field)`; every earlier interned layout clusters by term.
-    pub(super) fn clusters_term_postings_by_document(self) -> bool {
-        matches!(self, Self::V13 | Self::V14 | Self::V15 | Self::V16)
-    }
-
-    /// Revision 14 rows reference `row_dictionary` entries for their per-file
-    /// and per-symbol strings instead of carrying the text per chunk.
-    pub(super) fn interns_row_dictionary(self) -> bool {
-        matches!(self, Self::V14 | Self::V15 | Self::V16)
-    }
-
-    /// Revision 14 keeps `document_integrity` as `(document_id, digest
-    /// BLOB)`: the chunk id already lives in `rows` under the same key, and
-    /// the 32 digest bytes replace their 71-byte tagged hex form.
-    pub(super) fn stores_document_integrity_bytes(self) -> bool {
-        matches!(self, Self::V14 | Self::V15 | Self::V16)
-    }
-
-    pub(super) fn has_clone_index(self) -> bool {
-        matches!(self, Self::V15 | Self::V16)
-    }
-
-    pub(super) fn has_clone_fingerprints(self) -> bool {
-        self == Self::V16
+pub(super) fn require_served_revision(revision: u32) -> Result<(), CodeLexicalArtifactErrorV1> {
+    if revision == CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1 {
+        Ok(())
+    } else {
+        Err(CodeLexicalArtifactErrorV1::Incompatible(format!(
+            "format revision {revision} is unsupported"
+        )))
     }
 }
 
 pub(super) fn digest_domain_for_revision(
     revision: u32,
 ) -> Result<&'static [u8], CodeLexicalArtifactErrorV1> {
-    Ok(LexicalArtifactLayoutV1::from_revision(revision)?.digest_domain())
+    require_served_revision(revision)?;
+    Ok(DIGEST_DOMAIN)
 }
 
 pub(super) fn field_code(field: LexicalFieldV1) -> i64 {
@@ -347,16 +127,6 @@ pub(super) fn exact_field_code_from_encoded(
     Ok(exact_field_code(field))
 }
 
-/// Content-addressed term primary key. Incrementing IDs follow first-seen
-/// batch order, so one-page and multi-page commits of the same source would
-/// disagree on `vocabulary` / `term_stats` section receipts.
-pub(super) fn stable_term_id(term: &str) -> i64 {
-    stable_prefixed_id(
-        b"tracedecay.code-lexical-artifact.term-id.v11\0",
-        term.as_bytes(),
-    )
-}
-
 pub(super) fn stable_exact_term_id(term: &[u8]) -> i64 {
     stable_prefixed_id(
         b"tracedecay.code-lexical-artifact.exact-term-id.v12\0",
@@ -384,7 +154,7 @@ pub(super) fn stable_row_dictionary_id(entry: &[u8]) -> i64 {
 
 /// Stage every dictionary entry the batch references under its page ordinal.
 /// `row_dictionary_pages` is clustered by `(page_ordinal, entry_id)`, so a
-/// batch appends at the tail like every other revision-13 base table; a
+/// batch appends at the tail like every other base table; a
 /// hash-keyed insert straight into `row_dictionary` would dirty most of that
 /// tree on every batch (measured: +540 MiB of journal and page rewrites over
 /// 37 batches on a 24 MB dictionary). Finalization derives the deduplicated
@@ -479,89 +249,11 @@ pub(super) fn intern_exact_terms(
     Ok(())
 }
 
-/// Intern the batch's distinct terms and return the ids now present in
-/// `vocabulary`, so the posting writer can confirm every planned posting's
-/// term was interned with one integer probe per row. `terms` is ascending by
-/// term text, the order `vocabulary` was always interned in, and carries
-/// the ids the insert plan already content-addressed, so neither the digest
-/// nor the walk over every posting is repeated here.
-pub(super) fn intern_terms(
-    transaction: &Transaction<'_>,
-    terms: &[(&str, i64)],
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<HashSet<i64>, CodeLexicalArtifactErrorV1> {
-    let mut assigned = HashSet::with_capacity(terms.len());
-    let mut insert = transaction
-        .prepare_cached(
-            "INSERT INTO vocabulary(term_id, term, in_fuzzy) VALUES (?1, ?2, 0) ON CONFLICT(term) DO NOTHING",
-        )
-        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-    for (term, term_id) in terms {
-        checkpoint(control)?;
-        insert.execute(params![term_id, term]).map_err(|error| {
-            CodeLexicalArtifactErrorV1::Contract(format!(
-                "lexical artifact term identifier collided or vocabulary insert failed: {error}"
-            ))
-        })?;
-        assigned.insert(*term_id);
-    }
-    Ok(assigned)
-}
-
-pub(super) fn lookup_term_id(
-    connection: &Connection,
-    term: &str,
-) -> Result<Option<i64>, CodeLexicalArtifactErrorV1> {
-    connection
-        .query_row(
-            "SELECT term_id FROM vocabulary WHERE term = ?1",
-            [term],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))
-}
-
-pub(super) fn lookup_term_ids(
-    connection: &Connection,
-    terms: &BTreeSet<String>,
-) -> Result<BTreeMap<String, i64>, CodeLexicalArtifactErrorV1> {
-    let mut assigned = BTreeMap::new();
-    if terms.is_empty() {
-        return Ok(assigned);
-    }
-    let placeholders = std::iter::repeat_n("?", terms.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("SELECT term, term_id FROM vocabulary WHERE term IN ({placeholders})");
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-    let mut rows = statement
-        .query(rusqlite::params_from_iter(terms.iter()))
-        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?
-    {
-        assigned.insert(
-            row.get(0)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?,
-            row.get(1)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?,
-        );
-    }
-    Ok(assigned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11,
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13,
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14, CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15,
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16, CodeLexicalArtifactErrorV1,
-        LexicalArtifactLayoutV1, exact_field_code, field_code, field_from_code,
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactErrorV1, exact_field_code,
+        field_code, field_from_code, require_served_revision,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
     use rusqlite::Connection;
@@ -606,48 +298,18 @@ mod tests {
     }
 
     #[test]
-    fn layout_accepts_open_revisions_and_fails_closed_otherwise() {
-        assert_eq!(
-            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V10)
-                .expect("v10"),
-            LexicalArtifactLayoutV1::V10
-        );
-        assert_eq!(
-            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V11)
-                .expect("v11"),
-            LexicalArtifactLayoutV1::V11
-        );
-        assert_eq!(
-            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V12)
-                .expect("v12"),
-            LexicalArtifactLayoutV1::V12
-        );
-        assert_eq!(
-            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V13)
-                .expect("v13"),
-            LexicalArtifactLayoutV1::V13
-        );
-        assert_eq!(
-            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V14)
-                .expect("v14"),
-            LexicalArtifactLayoutV1::V14
-        );
-        assert_eq!(
-            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V15)
-                .expect("v15"),
-            LexicalArtifactLayoutV1::V15
-        );
-        assert_eq!(
-            LexicalArtifactLayoutV1::from_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V16)
-                .expect("v16"),
-            LexicalArtifactLayoutV1::V16
-        );
-        assert!(LexicalArtifactLayoutV1::from_revision(9).is_err());
-        assert!(LexicalArtifactLayoutV1::from_revision(17).is_err());
+    fn only_the_served_revision_is_accepted() {
+        require_served_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1).expect("served");
+        for revision in [16, 20, 22, 25, 27] {
+            assert!(matches!(
+                require_served_revision(revision),
+                Err(CodeLexicalArtifactErrorV1::Incompatible(_))
+            ));
+        }
     }
 
     #[test]
-    fn row_dictionary_ids_are_deterministic_and_distinct_from_term_ids() {
+    fn row_dictionary_ids_are_deterministic_and_distinct_from_exact_term_ids() {
         assert_eq!(
             super::stable_row_dictionary_id(b"src/lib.rs"),
             super::stable_row_dictionary_id(b"src/lib.rs")
@@ -658,8 +320,8 @@ mod tests {
         );
         assert_ne!(
             super::stable_row_dictionary_id(b"return"),
-            super::stable_term_id("return"),
-            "dictionary entries and vocabulary terms hash under different domains"
+            super::stable_exact_term_id(b"return"),
+            "dictionary entries and exact terms hash under different domains"
         );
         assert!(super::stable_row_dictionary_id(b"src/lib.rs") >= 0);
     }

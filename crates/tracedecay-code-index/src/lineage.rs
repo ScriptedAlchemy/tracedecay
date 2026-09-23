@@ -44,6 +44,39 @@ pub struct SymbolLineageCandidateV1 {
     pub abstention: Option<LineageAbstentionV1>,
 }
 
+impl SymbolLineageCandidateV1 {
+    /// The candidate the resolver emits when `symbol` continues with the
+    /// same content from `prior_occurrence`, the prior occurrence of its
+    /// exact identity tuple. Sealed evidence leaves such rows implicit and
+    /// rebuilds them here.
+    pub(crate) fn exact_unchanged(
+        prior_generation: &CodeGenerationId,
+        current_generation: &CodeGenerationId,
+        prior_occurrence: &SymbolOccurrenceId,
+        symbol: &LineageSymbolRecordV1,
+    ) -> Result<Self, LineageResolutionErrorV1> {
+        let kind = LineageKindV1::Unchanged;
+        let method = LineageMethodV1::ExactIdentityTuple;
+        Ok(Self {
+            prior_occurrence: prior_occurrence.clone(),
+            current_occurrence: symbol.occurrence.clone(),
+            kind,
+            method,
+            evidence: evidence_from(
+                prior_generation,
+                current_generation,
+                symbol,
+                Some((prior_occurrence, &symbol.content_digest)),
+                kind,
+                method,
+            )?,
+            confidence: LineageConfidenceKindV1::Exact,
+            alternatives: Vec::new(),
+            abstention: None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum LineageKindV1 {
@@ -1053,13 +1086,32 @@ fn evidence(
     kind: LineageKindV1,
     method: LineageMethodV1,
 ) -> Result<LineageEvidenceV1, LineageResolutionErrorV1> {
-    let prior_digest = ancestor.map(|record| record.content_digest.clone());
+    evidence_from(
+        prior_generation,
+        current_generation,
+        symbol,
+        ancestor.map(|record| (&record.occurrence, &record.content_digest)),
+        kind,
+        method,
+    )
+}
+
+/// [`evidence`] from the only two facts it reads of the ancestor.
+fn evidence_from(
+    prior_generation: &CodeGenerationId,
+    current_generation: &CodeGenerationId,
+    symbol: &LineageSymbolRecordV1,
+    ancestor: Option<(&SymbolOccurrenceId, &ContentDigest)>,
+    kind: LineageKindV1,
+    method: LineageMethodV1,
+) -> Result<LineageEvidenceV1, LineageResolutionErrorV1> {
+    let prior_digest = ancestor.map(|(_, digest)| digest.clone());
     let evidence_digest = canonical_sha256(&(
         LINEAGE_EVIDENCE_SEPARATOR,
         prior_generation,
         current_generation,
         &symbol.occurrence,
-        ancestor.map(|record| &record.occurrence),
+        ancestor.map(|(occurrence, _)| occurrence),
         kind,
         method,
         &prior_digest,

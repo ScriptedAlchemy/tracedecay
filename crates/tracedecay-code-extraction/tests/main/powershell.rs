@@ -6,7 +6,7 @@ use tracedecay_domain::*;
 fn test_powershell_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
+    let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -39,7 +39,7 @@ fn test_powershell_call_sites() {
 fn test_powershell_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
+    let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Write-Log should have a block comment docstring.
@@ -94,7 +94,7 @@ fn test_powershell_docstrings() {
 fn test_powershell_contains_edges() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
     let extractor = PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
+    let result = extractor.extract_artifact("sample.ps1", &source).result;
     let contains: Vec<_> = result
         .edges
         .iter()

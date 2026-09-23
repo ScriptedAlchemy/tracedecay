@@ -92,9 +92,6 @@ mod lean_extractor;
 mod lua_extractor;
 #[cfg(feature = "lang-markdown")]
 mod markdown_extractor;
-/// Grammar-free; always compiled so the retrieval layer can read section
-/// structure without linking a tree-sitter bundle.
-pub mod markdown_structure;
 #[cfg(feature = "lang-metal")]
 mod metal_extractor;
 #[cfg(feature = "lang-msbasic2")]
@@ -345,12 +342,6 @@ pub trait LanguageExtractor: Send + Sync {
             },
             crate::hotpath_observe::ExtractOutputCounts::from_artifact,
         )
-    }
-
-    /// Nodes, edges, and unresolved refs of the whole document, parsed with
-    /// this extractor's own grammar.
-    fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
-        self.extract_artifact(file_path, source).result
     }
 }
 

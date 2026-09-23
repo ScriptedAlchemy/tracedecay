@@ -30,7 +30,10 @@ use crate::lineage::LineageSymbolRecordV1;
 /// Bundle artifact name of the interactive catalog.
 pub const INTERACTIVE_CATALOG_ARTIFACT_NAME: &str = "interactive-catalog";
 
-const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str = "tracedecay.code-graph-interactive-catalog.v2";
+/// v3 names no generation: the catalog is a pure function of the graph's
+/// rows, so linked worktrees sealing the same graph share one artifact, and
+/// the per-generation bundle manifest carries the identity binding.
+const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str = "tracedecay.code-graph-interactive-catalog.v3";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -45,9 +48,6 @@ struct CatalogSymbolRowV1 {
 #[serde(deny_unknown_fields)]
 struct InteractiveCatalogArtifactV1 {
     format: String,
-    /// The graph generation this catalog was derived from, for a cheap
-    /// self-description check on top of the envelope's identity binding.
-    graph_generation: String,
     symbols: Vec<CatalogSymbolRowV1>,
     files: Vec<SanitizedCodeFileV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
@@ -118,7 +118,6 @@ where
 #[derive(Serialize)]
 struct InteractiveCatalogArtifactViewV1<'a> {
     format: &'static str,
-    graph_generation: &'a str,
     symbols: CatalogSymbolRowsV1<'a>,
     files: CancellableRowsV1<'a, SanitizedCodeFileV1>,
     imports: CancellableRowsV1<'a, CodeIndexImportEvidenceV1>,
@@ -284,7 +283,6 @@ pub fn write_interactive_catalog_artifact(
     check_cancelled(cancellation)?;
     let artifact = InteractiveCatalogArtifactViewV1 {
         format: INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1,
-        graph_generation: manifest.generation.as_str(),
         symbols: CatalogSymbolRowsV1 {
             manifest,
             cancellation,
@@ -314,7 +312,6 @@ pub fn write_interactive_catalog_artifact(
 /// catalog, revalidating structural invariants row by row.
 pub(super) fn decode_interactive_catalog_artifact(
     bytes: &[u8],
-    expected_graph_generation: &str,
     cancellation: &dyn GraphCancellation,
 ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
     let artifact: InteractiveCatalogArtifactV1 =
@@ -328,9 +325,6 @@ pub(super) fn decode_interactive_catalog_artifact(
             "code graph interactive catalog artifact format `{}` is not `{INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1}`",
             artifact.format
         )));
-    }
-    if artifact.graph_generation != expected_graph_generation {
-        return Err(CodeGraphProjectionError::GenerationMismatch);
     }
     let mut catalog = InteractiveCatalog::empty();
     for file in artifact.files {

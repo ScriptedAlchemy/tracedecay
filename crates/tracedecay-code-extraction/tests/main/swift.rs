@@ -8,7 +8,7 @@ fn test_swift_extract_imports() {
 import UIKit
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("sample.swift", source);
+    let result = extractor.extract_artifact("sample.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -36,7 +36,7 @@ class Base {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("base.swift", source);
+    let result = extractor.extract_artifact("base.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -63,7 +63,7 @@ fn test_swift_class_inheritance() {
 class Connection: Base {}
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("conn.swift", source);
+    let result = extractor.extract_artifact("conn.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let extends: Vec<_> = result
@@ -87,7 +87,7 @@ class Foo {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("funcs.swift", source);
+    let result = extractor.extract_artifact("funcs.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -119,7 +119,7 @@ fn test_swift_struct_with_fields_and_methods() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("point.swift", source);
+    let result = extractor.extract_artifact("point.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let structs: Vec<_> = result
@@ -160,7 +160,7 @@ fn test_swift_enum_with_variants() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("log.swift", source);
+    let result = extractor.extract_artifact("log.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -192,7 +192,7 @@ protocol Serializable {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("proto.swift", source);
+    let result = extractor.extract_artifact("proto.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let ifaces: Vec<_> = result
@@ -229,7 +229,7 @@ fn test_swift_extension() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("ext.swift", source);
+    let result = extractor.extract_artifact("ext.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let exts: Vec<_> = result
@@ -256,7 +256,7 @@ fn test_swift_constructor() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("foo.swift", source);
+    let result = extractor.extract_artifact("foo.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let ctors: Vec<_> = result
@@ -279,7 +279,7 @@ func main() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("main.swift", source);
+    let result = extractor.extract_artifact("main.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -304,7 +304,7 @@ fn test_swift_docstrings() {
 func setup() {}
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("doc.swift", source);
+    let result = extractor.extract_artifact("doc.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -333,7 +333,7 @@ fn test_swift_contains_edges() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("foo.swift", source);
+    let result = extractor.extract_artifact("foo.swift", source).result;
     let contains: Vec<_> = result
         .edges
         .iter()
@@ -352,7 +352,7 @@ fn test_swift_typealias() {
     let source = r#"typealias CompletionHandler = (Bool) -> Void
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("alias.swift", source);
+    let result = extractor.extract_artifact("alias.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let aliases: Vec<_> = result
@@ -369,7 +369,7 @@ fn test_swift_top_level_const() {
     let source = r#"let maxConnections = 100
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("const.swift", source);
+    let result = extractor.extract_artifact("const.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let consts: Vec<_> = result
@@ -389,7 +389,7 @@ fn test_swift_visibility_private() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("vis.swift", source);
+    let result = extractor.extract_artifact("vis.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let secret = result
@@ -416,7 +416,7 @@ fn test_swift_async_function() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("async.swift", source);
+    let result = extractor.extract_artifact("async.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let connect = result
@@ -443,7 +443,7 @@ fn test_swift_annotation_extraction() {
 }
 "#;
     let extractor = SwiftExtractor;
-    let result = extractor.extract("attrs.swift", source);
+    let result = extractor.extract_artifact("attrs.swift", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let annots: Vec<_> = result

@@ -1,5 +1,5 @@
 //! Sealed-generation restore contracts on a real multi-file corpus: decode
-//! determinism across indexing widths, corrupt-payload rejection, and the
+//! determinism across indexing widths, corrupt-manifest rejection, and the
 //! sealed format-revision gate.
 
 use std::sync::Arc;
@@ -10,10 +10,8 @@ use tracedecay_code_index::parallelism::{
     clear_forced_indexing_workers_for_test, force_indexing_workers_for_test,
 };
 use tracedecay_code_index::production::{
-    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
-    CodeIndexPublishedGenerationV1, MINIMUM_SEALED_GENERATION_FORMAT_REVISION,
-    SEALED_GENERATION_FORMAT_REVISION_V1, UninterruptibleCodeIndexControlV1,
-    sealed_generation_payload_digest,
+    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
+    CodeIndexProductionOwnerV1, SEALED_GENERATION_FORMAT_REVISION_V1,
 };
 use tracedecay_domain::{
     FileOccurrenceId, LanguageId, SanitizedCodeFileV1, SensitivityLevelV1,
@@ -23,7 +21,7 @@ use tracedecay_domain::{
 use crate::production_orchestration::{
     ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
 };
-use crate::support::id;
+use crate::support::{PartitionedSealV1, id, reseal_manifest};
 
 fn add_present_typescript_file(
     request: &mut CodeIndexBuildRequestV1,
@@ -48,7 +46,7 @@ fn add_present_typescript_file(
     request.changed_files.insert(logical_path.to_owned());
 }
 
-fn sealed_multi_file_generation() -> Vec<u8> {
+fn sealed_multi_file_generation() -> PartitionedSealV1 {
     let mut request = request_with_source(
         "file.sealed-restore.root",
         1_800_000,
@@ -95,11 +93,11 @@ fn sealed_multi_file_generation() -> Vec<u8> {
         ApplyingProjectionSink,
     )
     .expect("production owner");
-    owner
-        .build_and_publish(request, &ActiveControl)
-        .expect("multi-file generation publishes")
-        .encode_sealed()
-        .expect("multi-file generation seals")
+    PartitionedSealV1::of(
+        &owner
+            .build_and_publish(request, &ActiveControl)
+            .expect("multi-file generation publishes"),
+    )
 }
 
 /// Clears the forced width even when the guarded decode panics, so a failing
@@ -121,151 +119,75 @@ impl Drop for ForcedSerialWidth {
 
 /// Restore fans per-file authority reconstruction across the indexing pool.
 /// Width is sizing policy, never semantics: a width-one and a full-width
-/// restore of the same sealed bytes must re-encode to the identical envelope.
+/// restore of the same sealed bytes must re-encode to the identical manifest.
 #[test]
 fn sealed_restore_reencodes_identically_at_serial_and_parallel_widths() {
     let sealed = sealed_multi_file_generation();
 
     let serial = {
         let _width = ForcedSerialWidth::install();
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("width-one restore")
+        sealed.restored()
     };
-    let parallel =
-        CodeIndexPublishedGenerationV1::decode_sealed(&sealed).expect("full-width restore");
+    let parallel = sealed.restored();
 
-    assert_eq!(
-        serial
-            .encode_sealed()
-            .expect("width-one restored generation seals"),
-        sealed
-    );
-    assert_eq!(
-        parallel
-            .encode_sealed()
-            .expect("full-width restored generation seals"),
-        sealed
-    );
+    assert_eq!(PartitionedSealV1::of(&serial).manifest, sealed.manifest);
+    assert_eq!(PartitionedSealV1::of(&parallel).manifest, sealed.manifest);
 }
 
-/// Streaming seat from a seekable reader must keep the same envelope bytes
-/// as the in-memory decode: the digest proof and per-file restore cannot
-/// change generation identity.
 #[test]
-fn sealed_seek_reader_restore_reencodes_identically() {
+fn sealed_restore_rejects_one_corrupt_manifest_byte() {
     let sealed = sealed_multi_file_generation();
-    let admitted = u64::try_from(sealed.len()).expect("sealed length fits u64");
-    let restored = CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
-        std::io::Cursor::new(sealed.as_slice()),
-        admitted,
-        None,
-        &UninterruptibleCodeIndexControlV1,
-    )
-    .expect("seek restore")
-    .expect("compatible revision");
-    assert_eq!(
-        restored
-            .encode_sealed()
-            .expect("seek-restored generation seals"),
-        sealed
-    );
-}
-
-/// `unresolved_references` was added to the per-file artifact after revision
-/// six had already been persisted. Those earlier records mean exactly "no
-/// retained cross-file reference candidates"; restoring them must preserve
-/// that meaning so the scheduler can observe the old chunker revision and
-/// build a current successor rather than retrying a decode failure forever.
-#[test]
-fn sealed_restore_defaults_absent_unresolved_references() {
-    let sealed = sealed_multi_file_generation();
-    let mut envelope: Value = serde_json::from_slice(&sealed).expect("sealed envelope JSON");
-    let files = envelope["generation"]["files"]
-        .as_array_mut()
-        .expect("sealed generation files");
-    for file in files {
-        file["artifacts"]
-            .as_object_mut()
-            .expect("file artifacts")
-            .remove("unresolved_references");
-    }
-    let state_digest = sealed_generation_payload_digest(
-        MINIMUM_SEALED_GENERATION_FORMAT_REVISION,
-        &envelope["generation"],
-    )
-    .expect("compatible generation digest");
-    envelope["state_digest"] = Value::String(state_digest.as_str().to_owned());
-    let historical = serde_json::to_vec(&envelope).expect("historical sealed generation");
-
-    let restored = CodeIndexPublishedGenerationV1::decode_sealed(&historical)
-        .expect("current records without the additive field restore");
-    let restored: Value = serde_json::from_slice(
-        &restored
-            .encode_sealed()
-            .expect("restored generation reseals"),
-    )
-    .expect("restored envelope JSON");
-    assert!(
-        restored["generation"]["files"]
-            .as_array()
-            .expect("restored files")
-            .iter()
-            .all(|file| file["artifacts"]["unresolved_references"]
-                .as_array()
-                .is_some_and(Vec::is_empty)),
-        "historical files must restore with an explicit empty unresolved-reference authority"
-    );
-}
-
-#[test]
-fn sealed_restore_rejects_one_corrupt_payload_byte() {
-    let mut sealed = sealed_multi_file_generation();
-    let position = sealed
+    let mut manifest = sealed.manifest.clone();
+    let position = manifest
         .windows(5)
         .position(|window| window == b"gamma")
-        .expect("the sealed payload carries the fixture symbol");
-    sealed[position] = b'q';
+        .expect("the sealed manifest carries the fixture path");
+    manifest[position] = b'q';
 
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(&sealed)
-        .expect_err("a corrupt payload byte must be rejected");
+    let error = sealed
+        .restore(&manifest)
+        .expect_err("a corrupt manifest byte must be rejected");
 
     assert!(
         error.to_string().contains("state digest does not match"),
-        "corrupt payload reached the wrong rejection: {error}"
+        "corrupt manifest reached the wrong rejection: {error}"
     );
 }
 
 #[test]
 fn sealed_restore_refuses_superseded_and_adjacent_revisions() {
     let sealed = sealed_multi_file_generation();
-    let envelope: Value = serde_json::from_slice(&sealed).expect("sealed envelope JSON");
+    let envelope = sealed.envelope();
 
-    // Below the minimum: refused with the typed rebuild error, so the daemon
-    // rebuilds the generation instead of decoding a retired envelope shape.
-    let mut superseded = envelope.clone();
-    superseded["generation"]["format_revision"] =
-        Value::from(MINIMUM_SEALED_GENERATION_FORMAT_REVISION - 1);
-    let superseded = serde_json::to_vec(&superseded).expect("superseded sealed-generation JSON");
-    for error in [
-        CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&superseded).err(),
-        CodeIndexPublishedGenerationV1::decode_sealed(&superseded).err(),
-    ] {
-        let error = error.expect("a superseded revision must be refused");
+    // Every retired revision, the monolithic envelope included, is refused
+    // with the typed rebuild error, so the daemon rebuilds the generation
+    // instead of decoding a retired shape.
+    for retired in [9, SEALED_GENERATION_FORMAT_REVISION_V1 - 1] {
+        let mut superseded = envelope.clone();
+        superseded["generation"]["format_revision"] = Value::from(retired);
+        let error = sealed
+            .restore(&reseal_manifest(superseded))
+            .expect_err("a superseded revision must be refused");
         assert!(
-            error.to_string().contains("will be rebuilt from source"),
+            matches!(
+                error,
+                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
+                    if revision == retired
+            ),
             "superseded revision reached the wrong rejection: {error}"
         );
+        assert!(error.to_string().contains("will be rebuilt from source"));
     }
 
-    // Above every revision this build knows: abstain, then refuse.
+    // Above every revision this build knows: refused as incompatible.
     let mut incompatible = envelope;
     incompatible["generation"]["format_revision"] =
         Value::from(SEALED_GENERATION_FORMAT_REVISION_V1 + 1);
-    let incompatible =
-        serde_json::to_vec(&incompatible).expect("incompatible sealed-generation JSON");
-    assert!(matches!(
-        CodeIndexPublishedGenerationV1::decode_sealed_if_compatible(&incompatible),
-        Ok(None)
-    ));
-    CodeIndexPublishedGenerationV1::decode_sealed(&incompatible)
+    let error = sealed
+        .restore(&reseal_manifest(incompatible))
         .expect_err("adjacent sealed-generation revisions are incompatible");
+    assert!(
+        error.to_string().contains("incompatible"),
+        "adjacent revision reached the wrong rejection: {error}"
+    );
 }

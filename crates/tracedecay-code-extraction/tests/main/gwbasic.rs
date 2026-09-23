@@ -5,7 +5,7 @@ use tracedecay_domain::*;
 fn extract_fixture() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.gw").unwrap();
     let extractor = GwBasicExtractor;
-    let result = extractor.extract("sample.gw", &source);
+    let result = extractor.extract_artifact("sample.gw", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     result
 }

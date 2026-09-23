@@ -6,7 +6,7 @@ use tracedecay_domain::*;
 fn test_lua_call_sites() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -58,7 +58,7 @@ fn test_lua_call_sites() {
 fn test_lua_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let log_fn = result
@@ -109,7 +109,7 @@ fn test_lua_docstrings() {
 fn test_lua_contains_edges() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     let contains: Vec<_> = result
         .edges
         .iter()
@@ -126,7 +126,7 @@ fn test_lua_contains_edges() {
 fn test_lua_local_function_is_private() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let log_fn = result
@@ -145,7 +145,7 @@ fn test_lua_local_function_is_private() {
 fn test_lua_dot_function_qualified_name() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let conn_new_fns: Vec<_> = result
@@ -169,7 +169,7 @@ fn test_lua_dot_function_qualified_name() {
 fn test_lua_signatures() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
     let extractor = LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let log_fn = result

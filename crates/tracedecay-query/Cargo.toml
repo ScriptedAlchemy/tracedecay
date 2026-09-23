@@ -9,6 +9,9 @@ description = "TraceDecay exact/lexical/graph code retrieval query kernel and se
 include = ["/src/**", "/assets/**"]
 
 [dependencies]
+# Raw deflate for lexical row text; already in the tree through
+# `tracedecay-code-index`.
+flate2 = "1"
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
 gix = { version = "=0.87.1", default-features = false, features = ["revision", "parallel", "sha1", "sha256"] }
 hex = "0.4"

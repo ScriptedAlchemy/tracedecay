@@ -60,19 +60,6 @@ impl Default for GitWatchMaintenanceWakeV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ApplicationCatalogSnapshotErrorV1 {
-    pub message: String,
-}
-
-impl ApplicationCatalogSnapshotErrorV1 {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
 /// Connection-admission lease the scheduler parks behind on blocking work.
 pub trait AdmissionParkLeaseV1: Send + Sync {
     fn release(&self) -> bool;

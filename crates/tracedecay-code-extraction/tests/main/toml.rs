@@ -3,7 +3,7 @@ use tracedecay_code_extraction::TomlExtractor;
 use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
-    TomlExtractor.extract("Cargo.toml", source)
+    TomlExtractor.extract_artifact("Cargo.toml", source).result
 }
 
 fn names_of(result: &ExtractionResult, kind: NodeKind) -> Vec<String> {

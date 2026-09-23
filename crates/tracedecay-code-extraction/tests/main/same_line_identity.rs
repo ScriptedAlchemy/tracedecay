@@ -67,7 +67,9 @@ fn pairs(items: &[(&str, &str)]) -> BTreeSet<(String, String)> {
 
 #[test]
 fn rust_same_line_methods_bind_their_own_calls_and_containers() {
-    let result = RustExtractor.extract("test.rs", SAME_LINE_RUST);
+    let result = RustExtractor
+        .extract_artifact("test.rs", SAME_LINE_RUST)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let runs = result
@@ -89,7 +91,9 @@ fn rust_same_line_methods_bind_their_own_calls_and_containers() {
 
 #[test]
 fn typescript_same_line_methods_and_fields_stay_distinct() {
-    let result = TypeScriptExtractor.extract("test.ts", SAME_LINE_TYPESCRIPT);
+    let result = TypeScriptExtractor
+        .extract_artifact("test.ts", SAME_LINE_TYPESCRIPT)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fields = result
@@ -116,13 +120,15 @@ fn line_leading_constructs_keep_line_keyed_ids_regardless_of_indentation() {
     let compact = "impl A {\nfn run() {}\n}\n";
     let indented = "impl A {\n        fn run() {}\n}\n";
     let compact_ids: BTreeSet<String> = RustExtractor
-        .extract("test.rs", compact)
+        .extract_artifact("test.rs", compact)
+        .result
         .nodes
         .into_iter()
         .map(|node| node.id)
         .collect();
     let indented_ids: BTreeSet<String> = RustExtractor
-        .extract("test.rs", indented)
+        .extract_artifact("test.rs", indented)
+        .result
         .nodes
         .into_iter()
         .map(|node| node.id)
@@ -136,7 +142,9 @@ fn line_leading_constructs_keep_line_keyed_ids_regardless_of_indentation() {
 
 #[test]
 fn only_constructs_sharing_a_line_with_earlier_source_carry_a_column() {
-    let result = RustExtractor.extract("test.rs", SAME_LINE_RUST);
+    let result = RustExtractor
+        .extract_artifact("test.rs", SAME_LINE_RUST)
+        .result;
     let struct_a = result
         .nodes
         .iter()

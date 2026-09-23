@@ -14,7 +14,7 @@ int main() {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("test.cpp", source);
+    let result = extractor.extract_artifact("test.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -33,7 +33,7 @@ int add(int a, int b) {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("math.cpp", source);
+    let result = extractor.extract_artifact("math.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -61,7 +61,7 @@ private:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("dog.cpp", source);
+    let result = extractor.extract_artifact("dog.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -109,7 +109,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("foo.cpp", source);
+    let result = extractor.extract_artifact("foo.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let constructors: Vec<_> = result
@@ -141,7 +141,7 @@ namespace mylib {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("lib.cpp", source);
+    let result = extractor.extract_artifact("lib.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let namespaces: Vec<_> = result
@@ -183,7 +183,7 @@ T maximum(T a, T b) {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("tmpl.cpp", source);
+    let result = extractor.extract_artifact("tmpl.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let templates: Vec<_> = result
@@ -205,7 +205,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("shape.cpp", source);
+    let result = extractor.extract_artifact("shape.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let methods: Vec<_> = result
@@ -247,7 +247,7 @@ private:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("widget.cpp", source);
+    let result = extractor.extract_artifact("widget.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fields: Vec<_> = result
@@ -296,7 +296,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("animals.cpp", source);
+    let result = extractor.extract_artifact("animals.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -330,7 +330,7 @@ struct Point {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("point.cpp", source);
+    let result = extractor.extract_artifact("point.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let structs: Vec<_> = result
@@ -367,7 +367,7 @@ enum Color {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("color.cpp", source);
+    let result = extractor.extract_artifact("color.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -399,7 +399,7 @@ union Data {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("data.cpp", source);
+    let result = extractor.extract_artifact("data.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let unions: Vec<_> = result
@@ -417,7 +417,7 @@ fn test_cpp_typedef() {
 typedef unsigned long ulong;
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("types.hpp", source);
+    let result = extractor.extract_artifact("types.hpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let typedefs: Vec<_> = result
@@ -437,7 +437,7 @@ fn test_cpp_preprocessor_and_include() {
 #include "myheader.h"
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("main.cpp", source);
+    let result = extractor.extract_artifact("main.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let macros: Vec<_> = result
@@ -462,7 +462,7 @@ fn test_cpp_using_declaration() {
 using namespace std;
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("main.cpp", source);
+    let result = extractor.extract_artifact("main.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let uses: Vec<_> = result
@@ -513,7 +513,7 @@ int divide(int a, int b) {
 
     for (style, source, expected) in cases {
         let extractor = CppExtractor;
-        let result = extractor.extract("math.cpp", source);
+        let result = extractor.extract_artifact("math.cpp", source).result;
         assert_node_docstring(style, &result, NodeKind::Function, None, expected);
     }
 }
@@ -531,7 +531,7 @@ int main() {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("main.cpp", source);
+    let result = extractor.extract_artifact("main.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -554,7 +554,7 @@ void foo() {}
 void bar() {}
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("test.cpp", source);
+    let result = extractor.extract_artifact("test.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let contains: Vec<_> = result
@@ -580,7 +580,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("rect.cpp", source);
+    let result = extractor.extract_artifact("rect.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let class_node = result
@@ -611,7 +611,7 @@ static int helper(int x) {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("utils.cpp", source);
+    let result = extractor.extract_artifact("utils.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -632,7 +632,7 @@ int public_func() {
 }
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("api.cpp", source);
+    let result = extractor.extract_artifact("api.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -656,7 +656,7 @@ public:
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("container.hpp", source);
+    let result = extractor.extract_artifact("container.hpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let templates: Vec<_> = result
@@ -679,7 +679,7 @@ enum class Direction {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("direction.cpp", source);
+    let result = extractor.extract_artifact("direction.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -706,7 +706,7 @@ class B {};
 class C : public A, public B {};
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("multi.cpp", source);
+    let result = extractor.extract_artifact("multi.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let extends_refs: Vec<_> = result
@@ -736,7 +736,7 @@ class [[nodiscard]] Result {
 };
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("attr.cpp", source);
+    let result = extractor.extract_artifact("attr.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Should have 3 AnnotationUsage nodes: nodiscard, deprecated, nodiscard
@@ -779,7 +779,7 @@ fn test_cpp_function_pointer_typedef() {
 typedef int (*compare_fn)(const void *, const void *);
 "#;
     let extractor = CppExtractor;
-    let result = extractor.extract("types.hpp", source);
+    let result = extractor.extract_artifact("types.hpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let typedefs: Vec<_> = result

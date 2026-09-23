@@ -33,7 +33,7 @@ mod artifact_bench;
 use artifact_bench::{
     ActiveControl, AdmittedFile, ApplyingProjectionSink, MemoryPublicationStore, SealedDrainBounds,
     default_corpus_root, drain_pages, identity, load_corpus, millis, peak_rss_bytes, percentile,
-    replicate, sealed_state_digest,
+    replicate, seal_partitioned,
 };
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -66,8 +66,8 @@ use tracedecay_query::retrieval::exact::{
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactWriterRevisionV1, CodeLexicalProjectionMetadataV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
+    CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::{
@@ -123,10 +123,7 @@ fn main() -> ExitCode {
         }
     };
 
-    match options.artifact.as_ref().map_or_else(
-        || run(&options),
-        |path| run_existing_artifact(&options, path),
-    ) {
+    match run(&options) {
         Ok(summary) => {
             println!("{summary}");
             ExitCode::SUCCESS
@@ -159,8 +156,7 @@ fn configure_hotpath() {
 
 const USAGE: &str = "\
 usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
-                               [--warmups N] [--fuzzy-budget N] [--artifact FILE]
-                               [--format-revision 11|12|13|14]
+                               [--warmups N] [--fuzzy-budget N]
                                [--class NAME]... [--term CLASS=QUERY]...
 
   --corpus DIR       fixture corpus to index and query
@@ -171,8 +167,6 @@ usage: tracedecay-search-bench [--corpus DIR] [--replicas N] [--iterations N]
   --iterations N     timed query iterations per class (default: 40)
   --warmups N        untimed warmup iterations per class (default: 3)
   --fuzzy-budget N   lexical typo-recovery budget (default: production 64)
-  --artifact FILE    reopen an existing sealed lexical artifact and skip ingest
-  --format-revision  select the writer revision for build A/B runs (default: 14)
   --class NAME       run only the named classes (repeatable; default: all)
   --term CLASS=QUERY override one class's query text (repeatable)
   -h, --help         print this message
@@ -208,8 +202,6 @@ struct Options {
     iterations: usize,
     warmups: usize,
     fuzzy_budget: u32,
-    artifact: Option<PathBuf>,
-    writer_revision: CodeLexicalArtifactWriterRevisionV1,
     classes: Vec<(String, String)>,
 }
 
@@ -222,8 +214,6 @@ impl Options {
         let mut fuzzy_budget = MAX_FUZZY_TERM_EXPANSIONS_V1;
         let mut selected: Vec<String> = Vec::new();
         let mut overrides: Vec<(String, String)> = Vec::new();
-        let mut artifact = None;
-        let mut writer_revision = CodeLexicalArtifactWriterRevisionV1::default();
         let mut arguments = arguments.peekable();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -264,24 +254,6 @@ impl Options {
                         .next()
                         .ok_or_else(|| "--class needs a name".to_owned())?;
                     selected.push(value);
-                }
-                "--artifact" => {
-                    let value = arguments
-                        .next()
-                        .ok_or_else(|| "--artifact needs a file".to_owned())?;
-                    artifact = Some(PathBuf::from(value));
-                }
-                "--format-revision" => {
-                    let value = arguments
-                        .next()
-                        .ok_or_else(|| "--format-revision needs 11, 12, 13, or 14".to_owned())?;
-                    writer_revision = match value.as_str() {
-                        "11" => CodeLexicalArtifactWriterRevisionV1::V11,
-                        "12" => CodeLexicalArtifactWriterRevisionV1::V12,
-                        "13" => CodeLexicalArtifactWriterRevisionV1::V13,
-                        "14" => CodeLexicalArtifactWriterRevisionV1::V14,
-                        _ => return Err("--format-revision needs 11, 12, 13, or 14".to_owned()),
-                    };
                 }
                 "--term" => {
                     let value = arguments
@@ -329,8 +301,6 @@ impl Options {
             iterations,
             warmups,
             fuzzy_budget,
-            artifact,
-            writer_revision,
             classes,
         }))
     }
@@ -400,18 +370,13 @@ fn run(options: &Options) -> Result<String, String> {
     let chunk_count = generation.chunks().chunks().len() as u64;
 
     let seal_started = Instant::now();
-    let sealed = generation
-        .encode_sealed()
-        .map_err(|error| format!("encode sealed generation: {error}"))?;
+    let sealed = seal_partitioned(&generation)?;
     let seal_wall = seal_started.elapsed();
-    let sealed_len = sealed.len() as u64;
-    let state_digest = sealed_state_digest(&sealed)?;
+    let sealed_len = sealed.byte_len();
 
     let drain_started = Instant::now();
     let (pages, source_receipt) = drain_pages(
         &sealed,
-        sealed_len,
-        &state_digest,
         &control,
         SealedDrainBounds {
             batch_pages: BATCH_MAX_PAGES,
@@ -428,10 +393,9 @@ fn run(options: &Options) -> Result<String, String> {
     let ingest_started = Instant::now();
     let receipt = ingest_artifact(
         &artifact_path,
-        metadata,
+        metadata.clone(),
         &pages,
         &source_receipt,
-        options.writer_revision,
         &control,
     )?;
     let ingest_wall = ingest_started.elapsed();
@@ -446,6 +410,7 @@ fn run(options: &Options) -> Result<String, String> {
         &artifact_path,
         &file_digest,
         file_size_bytes,
+        &metadata,
         CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
         &control,
     )
@@ -512,111 +477,6 @@ fn run(options: &Options) -> Result<String, String> {
         "classes": class_reports,
     });
     serde_json::to_string_pretty(&report).map_err(|error| format!("serialize summary: {error}"))
-}
-
-/// Reopen a preserved sealed artifact and measure the same query classes
-/// without repeating ingest. Used to verify read-path fixes against a
-/// generation-scale file.
-fn run_existing_artifact(options: &Options, artifact_path: &Path) -> Result<String, String> {
-    let started = Instant::now();
-    let control = ActiveControl;
-
-    let open_started = Instant::now();
-    let (file_digest, file_size_bytes) = hash_file(artifact_path)?;
-    let reader = CodeLexicalArtifactReaderV1::open_content_addressed(
-        artifact_path,
-        &file_digest,
-        file_size_bytes,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        &control,
-    )
-    .map_err(|error| format!("reopen lexical artifact: {error}"))?;
-    let open_wall = open_started.elapsed();
-
-    let authority = CentralExactAdmissionAuthorityV1::new(
-        ExactAdmissionRuleRevision::new(QUERY_EXACT_RULE_REVISION_V1)
-            .map_err(|error| format!("exact rule revision: {error}"))?,
-    );
-    let exact_lane = ExactLane::new(authority.clone(), reader.exact_adapter(authority.clone()));
-    let lexical_lane = LexicalLane::new(reader.clone());
-    let generation_id = reader.metadata().generation.clone();
-    let prototype = request_prototype_from_artifact(&reader)?;
-
-    let mut class_reports = Vec::with_capacity(options.classes.len());
-    for (class, query) in &options.classes {
-        let report = run_class(RunClassArguments {
-            class,
-            query,
-            options,
-            prototype: &prototype,
-            authority: &authority,
-            exact_lane: &exact_lane,
-            lexical_lane: &lexical_lane,
-            generation: &generation_id,
-        })?;
-        class_reports.push(report);
-    }
-
-    let verified = reader.verified_artifact();
-    let total_wall = started.elapsed();
-    let report = serde_json::json!({
-        "workload_revision": WORKLOAD_REVISION,
-        "reused_artifact": true,
-        "artifact_path": artifact_path.display().to_string(),
-        "chunks": verified.total_chunks(),
-        "artifact_bytes": file_size_bytes,
-        "artifact_digest": file_digest.as_str(),
-        "artifact_logical_digest": verified.artifact_digest().as_str(),
-        "iterations": options.iterations,
-        "warmups": options.warmups,
-        "fuzzy_budget": options.fuzzy_budget,
-        "peak_rss_bytes": peak_rss_bytes(),
-        "build_wall_ms": {
-            "artifact_reopen_verified": millis(open_wall),
-            "total": millis(total_wall),
-        },
-        "classes": class_reports,
-    });
-    serde_json::to_string_pretty(&report).map_err(|error| format!("serialize summary: {error}"))
-}
-
-fn request_prototype_from_artifact(
-    reader: &CodeLexicalArtifactReaderV1,
-) -> Result<RequestPrototypeV1, String> {
-    let metadata = reader.metadata();
-    let verified = reader.verified_artifact();
-    let repository = metadata
-        .repository_id
-        .clone()
-        .or_else(|| verified.repository_id().cloned())
-        .unwrap_or_else(|| identity("repository.search-bench"));
-    Ok(RequestPrototypeV1 {
-        principal: identity::<PrincipalId>("principal.search-bench"),
-        scope: RetrievalScope {
-            privacy_domain: identity::<PrivacyDomainId>("privacy.search-bench"),
-            root: SingleRootScopeV1 {
-                repository,
-                worktree: None,
-                reference: None,
-            },
-        },
-        snapshot: RetrievalSnapshot {
-            watermarks: VectorWatermark::default(),
-            freshness_digest: FreshnessVectorDigest::new(verified.source_state_digest().as_str())
-                .map_err(|error| format!("freshness digest: {error}"))?,
-            authorization_revision: identity::<AuthorizationRevision>(
-                "authorization.search-bench.v1",
-            ),
-            captured_at: metadata.freshness.observed_at,
-        },
-        profile_id: identity::<FusionProfileId>("query-fallback"),
-        sanitizer_revision: identity::<SanitizerRevision>(QUERY_SANITIZER_REVISION_V1),
-        normalization_revision: identity::<QueryNormalizationRevision>(
-            QUERY_NORMALIZATION_REVISION_V1,
-        ),
-        lexical_profile_revision: identity::<ComponentRevision>(QUERY_LEXICAL_PROFILE_REVISION_V1),
-        lexical_score_domain: identity::<ScoreDomainId>(QUERY_LEXICAL_SCORE_DOMAIN_V1),
-    })
 }
 
 /// Query-independent request fields, cloned per iteration exactly as the
@@ -919,6 +779,11 @@ fn projection_metadata(
             "retriever.lexical.search-bench.v1",
         ),
         exact_score_domain: identity::<ScoreDomainId>("score.exact.search-bench.v1"),
+        clone_route: Some(CodeLexicalCloneRouteV1 {
+            project_id: generation.manifest().project_id.clone(),
+            worktree_id: generation.snapshot().worktree.clone(),
+            snapshot_digest: generation.manifest().snapshot_digest.clone(),
+        }),
     }
 }
 
@@ -927,15 +792,10 @@ fn ingest_artifact(
     metadata: CodeLexicalProjectionMetadataV1,
     pages: &[VerifiedSealedLexicalPageV1],
     source_receipt: &VerifiedSealedLexicalSourceReceiptV1,
-    writer_revision: CodeLexicalArtifactWriterRevisionV1,
     control: &ActiveControl,
 ) -> Result<tracedecay_query::retrieval::lexical::VerifiedCodeLexicalArtifactV1, String> {
-    let mut builder = CodeLexicalArtifactBuilderV1::create_with_format_revision(
-        artifact_path,
-        metadata,
-        writer_revision,
-    )
-    .map_err(|error| format!("create lexical artifact: {error}"))?;
+    let mut builder = CodeLexicalArtifactBuilderV1::create(artifact_path, metadata)
+        .map_err(|error| format!("create lexical artifact: {error}"))?;
     for batch in pages.chunks(BATCH_MAX_PAGES) {
         builder
             .append_pages(batch, control)

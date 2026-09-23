@@ -13,15 +13,20 @@ use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
-    acquire_code_generation_store_lock, durable_generation_index_digest,
-    execute_code_generation_retention_cancellable,
+    acquire_code_generation_store_lock, code_generation_segments_root,
+    code_text_artifact_staging_root, code_text_artifacts_root,
+    durable_generation_index_digest, execute_code_generation_retention_cancellable,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
-    try_acquire_code_generation_store_read_lock,
+    try_acquire_code_generation_store_read_lock, withdraw_verified_text_artifact_under_lock,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, SanitizerRevision, UtcMicros, encode_lowercase_hex,
-    sha256_hex_suffix,
+    AuthorizationRevision, CodeGenerationId, ComponentRevision, EphemeralSanitizedQueryViewV1,
+    FreshnessVectorDigest, ManifestDigest, PrincipalId, QueryNormalizationRevision,
+    RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverOutcome,
+    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, UtcMicros,
+    VectorWatermark, encode_lowercase_hex, sha256_hex_suffix,
 };
+use tracedecay_query::retrieval::lexical::LexicalLaneRequest;
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 
 use super::{
@@ -38,7 +43,10 @@ use crate::{
         SealedGenerationSegmentReadV1, UninterruptibleCodeIndexControlV1,
         VerifiedSealedLexicalPageReadV1,
     },
-    code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1},
+    code_index_scheduler::{
+        CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
+        scoped_code_index_store_root,
+    },
 };
 
 struct CancelledCodeIndexControlV1;
@@ -241,17 +249,14 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
                 .map(|(_, size)| *size)
                 .sum::<u64>(),
         );
-    let monolithic_second_bytes = scheduler
-        .latest_complete_already_decoded()
-        .expect("second generation remains decoded")
-        .generation
-        .encode_sealed()
-        .expect("encode monolithic comparison")
-        .len() as u64;
+    let full_second_bytes = std::fs::metadata(&second_manifest_path)
+        .expect("second manifest metadata")
+        .len()
+        .saturating_add(second_components.values().sum::<u64>());
     assert!(
-        second_generation_growth.saturating_mul(2) < monolithic_second_bytes,
+        second_generation_growth.saturating_mul(2) < full_second_bytes,
         "one-line edit added {second_generation_growth} physical bytes versus a \
-         {monolithic_second_bytes}-byte monolithic rewrite"
+         {full_second_bytes}-byte full rewrite"
     );
     let segment_sizes = std::fs::read_dir(&segment_root)
         .expect("list content-addressed segments")
@@ -623,16 +628,44 @@ fn generation_decode_shares_store_and_refuses_exclusive_writer_contention() {
     );
 }
 
-#[test]
-fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
-    let source = (0..1_600).fold(String::new(), |mut source, index| {
+/// 1,600 functions named `{prefix}_{index}` whose bodies apply `operator`.
+/// A clean generation's evidence is implied by its own symbols and chunks
+/// and fits one page; a successor that changes every body keeps one whole
+/// lineage row per function, which spans several.
+fn evidence_fixture_source(prefix: &str, operator: char) -> String {
+    (0..1_600).fold(String::new(), |mut source, index| {
         writeln!(
             source,
-            "pub fn evidence_{index}(value: usize) -> usize {{ value + {index} }}"
+            "pub fn {prefix}_{index}(value: usize) -> usize {{ value {operator} {index} }}"
         )
         .expect("write generated fixture source");
         source
-    });
+    })
+}
+
+/// Publish the fixture, then a successor that changes every function body.
+fn publish_multi_page_evidence(
+    fixture: &GitFixture,
+    scheduler: &mut CodeIndexWorktreeSchedulerV1,
+    prefix: &str,
+) {
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish the clean generation"),
+    );
+    fixture.edit("src/evidence.rs", &evidence_fixture_source(prefix, '*'));
+    fixture.commit_all("change every evidence body");
+    published(
+        scheduler
+            .reconcile_now()
+            .expect("publish multi-page generation"),
+    );
+}
+
+#[test]
+fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
+    let source = evidence_fixture_source("evidence", '+');
     let fixture = GitFixture::new(&[("src/evidence.rs", source.as_str())]);
     let store = TempDir::new().expect("store root");
     let (generation_id, evidence_pack_path) = {
@@ -641,11 +674,7 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
             store.path().to_path_buf(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
-        published(
-            scheduler
-                .reconcile_now()
-                .expect("publish multi-page generation"),
-        );
+        publish_multi_page_evidence(&fixture, &mut scheduler, "evidence");
         let latest = scheduler
             .latest_complete_already_decoded()
             .expect("multi-page generation remains decoded");
@@ -671,17 +700,22 @@ fn multi_page_evidence_uses_one_durable_pack_and_survives_restart() {
             .expect("evidence page descriptors");
         assert!(pages.len() > 1, "the production fixture must span pages");
         let segments_root = store.path().join("code-generation-segments-v1");
-        let file_segment_count = manifest["generation"]["file_segments"]
+        for descriptor in manifest["generation"]["file_segments"]
             .as_array()
             .expect("file segment descriptors")
-            .len();
-        assert_eq!(
-            std::fs::read_dir(&segments_root)
-                .expect("read segment objects")
-                .count(),
-            file_segment_count + 1,
-            "pages must be ranges in one pack, never separate filesystem objects"
-        );
+            .iter()
+            .map(|descriptor| &descriptor["segment_digest"])
+            .chain([&manifest["generation"]["generation_evidence"]["segment_digest"]])
+        {
+            let digest = sha256_hex_suffix(descriptor.as_str().expect("segment digest"))
+                .expect("tagged segment digest");
+            assert!(
+                segments_root
+                    .join(format!("segment-{digest}.json"))
+                    .is_file(),
+                "every file segment and the one evidence pack are durable objects"
+            );
+        }
         for page in pages {
             let page_digest = sha256_hex_suffix(page["page_digest"].as_str().expect("page digest"))
                 .expect("tagged page digest");
@@ -784,7 +818,16 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
         "a failure after N pages must remove the incomplete pack"
     );
 
-    std::fs::write(&temporary_path, b"crash orphan").expect("write crash orphan");
+    let scope = store
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("store scope name");
+    let orphan_path = segments_root.join(format!(".evidence-pack-publication.{scope}.4242.tmp"));
+    std::fs::write(&orphan_path, b"crash orphan").expect("write crash orphan");
+    // Linked worktrees share this directory; a sibling's pack may be in flight.
+    let sibling_path = segments_root.join(".evidence-pack-publication.sibling.4242.tmp");
+    std::fs::write(&sibling_path, b"sibling in flight").expect("write sibling pack");
     let _reopened = super::super::DaemonCodeIndexPublicationStoreV1::new(
         store.path(),
         fixture.path(),
@@ -793,8 +836,12 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
     )
     .expect("restart publication store");
     assert!(
-        !temporary_path.exists(),
+        !orphan_path.exists(),
         "restart must durably clean an abandoned evidence pack"
+    );
+    assert!(
+        sibling_path.exists(),
+        "restart must not remove another worktree scope's evidence pack"
     );
 }
 
@@ -968,14 +1015,7 @@ fn publishing_many_new_segments_syncs_the_segments_directory_once() {
 
 #[test]
 fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
-    let source = (0..1_600).fold(String::new(), |mut source, index| {
-        writeln!(
-            source,
-            "pub fn failed_evidence_{index}(value: usize) -> usize {{ value + {index} }}"
-        )
-        .expect("write generated fixture source");
-        source
-    });
+    let source = evidence_fixture_source("failed_evidence", '+');
     let fixture = GitFixture::new(&[("src/evidence.rs", source.as_str())]);
     let source_store = TempDir::new().expect("source store root");
     let generation = {
@@ -984,11 +1024,7 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
             source_store.path().to_path_buf(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
-        published(
-            scheduler
-                .reconcile_now()
-                .expect("build multi-page generation"),
-        );
+        publish_multi_page_evidence(&fixture, &mut scheduler, "failed_evidence");
         Arc::clone(
             &scheduler
                 .latest_complete_already_decoded()
@@ -1907,7 +1943,7 @@ fn restart_rejects_corrupt_sealed_generation() {
 
 #[derive(Debug, PartialEq, Eq)]
 enum RestartDecodeStatusV1 {
-    Abstained { refused_revision: Option<u32> },
+    Abstained,
     Decoded,
     SourceCommitmentRefused,
 }
@@ -1921,7 +1957,6 @@ enum RestartIdentityStatusV1 {
 
 #[derive(Debug, PartialEq, Eq)]
 struct RestartDecodeCensusV1 {
-    monolithic: RestartDecodeStatusV1,
     partitioned: RestartDecodeStatusV1,
     sanitizer: RestartIdentityStatusV1,
     pointer: RestartIdentityStatusV1,
@@ -1935,30 +1970,7 @@ fn restart_decode_census(
         .join("code-generations-v1")
         .join(&pointer.generation_file);
     let generation_bytes = std::fs::read(&generation_path).expect("read generation manifest");
-    let generation_size = u64::try_from(generation_bytes.len()).expect("generation byte size");
-    let expected_digest =
-        ManifestDigest::new(pointer.state_digest.clone()).expect("generation digest");
-    let monolithic = match CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
-        File::open(&generation_path).expect("open generation manifest"),
-        generation_size,
-        Some(&expected_digest),
-        &UninterruptibleCodeIndexControlV1,
-    ) {
-        Ok(None) => RestartDecodeStatusV1::Abstained {
-            refused_revision: None,
-        },
-        Ok(Some(_)) => RestartDecodeStatusV1::Decoded,
-        Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
-            RestartDecodeStatusV1::Abstained {
-                refused_revision: Some(revision),
-            }
-        }
-        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => {
-            RestartDecodeStatusV1::SourceCommitmentRefused
-        }
-        Err(error) => panic!("monolithic restart census failed: {error}"),
-    };
-    let segments = store.join("code-generation-segments-v1");
+    let segments = code_generation_segments_root(store);
     let partitioned = CodeIndexPublishedGenerationV1::decode_partitioned_sealed(
         &generation_bytes,
         |request, buffer| {
@@ -2014,20 +2026,16 @@ fn restart_decode_census(
         },
     );
     let generation = match partitioned {
-        Ok(Some(generation)) => generation,
-        Ok(None) => {
+        Ok(generation) => generation,
+        Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_)) => {
             return RestartDecodeCensusV1 {
-                monolithic,
-                partitioned: RestartDecodeStatusV1::Abstained {
-                    refused_revision: None,
-                },
+                partitioned: RestartDecodeStatusV1::Abstained,
                 sanitizer: RestartIdentityStatusV1::NotReached,
                 pointer: RestartIdentityStatusV1::NotReached,
             };
         }
         Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => {
             return RestartDecodeCensusV1 {
-                monolithic,
                 partitioned: RestartDecodeStatusV1::SourceCommitmentRefused,
                 sanitizer: RestartIdentityStatusV1::NotReached,
                 pointer: RestartIdentityStatusV1::NotReached,
@@ -2047,7 +2055,6 @@ fn restart_decode_census(
         && generation.projection().publication_digest().as_str() == pointer.publication_digest
         && generation.manifest().seal.sealed_at.0 == pointer.sealed_at_micros;
     RestartDecodeCensusV1 {
-        monolithic,
         partitioned: RestartDecodeStatusV1::Decoded,
         sanitizer,
         pointer: if pointer_matches {
@@ -2079,14 +2086,11 @@ fn restart_decode_census_reaches_partitioned_decode_and_matches_durable_identity
     assert_eq!(
         restart_decode_census(store.path(), &pointer),
         RestartDecodeCensusV1 {
-            monolithic: RestartDecodeStatusV1::Abstained {
-                refused_revision: None,
-            },
             partitioned: RestartDecodeStatusV1::Decoded,
             sanitizer: RestartIdentityStatusV1::Matched,
             pointer: RestartIdentityStatusV1::Matched,
         },
-        "shared premise: a current partitioned generation must survive the monolithic probe and reach exact sanitizer and pointer checks"
+        "shared premise: a current partitioned generation must decode and reach exact sanitizer and pointer checks"
     );
 }
 
@@ -2702,4 +2706,663 @@ fn stale_pointer_commit_does_not_replace_a_changed_active_pointer() {
         b"{",
         "the truncated pointer must still be the file"
     );
+}
+
+/// The segment digests one scope's active manifest names: its file segments
+/// and, last, its evidence pack.
+fn active_segment_digests(scope: &Path) -> Vec<String> {
+    let pointer: DurablePublicationPointerV1 = serde_json::from_slice(
+        &std::fs::read(scope.join("active-code-generation-v1.json")).expect("active pointer"),
+    )
+    .expect("decode active pointer");
+    let manifest = std::fs::read(
+        scope
+            .join("code-generations-v1")
+            .join(&pointer.generation_file),
+    )
+    .expect("active manifest");
+    CodeIndexPublishedGenerationV1::partitioned_segment_identities(&manifest)
+        .expect("segment identities")
+        .into_iter()
+        .map(|identity| {
+            sha256_hex_suffix(identity.digest.as_str())
+                .expect("sha256 segment digest")
+                .to_owned()
+        })
+        .collect()
+}
+
+fn segment_files(segments_root: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(segments_root)
+        .expect("read shared segments")
+        .map(|entry| {
+            entry
+                .expect("segment entry")
+                .file_name()
+                .into_string()
+                .expect("UTF-8 segment name")
+        })
+        .filter_map(|name| {
+            name.strip_prefix("segment-")
+                .and_then(|name| name.strip_suffix(".json"))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A primary checkout and a linked worktree of it, mounted as two scopes of
+/// one project's `code-index-v1/`, both published at the same tree.
+struct LinkedWorktreeScopesV1 {
+    _first: GitFixture,
+    _linked_root: TempDir,
+    linked: PathBuf,
+    _store: TempDir,
+    code_index_root: PathBuf,
+    first_scope: PathBuf,
+    linked_scope: PathBuf,
+}
+
+fn publish_linked_worktree_scopes(files: &[(&str, &str)]) -> LinkedWorktreeScopesV1 {
+    let first = GitFixture::new(files);
+    let linked_root = TempDir::new_in(super::canonical_temp_root()).expect("linked root");
+    let linked = linked_root.path().join("linked");
+    super::git(
+        first.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().expect("linked path"),
+            "main",
+        ],
+    );
+    let store = TempDir::new().expect("project store");
+    let code_index_root = store.path().join("code-index-v1");
+    std::fs::create_dir_all(&code_index_root).expect("project code-index root");
+    let first_scope = scoped_code_index_store_root(&code_index_root, first.path());
+    let linked_scope = scoped_code_index_store_root(&code_index_root, &linked);
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    for (root, scope) in [
+        (first.path(), &first_scope),
+        (linked.as_path(), &linked_scope),
+    ] {
+        let mut scheduler = registry
+            .open_worktree(test_project_id(), root, scope.clone())
+            .expect("open worktree scheduler");
+        published(scheduler.reconcile_now().expect("publish worktree"));
+    }
+    LinkedWorktreeScopesV1 {
+        _first: first,
+        _linked_root: linked_root,
+        linked,
+        _store: store,
+        code_index_root,
+        first_scope,
+        linked_scope,
+    }
+}
+
+#[test]
+fn linked_worktrees_that_seal_identical_files_share_one_segment_per_file() {
+    // Several bodies per file: in memory they sort by worktree-specific
+    // symbol occurrences, so the segment must not persist that order.
+    let scopes = publish_linked_worktree_scopes(&[
+        (
+            "src/lib.rs",
+            "pub fn alpha(value: u32) -> u32 { value + 1 }\n\
+             pub fn beta(value: u32) -> u32 { value * 2 }\n\
+             pub fn gamma(value: u32) -> u32 { value - 3 }\n\
+             pub fn delta(value: u32) -> u32 { value / 4 }\n\
+             pub fn epsilon(value: u32) -> u32 { value % 5 }\n\
+             pub fn zeta(value: u32) -> u32 { value ^ 6 }\n\
+             pub fn eta(value: u32) -> u32 { value | 7 }\n\
+             pub fn theta(value: u32) -> u32 { value & 8 }\n",
+        ),
+        (
+            "src/other.rs",
+            "pub fn other(value: u32) -> u32 { value + 1 }\n",
+        ),
+    ]);
+    let segments_root = scopes.code_index_root.join("code-generation-segments-v1");
+    assert_eq!(
+        code_generation_segments_root(&scopes.first_scope),
+        segments_root
+    );
+    assert_eq!(
+        code_generation_segments_root(&scopes.linked_scope),
+        segments_root
+    );
+    for scope in [&scopes.first_scope, &scopes.linked_scope] {
+        assert!(
+            !scope.join("code-generation-segments-v1").exists(),
+            "a worktree scope holds no segments of its own"
+        );
+    }
+
+    let mut first = active_segment_digests(&scopes.first_scope);
+    let mut linked = active_segment_digests(&scopes.linked_scope);
+    let first_evidence = first.pop().expect("first evidence pack");
+    let linked_evidence = linked.pop().expect("linked evidence pack");
+    assert_eq!(first.len(), 2, "one file segment per source file");
+    assert_eq!(
+        first, linked,
+        "identical files seal to identical, worktree-independent segments"
+    );
+    assert_ne!(first_evidence, linked_evidence);
+    let mut expected = first.into_iter().collect::<BTreeSet<_>>();
+    expected.extend([first_evidence, linked_evidence]);
+    assert_eq!(
+        segment_files(&segments_root),
+        expected,
+        "the project stores each shared file segment exactly once"
+    );
+}
+
+#[test]
+fn retiring_one_worktree_keeps_the_segments_its_sibling_still_names() {
+    let scopes =
+        publish_linked_worktree_scopes(&[("src/lib.rs", "pub fn shared() -> u32 { 7 }\n")]);
+    // The linked worktree also seals a file the primary checkout does not.
+    super::write(
+        &scopes.linked,
+        "src/only_linked.rs",
+        "pub fn only_linked() {}\n",
+    );
+    super::git(&scopes.linked, &["add", "-A"]);
+    super::git(&scopes.linked, &["commit", "-qm", "linked-only file"]);
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut linked_scheduler = registry
+        .open_worktree(
+            test_project_id(),
+            &scopes.linked,
+            scopes.linked_scope.clone(),
+        )
+        .expect("reopen linked scheduler");
+    linked_scheduler.notify_path(scopes.linked.join("src/only_linked.rs"));
+    published(
+        linked_scheduler
+            .reconcile_now()
+            .expect("publish linked-only file"),
+    );
+    drop(linked_scheduler);
+    // A scope directory left behind by the per-scope layout is collected.
+    let retired_segments = scopes.first_scope.join("code-generation-segments-v1");
+    std::fs::create_dir_all(&retired_segments).expect("retired per-scope segment directory");
+    std::fs::write(retired_segments.join("segment-retired.json"), b"retired")
+        .expect("retired per-scope segment");
+
+    let segments_root = code_generation_segments_root(&scopes.first_scope);
+    let first = active_segment_digests(&scopes.first_scope);
+    let linked = active_segment_digests(&scopes.linked_scope);
+    let retain = |scope: &Path| {
+        run_code_generation_retention(
+            scope,
+            &BTreeSet::new(),
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(unix_now_secs() * 1_000_000),
+            None,
+        )
+        .expect("retention over shared segments")
+    };
+    // The linked scope's superseded generation retires, and a sweep from
+    // the primary scope must still mark everything the linked manifest names.
+    retain(&scopes.linked_scope);
+    retain(&scopes.first_scope);
+    let present = segment_files(&segments_root);
+    for digest in first.iter().chain(&linked) {
+        assert!(
+            present.contains(digest),
+            "a sweep from one scope must keep what a sibling scope names"
+        );
+    }
+    assert!(
+        !retired_segments.exists(),
+        "a per-scope segment directory from the retired layout is removed"
+    );
+
+    // Collecting the linked scope strands only what it alone named.
+    std::fs::remove_dir_all(&scopes.linked_scope).expect("collect linked scope");
+    retain(&scopes.first_scope);
+    let present = segment_files(&segments_root);
+    for digest in &first {
+        assert!(
+            present.contains(digest),
+            "the primary scope keeps its segments"
+        );
+    }
+    let linked_only = linked
+        .iter()
+        .filter(|digest| !first.contains(digest))
+        .collect::<Vec<_>>();
+    assert!(
+        linked_only.len() >= 2,
+        "the linked scope named at least its own file segment and evidence pack"
+    );
+    for digest in linked_only {
+        assert!(
+            !present.contains(digest),
+            "a segment only the collected scope named is swept"
+        );
+    }
+}
+
+/// Serve one scope's text artifact to completion and return the descriptor
+/// its active generation names.
+fn serve_scope_text(
+    worktree: &Path,
+    scope: &Path,
+) -> tracedecay_code_index_retention::code_index_generations::DurableCodeTextArtifactDescriptorV1
+{
+    serve_scope_text_with_hits(worktree, scope, "alpha").0
+}
+
+/// [`serve_scope_text`], plus the route-independent identity of every
+/// lexical hit the served artifact returns for `term`.
+fn serve_scope_text_with_hits(
+    worktree: &Path,
+    scope: &Path,
+    term: &str,
+) -> (
+    tracedecay_code_index_retention::code_index_generations::DurableCodeTextArtifactDescriptorV1,
+    Vec<String>,
+) {
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut scheduler = registry
+        .open_worktree(test_project_id(), worktree, scope.to_path_buf())
+        .expect("open worktree scheduler");
+    scheduler.reconcile_now().expect("adopt published generation");
+    let latest = scheduler.latest_complete().expect("published generation");
+    let mut passes = 0_usize;
+    while !latest
+        .advance_text_serving(64)
+        .expect("advance text-artifact build")
+    {
+        passes += 1;
+        assert!(passes < 10_000, "the text-artifact build never completed");
+    }
+    let generation = latest.generation().manifest().generation_id.clone();
+    let owners = latest.production_query_owners().expect("text query owners");
+    let base = RetrievalRequest {
+        principal: PrincipalId::new("principal.shared-artifact").expect("principal"),
+        scope: RetrievalScope {
+            privacy_domain: latest.generation().manifest().privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: latest.generation().snapshot().repository.clone(),
+                worktree: latest.generation().snapshot().worktree.clone(),
+                reference: latest.generation().snapshot().reference.clone(),
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "f".repeat(64)))
+                .expect("freshness digest"),
+            authorization_revision: AuthorizationRevision::new("authorization.shared.v1")
+                .expect("authorization revision"),
+            captured_at: UtcMicros(1),
+        },
+        profile_id: "profile.shared-artifact.v1"
+            .to_owned()
+            .try_into()
+            .expect("profile"),
+        budget: RetrievalBudget {
+            max_candidates_per_lane: 16,
+            max_fused_candidates: 16,
+            max_hydrated_results: 16,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        },
+    };
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        term,
+        SanitizerRevision::new("sanitizer.shared-artifact.v1").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.shared-artifact.v1")
+            .expect("normalization"),
+    )
+    .expect("query view");
+    let RetrieverOutcome::Complete(batch) = owners
+        .retrieve_lexical(&LexicalLaneRequest {
+            query_view: &query_view,
+            generation,
+            whole_terms: std::borrow::Cow::Owned(vec![term.to_owned()]),
+            subtokens: std::borrow::Cow::Owned(vec![term.to_owned()]),
+            phrases: std::borrow::Cow::Owned(Vec::new()),
+            proximities: std::borrow::Cow::Owned(Vec::new()),
+            field_filters: std::borrow::Cow::Owned(Vec::new()),
+            fuzzy_budget: 0,
+            lexical_profile_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+            )
+            .expect("lexical profile revision"),
+            score_domain: ScoreDomainId::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            )
+            .expect("lexical score domain"),
+            budget: base.budget,
+            base,
+            control: &super::ReadyRetrievalControlV1,
+        })
+        .expect("lexical retrieval")
+    else {
+        panic!("the served artifact must complete the lexical retrieval");
+    };
+    let mut hits = batch
+        .evidence_by_occurrence
+        .values()
+        .map(|evidence| {
+            format!(
+                "{} {:?} {:?} {:?} {:?}",
+                evidence.binding.occurrence.file,
+                evidence.binding.occurrence.symbol,
+                evidence.binding.occurrence.chunk,
+                evidence.field_scores_micros,
+                evidence.matched_whole_terms,
+            )
+        })
+        .collect::<Vec<_>>();
+    hits.sort();
+    (active_text_descriptor(scope), hits)
+}
+
+fn active_pointer(scope: &Path) -> DurablePublicationPointerV1 {
+    serde_json::from_slice(
+        &std::fs::read(scope.join("active-code-generation-v1.json")).expect("read pointer"),
+    )
+    .expect("decode pointer")
+}
+
+fn active_text_descriptor(
+    scope: &Path,
+) -> tracedecay_code_index_retention::code_index_generations::DurableCodeTextArtifactDescriptorV1
+{
+    let pointer = active_pointer(scope);
+    pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .and_then(|entry| entry.text_artifact().cloned())
+        .expect("active generation names a text artifact")
+}
+
+fn completed_text_artifacts(root: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(root)
+        .expect("read text artifact root")
+        .map(|entry| entry.expect("artifact entry").file_name().into_string().expect("utf-8"))
+        .filter(|name| name.starts_with("text-artifact-") && name.ends_with(".bin"))
+        .collect()
+}
+
+/// The content metadata an artifact stores, which lists its logical paths.
+fn artifact_content_metadata(path: &Path) -> String {
+    let metadata: Vec<u8> = rusqlite::Connection::open(path)
+        .expect("open artifact")
+        .query_row(
+            "SELECT metadata FROM artifact_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read artifact metadata");
+    String::from_utf8(metadata).expect("utf-8 metadata")
+}
+
+const CLONE_FIXTURE_SOURCE: &str = "pub fn alpha(value: u32) -> u32 { let a = value + 1; let b = a * 2; let c = b - 3; let d = c / 4; a + b + c + d }\n\
+     pub fn beta(input: u32) -> u32 { let a = input + 1; let b = a * 2; let c = b - 3; let d = c / 4; a + b + c + d }\n";
+
+#[test]
+fn linked_worktrees_that_index_identical_trees_share_one_text_artifact() {
+    let scopes = publish_linked_worktree_scopes(&[
+        ("src/lib.rs", CLONE_FIXTURE_SOURCE),
+        ("src/other.rs", "pub fn other(value: u32) -> u32 { value + 1 }\n"),
+    ]);
+    let (first, first_hits) =
+        serve_scope_text_with_hits(scopes._first.path(), &scopes.first_scope, "alpha");
+    assert!(
+        code_text_artifact_staging_root(&scopes.first_scope).is_dir(),
+        "the first worktree builds the artifact"
+    );
+    let (linked, linked_hits) =
+        serve_scope_text_with_hits(&scopes.linked, &scopes.linked_scope, "alpha");
+    assert!(
+        !code_text_artifact_staging_root(&scopes.linked_scope).exists(),
+        "a worktree sealing content a sibling already published adopts it without building"
+    );
+    assert_eq!(first.content_key, linked.content_key);
+    assert!(!first_hits.is_empty());
+    assert_eq!(first_hits, linked_hits, "the adopted artifact serves identical results");
+    let shared_root = code_text_artifacts_root(&scopes.first_scope);
+    assert_eq!(shared_root, scopes.code_index_root.join("code-text-artifacts-v1"));
+    assert_eq!(code_text_artifacts_root(&scopes.linked_scope), shared_root);
+    assert_ne!(
+        first.generation_id, linked.generation_id,
+        "each worktree seals its own generation"
+    );
+    assert_eq!(
+        (&first.artifact_file, &first.artifact_digest, first.artifact_size_bytes),
+        (&linked.artifact_file, &linked.artifact_digest, linked.artifact_size_bytes),
+        "identical trees seal byte-identical text artifacts"
+    );
+    assert_eq!(
+        completed_text_artifacts(&shared_root),
+        BTreeSet::from([first.artifact_file.clone()]),
+        "the project stores the shared artifact exactly once"
+    );
+    for scope in [&scopes.first_scope, &scopes.linked_scope] {
+        assert!(
+            !scope.join("code-text-artifacts-v1").exists(),
+            "a worktree scope holds no completed artifact of its own"
+        );
+    }
+}
+
+#[test]
+fn a_file_that_diverges_in_one_worktree_is_never_served_to_its_sibling() {
+    let scopes = publish_linked_worktree_scopes(&[("src/lib.rs", CLONE_FIXTURE_SOURCE)]);
+    super::write(
+        &scopes.linked,
+        "src/only_linked.rs",
+        "pub fn only_linked() -> u32 { 7 }\n",
+    );
+    super::git(&scopes.linked, &["add", "-A"]);
+    super::git(&scopes.linked, &["commit", "-qm", "linked-only file"]);
+    {
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let mut linked_scheduler = registry
+            .open_worktree(test_project_id(), &scopes.linked, scopes.linked_scope.clone())
+            .expect("reopen linked scheduler");
+        linked_scheduler.notify_path(scopes.linked.join("src/only_linked.rs"));
+        published(
+            linked_scheduler
+                .reconcile_now()
+                .expect("publish linked-only file"),
+        );
+    }
+    let first = serve_scope_text(scopes._first.path(), &scopes.first_scope);
+    let linked = serve_scope_text(&scopes.linked, &scopes.linked_scope);
+    assert_ne!(first.content_key, linked.content_key);
+    assert!(
+        code_text_artifact_staging_root(&scopes.linked_scope).is_dir(),
+        "one differing file forces the worktree to build its own artifact"
+    );
+    assert_ne!(
+        first.artifact_digest, linked.artifact_digest,
+        "diverged trees seal different artifacts"
+    );
+    let shared_root = code_text_artifacts_root(&scopes.first_scope);
+    assert!(
+        artifact_content_metadata(&shared_root.join(&linked.artifact_file))
+            .contains("src/only_linked.rs")
+    );
+    assert!(
+        !artifact_content_metadata(&shared_root.join(&first.artifact_file))
+            .contains("src/only_linked.rs"),
+        "the primary worktree's artifact carries none of its sibling's divergent file"
+    );
+}
+
+#[test]
+fn a_shared_artifact_that_fails_verification_is_rebuilt_not_adopted() {
+    let scopes = publish_linked_worktree_scopes(&[("src/lib.rs", CLONE_FIXTURE_SOURCE)]);
+    let first = serve_scope_text(scopes._first.path(), &scopes.first_scope);
+    // The shared file keeps its name and size but no longer holds the bytes
+    // its content address names.
+    let shared = code_text_artifacts_root(&scopes.first_scope).join(&first.artifact_file);
+    let mut bytes = std::fs::read(&shared).expect("read shared artifact");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(&shared, &bytes).expect("damage shared artifact");
+    let linked = serve_scope_text(&scopes.linked, &scopes.linked_scope);
+    assert!(
+        code_text_artifact_staging_root(&scopes.linked_scope).is_dir(),
+        "a key match that fails verification builds instead of adopting"
+    );
+    assert_eq!(linked.content_key, first.content_key);
+    assert_eq!(linked.artifact_file, first.artifact_file);
+    assert_eq!(
+        Some(encode_lowercase_hex(&Sha256::digest(
+            std::fs::read(&shared).expect("read rebuilt artifact")
+        )))
+        .as_deref(),
+        sha256_hex_suffix(first.artifact_digest.as_str()),
+        "the rebuild restores the bytes the content address names"
+    );
+}
+
+#[test]
+fn retiring_one_worktree_keeps_the_text_artifact_its_sibling_references() {
+    let scopes = publish_linked_worktree_scopes(&[("src/lib.rs", CLONE_FIXTURE_SOURCE)]);
+    let first = serve_scope_text(scopes._first.path(), &scopes.first_scope);
+    let linked = serve_scope_text(&scopes.linked, &scopes.linked_scope);
+    assert_eq!(first.artifact_file, linked.artifact_file);
+    let shared = code_text_artifacts_root(&scopes.first_scope).join(&first.artifact_file);
+    let retain = |scope: &Path| {
+        run_code_generation_retention(
+            scope,
+            &BTreeSet::new(),
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(unix_now_secs() * 1_000_000),
+            None,
+        )
+        .expect("retention over shared text artifacts")
+    };
+    let withdraw = |scope: &Path| {
+        let lock = acquire_code_generation_store_lock(scope).expect("scope store lock");
+        let pointer = active_pointer(scope);
+        let descriptor = active_text_descriptor(scope);
+        withdraw_verified_text_artifact_under_lock(&lock, &pointer, &descriptor)
+            .expect("withdraw text artifact");
+    };
+    // A scope that stops naming the shared artifact must not collect it
+    // while its sibling still does.
+    withdraw(&scopes.first_scope);
+    retain(&scopes.first_scope);
+    assert!(
+        shared.exists(),
+        "retention from one scope keeps an artifact a sibling scope names"
+    );
+    // A scope from the per-scope layout left its own artifact directory.
+    let retired = scopes.first_scope.join("code-text-artifacts-v1");
+    std::fs::create_dir_all(&retired).expect("retired per-scope artifact directory");
+    std::fs::write(retired.join("text-artifact-retired.bin"), b"retired").expect("retired artifact");
+    // Collecting the linked scope leaves the artifact unnamed.
+    std::fs::remove_dir_all(&scopes.linked_scope).expect("collect linked scope");
+    retain(&scopes.first_scope);
+    assert!(
+        !shared.exists(),
+        "an artifact no scope names is collected"
+    );
+    assert!(
+        !retired.exists(),
+        "a per-scope artifact directory from the retired layout is removed"
+    );
+}
+
+#[test]
+fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 2 }\n"),
+        ("src/c.rs", "pub fn c() -> u32 { 3 }\n"),
+    ]);
+    let source_store = TempDir::new().expect("source store root");
+    let generation = {
+        let mut scheduler = scheduler(
+            &fixture,
+            source_store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(scheduler.reconcile_now().expect("build generation"));
+        Arc::clone(
+            &scheduler
+                .latest_complete_already_decoded()
+                .expect("generation remains decoded")
+                .generation,
+        )
+    };
+    let project_store = TempDir::new().expect("project store");
+    let code_index_root = project_store.path().join("code-index-v1");
+    let target_scope = scoped_code_index_store_root(&code_index_root, fixture.path());
+    // A sibling worktree scope of the same project whose maintenance pass
+    // runs while the target publication is between segments and manifest.
+    let sibling_scope = code_index_root.join("a".repeat(64));
+    std::fs::create_dir_all(sibling_scope.join("code-generations-v1")).expect("sibling scope");
+    std::fs::create_dir_all(&target_scope).expect("target scope");
+    let sweeps = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_sweeps = Arc::clone(&sweeps);
+    let observed_sibling = sibling_scope.clone();
+    let mut publication = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        &target_scope,
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("open target publication store")
+    .with_seal_segment_observer_for_test(Arc::new(move || {
+        let outcome = run_code_generation_retention(
+            &observed_sibling,
+            &BTreeSet::new(),
+            CodeGenerationRetentionModeV1::Apply,
+            UtcMicros(1),
+            None,
+        )
+        .map(|_| ());
+        observed_sweeps
+            .lock()
+            .expect("sweep observations")
+            .push(outcome);
+    }));
+
+    publication
+        .publish_atomically(&generation.sealed_scope(), None, Arc::clone(&generation))
+        .expect("publish while sibling sweeps run");
+
+    let sweeps = sweeps.lock().expect("sweep observations");
+    assert_eq!(
+        sweeps.len(),
+        3,
+        "one sibling sweep per written file segment"
+    );
+    assert!(
+        sweeps.iter().all(|sweep| matches!(
+            sweep,
+            Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)
+        )),
+        "a sweep that saw unnamed segments must wait out the publication: {sweeps:?}"
+    );
+    let segments_root = code_generation_segments_root(&target_scope);
+    let present = segment_files(&segments_root);
+    for digest in active_segment_digests(&target_scope) {
+        assert!(present.contains(&digest), "every named segment survived");
+    }
+    // With the manifest durable the same sweep runs and keeps everything.
+    run_code_generation_retention(
+        &sibling_scope,
+        &BTreeSet::new(),
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(1),
+        None,
+    )
+    .expect("sweep after publication");
+    assert_eq!(segment_files(&segments_root), present);
 }

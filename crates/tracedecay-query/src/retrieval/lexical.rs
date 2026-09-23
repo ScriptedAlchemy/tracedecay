@@ -46,12 +46,13 @@ pub use self::projection::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1, CodeLexicalArtifactWriterRevisionV1,
-    CodeLexicalCloneIndexCensusV1, CodeLexicalCloneSuccessorV1,
-    CodeLexicalImportMembershipWitnessV1, CodeLexicalProjectionMetadataV1,
+    CodeLexicalArtifactSectionDigestV1,
+    CodeLexicalCloneIndexCensusV1,
+    CodeLexicalCloneRouteV1, CodeLexicalImportMembershipWitnessV1, CodeLexicalProjectionMetadataV1,
     MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
     PreparedCodeLexicalArtifactBatchV1, PreparedCodeLexicalArtifactPageV1,
     VerifiedCodeLexicalArtifactV1, code_lexical_artifact_build_memory_budget_for,
+    code_lexical_artifact_content_key,
 };
 #[cfg(feature = "search-eval")]
 pub use self::projection::{

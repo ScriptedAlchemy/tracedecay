@@ -353,13 +353,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         reason: String,
     ) -> Result<WithheldSourceV1, CodeIndexSchedulerErrorV1> {
         let digest = content_digest(raw_bytes);
-        let occurrence = omitted_file_occurrence_id(
-            &self.repository_id,
-            &self.worktree_id,
-            logical_path,
-            &digest,
-            disposition,
-        )?;
+        let occurrence =
+            omitted_file_occurrence_id(&self.repository_id, logical_path, &digest, disposition)?;
         Ok(WithheldSourceV1 {
             logical_path: logical_path.to_owned(),
             file: Some(SanitizedCodeFileV1 {
@@ -401,13 +396,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 privacy::sanitize_code_file(&descriptor.language, raw_bytes)?;
             let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
             let retained_reservation = self.reserve_snapshot_memory(&digest, shared.len())?;
-            let occurrence = file_occurrence_id(
-                &self.repository_id,
-                &self.worktree_id,
-                logical_path,
-                &digest,
-                &receipt_id,
-            )?;
+            let occurrence =
+                file_occurrence_id(&self.repository_id, logical_path, &digest, &receipt_id)?;
             Ok(Some(CapturedCandidateV1 {
                 file: SanitizedCodeFileV1 {
                     file_occurrence_id: occurrence.clone(),

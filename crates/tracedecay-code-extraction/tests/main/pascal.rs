@@ -8,7 +8,7 @@ use tracedecay_domain::*;
 include!("support/docstrings.rs");
 fn extract(source: &str) -> ExtractionResult {
     let extractor = PascalExtractor;
-    extractor.extract("test.pas", source)
+    extractor.extract_artifact("test.pas", source).result
 }
 
 // ----------------------------

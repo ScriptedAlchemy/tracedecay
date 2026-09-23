@@ -39,7 +39,7 @@ fn destructure(context: Context) {
 fn test_rust_file_node_is_root() {
     let source = r#"fn main() {}"#;
     let extractor = RustExtractor;
-    let result = extractor.extract("test.rs", source);
+    let result = extractor.extract_artifact("test.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -61,7 +61,7 @@ pub fn add(a: i32, b: i32) -> i32 {
 fn helper() {}
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("math.rs", source);
+    let result = extractor.extract_artifact("math.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -100,7 +100,7 @@ pub enum Mode {
     Fast,
 }
 "#;
-    let result = RustExtractor.extract("mode.rs", source);
+    let result = RustExtractor.extract_artifact("mode.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let safe = result
         .nodes
@@ -124,7 +124,7 @@ pub async fn fetch_data() -> String {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("async.rs", source);
+    let result = extractor.extract_artifact("async.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -145,7 +145,7 @@ pub struct Point {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("types.rs", source);
+    let result = extractor.extract_artifact("types.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let structs: Vec<_> = result
         .nodes
@@ -189,7 +189,7 @@ pub enum Color {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("color.rs", source);
+    let result = extractor.extract_artifact("color.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let enums: Vec<_> = result
         .nodes
@@ -222,7 +222,7 @@ pub trait Drawable {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("draw.rs", source);
+    let result = extractor.extract_artifact("draw.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let traits: Vec<_> = result
         .nodes
@@ -261,7 +261,7 @@ impl Rect {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("rect.rs", source);
+    let result = extractor.extract_artifact("rect.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let impls: Vec<_> = result
         .nodes
@@ -390,7 +390,7 @@ pub const MAX_SIZE: usize = 1024;
 static COUNTER: u32 = 0;
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("consts.rs", source);
+    let result = extractor.extract_artifact("consts.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -414,7 +414,7 @@ fn test_rust_type_alias() {
 pub type Result<T> = std::result::Result<T, Error>;
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("types.rs", source);
+    let result = extractor.extract_artifact("types.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let aliases: Vec<_> = result
         .nodes
@@ -433,7 +433,7 @@ pub mod inner {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("lib.rs", source);
+    let result = extractor.extract_artifact("lib.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let modules: Vec<_> = result
         .nodes
@@ -467,7 +467,7 @@ mod tests {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("src/lib.rs", source);
+    let result = extractor.extract_artifact("src/lib.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let modules: Vec<_> = result
@@ -542,7 +542,7 @@ fn complex(x: i32) -> i32 {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("complex.rs", source);
+    let result = extractor.extract_artifact("complex.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -576,7 +576,7 @@ fn risky(v: Option<i32>) -> i32 {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("risky.rs", source);
+    let result = extractor.extract_artifact("risky.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -607,7 +607,7 @@ fn caller() {
 fn helper() {}
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("calls.rs", source);
+    let result = extractor.extract_artifact("calls.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert!(
         result
@@ -657,7 +657,7 @@ fn assemble(args: &HiArgs, raw: Vec<u8>) -> Widget {
     types.clone().matched();
 }
 "#;
-    let result = RustExtractor.extract("typed.rs", source);
+    let result = RustExtractor.extract_artifact("typed.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names = call_names(&result, "assemble");
     // `Vec::len` is stated too: which owners never bind cross-file is the
@@ -706,7 +706,7 @@ fn assemble() {
     r.run();
 }
 "#;
-    let result = RustExtractor.extract("factory.rs", source);
+    let result = RustExtractor.extract_artifact("factory.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names = call_names(&result, "assemble");
     assert!(
@@ -744,7 +744,9 @@ fn assemble() -> Questioned {
     Questioned {}
 }
 "#;
-    let result = RustExtractor.extract("initializers.rs", source);
+    let result = RustExtractor
+        .extract_artifact("initializers.rs", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names = call_names(&result, "assemble");
     assert!(
@@ -778,7 +780,7 @@ fn rebound(builders: Vec<Builder>, pair: (Builder, Builder), maybe: Option<Build
     let typed = |arg: Builder| arg.build();
 }
 "#;
-    let result = RustExtractor.extract("rebound.rs", source);
+    let result = RustExtractor.extract_artifact("rebound.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names = call_names(&result, "rebound");
     assert_eq!(
@@ -809,7 +811,7 @@ impl Greet for Bot {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("greet.rs", source);
+    let result = extractor.extract_artifact("greet.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let impls: Vec<_> = result
         .nodes
@@ -832,7 +834,7 @@ impl Greet for Bot {
 #[test]
 fn test_rust_empty_source() {
     let extractor = RustExtractor;
-    let result = extractor.extract("empty.rs", "");
+    let result = extractor.extract_artifact("empty.rs", "").result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -862,7 +864,7 @@ pub struct Config {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("attrs.rs", source);
+    let result = extractor.extract_artifact("attrs.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let annots: Vec<_> = result
@@ -953,7 +955,7 @@ pub fn no_attrs(y: i32) -> i32 {
     y
 }
 "#;
-    let result = RustExtractor.extract("doc.rs", source);
+    let result = RustExtractor.extract_artifact("doc.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let double = result
         .nodes
@@ -995,7 +997,7 @@ pub struct Container {
     count: usize,
 }
 "#;
-    let result = RustExtractor.extract("c.rs", source);
+    let result = RustExtractor.extract_artifact("c.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let type_of_refs: Vec<_> = result
         .unresolved_refs
@@ -1024,7 +1026,7 @@ pub fn make(name: String, count: usize) -> Result<MyType, MyError> {
     todo!()
 }
 "#;
-    let result = RustExtractor.extract("f.rs", source);
+    let result = RustExtractor.extract_artifact("f.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let type_of: Vec<_> = result
         .unresolved_refs
@@ -1068,7 +1070,7 @@ fn test_check() {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("src/lib.rs", source);
+    let result = extractor.extract_artifact("src/lib.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let test_fn = result
@@ -1107,7 +1109,7 @@ fn use_foo() {
 }
 "#;
     let extractor = RustExtractor;
-    let result = extractor.extract("src/lib.rs", source);
+    let result = extractor.extract_artifact("src/lib.rs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let use_fn = result
@@ -1174,7 +1176,7 @@ fn caller(items: Vec<i32>, rows: Rows) {
 }
 fn make() -> Vec<i32> { Vec::new() }
 "#;
-    let result = RustExtractor.extract("src/lib.rs", source);
+    let result = RustExtractor.extract_artifact("src/lib.rs", source).result;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
 
     let from = |name: &str| {
@@ -1279,7 +1281,7 @@ fn ambiguous<T: Processor + Other>(processor: &T, input: u32) -> u32 {
     processor.process(input)
 }
 "#;
-    let result = RustExtractor.extract("src/lib.rs", source);
+    let result = RustExtractor.extract_artifact("src/lib.rs", source).result;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let from = |name: &str| {
         let function = result
@@ -1345,7 +1347,7 @@ impl Local for <Foo as Assoc>::Item {
     fn span(&self) -> usize { self.len() }
 }
 "#;
-    let result = RustExtractor.extract("src/lib.rs", source);
+    let result = RustExtractor.extract_artifact("src/lib.rs", source).result;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
 
     let from = |qualified: &str| {
@@ -1386,10 +1388,12 @@ impl Local for <Foo as Assoc>::Item {
 
 #[test]
 fn wildcard_imports_retain_unresolved_dependencies_alongside_named_bindings() {
-    let result = RustExtractor.extract(
-        "src/lib.rs",
-        "use crate::one::*;\nuse crate::two::{Item, *};",
-    );
+    let result = RustExtractor
+        .extract_artifact(
+            "src/lib.rs",
+            "use crate::one::*;\nuse crate::two::{Item, *};",
+        )
+        .result;
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let uses: Vec<_> = result
         .unresolved_refs

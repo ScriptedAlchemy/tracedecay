@@ -2,21 +2,15 @@
 //!
 //! The canonical code-graph namespace is derived from the code shard alone, so
 //! every generation of one scope publishes into a single projection. These
-//! tests pin the two consequences that make the layout worth having:
-//!
-//! * publishing generation N+1 supersedes N as an ordinary verified-head
-//!   replacement, and N is then reclaimed through the ordinary
-//!   `retire_replay` path, never through the head-retirement escape hatch;
-//! * a store persisted under the retired per-generation layout still opens,
-//!   and its immortal per-generation head is drained through the existing
-//!   superseded-head retirement path without disturbing the canonical
-//!   projection the code index republished into.
+//! tests pin the consequence that makes the layout worth having: publishing
+//! generation N+1 supersedes N as an ordinary verified-head replacement, and
+//! N is then reclaimed through the ordinary `retire_replay` path, never
+//! through the head-retirement escape hatch.
 
 use rusqlite::Savepoint;
 use tracedecay_graph_db::{
-    LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX, SupersededReplayRetirement,
-    VerifiedGraphCommit, code_graph_shard_namespace, is_code_graph_shard_namespace,
-    is_legacy_per_generation_code_graph_namespace,
+    SupersededReplayRetirement, VerifiedGraphCommit, code_graph_shard_namespace,
+    is_code_graph_shard_namespace,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
@@ -121,19 +115,6 @@ fn canonical_projection(worktree: &str) -> GraphProjectionIdentity {
     )
 }
 
-/// A projection exactly as a pre-cutover store persisted it: the code
-/// generation hashed into the namespace, so the generation owns the projection.
-fn legacy_per_generation_projection(digest_byte: char) -> GraphProjectionIdentity {
-    GraphProjectionIdentity::new(
-        GraphNamespace::new(format!(
-            "{LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX}{}",
-            digest_byte.to_string().repeat(64)
-        ))
-        .unwrap(),
-        GraphProjectionId::new("code-graph").unwrap(),
-    )
-}
-
 fn sealed_source(
     generation: &CodeGenerationId,
     digest: &SealedGraphStateDigest,
@@ -188,21 +169,14 @@ fn fresh_context<'a>(
     GraphPublicationOperationContextV1::new(control, probe).unwrap()
 }
 
-/// The canonical namespace is generation-agnostic and never collides with the
-/// retired per-generation layout it replaced.
+/// The canonical namespace is generation-agnostic and distinct per shard.
 #[test]
-fn canonical_code_graph_namespace_is_per_shard_and_disjoint_from_the_legacy_layout() {
+fn canonical_code_graph_namespace_is_per_shard() {
     let primary = canonical_projection("worktree.primary");
     let linked = canonical_projection("worktree.linked");
     assert_eq!(primary, canonical_projection("worktree.primary"));
     assert_ne!(primary, linked);
     assert!(is_code_graph_shard_namespace(&primary.namespace));
-    assert!(!is_legacy_per_generation_code_graph_namespace(
-        &primary.namespace
-    ));
-    assert!(is_legacy_per_generation_code_graph_namespace(
-        &legacy_per_generation_projection('a').namespace
-    ));
 }
 
 /// Publishing a second generation of one code shard supersedes the first head,
@@ -334,292 +308,6 @@ fn second_generation_supersedes_the_head_and_the_first_retires_without_head_reti
         authority.heads.get(&g2_record.publication.key.projection),
         Some(&g2_head),
         "retiring the superseded generation leaves the current head standing",
-    );
-}
-
-/// A store persisted under the retired per-generation layout still opens, and
-/// its immortal per-generation head is drained through the existing
-/// superseded-head retirement path without touching the canonical projection
-/// the code index republished into after the cutover.
-#[test]
-fn a_store_persisted_under_the_legacy_layout_opens_and_drains_its_per_generation_head() {
-    let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
-    let mut authority = RelationalAuthority::default();
-    let legacy_identity = legacy_per_generation_projection('c');
-    let canonical_identity = canonical_projection("worktree.primary");
-    let sealed_digest =
-        SealedGraphStateDigest::try_from(format!("sha256:{}", "6".repeat(64))).unwrap();
-    let legacy_generation = CodeGenerationId::new("code-generation.pre-cutover").unwrap();
-    let current_generation = CodeGenerationId::new("code-generation.post-cutover").unwrap();
-
-    // Pre-cutover state: the generation owns a projection of its own and is
-    // its permanent verified head.
-    let legacy = manifest(
-        legacy_identity.clone(),
-        "legacy-g1",
-        "legacy",
-        vec![],
-        vec![],
-    );
-    let legacy_record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &legacy,
-        "publish:legacy-g1",
-        None,
-        '3',
-    );
-    let (control, probe) = control_and_probe();
-    let legacy_commit = registered
-        .registry
-        .publish_verified(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority,
-            &fresh_context(&control, &probe),
-            &legacy_record.publication.key,
-            None,
-        )
-        .unwrap();
-    drop(legacy_commit);
-    bind_sealed_source(
-        &mut authority,
-        &registered.binding,
-        &legacy,
-        &legacy_record,
-        "publish:legacy-g1",
-        None,
-        '3',
-        &legacy_generation,
-        &sealed_digest,
-    );
-
-    // Post-cutover: the canonical per-shard projection has no head, so the
-    // code index republishes the live generation into it. The legacy
-    // projection is untouched by that publication.
-    let current = manifest(
-        canonical_identity.clone(),
-        "canonical-g1",
-        "canonical",
-        vec![],
-        vec![],
-    );
-    let current_record = stage_manifest(
-        &mut authority,
-        &registered.binding,
-        &current,
-        "publish:canonical-g1",
-        None,
-        '4',
-    );
-    let (control, probe) = control_and_probe();
-    let current_commit = registered
-        .registry
-        .publish_verified(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority,
-            &fresh_context(&control, &probe),
-            &current_record.publication.key,
-            None,
-        )
-        .unwrap();
-    let current_head = current_commit.head.clone();
-    drop(current_commit);
-    bind_sealed_source(
-        &mut authority,
-        &registered.binding,
-        &current,
-        &current_record,
-        "publish:canonical-g1",
-        None,
-        '4',
-        &current_generation,
-        &sealed_digest,
-    );
-
-    // Remount: the legacy-layout rows must survive a close and reopen.
-    assert!(registered.close().unwrap());
-    drop(registered);
-    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
-
-    // Draining the pre-cutover generation goes through the superseded-head
-    // retirement path, because a legacy projection's only replay is its head.
-    let (control, probe) = control_and_probe();
-    assert_eq!(
-        registered.registry.retire_one_code_generation_replay(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority,
-            &fresh_context(&control, &probe),
-            &legacy_generation,
-            &sealed_digest,
-        ),
-        Ok(GraphReplayCollectionOutcome::Retired(Box::new(
-            tracedecay_graph_db::GraphGenerationReplaySource::SealedCodeGeneration(sealed_source(
-                &legacy_generation,
-                &sealed_digest,
-            ))
-        )))
-    );
-    assert_eq!(
-        authority.head_retirement_calls, 1,
-        "a legacy per-generation head is reclaimed by the head-retirement path",
-    );
-    assert!(
-        !authority
-            .heads
-            .contains_key(&legacy_record.publication.key.projection),
-        "the legacy per-generation head is gone",
-    );
-    assert_eq!(
-        authority
-            .heads
-            .get(&current_record.publication.key.projection),
-        Some(&current_head),
-        "draining legacy-layout residue leaves the canonical head standing",
-    );
-
-    // Nothing legacy-layout is left for the sweep to find.
-    let (control, probe) = control_and_probe();
-    assert_eq!(
-        registered.registry.retire_one_code_generation_replay(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority,
-            &fresh_context(&control, &probe),
-            &legacy_generation,
-            &sealed_digest,
-        ),
-        Ok(GraphReplayCollectionOutcome::Absent)
-    );
-}
-
-/// A retired legacy replay remains sufficient authority to release its
-/// duplicate staging rows after head retirement. The sealed artifact must
-/// still reproduce the tombstone's exact digest; an active, dependency-
-/// bearing, ambiguous, or non-legacy replay stays fail-closed.
-///
-/// Fails if release checks only `verified_head` and returns
-/// `NoVerifiedLease` before inspecting the durable cleanup tombstone.
-#[test]
-fn retired_legacy_replay_without_a_head_releases_its_verified_sealed_staging_rows() {
-    let temp = TempDir::new().unwrap();
-    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
-    let mut authority = ExactPublicationAuthority::new(temp.path(), &registered.binding);
-    let identity = legacy_per_generation_projection('d');
-    let code_generation = CodeGenerationId::new("code-generation.legacy-no-head").unwrap();
-    let sealed_digest =
-        SealedGraphStateDigest::try_from(format!("sha256:{}", "8".repeat(64))).unwrap();
-    let generation = manifest(
-        identity,
-        "legacy-no-head-g1",
-        "legacy-no-head",
-        vec![],
-        vec![],
-    );
-    let publication = generation
-        .relational_sealed_replay(
-            registered.binding.shard_id.clone(),
-            GraphIdempotencyKey::new("publish:legacy-no-head-g1").unwrap(),
-            digest('8'),
-            None,
-            sealed_source(&code_generation, &sealed_digest),
-            &|| Ok(()),
-        )
-        .unwrap();
-    let (control, probe) = control_and_probe();
-    let replay = match authority
-        .storage
-        .append_replay(&publication, &fresh_context(&control, &probe))
-        .unwrap()
-    {
-        GraphReplayAppendOutcomeV1::Appended(replay) => replay,
-        outcome => panic!("fresh exact-SQL authority must append: {outcome:?}"),
-    };
-    let (control, probe) = control_and_probe();
-    assert_eq!(
-        registered.registry.release_sealed_generation_staging_rows(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority.storage,
-            &fresh_context(&control, &probe),
-            &replay.publication.key.projection,
-        ),
-        Ok(SealedStagingRelease::Retained(
-            SealedStagingRetentionReason::NoVerifiedLease,
-        )),
-        "production no-head replay semantics classify the sole active replay as pending"
-    );
-    // The legacy shape under test: the generation's rows already sit in the
-    // staging database when its sealed artifact is built.
-    registered
-        .registry
-        .resolve(registration(registered.binding.clone(), temp.path()))
-        .unwrap()
-        .stage_generation_rows_unpublished(Arc::new(generation.clone()))
-        .unwrap();
-    let (control, probe) = control_and_probe();
-    let commit = registered
-        .registry
-        .publish_verified(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority.storage,
-            &fresh_context(&control, &probe),
-            &replay.publication.key,
-            Some(Arc::new(generation.clone())),
-        )
-        .unwrap();
-    let retirement = GraphPublicationReplayRetirementV1::new(
-        replay.publication.key.clone(),
-        replay.publication.input_digest.clone(),
-        replay
-            .publication
-            .dependency_generation_closure_digest
-            .clone(),
-        replay.publication.direct_dependency_generations.clone(),
-        replay.publication.expected_prior_head.clone(),
-        replay.publication.expected_recovered_digest.clone(),
-        replay.publication.canonical_replay_source_digest.clone(),
-    )
-    .unwrap();
-    let (control, probe) = control_and_probe();
-    assert!(matches!(
-        authority
-            .storage
-            .retire_verified_head_replay(
-                &retirement,
-                &commit.head,
-                &fresh_context(&control, &probe),
-            )
-            .unwrap(),
-        GraphReplayRetirementOutcomeV1::Retired(_)
-    ));
-    drop(commit);
-
-    assert!(registered.close().unwrap());
-    drop(registered);
-
-    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
-    let (control, probe) = control_and_probe();
-    assert_eq!(
-        registered.registry.release_sealed_generation_staging_rows(
-            registration(registered.binding.clone(), temp.path()),
-            &mut authority.storage,
-            &fresh_context(&control, &probe),
-            &replay.publication.key.projection,
-        ),
-        Ok(SealedStagingRelease::Released {
-            entities: 1,
-            relations: 0,
-        })
-    );
-    let database = registered
-        .registry
-        .resolve(registration(registered.binding.clone(), temp.path()))
-        .unwrap();
-    assert_eq!(
-        database
-            .staging_generation_row_counts(&generation.identity())
-            .unwrap(),
-        (0, 0),
-        "the replay-verified sealed artifact makes the staging copy redundant"
     );
 }
 

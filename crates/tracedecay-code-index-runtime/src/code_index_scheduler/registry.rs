@@ -354,11 +354,8 @@ impl ServingSwapOutcomeV1 {
     }
 }
 
-/// An unfinished text projection withholds the serving seat only when exact
-/// or lexical owners are still missing.
-///
-/// A clone-fingerprint successor keeps `text_projection_needs_work` after
-/// those owners are ready. That is not `published_text_owner_unfinished`.
+/// An unfinished text projection withholds the serving seat only when its
+/// query owners are still missing.
 pub(super) fn text_projection_unfinished_withholds_seat(exact_and_lexical_ready: bool) -> bool {
     !exact_and_lexical_ready
 }
@@ -2334,11 +2331,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 return PublishedTextProjectionOutcomeV1::Shutdown;
             }
             // A publication's pass waits only for the owners the seat needs.
-            // Once the admission artifact serves exact and lexical, the slot
-            // may still hold the clone-fingerprint successor: that backfill
-            // re-decodes the whole sealed source into a second artifact and
-            // is not a seat precondition, so it continues on the retained
-            // driver of a later pass instead of holding graph activation.
             if installed.is_none() && text.query_owners_are_ready() {
                 break;
             }

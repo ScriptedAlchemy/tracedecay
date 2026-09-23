@@ -11,9 +11,11 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ManifestDigest, RetrieverCoverage, SymbolOccurrenceId, canonical_sha256};
 
-use super::format::{VerifiedCodeLexicalArtifactV1, contract_number};
+use super::clone_codec::{CloneOccurrenceRouteV1, routed_clone_body_row};
+use super::format::{
+    VerifiedCodeLexicalArtifactV1, contract_number, decode_fingerprint_postings,
+};
 use super::reader::{CloneArtifactCursorPositionV1, CloneArtifactCursorV1, CloneArtifactPageV1};
-use super::schema::LexicalArtifactLayoutV1;
 use super::{CodeLexicalArtifactErrorV1, sqlite_error};
 
 pub const CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1: u64 = 16_384;
@@ -128,8 +130,9 @@ struct CandidateAccumulatorV1 {
 }
 
 pub(super) struct CloneFingerprintReadRequestV1<'a> {
-    pub(super) layout: LexicalArtifactLayoutV1,
     pub(super) receipt: &'a VerifiedCodeLexicalArtifactV1,
+    /// The opener's route, which also names the generation cursors bind.
+    pub(super) route: &'a CloneOccurrenceRouteV1,
     pub(super) authority_digest: &'a ManifestDigest,
     pub(super) authority: &'a CloneBodyOccurrenceV1,
     pub(super) source: &'a CloneBodyPayloadV1,
@@ -145,8 +148,8 @@ pub(super) fn read_clone_fingerprint_page(
 ) -> Result<CloneFingerprintArtifactReadV1, CodeLexicalArtifactErrorV1> {
     let started = Instant::now();
     let CloneFingerprintReadRequestV1 {
-        layout,
         receipt,
+        route,
         authority_digest,
         authority,
         source,
@@ -155,11 +158,6 @@ pub(super) fn read_clone_fingerprint_page(
         limit,
         control,
     } = request;
-    if !layout.has_clone_fingerprints() {
-        return Err(CodeLexicalArtifactErrorV1::Incompatible(
-            "clone fingerprint lookup requires lexical artifact revision 16".to_owned(),
-        ));
-    }
     if limit == 0 || limit > MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1 {
         return Err(CodeLexicalArtifactErrorV1::Contract(format!(
             "clone fingerprint page limit must be within 1..={MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1}"
@@ -242,7 +240,7 @@ pub(super) fn read_clone_fingerprint_page(
     let after = match cursor {
         Some(cursor)
             if cursor.artifact_digest == *receipt.artifact_digest()
-                && cursor.generation == *receipt.generation()
+                && cursor.generation == route.source_generation
                 && cursor.request_digest == request_digest =>
         {
             match &cursor.after {
@@ -284,9 +282,23 @@ pub(super) fn read_clone_fingerprint_page(
     };
     let mut partial_reasons = BTreeSet::new();
     let mut ordered_lists = Vec::with_capacity(positions_by_fingerprint.len());
+    let mut list_statement = connection
+        .prepare_cached(
+            "SELECT postings FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4",
+        )
+        .map_err(sqlite_error)?;
+    let mut occurrence_statement = connection
+        .prepare_cached(
+            "SELECT occurrence.symbol_key, payload.payload_digest, occurrence.path,
+             occurrence.body_start, occurrence.body_end, occurrence.eligibility, payload.payload
+             FROM clone_occurrences AS occurrence
+             LEFT JOIN clone_body_payloads AS payload ON payload.ordinal = occurrence.payload_ordinal
+             WHERE occurrence.ordinal = ?1",
+        )
+        .map_err(sqlite_error)?;
     let mut count_statement = connection
         .prepare_cached(
-            "SELECT posting_count FROM clone_fingerprint_counts WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4",
+            "SELECT posting_count FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4",
         )
         .map_err(sqlite_error)?;
     for fingerprint in positions_by_fingerprint.keys().copied() {
@@ -346,28 +358,28 @@ pub(super) fn read_clone_fingerprint_page(
             partial_reasons.insert(CloneFingerprintPartialReasonV1::PostingRowBudget);
             break;
         }
-        let mut statement = connection
-            .prepare_cached(
-                "SELECT posting.symbol_occurrence_id, posting.token_position, posting.payload_digest, posting.body_digest, occurrence.occurrence, payload.payload
-                 FROM clone_fingerprint_postings AS posting
-                 LEFT JOIN clone_occurrences AS occurrence ON occurrence.symbol_occurrence_id = posting.symbol_occurrence_id
-                 LEFT JOIN clone_body_payloads AS payload ON payload.payload_digest = posting.payload_digest
-                 WHERE posting.language = ?1 AND posting.class = ?2 AND posting.normalization_revision = ?3 AND posting.fingerprint = ?4
-                 ORDER BY posting.symbol_occurrence_id, posting.token_position
-                 LIMIT ?5",
+        let read_limit = remaining.min(posting_count);
+        let list: Vec<u8> = list_statement
+            .query_row(
+                rusqlite::params![
+                    descriptor.language,
+                    i64::from(descriptor.class as u8),
+                    i64::from(descriptor.normalization_revision),
+                    i64::try_from(fingerprint).map_err(contract_number)?,
+                ],
+                |row| row.get(0),
             )
             .map_err(sqlite_error)?;
-        let read_limit = remaining.min(posting_count);
-        let mut rows = statement
-            .query(rusqlite::params![
-                descriptor.language,
-                i64::from(descriptor.class as u8),
-                i64::from(descriptor.normalization_revision),
-                i64::try_from(fingerprint).map_err(contract_number)?,
-                i64::try_from(read_limit).map_err(contract_number)?,
-            ])
-            .map_err(sqlite_error)?;
-        while let Some(row) = rows.next().map_err(sqlite_error)? {
+        let postings = decode_fingerprint_postings(&list)?;
+        if u64::try_from(postings.len()).ok() != Some(posting_count) {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "clone fingerprint posting list disagrees with its stored count".to_owned(),
+            ));
+        }
+        for (occurrence_ordinal, candidate_position) in postings
+            .into_iter()
+            .take(usize::try_from(read_limit).map_err(contract_number)?)
+        {
             accounting.posting_rows_examined = accounting.posting_rows_examined.saturating_add(1);
             if interrupt(
                 control,
@@ -378,42 +390,16 @@ pub(super) fn read_clone_fingerprint_page(
                 stop = true;
                 break;
             }
-            let posting_occurrence: String = row.get(0).map_err(sqlite_error)?;
-            let candidate_position = u32::try_from(row.get::<_, i64>(1).map_err(sqlite_error)?)
-                .map_err(|_| {
+            let stored = occurrence_statement
+                .query_row([occurrence_ordinal], routed_clone_body_row)
+                .optional()
+                .map_err(sqlite_error)?
+                .ok_or_else(|| {
                     CodeLexicalArtifactErrorV1::Corrupt(
-                        "clone fingerprint token position is outside u32".to_owned(),
+                        "clone fingerprint posting is missing its occurrence".to_owned(),
                     )
                 })?;
-            let posting_payload: String = row.get(2).map_err(sqlite_error)?;
-            let posting_body: String = row.get(3).map_err(sqlite_error)?;
-            let occurrence_bytes: Option<Vec<u8>> = row.get(4).map_err(sqlite_error)?;
-            let payload_bytes: Option<Vec<u8>> = row.get(5).map_err(sqlite_error)?;
-            let (Some(occurrence_bytes), Some(payload_bytes)) = (occurrence_bytes, payload_bytes)
-            else {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "clone fingerprint posting is missing its occurrence or payload".to_owned(),
-                ));
-            };
-            let occurrence: CloneBodyOccurrenceV1 = serde_json::from_slice(&occurrence_bytes)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-            let payload: CloneBodyPayloadV1 = serde_json::from_slice(&payload_bytes)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-            if occurrence.symbol_occurrence_id.as_str() != posting_occurrence
-                || occurrence.project_id != authority.project_id
-                || occurrence.repository_id != authority.repository_id
-                || occurrence.worktree_id != authority.worktree_id
-                || occurrence.source_generation != *receipt.generation()
-                || occurrence.payload_digest.as_str() != posting_payload
-                || occurrence.payload_digest != payload.payload_digest
-                || payload.body_digest.as_str() != posting_body
-                || payload.validate().is_err()
-            {
-                return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "clone fingerprint posting does not match its payload and occurrence"
-                        .to_owned(),
-                ));
-            }
+            let (occurrence, payload) = route.occurrence_and_payload(stored)?;
             if occurrence.symbol_occurrence_id == authority.symbol_occurrence_id
                 || payload.language != source.language
                 || (selected_block.is_none()
@@ -650,7 +636,7 @@ pub(super) fn read_clone_fingerprint_page(
     let next_cursor = if has_more {
         last_compared.map(|(body_digest, payload_digest)| CloneArtifactCursorV1 {
             artifact_digest: receipt.artifact_digest().clone(),
-            generation: receipt.generation().clone(),
+            generation: route.source_generation.clone(),
             request_digest,
             after: CloneArtifactCursorPositionV1::Fingerprint {
                 body_digest,

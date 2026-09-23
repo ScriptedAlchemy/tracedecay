@@ -40,9 +40,7 @@ mod publication_support;
 #[path = "registry/support.rs"]
 mod support;
 pub use code_graph_namespace::{
-    CODE_GRAPH_SHARD_NAMESPACE_PREFIX, LEGACY_PER_GENERATION_CODE_GRAPH_NAMESPACE_PREFIX,
-    code_graph_shard_namespace, is_code_graph_shard_namespace,
-    is_legacy_per_generation_code_graph_namespace,
+    CODE_GRAPH_SHARD_NAMESPACE_PREFIX, code_graph_shard_namespace, is_code_graph_shard_namespace,
 };
 pub use publication::{GraphPublicationPreparationV1, ProvenGraphPublicationV1};
 

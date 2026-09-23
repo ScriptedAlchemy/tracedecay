@@ -4,7 +4,7 @@ use tracedecay_code_index::capabilities::{
     BaseCapabilityEmitter, BaseCapabilityValidator, capability_manifest_digest,
     expected_seal_digest,
 };
-use tracedecay_code_index::chunks::{CodeChunker, DeterministicCodeChunker};
+use tracedecay_code_index::chunks::DeterministicCodeChunker;
 use tracedecay_code_index::extract::{
     LanguageExtractor, MAX_EXTRACTION_SOURCE_BYTES, NeverCancelled, TreeSitterExtractor,
 };
@@ -12,7 +12,8 @@ use tracedecay_code_index::languages::LanguageRegistry;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationManifestV1, CodeSearchChunkGrainV1, ComponentVersion,
     CoverageSummaryV1, ExactTechnicalTermKindV1, GenerationSealV1, MAX_CHUNK_TEXT_BYTES,
-    PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizerRevision, UtcMicros,
+    PrivacyDomainId, RepositoryId, SanitizationReceiptId, SanitizerRevision, SensitivityLevelV1,
+    UtcMicros,
 };
 
 use crate::support::{RUST_SOURCE, digest, id, registry, rust_descriptor, validated_rust_file};
@@ -31,14 +32,27 @@ fn extraction_to_chunks_is_deterministic_and_covers_all_grains() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_extraction::LanguageRegistry::new(),
     );
 
     let first = chunker
-        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+        .index_file_with_authority_from_extraction(
+            &file,
+            &batch,
+            &descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
+        .map(|(artifacts, _)| artifacts.chunks)
         .expect("chunk source");
     let second = chunker
-        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+        .index_file_with_authority_from_extraction(
+            &file,
+            &batch,
+            &descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
+        .map(|(artifacts, _)| artifacts.chunks)
         .expect("chunk source again");
 
     assert_eq!(first, second);
@@ -81,9 +95,15 @@ fn partial_extraction_never_chunks_unsupported_tail_bytes() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_extraction::LanguageRegistry::new(),
     )
-    .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+    .index_file_with_authority_from_extraction(
+        &file,
+        &batch,
+        &descriptor,
+        SensitivityLevelV1::Public,
+        &NeverCancelled,
+    )
+    .map(|(artifacts, _)| artifacts.chunks)
     .expect("chunk bounded evidence");
 
     assert!(matches!(
@@ -121,9 +141,15 @@ fn exact_term_kinds_cover_the_supported_search_contract() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_extraction::LanguageRegistry::new(),
     )
-    .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+    .index_file_with_authority_from_extraction(
+        &file,
+        &batch,
+        &descriptor,
+        SensitivityLevelV1::Public,
+        &NeverCancelled,
+    )
+    .map(|(artifacts, _)| artifacts.chunks)
     .expect("chunk exact-term fixture");
     let kinds: BTreeSet<_> = result
         .chunks
@@ -183,14 +209,27 @@ fn oversized_symbol_bodies_use_bounded_deterministic_fallback_windows() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_extraction::LanguageRegistry::new(),
     );
 
     let first = chunker
-        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+        .index_file_with_authority_from_extraction(
+            &file,
+            &batch,
+            &descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
+        .map(|(artifacts, _)| artifacts.chunks)
         .expect("chunk oversized body");
     let second = chunker
-        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+        .index_file_with_authority_from_extraction(
+            &file,
+            &batch,
+            &descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
+        .map(|(artifacts, _)| artifacts.chunks)
         .expect("chunk oversized body again");
     let bodies: Vec<_> = first
         .chunks
@@ -226,14 +265,27 @@ fn multiple_file_windows_have_unique_stable_ids_and_ordinals() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_extraction::LanguageRegistry::new(),
     );
 
     let first = chunker
-        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+        .index_file_with_authority_from_extraction(
+            &file,
+            &batch,
+            &descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
+        .map(|(artifacts, _)| artifacts.chunks)
         .expect("chunk multiple file windows");
     let second = chunker
-        .chunk_file(&file, batch.batch(), &descriptor, &NeverCancelled)
+        .index_file_with_authority_from_extraction(
+            &file,
+            &batch,
+            &descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
+        .map(|(artifacts, _)| artifacts.chunks)
         .expect("replay multiple file windows");
     let first_windows: Vec<_> = first
         .chunks
@@ -314,7 +366,10 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
     let privacy_domain = id::<PrivacyDomainId>("privacy.fixture");
     let mut generation = CodeGenerationManifestV1 {
         project_id: id("project.fixture"),
-        generation_id: id("generation.v1.aaaaaaaa.00000001"),
+        generation_id: id(&format!(
+            "generation.v1.aaaaaaaa.00000001.{}",
+            "d".repeat(64)
+        )),
         snapshot_digest: digest('a'),
         invalidation_digest: digest('d'),
         registry_revision: registry.registry_revision(),
@@ -332,9 +387,6 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
             planner: id::<ComponentVersion>("planner.v1"),
         },
     };
-    generation.invalidation_digest = generation
-        .expected_legacy_invalidation_digest()
-        .expect("legacy invalidation digest computes");
     generation.seal.expected_digest =
         expected_seal_digest(&generation).expect("seal digest computes");
 
@@ -363,9 +415,6 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
 
     let mut mixed_registry = generation.clone();
     mixed_registry.registry_revision = id("registry.other.v1");
-    mixed_registry.invalidation_digest = mixed_registry
-        .expected_legacy_invalidation_digest()
-        .expect("mixed invalidation digest computes");
     mixed_registry.seal.expected_digest =
         expected_seal_digest(&mixed_registry).expect("mixed manifest still seals");
     assert_eq!(

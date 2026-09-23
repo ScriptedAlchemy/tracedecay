@@ -13,7 +13,7 @@ function add(int $a, int $b): int {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("math.php", source);
+        let result = extractor.extract_artifact("math.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let fns: Vec<_> = result
             .nodes
@@ -44,7 +44,7 @@ class User {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("user.php", source);
+        let result = extractor.extract_artifact("user.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
         let classes: Vec<_> = result
@@ -103,7 +103,7 @@ interface Loggable {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("loggable.php", source);
+        let result = extractor.extract_artifact("loggable.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let traits: Vec<_> = result
             .nodes
@@ -124,7 +124,7 @@ trait Timestamps {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("timestamps.php", source);
+        let result = extractor.extract_artifact("timestamps.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let traits: Vec<_> = result
             .nodes
@@ -143,7 +143,7 @@ namespace App\Models;
 class Item {}
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("item.php", source);
+        let result = extractor.extract_artifact("item.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert!(
             result.nodes.iter().any(|n| n.kind == NodeKind::Module),
@@ -161,7 +161,7 @@ enum Status {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("status.php", source);
+        let result = extractor.extract_artifact("status.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let enums: Vec<_> = result
             .nodes
@@ -190,7 +190,7 @@ class Service {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("service.php", source);
+        let result = extractor.extract_artifact("service.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let uses: Vec<_> = result
             .nodes
@@ -211,7 +211,7 @@ class Widget {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("widget.php", source);
+        let result = extractor.extract_artifact("widget.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         // PHP extractor maps __construct as a regular Method
         let methods: Vec<_> = result
@@ -239,7 +239,7 @@ class MyController {
 }
 "#;
         let extractor = PhpExtractor;
-        let result = extractor.extract("attr.php", source);
+        let result = extractor.extract_artifact("attr.php", source).result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
         // Should have 4 AnnotationUsage nodes: Route, Deprecated, Override, AllowDynamicProperties
@@ -279,7 +279,7 @@ class MyController {
     #[test]
     fn test_php_empty_source() {
         let extractor = PhpExtractor;
-        let result = extractor.extract("empty.php", "<?php\n");
+        let result = extractor.extract_artifact("empty.php", "<?php\n").result;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let files: Vec<_> = result
             .nodes

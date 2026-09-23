@@ -14,7 +14,7 @@ fn read_fixture(name: &str) -> String {
 fn test_fixture_typescript() {
     let source = read_fixture("sample.ts");
     let extractor = tracedecay_code_extraction::TypeScriptExtractor;
-    let result = extractor.extract("sample.ts", &source);
+    let result = extractor.extract_artifact("sample.ts", &source).result;
     assert!(result.errors.is_empty(), "TS errors: {:?}", result.errors);
 
     // File root
@@ -130,7 +130,7 @@ fn test_fixture_typescript() {
 fn test_fixture_javascript() {
     let source = read_fixture("sample.js");
     let extractor = tracedecay_code_extraction::TypeScriptExtractor;
-    let result = extractor.extract("sample.js", &source);
+    let result = extractor.extract_artifact("sample.js", &source).result;
     assert!(result.errors.is_empty(), "JS errors: {:?}", result.errors);
 
     assert!(
@@ -165,7 +165,7 @@ fn test_fixture_javascript() {
 fn test_fixture_python() {
     let source = read_fixture("sample.py");
     let extractor = tracedecay_code_extraction::PythonExtractor;
-    let result = extractor.extract("sample.py", &source);
+    let result = extractor.extract_artifact("sample.py", &source).result;
     assert!(
         result.errors.is_empty(),
         "Python errors: {:?}",
@@ -308,7 +308,7 @@ fn test_fixture_python() {
 fn test_fixture_c() {
     let source = read_fixture("sample.c");
     let extractor = tracedecay_code_extraction::CExtractor;
-    let result = extractor.extract("sample.c", &source);
+    let result = extractor.extract_artifact("sample.c", &source).result;
     assert!(result.errors.is_empty(), "C errors: {:?}", result.errors);
 
     // Includes
@@ -411,7 +411,7 @@ fn test_fixture_c() {
 fn test_fixture_c_header() {
     let source = read_fixture("sample.h");
     let extractor = tracedecay_code_extraction::CExtractor;
-    let result = extractor.extract("sample.h", &source);
+    let result = extractor.extract_artifact("sample.h", &source).result;
     assert!(
         result.errors.is_empty(),
         "C header errors: {:?}",
@@ -447,7 +447,7 @@ fn test_fixture_c_header() {
 fn test_fixture_cpp() {
     let source = read_fixture("sample.cpp");
     let extractor = tracedecay_code_extraction::CppExtractor;
-    let result = extractor.extract("sample.cpp", &source);
+    let result = extractor.extract_artifact("sample.cpp", &source).result;
     assert!(result.errors.is_empty(), "C++ errors: {:?}", result.errors);
 
     // Namespace
@@ -564,7 +564,7 @@ fn test_fixture_cpp() {
 fn test_fixture_kotlin() {
     let source = read_fixture("sample.kt");
     let extractor = tracedecay_code_extraction::KotlinExtractor;
-    let result = extractor.extract("sample.kt", &source);
+    let result = extractor.extract_artifact("sample.kt", &source).result;
     assert!(
         result.errors.is_empty(),
         "Kotlin errors: {:?}",
@@ -687,7 +687,7 @@ fn test_fixture_kotlin() {
 fn test_fixture_dart() {
     let source = read_fixture("sample.dart");
     let extractor = tracedecay_code_extraction::DartExtractor;
-    let result = extractor.extract("sample.dart", &source);
+    let result = extractor.extract_artifact("sample.dart", &source).result;
     assert!(result.errors.is_empty(), "Dart errors: {:?}", result.errors);
 
     // Library
@@ -770,7 +770,7 @@ fn test_fixture_dart() {
 fn test_fixture_csharp() {
     let source = read_fixture("sample.cs");
     let extractor = tracedecay_code_extraction::CSharpExtractor;
-    let result = extractor.extract("sample.cs", &source);
+    let result = extractor.extract_artifact("sample.cs", &source).result;
     assert!(result.errors.is_empty(), "C# errors: {:?}", result.errors);
 
     // Namespace
@@ -907,7 +907,7 @@ fn test_fixture_csharp() {
 fn test_fixture_php() {
     let source = read_fixture("sample.php");
     let extractor = tracedecay_code_extraction::PhpExtractor;
-    let result = extractor.extract("sample.php", &source);
+    let result = extractor.extract_artifact("sample.php", &source).result;
     assert!(result.errors.is_empty(), "PHP errors: {:?}", result.errors);
 
     // File root node
@@ -1040,7 +1040,7 @@ fn test_fixture_php() {
 fn test_fixture_pascal() {
     let source = read_fixture("sample.pas");
     let extractor = tracedecay_code_extraction::PascalExtractor;
-    let result = extractor.extract("sample.pas", &source);
+    let result = extractor.extract_artifact("sample.pas", &source).result;
     assert!(
         result.errors.is_empty(),
         "Pascal errors: {:?}",
@@ -1143,7 +1143,7 @@ fn test_fixture_pascal() {
 fn test_fixture_ruby() {
     let source = read_fixture("sample.rb");
     let extractor = tracedecay_code_extraction::RubyExtractor;
-    let result = extractor.extract("sample.rb", &source);
+    let result = extractor.extract_artifact("sample.rb", &source).result;
     assert!(result.errors.is_empty(), "Ruby errors: {:?}", result.errors);
 
     // File root node
@@ -1256,7 +1256,7 @@ fn test_fixture_ruby() {
 fn test_fixture_swift() {
     let source = read_fixture("sample.swift");
     let extractor = tracedecay_code_extraction::SwiftExtractor;
-    let result = extractor.extract("sample.swift", &source);
+    let result = extractor.extract_artifact("sample.swift", &source).result;
     assert!(
         result.errors.is_empty(),
         "Swift errors: {:?}",
@@ -1460,7 +1460,7 @@ fn test_fixture_swift() {
 fn test_fixture_bash() {
     let source = read_fixture("sample.sh");
     let extractor = tracedecay_code_extraction::BashExtractor;
-    let result = extractor.extract("sample.sh", &source);
+    let result = extractor.extract_artifact("sample.sh", &source).result;
     assert!(result.errors.is_empty(), "Bash errors: {:?}", result.errors);
 
     // File root node
@@ -1526,7 +1526,7 @@ fn test_fixture_bash() {
 fn test_fixture_lua() {
     let source = read_fixture("sample.lua");
     let extractor = tracedecay_code_extraction::LuaExtractor;
-    let result = extractor.extract("sample.lua", &source);
+    let result = extractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "Lua errors: {:?}", result.errors);
 
     // File root node
@@ -1607,7 +1607,7 @@ fn test_fixture_lua() {
 fn test_fixture_zig() {
     let source = read_fixture("sample.zig");
     let extractor = tracedecay_code_extraction::ZigExtractor;
-    let result = extractor.extract("sample.zig", &source);
+    let result = extractor.extract_artifact("sample.zig", &source).result;
     assert!(result.errors.is_empty(), "Zig errors: {:?}", result.errors);
 
     // File root node
@@ -1780,7 +1780,7 @@ fn test_fixture_zig() {
 fn test_fixture_proto() {
     let source = read_fixture("sample.proto");
     let extractor = tracedecay_code_extraction::ProtoExtractor;
-    let result = extractor.extract("sample.proto", &source);
+    let result = extractor.extract_artifact("sample.proto", &source).result;
     assert!(
         result.errors.is_empty(),
         "Proto errors: {:?}",
@@ -1919,7 +1919,7 @@ fn test_fixture_proto() {
 fn test_fixture_nix() {
     let source = read_fixture("sample.nix");
     let extractor = tracedecay_code_extraction::NixExtractor;
-    let result = extractor.extract("sample.nix", &source);
+    let result = extractor.extract_artifact("sample.nix", &source).result;
     assert!(result.errors.is_empty(), "Nix errors: {:?}", result.errors);
 
     // File root
@@ -2030,7 +2030,7 @@ fn test_fixture_nix() {
 fn test_fixture_vbnet() {
     let source = read_fixture("sample.vb");
     let extractor = tracedecay_code_extraction::VbNetExtractor;
-    let result = extractor.extract("sample.vb", &source);
+    let result = extractor.extract_artifact("sample.vb", &source).result;
 
     // File root
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
@@ -2204,7 +2204,7 @@ fn test_fixture_vbnet() {
 fn test_fixture_powershell() {
     let source = read_fixture("sample.ps1");
     let extractor = tracedecay_code_extraction::PowerShellExtractor;
-    let result = extractor.extract("sample.ps1", &source);
+    let result = extractor.extract_artifact("sample.ps1", &source).result;
     assert!(
         result.errors.is_empty(),
         "PowerShell errors: {:?}",
@@ -2278,7 +2278,7 @@ fn test_fixture_powershell() {
 fn test_fixture_batch() {
     let source = read_fixture("sample.bat");
     let extractor = tracedecay_code_extraction::BatchExtractor;
-    let result = extractor.extract("sample.bat", &source);
+    let result = extractor.extract_artifact("sample.bat", &source).result;
     assert!(
         result.errors.is_empty(),
         "Batch errors: {:?}",
@@ -2339,7 +2339,7 @@ fn test_fixture_batch() {
 fn test_fixture_perl() {
     let source = read_fixture("sample.pl");
     let extractor = tracedecay_code_extraction::PerlExtractor;
-    let result = extractor.extract("sample.pl", &source);
+    let result = extractor.extract_artifact("sample.pl", &source).result;
     assert!(result.errors.is_empty(), "Perl errors: {:?}", result.errors);
 
     // File root node
@@ -2466,7 +2466,7 @@ fn test_fixture_perl() {
 fn test_fixture_objc() {
     let source = read_fixture("sample.m");
     let extractor = tracedecay_code_extraction::ObjcExtractor;
-    let result = extractor.extract("sample.m", &source);
+    let result = extractor.extract_artifact("sample.m", &source).result;
 
     // File root
     assert!(result.nodes.iter().any(|n| n.kind == NodeKind::File));
@@ -2640,7 +2640,7 @@ fn test_fixture_objc() {
 fn test_fixture_fortran() {
     let source = read_fixture("sample.f90");
     let extractor = tracedecay_code_extraction::FortranExtractor;
-    let result = extractor.extract("sample.f90", &source);
+    let result = extractor.extract_artifact("sample.f90", &source).result;
     assert!(
         result.errors.is_empty(),
         "Fortran errors: {:?}",
@@ -2801,7 +2801,7 @@ fn test_fixture_fortran() {
 fn test_fixture_cobol() {
     let source = read_fixture("sample.cob");
     let extractor = tracedecay_code_extraction::CobolExtractor;
-    let result = extractor.extract("sample.cob", &source);
+    let result = extractor.extract_artifact("sample.cob", &source).result;
     assert!(
         result.errors.is_empty(),
         "COBOL errors: {:?}",
@@ -2909,7 +2909,7 @@ fn test_fixture_cobol() {
 fn test_fixture_msbasic2() {
     let source = read_fixture("sample.bas");
     let extractor = tracedecay_code_extraction::MsBasic2Extractor;
-    let result = extractor.extract("sample.bas", &source);
+    let result = extractor.extract_artifact("sample.bas", &source).result;
     assert!(
         result.errors.is_empty(),
         "MS BASIC 2.0 errors: {:?}",
@@ -2992,7 +2992,7 @@ fn test_fixture_msbasic2() {
 fn test_fixture_gwbasic() {
     let source = read_fixture("sample.gw");
     let extractor = tracedecay_code_extraction::GwBasicExtractor;
-    let result = extractor.extract("sample.gw", &source);
+    let result = extractor.extract_artifact("sample.gw", &source).result;
     assert!(
         result.errors.is_empty(),
         "GW-BASIC errors: {:?}",
@@ -3079,7 +3079,7 @@ fn test_fixture_gwbasic() {
 fn test_fixture_qbasic() {
     let source = read_fixture("sample.qb");
     let extractor = tracedecay_code_extraction::QBasicExtractor;
-    let result = extractor.extract("sample.qb", &source);
+    let result = extractor.extract_artifact("sample.qb", &source).result;
     assert!(
         result.errors.is_empty(),
         "QBasic errors: {:?}",

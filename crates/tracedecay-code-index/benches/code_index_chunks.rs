@@ -9,10 +9,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::chunks::{
-    CodeChunker, CodeFileChunksV1, DeterministicCodeChunker, content_digest,
-};
-use tracedecay_code_index::extract::ExtractionBatchV1;
+use tracedecay_code_index::chunks::{CodeFileChunksV1, DeterministicCodeChunker, content_digest};
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_code_index::incremental::{GenerationChunkManifestV1, plan_chunk_increment};
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
@@ -27,8 +24,8 @@ use tracedecay_domain::{
     LanguageDescriptorV1, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
     ProjectionOutcomeV1, ProjectionReplayReasonV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    UtcMicros, ValidatedCodeFileV1,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
+    SnapshotFileDispositionV1, UtcMicros, ValidatedCodeFileV1,
 };
 
 const WORKLOAD_PATH: &str = concat!(
@@ -193,7 +190,6 @@ struct WorkloadFile {
 #[derive(Clone)]
 struct FileArtifact {
     source: WorkloadFile,
-    extraction: ExtractionBatchV1,
     chunks: CodeFileChunksV1,
 }
 
@@ -695,11 +691,12 @@ fn execute_case(
             ProjectionReplayReasonV1::VerificationReplay,
         ),
         CaseName::ChunkerReplay => (
-            rechunk(
-                prior.as_ref().expect("prior generation"),
+            build_fresh(
+                &sources,
                 generation(2)?,
                 chunker_revision(CHUNKER_REPLAY)?,
                 &descriptor,
+                &extractor,
             )?,
             sources.len() as u64,
             corpus_bytes,
@@ -823,14 +820,18 @@ fn build_artifact(
     let extraction = extractor
         .extract(&file, descriptor, &NeverCancelled)
         .map_err(|error| format!("extract {}: {error:?}", source.logical_path))?;
-    let chunks = chunker
-        .chunk_file(&file, extraction.batch(), descriptor, &NeverCancelled)
+    let (artifacts, _) = chunker
+        .index_file_with_authority_from_extraction(
+            &file,
+            &extraction,
+            descriptor,
+            SensitivityLevelV1::Public,
+            &NeverCancelled,
+        )
         .map_err(|error| format!("chunk {}: {error}", source.logical_path))?;
-    let extraction = extraction.batch().clone();
     Ok(FileArtifact {
         source: source.clone(),
-        extraction,
-        chunks,
+        chunks: artifacts.chunks,
     })
 }
 
@@ -876,8 +877,6 @@ fn rebind_artifact(
     generation_id: &CodeGenerationId,
 ) -> Result<(), String> {
     let occurrence = file_occurrence(&artifact.source.logical_path, generation_id)?;
-    artifact.extraction.generation_id = generation_id.clone();
-    artifact.extraction.file_occurrence_id = occurrence.clone();
     artifact.chunks.document.generation_id = generation_id.clone();
     artifact.chunks.document.file_occurrence_id = occurrence.clone();
     for chunk in &mut artifact.chunks.chunks {
@@ -891,34 +890,6 @@ fn rebind_artifact(
         .map_err(|error| format!("validate carried {}: {error}", artifact.source.logical_path))
 }
 
-fn rechunk(
-    prior: &BuiltCorpus,
-    generation_id: CodeGenerationId,
-    chunker_revision: ChunkerRevision,
-    descriptor: &LanguageDescriptorV1,
-) -> Result<BuiltCorpus, String> {
-    let chunker = chunker(generation_id.clone(), chunker_revision)?;
-    let mut artifacts = BTreeMap::new();
-    for artifact in prior.artifacts.values() {
-        let mut extraction = artifact.extraction.clone();
-        let file = receipt_bound_file(&artifact.source, &generation_id)?;
-        extraction.generation_id = generation_id.clone();
-        extraction.file_occurrence_id = file.file.file_occurrence_id.clone();
-        let chunks = chunker
-            .chunk_file(&file, &extraction, descriptor, &NeverCancelled)
-            .map_err(|error| format!("rechunk {}: {error}", artifact.source.logical_path))?;
-        artifacts.insert(
-            artifact.source.logical_path.clone(),
-            FileArtifact {
-                source: artifact.source.clone(),
-                extraction,
-                chunks,
-            },
-        );
-    }
-    BuiltCorpus::from_artifacts(generation_id, artifacts)
-}
-
 fn chunker(
     generation_id: CodeGenerationId,
     chunker_revision: ChunkerRevision,
@@ -929,7 +900,6 @@ fn chunker(
         id::<SanitizerRevision>("sanitizer.query-benchmark.v1")?,
         id::<PolicyRevisionId>("policy.query-benchmark.v1")?,
         chunker_revision,
-        tracedecay_code_extraction::LanguageRegistry::new(),
     ))
 }
 

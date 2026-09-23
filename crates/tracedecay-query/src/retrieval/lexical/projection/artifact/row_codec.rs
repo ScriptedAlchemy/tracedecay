@@ -1,51 +1,64 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     BoundedSanitizedText, CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
     CodeSearchChunkId, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileOccurrenceId,
-    LanguageDescriptorRevision, SourceSpan, SymbolOccurrenceId,
+    LanguageDescriptorRevision, MAX_CHUNK_TEXT_BYTES, SourceSpan, SymbolOccurrenceId,
 };
 
 use super::super::LexicalFieldV1;
 use super::CodeLexicalArtifactErrorV1;
-use super::format::ArtifactRowV1;
-use super::schema::{LexicalArtifactLayoutV1, stable_row_dictionary_id};
+use super::format::{ArtifactRowV1, deflate_bytes, inflate_bytes};
+use super::schema::stable_row_dictionary_id;
 
-const ROW_CODEC_V11_MAGIC: &[u8] = b"TDLR11\0";
-const ROW_CODEC_V14_MAGIC: &[u8] = b"TDLR14\0";
-const ROW_CODEC_V16_MAGIC: &[u8] = b"TDLR16\0";
+/// Rows are stored in blocks of up to `ROW_BLOCK_MAX_ROWS` consecutive
+/// documents of one source page, closed early once their uncompressed
+/// payload reaches `ROW_BLOCK_TARGET_BYTES`, and deflated as one stream: a
+/// read inflates at most one block, and neighbouring chunks of one file
+/// share a deflate window (about twice the ratio of per-row deflate).
+pub(super) const ROW_BLOCK_MAX_ROWS: usize = 32;
+const ROW_BLOCK_TARGET_BYTES: usize = 64 * 1024;
+/// Hard bound on one block's inflated payload: a block closes at its target
+/// before its last row, and one row holds at most a chunk's text plus its
+/// metadata.
+const ROW_BLOCK_MAX_INFLATED_BYTES: usize = ROW_BLOCK_TARGET_BYTES + 4 * MAX_CHUNK_TEXT_BYTES;
+const ROW_BLOCK_DEFLATE: u8 = 23;
+const BLOCK_CHUNK_DIGEST: u8 = 1;
+const BLOCK_CHUNK_LITERAL: u8 = 2;
+/// A row's text is stored raw, or as the length of the prefix it shares
+/// with the raw text of its parent chunk in the same block (a signature
+/// chunk is the first line of its symbol's body chunk).
+const BLOCK_TEXT_RAW: u8 = 0;
+const BLOCK_TEXT_PARENT_PREFIX: u8 = 1;
 
 /// Chunk identities the chunker mints: `chunk.v1.` followed by a tagged
 /// lowercase SHA-256. Revision 14 stores such a parent as its 32 digest bytes
 /// and any other shape as the literal string.
 const CANONICAL_CHUNK_ID_PREFIX: &str = "chunk.v1.sha256:";
+/// Symbol identities the extractor mints, stored the same way in symbol
+/// dictionary entries.
+const CANONICAL_SYMBOL_ID_PREFIX: &str = "symbol.v1.sha256:";
 const PARENT_NONE: u8 = 0;
 const PARENT_CANONICAL_DIGEST: u8 = 1;
 const PARENT_LITERAL: u8 = 2;
 const OPTIONAL_ABSENT: u8 = 0;
 const OPTIONAL_PRESENT: u8 = 1;
+/// Symbol-entry presence tags beyond `OPTIONAL_PRESENT`: a canonical symbol
+/// id as its 32 digest bytes, and a qualified name stored as the suffix
+/// after its file's `"<logical path>::"`.
+const SYMBOL_ID_CANONICAL_DIGEST: u8 = 2;
+const QUALIFIED_NAME_IN_FILE: u8 = 2;
 /// An exact term's symbol authority is almost always the row's own symbol;
 /// spell that as one byte instead of a second reference.
 const TERM_SYMBOL_NONE: u8 = 0;
 const TERM_SYMBOL_ROW: u8 = 1;
 const TERM_SYMBOL_REFERENCE: u8 = 2;
 
-const LEGACY_FIELD_LENGTH_ORDER: [LexicalFieldV1; 7] = [
-    LexicalFieldV1::SymbolName,
-    LexicalFieldV1::QualifiedName,
-    LexicalFieldV1::Path,
-    LexicalFieldV1::BodyText,
-    LexicalFieldV1::PreambleText,
-    LexicalFieldV1::ExactTerm,
-    LexicalFieldV1::Subtoken,
-];
-
-/// Field order for the revision-16 `field_lengths` presence bitmap. New fields
-/// append after the revision-14/15 prefix.
+/// Field order for the `field_lengths` presence bitmap.
 const FIELD_LENGTH_ORDER: [LexicalFieldV1; 9] = [
     LexicalFieldV1::SymbolName,
     LexicalFieldV1::QualifiedName,
@@ -62,29 +75,6 @@ const GRAIN_ORDER: &[CodeSearchChunkGrainV1] = CodeSearchChunkGrainV1::ORDER.as_
 
 const EXACT_TERM_KIND_ORDER: &[ExactTechnicalTermKindV1] =
     ExactTechnicalTermKindV1::ORDER.as_slice();
-
-/// Compact row payload: drop identities already stored as columns or
-/// generation metadata, and reconstruct ASCII-normalized text on read.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct ArtifactRowCompactV11 {
-    file_occurrence_id: FileOccurrenceId,
-    symbol_occurrence_id: Option<SymbolOccurrenceId>,
-    parent_chunk_id: Option<CodeSearchChunkId>,
-    source_span: SourceSpan,
-    grain: CodeSearchChunkGrainV1,
-    ordinal: u32,
-    language_descriptor_revision: LanguageDescriptorRevision,
-    exact_terms: Vec<ExactTechnicalTermV1>,
-    sanitized_text: BoundedSanitizedText,
-    logical_path: String,
-    symbol_simple_name: Option<String>,
-    symbol_qualified_name: Option<String>,
-    symbol_kind: Option<String>,
-    symbol_signature: Option<String>,
-    symbol_documentation: Option<String>,
-    field_lengths: BTreeMap<LexicalFieldV1, usize>,
-}
 
 /// Dictionary entries a revision-14 row references by content-addressed id:
 /// one per file (occurrence identity, logical path, descriptor revision) and
@@ -108,18 +98,43 @@ pub(super) enum RowDictionaryEntryV1 {
     Symbol {
         symbol_occurrence_id: Option<String>,
         simple_name: Option<String>,
-        qualified_name: Option<String>,
+        qualified_name: Option<QualifiedNameV1>,
         kind: Option<String>,
         signature: Option<String>,
         documentation: Option<String>,
     },
 }
 
+/// A symbol's qualified name. Parser-attested names almost always spell out
+/// their file as `"<logical path>::<suffix>"`; that prefix is the row's file
+/// entry and is not stored twice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum QualifiedNameV1 {
+    Literal(String),
+    InFile(String),
+}
+
+impl QualifiedNameV1 {
+    fn for_path(qualified_name: &str, logical_path: &str) -> Self {
+        qualified_name
+            .strip_prefix(logical_path)
+            .and_then(|suffix| suffix.strip_prefix("::"))
+            .map_or_else(
+                || Self::Literal(qualified_name.to_owned()),
+                |suffix| Self::InFile(suffix.to_owned()),
+            )
+    }
+
+    fn resolve(&self, logical_path: &str) -> String {
+        match self {
+            Self::Literal(name) => name.clone(),
+            Self::InFile(suffix) => format!("{logical_path}::{suffix}"),
+        }
+    }
+}
+
 impl RowDictionaryEntryV1 {
-    fn encode(
-        &self,
-        include_vocabulary_fields: bool,
-    ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    fn encode(&self) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
         let mut out = Vec::with_capacity(256);
         match self {
             Self::File {
@@ -141,25 +156,34 @@ impl RowDictionaryEntryV1 {
                 documentation,
             } => {
                 out.push(ENTRY_SYMBOL);
-                for field in [symbol_occurrence_id, simple_name, qualified_name, kind] {
-                    match field {
-                        None => out.push(OPTIONAL_ABSENT),
-                        Some(value) => {
-                            out.push(OPTIONAL_PRESENT);
-                            put_bytes(&mut out, value.as_bytes())?;
-                        }
+                match symbol_occurrence_id
+                    .as_deref()
+                    .map(|id| (id, canonical_digest(CANONICAL_SYMBOL_ID_PREFIX, id)))
+                {
+                    None => out.push(OPTIONAL_ABSENT),
+                    Some((_, Some(digest))) => {
+                        out.push(SYMBOL_ID_CANONICAL_DIGEST);
+                        out.extend_from_slice(&digest);
+                    }
+                    Some((id, None)) => {
+                        out.push(OPTIONAL_PRESENT);
+                        put_bytes(&mut out, id.as_bytes())?;
                     }
                 }
-                if include_vocabulary_fields {
-                    for field in [signature, documentation] {
-                        match field {
-                            None => out.push(OPTIONAL_ABSENT),
-                            Some(value) => {
-                                out.push(OPTIONAL_PRESENT);
-                                put_bytes(&mut out, value.as_bytes())?;
-                            }
-                        }
+                put_optional_string(&mut out, simple_name.as_deref())?;
+                match qualified_name {
+                    None => out.push(OPTIONAL_ABSENT),
+                    Some(QualifiedNameV1::Literal(name)) => {
+                        out.push(OPTIONAL_PRESENT);
+                        put_bytes(&mut out, name.as_bytes())?;
                     }
+                    Some(QualifiedNameV1::InFile(suffix)) => {
+                        out.push(QUALIFIED_NAME_IN_FILE);
+                        put_bytes(&mut out, suffix.as_bytes())?;
+                    }
+                }
+                for field in [kind, signature, documentation] {
+                    put_optional_string(&mut out, field.as_deref())?;
                 }
             }
         }
@@ -174,28 +198,35 @@ impl RowDictionaryEntryV1 {
                 logical_path: cursor.take_string()?,
                 language_descriptor_revision: cursor.take_string()?,
             },
-            ENTRY_SYMBOL => {
-                let symbol_occurrence_id = cursor.take_optional_string()?;
-                let simple_name = cursor.take_optional_string()?;
-                let qualified_name = cursor.take_optional_string()?;
-                let kind = cursor.take_optional_string()?;
-                let (signature, documentation) = if cursor.bytes.is_empty() {
-                    (None, None)
-                } else {
-                    (
-                        cursor.take_optional_string()?,
-                        cursor.take_optional_string()?,
-                    )
-                };
-                Self::Symbol {
-                    symbol_occurrence_id,
-                    simple_name,
-                    qualified_name,
-                    kind,
-                    signature,
-                    documentation,
-                }
-            }
+            ENTRY_SYMBOL => Self::Symbol {
+                symbol_occurrence_id: match cursor.take_u8()? {
+                    OPTIONAL_ABSENT => None,
+                    OPTIONAL_PRESENT => Some(cursor.take_string()?),
+                    SYMBOL_ID_CANONICAL_DIGEST => Some(format!(
+                        "{CANONICAL_SYMBOL_ID_PREFIX}{}",
+                        hex::encode(cursor.take_exact(32)?)
+                    )),
+                    _ => {
+                        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                            "lexical artifact symbol identity tag is unknown".to_owned(),
+                        ));
+                    }
+                },
+                simple_name: cursor.take_optional_string()?,
+                qualified_name: match cursor.take_u8()? {
+                    OPTIONAL_ABSENT => None,
+                    OPTIONAL_PRESENT => Some(QualifiedNameV1::Literal(cursor.take_string()?)),
+                    QUALIFIED_NAME_IN_FILE => Some(QualifiedNameV1::InFile(cursor.take_string()?)),
+                    _ => {
+                        return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                            "lexical artifact qualified-name tag is unknown".to_owned(),
+                        ));
+                    }
+                },
+                kind: cursor.take_optional_string()?,
+                signature: cursor.take_optional_string()?,
+                documentation: cursor.take_optional_string()?,
+            },
             _ => {
                 return Err(CodeLexicalArtifactErrorV1::Corrupt(
                     "lexical artifact dictionary entry kind is unknown".to_owned(),
@@ -211,8 +242,7 @@ impl RowDictionaryEntryV1 {
     }
 }
 
-/// Resolves revision-14 dictionary references. Layouts before 14 never
-/// consult it, so every call site can hand over its connection.
+/// Resolves row dictionary references.
 pub(super) trait RowDictionaryV1 {
     fn entry(&self, entry_id: i64)
     -> Result<Arc<RowDictionaryEntryV1>, CodeLexicalArtifactErrorV1>;
@@ -273,187 +303,45 @@ impl RowDictionaryV1 for ConnectionRowDictionaryV1<'_> {
 }
 
 pub(super) fn encode_artifact_row(
-    layout: LexicalArtifactLayoutV1,
     row: &ArtifactRowV1,
     dictionary: &mut RowDictionaryTableV1,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    match layout {
-        LexicalArtifactLayoutV1::V10 => serde_json::to_vec(row)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string())),
-        LexicalArtifactLayoutV1::V11
-        | LexicalArtifactLayoutV1::V12
-        | LexicalArtifactLayoutV1::V13 => encode_compact_v11(row),
-        // Admission bases (V14/V15) and the fingerprint-complete revision
-        // (V16) share the current compact row codec. Clone fingerprints stay
-        // deferred via `has_clone_fingerprints`, not via a weaker row encoding.
-        LexicalArtifactLayoutV1::V14
-        | LexicalArtifactLayoutV1::V15
-        | LexicalArtifactLayoutV1::V16 => encode_binary(
-            row,
-            dictionary,
-            ROW_CODEC_V16_MAGIC,
-            &FIELD_LENGTH_ORDER,
-            true,
-        ),
-    }
+    encode_binary(row, dictionary)
 }
 
-fn encode_compact_v11(row: &ArtifactRowV1) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    let compact = ArtifactRowCompactV11 {
-        file_occurrence_id: row.anchor.file_occurrence_id.clone(),
-        symbol_occurrence_id: row.anchor.symbol_occurrence_id.clone(),
-        parent_chunk_id: row.anchor.parent_chunk_id.clone(),
-        source_span: row.anchor.source_span,
-        grain: row.anchor.grain,
-        ordinal: row.anchor.ordinal,
-        language_descriptor_revision: row.language_descriptor_revision.clone(),
-        exact_terms: row.exact_terms.clone(),
-        sanitized_text: row.sanitized_text.clone(),
-        logical_path: row.logical_path.clone(),
-        symbol_simple_name: row.symbol_simple_name.clone(),
-        symbol_qualified_name: row.symbol_qualified_name.clone(),
-        symbol_kind: row.symbol_kind.clone(),
-        symbol_signature: row.symbol_signature.clone(),
-        symbol_documentation: row.symbol_documentation.clone(),
-        field_lengths: row.field_lengths.clone(),
-    };
-    let payload = serde_json::to_vec(&compact)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    let mut bytes = Vec::with_capacity(ROW_CODEC_V11_MAGIC.len().saturating_add(payload.len()));
-    bytes.extend_from_slice(ROW_CODEC_V11_MAGIC);
-    bytes.extend_from_slice(&payload);
-    Ok(bytes)
-}
-
+/// Decode one row's metadata and restore its text, which the row block
+/// stores beside it.
 pub(super) fn decode_artifact_row(
-    layout: LexicalArtifactLayoutV1,
     generation: &CodeGenerationId,
     chunk_id: &str,
     bytes: &[u8],
+    text: &str,
     dictionary: &dyn RowDictionaryV1,
 ) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
-    match layout {
-        LexicalArtifactLayoutV1::V10 => decode_json_v10(generation, chunk_id, bytes),
-        LexicalArtifactLayoutV1::V11
-        | LexicalArtifactLayoutV1::V12
-        | LexicalArtifactLayoutV1::V13 => decode_compact_v11(generation, chunk_id, bytes),
-        // Row bytes carry their codec tag. Clone-successor bumps may label an
-        // artifact V16 before rows are rewritten; dispatch on the tag so
-        // seated lexical owners stay readable either way.
-        LexicalArtifactLayoutV1::V14
-        | LexicalArtifactLayoutV1::V15
-        | LexicalArtifactLayoutV1::V16 => {
-            if bytes.starts_with(ROW_CODEC_V16_MAGIC) {
-                decode_binary(
-                    generation,
-                    chunk_id,
-                    bytes,
-                    dictionary,
-                    ROW_CODEC_V16_MAGIC,
-                    &FIELD_LENGTH_ORDER,
-                    true,
-                )
-            } else if bytes.starts_with(ROW_CODEC_V14_MAGIC) {
-                decode_binary(
-                    generation,
-                    chunk_id,
-                    bytes,
-                    dictionary,
-                    ROW_CODEC_V14_MAGIC,
-                    &LEGACY_FIELD_LENGTH_ORDER,
-                    false,
-                )
-            } else {
-                Err(CodeLexicalArtifactErrorV1::Corrupt(
-                    "lexical artifact row is missing its binary codec tag".to_owned(),
-                ))
-            }
-        }
-    }
-}
-
-fn decode_json_v10(
-    generation: &CodeGenerationId,
-    chunk_id: &str,
-    bytes: &[u8],
-) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
-    let row: ArtifactRowV1 = serde_json::from_slice(bytes)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    if row.id.as_str() != chunk_id || &row.anchor.generation_id != generation {
-        return Err(CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact row identity does not match its stored coordinates".to_owned(),
-        ));
-    }
-    Ok(row)
-}
-
-fn decode_compact_v11(
-    generation: &CodeGenerationId,
-    chunk_id: &str,
-    bytes: &[u8],
-) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
-    let payload = bytes.strip_prefix(ROW_CODEC_V11_MAGIC).ok_or_else(|| {
-        CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact row is missing the compact v11 codec tag".to_owned(),
-        )
-    })?;
-    let compact: ArtifactRowCompactV11 = serde_json::from_slice(payload)
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    let id = CodeSearchChunkId::new(chunk_id.to_owned())
-        .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-    let normalized_text = compact.sanitized_text.as_str().to_ascii_lowercase();
-    Ok(ArtifactRowV1 {
-        id,
-        anchor: CodeSearchChunkAnchorV1 {
-            generation_id: generation.clone(),
-            file_occurrence_id: compact.file_occurrence_id,
-            symbol_occurrence_id: compact.symbol_occurrence_id,
-            parent_chunk_id: compact.parent_chunk_id,
-            source_span: compact.source_span,
-            grain: compact.grain,
-            ordinal: compact.ordinal,
-        },
-        language_descriptor_revision: compact.language_descriptor_revision,
-        exact_terms: compact.exact_terms,
-        sanitized_text: compact.sanitized_text,
-        logical_path: compact.logical_path,
-        symbol_simple_name: compact.symbol_simple_name,
-        symbol_qualified_name: compact.symbol_qualified_name,
-        symbol_kind: compact.symbol_kind,
-        symbol_signature: compact.symbol_signature,
-        symbol_documentation: compact.symbol_documentation,
-        field_lengths: compact.field_lengths,
-        normalized_text,
-    })
+    decode_binary(generation, chunk_id, bytes, text, dictionary)
 }
 
 // ---------------------------------------------------------------------------
 // Binary row with a per-file / per-symbol dictionary
 // ---------------------------------------------------------------------------
 //
-// Legacy magic `TDLR14\0` (still decoded), then in order:
+// In order:
 //   ref file entry · opt-ref symbol entry · parent (tag, digest | literal)
 //   varint span start/end · u8 grain · varint ordinal
 //   varint term count × (u8 kind, bytes, varint span start/end, symbol tag [ref])
-//   bytes sanitized_text · u8 field bitmap · varint lengths
+//   u16 field bitmap · varint lengths
 //
+// The sanitized text is not part of the row; its row block stores it.
 // A `ref` is the little-endian `row_dictionary.entry_id`; an `opt-ref` is one
 // presence byte followed by the ref when present. `bytes` is a varint length
 // followed by the bytes. Decoders consume the whole payload and fail closed
 // on any trailing byte.
-// Current codec uses `TDLR16\0`, appends signature and documentation to symbol
-// dictionary entries, and widens the field bitmap to `u16`. Admission bases
-// (V14/V15) emit this codec while clone fingerprints remain V16-only.
 
 fn encode_binary(
     row: &ArtifactRowV1,
     dictionary: &mut RowDictionaryTableV1,
-    magic: &[u8],
-    field_order: &[LexicalFieldV1],
-    include_vocabulary_fields: bool,
 ) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
-    let mut out = Vec::with_capacity(96 + row.sanitized_text.as_str().len());
-    out.extend_from_slice(magic);
+    let mut out = Vec::with_capacity(96);
     put_reference(
         &mut out,
         dictionary,
@@ -462,7 +350,6 @@ fn encode_binary(
             logical_path: row.logical_path.clone(),
             language_descriptor_revision: row.language_descriptor_revision.as_str().to_owned(),
         },
-        include_vocabulary_fields,
     )?;
     let symbol = RowDictionaryEntryV1::Symbol {
         symbol_occurrence_id: row
@@ -471,7 +358,10 @@ fn encode_binary(
             .as_ref()
             .map(|id| id.as_str().to_owned()),
         simple_name: row.symbol_simple_name.clone(),
-        qualified_name: row.symbol_qualified_name.clone(),
+        qualified_name: row
+            .symbol_qualified_name
+            .as_deref()
+            .map(|name| QualifiedNameV1::for_path(name, &row.logical_path)),
         kind: row.symbol_kind.clone(),
         signature: row.symbol_signature.clone(),
         documentation: row.symbol_documentation.clone(),
@@ -484,7 +374,7 @@ fn encode_binary(
         || row.symbol_documentation.is_some();
     if has_symbol {
         out.push(OPTIONAL_PRESENT);
-        put_reference(&mut out, dictionary, &symbol, include_vocabulary_fields)?;
+        put_reference(&mut out, dictionary, &symbol)?;
     } else {
         out.push(OPTIONAL_ABSENT);
     }
@@ -533,14 +423,12 @@ fn encode_binary(
                         signature: None,
                         documentation: None,
                     },
-                    include_vocabulary_fields,
                 )?;
             }
         }
     }
-    put_bytes(&mut out, row.sanitized_text.as_str().as_bytes())?;
     let mut bitmap = 0u16;
-    for (bit, field) in field_order.iter().enumerate() {
+    for (bit, field) in FIELD_LENGTH_ORDER.iter().enumerate() {
         if row.field_lengths.contains_key(field) {
             bitmap |= 1 << bit;
         }
@@ -548,7 +436,7 @@ fn encode_binary(
     let expected_fields = row
         .field_lengths
         .keys()
-        .filter(|field| field_order.contains(field))
+        .filter(|field| FIELD_LENGTH_ORDER.contains(field))
         .count();
     if expected_fields != bitmap.count_ones() as usize {
         return Err(CodeLexicalArtifactErrorV1::Contract(
@@ -556,12 +444,8 @@ fn encode_binary(
                 .to_owned(),
         ));
     }
-    if include_vocabulary_fields {
-        out.extend_from_slice(&bitmap.to_le_bytes());
-    } else {
-        out.push(bitmap as u8);
-    }
-    for field in field_order {
+    out.extend_from_slice(&bitmap.to_le_bytes());
+    for field in &FIELD_LENGTH_ORDER {
         if let Some(length) = row.field_lengths.get(field) {
             put_varint(&mut out, length_u64(*length)?);
         }
@@ -573,17 +457,10 @@ fn decode_binary(
     generation: &CodeGenerationId,
     chunk_id: &str,
     bytes: &[u8],
+    text: &str,
     dictionary: &dyn RowDictionaryV1,
-    magic: &[u8],
-    field_order: &[LexicalFieldV1],
-    wide_bitmap: bool,
 ) -> Result<ArtifactRowV1, CodeLexicalArtifactErrorV1> {
-    let payload = bytes.strip_prefix(magic).ok_or_else(|| {
-        CodeLexicalArtifactErrorV1::Corrupt(
-            "lexical artifact row is missing its binary codec tag".to_owned(),
-        )
-    })?;
-    let mut cursor = RowCursorV1 { bytes: payload };
+    let mut cursor = RowCursorV1 { bytes };
     let file = dictionary.entry(cursor.take_reference()?)?;
     let RowDictionaryEntryV1::File {
         file_occurrence_id,
@@ -617,7 +494,7 @@ fn decode_binary(
                     .transpose()
                     .map_err(corrupt)?,
                 simple_name,
-                qualified_name,
+                qualified_name.map(|name| name.resolve(&logical_path)),
                 kind,
                 signature,
                 documentation,
@@ -693,19 +570,15 @@ fn decode_binary(
                 .map_err(corrupt)?,
         );
     }
-    let sanitized_text = BoundedSanitizedText::new(&cursor.take_string()?).map_err(corrupt)?;
-    let bitmap = if wide_bitmap {
-        cursor.take_u16()?
-    } else {
-        u16::from(cursor.take_u8()?)
-    };
-    if bitmap >> field_order.len() != 0 {
+    let sanitized_text = BoundedSanitizedText::new(text).map_err(corrupt)?;
+    let bitmap = cursor.take_u16()?;
+    if bitmap >> FIELD_LENGTH_ORDER.len() != 0 {
         return Err(CodeLexicalArtifactErrorV1::Corrupt(
             "lexical artifact row field bitmap names an unknown field".to_owned(),
         ));
     }
     let mut field_lengths = BTreeMap::new();
-    for (bit, field) in field_order.iter().enumerate() {
+    for (bit, field) in FIELD_LENGTH_ORDER.iter().enumerate() {
         if bitmap & (1 << bit) != 0 {
             let length = usize::try_from(cursor.take_varint()?).map_err(corrupt)?;
             field_lengths.insert(*field, length);
@@ -746,7 +619,7 @@ fn decode_binary(
 type SymbolEntryFieldsV1 = (
     Option<String>,
     Option<String>,
-    Option<String>,
+    Option<QualifiedNameV1>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -779,8 +652,387 @@ fn symbol_entry_fields(
 
 /// The 32 digest bytes of a chunker-minted chunk id, when re-encoding them
 /// reproduces the id byte for byte.
-fn canonical_chunk_digest(chunk_id: &str) -> Option<[u8; 32]> {
-    let hex = chunk_id.strip_prefix(CANONICAL_CHUNK_ID_PREFIX)?;
+pub(super) fn canonical_chunk_digest(chunk_id: &str) -> Option<[u8; 32]> {
+    canonical_digest(CANONICAL_CHUNK_ID_PREFIX, chunk_id)
+}
+
+/// The value `row_chunks.chunk_id` stores: 32 digest bytes for a canonical
+/// chunk id, the literal text otherwise.
+pub(super) fn stored_chunk_key(chunk_id: &str) -> rusqlite::types::Value {
+    canonical_chunk_digest(chunk_id).map_or_else(
+        || rusqlite::types::Value::Text(chunk_id.to_owned()),
+        |digest| rusqlite::types::Value::Blob(digest.to_vec()),
+    )
+}
+
+/// The value `clone_occurrences.symbol_key` stores: 32 digest bytes for an
+/// extractor-minted symbol id, the literal text otherwise.
+pub(super) fn stored_symbol_key(symbol: &str) -> rusqlite::types::Value {
+    canonical_digest(CANONICAL_SYMBOL_ID_PREFIX, symbol).map_or_else(
+        || rusqlite::types::Value::Text(symbol.to_owned()),
+        |digest| rusqlite::types::Value::Blob(digest.to_vec()),
+    )
+}
+
+/// Inverse of [`stored_symbol_key`].
+pub(super) fn symbol_id_from_key(
+    key: rusqlite::types::ValueRef<'_>,
+) -> Result<String, CodeLexicalArtifactErrorV1> {
+    match key {
+        rusqlite::types::ValueRef::Blob(digest) if digest.len() == 32 => Ok(format!(
+            "{CANONICAL_SYMBOL_ID_PREFIX}{}",
+            hex::encode(digest)
+        )),
+        rusqlite::types::ValueRef::Text(text) => std::str::from_utf8(text)
+            .map(str::to_owned)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string())),
+        _ => Err(CodeLexicalArtifactErrorV1::Corrupt(
+            "clone occurrence symbol key is malformed".to_owned(),
+        )),
+    }
+}
+
+/// One row as a page hands it to [`encode_row_blocks`].
+pub(super) struct BlockRowV1<'a> {
+    pub(super) document_id: i64,
+    pub(super) chunk_id: &'a str,
+    pub(super) parent_chunk_id: Option<&'a str>,
+    pub(super) row: &'a [u8],
+    pub(super) text: &'a str,
+}
+
+/// One row restored from its block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct StoredRowV1 {
+    pub(super) document_id: u32,
+    pub(super) chunk_id: String,
+    pub(super) row: Vec<u8>,
+    pub(super) text: String,
+}
+
+/// Split one page's rows (ascending documents) into stored blocks, each
+/// keyed by its first document.
+pub(super) fn encode_row_blocks(
+    rows: &[BlockRowV1<'_>],
+) -> Result<Vec<(i64, Vec<u8>)>, CodeLexicalArtifactErrorV1> {
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    while start < rows.len() {
+        let mut end = start;
+        let mut bytes = 0usize;
+        while end < rows.len() && end - start < ROW_BLOCK_MAX_ROWS && bytes < ROW_BLOCK_TARGET_BYTES
+        {
+            bytes = bytes
+                .saturating_add(rows[end].row.len())
+                .saturating_add(rows[end].text.len());
+            end += 1;
+        }
+        blocks.push((
+            rows[start].document_id,
+            encode_row_block(&rows[start..end])?,
+        ));
+        start = end;
+    }
+    Ok(blocks)
+}
+
+fn encode_row_block(rows: &[BlockRowV1<'_>]) -> Result<Vec<u8>, CodeLexicalArtifactErrorV1> {
+    // A row may name only a parent whose own text is stored raw.
+    let candidate = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let parent = row.parent_chunk_id?;
+            rows.iter()
+                .position(|other| other.chunk_id == parent)
+                .filter(|&position| {
+                    position != index
+                        && !row.text.is_empty()
+                        && rows[position].text.starts_with(row.text)
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut payload = Vec::new();
+    put_varint(&mut payload, length_u64(rows.len())?);
+    let mut previous: Option<i64> = None;
+    for (index, row) in rows.iter().enumerate() {
+        // The first row spells its document out, binding the block to its key.
+        let gap = match previous {
+            None => u64::try_from(row.document_id)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?,
+            Some(previous) => row
+                .document_id
+                .checked_sub(previous)
+                .and_then(|delta| delta.checked_sub(1))
+                .and_then(|gap| u64::try_from(gap).ok())
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Contract(
+                        "lexical artifact row block documents are not ascending".to_owned(),
+                    )
+                })?,
+        };
+        previous = Some(row.document_id);
+        put_varint(&mut payload, gap);
+        match canonical_chunk_digest(row.chunk_id) {
+            Some(digest) => {
+                payload.push(BLOCK_CHUNK_DIGEST);
+                payload.extend_from_slice(&digest);
+            }
+            None => {
+                payload.push(BLOCK_CHUNK_LITERAL);
+                put_bytes(&mut payload, row.chunk_id.as_bytes())?;
+            }
+        }
+        put_bytes(&mut payload, row.row)?;
+        match candidate[index].filter(|parent| candidate[*parent].is_none()) {
+            Some(parent) => {
+                payload.push(BLOCK_TEXT_PARENT_PREFIX);
+                put_varint(&mut payload, length_u64(parent)?);
+                put_varint(&mut payload, length_u64(row.text.len())?);
+            }
+            None => {
+                payload.push(BLOCK_TEXT_RAW);
+                put_bytes(&mut payload, row.text.as_bytes())?;
+            }
+        }
+    }
+    if payload.len() > ROW_BLOCK_MAX_INFLATED_BYTES {
+        return Err(CodeLexicalArtifactErrorV1::Contract(
+            "lexical artifact row block exceeds its inflated bound".to_owned(),
+        ));
+    }
+    deflate_bytes(ROW_BLOCK_DEFLATE, &payload)
+}
+
+enum BlockChunkV1 {
+    Digest(Range<usize>),
+    Literal(Range<usize>),
+}
+
+enum BlockTextV1 {
+    Raw(Range<usize>),
+    ParentPrefix { parent: usize, length: usize },
+}
+
+struct BlockEntryV1 {
+    document_id: u32,
+    chunk: BlockChunkV1,
+    row: Range<usize>,
+    text: BlockTextV1,
+}
+
+/// One inflated, structurally verified row block. Rows are materialized one
+/// at a time, so a sparse reader pays one inflate and one row per visit.
+pub(super) struct RowBlockV1 {
+    payload: Vec<u8>,
+    entries: Vec<BlockEntryV1>,
+}
+
+impl RowBlockV1 {
+    /// Inflate one stored block (bounded by `ROW_BLOCK_MAX_INFLATED_BYTES`)
+    /// and index its rows, failing closed on any malformed or trailing byte.
+    pub(super) fn parse(
+        first_document: i64,
+        stored: &[u8],
+    ) -> Result<Self, CodeLexicalArtifactErrorV1> {
+        let payload = inflate_bytes(ROW_BLOCK_DEFLATE, stored, ROW_BLOCK_MAX_INFLATED_BYTES)?;
+        let total = payload.len();
+        let mut cursor = RowCursorV1 { bytes: &payload };
+        let offset = |cursor: &RowCursorV1<'_>| total - cursor.bytes.len();
+        let count = usize::try_from(cursor.take_varint()?).map_err(corrupt)?;
+        if count == 0 || count > ROW_BLOCK_MAX_ROWS {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact row block row count is out of range".to_owned(),
+            ));
+        }
+        let mut entries = Vec::with_capacity(count);
+        let mut document = first_document;
+        for index in 0..count {
+            let gap = i64::try_from(cursor.take_varint()?).map_err(corrupt)?;
+            document = if index == 0 {
+                if gap != first_document {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact row block does not start at its key".to_owned(),
+                    ));
+                }
+                first_document
+            } else {
+                document
+                    .checked_add(1)
+                    .and_then(|next| next.checked_add(gap))
+                    .ok_or_else(|| corrupt("lexical artifact row block document overflowed"))?
+            };
+            let chunk = match cursor.take_u8()? {
+                BLOCK_CHUNK_DIGEST => {
+                    let start = offset(&cursor);
+                    cursor.take_exact(32)?;
+                    BlockChunkV1::Digest(start..offset(&cursor))
+                }
+                BLOCK_CHUNK_LITERAL => {
+                    let literal = cursor.take_bytes()?;
+                    let end = offset(&cursor);
+                    BlockChunkV1::Literal(end - literal.len()..end)
+                }
+                _ => {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact row block chunk tag is unknown".to_owned(),
+                    ));
+                }
+            };
+            let row = cursor.take_bytes()?;
+            let row = offset(&cursor) - row.len()..offset(&cursor);
+            let text = match cursor.take_u8()? {
+                BLOCK_TEXT_RAW => {
+                    let text = cursor.take_bytes()?;
+                    let end = offset(&cursor);
+                    BlockTextV1::Raw(end - text.len()..end)
+                }
+                BLOCK_TEXT_PARENT_PREFIX => BlockTextV1::ParentPrefix {
+                    parent: usize::try_from(cursor.take_varint()?).map_err(corrupt)?,
+                    length: usize::try_from(cursor.take_varint()?).map_err(corrupt)?,
+                },
+                _ => {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact row block text tag is unknown".to_owned(),
+                    ));
+                }
+            };
+            entries.push(BlockEntryV1 {
+                document_id: u32::try_from(document).map_err(corrupt)?,
+                chunk,
+                row,
+                text,
+            });
+        }
+        if !cursor.bytes.is_empty() {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact row block has trailing bytes".to_owned(),
+            ));
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            if let BlockTextV1::ParentPrefix { parent, length } = entry.text {
+                let valid = parent != index
+                    && length > 0
+                    && matches!(
+                        entries.get(parent).map(|parent| &parent.text),
+                        Some(BlockTextV1::Raw(text)) if length <= text.len()
+                    );
+                if !valid {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact row block prefix names no raw parent row".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(Self { payload, entries })
+    }
+
+    /// The row stored for `document`, when this block holds it.
+    pub(super) fn row(
+        &self,
+        document: u32,
+    ) -> Option<Result<StoredRowV1, CodeLexicalArtifactErrorV1>> {
+        self.entries
+            .binary_search_by_key(&document, |entry| entry.document_id)
+            .ok()
+            .map(|index| self.materialize(index))
+    }
+
+    pub(super) fn rows(&self) -> Result<Vec<StoredRowV1>, CodeLexicalArtifactErrorV1> {
+        (0..self.entries.len())
+            .map(|index| self.materialize(index))
+            .collect()
+    }
+
+    fn materialize(&self, index: usize) -> Result<StoredRowV1, CodeLexicalArtifactErrorV1> {
+        let entry = &self.entries[index];
+        let chunk_id = match &entry.chunk {
+            BlockChunkV1::Digest(range) => format!(
+                "{CANONICAL_CHUNK_ID_PREFIX}{}",
+                hex::encode(&self.payload[range.clone()])
+            ),
+            BlockChunkV1::Literal(range) => {
+                String::from_utf8(self.payload[range.clone()].to_vec()).map_err(corrupt)?
+            }
+        };
+        let text = match entry.text {
+            BlockTextV1::Raw(ref range) => &self.payload[range.clone()],
+            BlockTextV1::ParentPrefix { parent, length } => match &self.entries[parent].text {
+                BlockTextV1::Raw(range) => &self.payload[range.start..range.start + length],
+                BlockTextV1::ParentPrefix { .. } => {
+                    return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                        "lexical artifact row block prefix names no raw parent row".to_owned(),
+                    ));
+                }
+            },
+        };
+        Ok(StoredRowV1 {
+            document_id: entry.document_id,
+            chunk_id,
+            row: self.payload[entry.row.clone()].to_vec(),
+            text: std::str::from_utf8(text).map_err(corrupt)?.to_owned(),
+        })
+    }
+}
+
+/// Every row of one stored block.
+pub(super) fn decode_row_block(
+    first_document: i64,
+    stored: &[u8],
+) -> Result<Vec<StoredRowV1>, CodeLexicalArtifactErrorV1> {
+    RowBlockV1::parse(first_document, stored)?.rows()
+}
+
+/// The one block holding a document: the greatest block key at or below it.
+pub(super) const ROW_BLOCK_BY_DOCUMENT_SQL: &str = "SELECT first_document, payload FROM row_blocks WHERE first_document <= ?1 ORDER BY first_document DESC LIMIT 1";
+
+/// Rows by document over an open artifact connection. Callers visit
+/// documents in ascending order, so the one inflated block held here serves
+/// every document it contains.
+pub(super) struct RowBlocksV1<'a> {
+    connection: &'a Connection,
+    block: RefCell<Option<RowBlockV1>>,
+}
+
+impl<'a> RowBlocksV1<'a> {
+    pub(super) fn new(connection: &'a Connection) -> Self {
+        Self {
+            connection,
+            block: RefCell::new(None),
+        }
+    }
+
+    pub(super) fn row(&self, document: u32) -> Result<StoredRowV1, CodeLexicalArtifactErrorV1> {
+        if let Some(row) = self
+            .block
+            .borrow()
+            .as_ref()
+            .and_then(|block| block.row(document))
+        {
+            return row;
+        }
+        let mut statement = self
+            .connection
+            .prepare_cached(ROW_BLOCK_BY_DOCUMENT_SQL)
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        let block: Option<(i64, Vec<u8>)> = statement
+            .query_row([i64::from(document)], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        let (first_document, payload) = block.ok_or_else(missing_document_row)?;
+        let block = RowBlockV1::parse(first_document, &payload)?;
+        let row = block.row(document).ok_or_else(missing_document_row)?;
+        *self.block.borrow_mut() = Some(block);
+        row
+    }
+}
+
+fn missing_document_row() -> CodeLexicalArtifactErrorV1 {
+    CodeLexicalArtifactErrorV1::Corrupt("lexical artifact document has no stored row".to_owned())
+}
+
+fn canonical_digest(prefix: &str, id: &str) -> Option<[u8; 32]> {
+    let hex = id.strip_prefix(prefix)?;
     let decoded: [u8; 32] = hex::decode(hex).ok()?.try_into().ok()?;
     (hex::encode(decoded) == hex).then_some(decoded)
 }
@@ -789,9 +1041,8 @@ fn put_reference(
     out: &mut Vec<u8>,
     dictionary: &mut RowDictionaryTableV1,
     entry: &RowDictionaryEntryV1,
-    include_vocabulary_fields: bool,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    let encoded = entry.encode(include_vocabulary_fields)?;
+    let encoded = entry.encode()?;
     let entry_id = stable_row_dictionary_id(&encoded);
     match dictionary.get(&entry_id) {
         Some(existing) if *existing != encoded => {
@@ -805,6 +1056,20 @@ fn put_reference(
         }
     }
     out.extend_from_slice(&entry_id.to_le_bytes());
+    Ok(())
+}
+
+fn put_optional_string(
+    out: &mut Vec<u8>,
+    value: Option<&str>,
+) -> Result<(), CodeLexicalArtifactErrorV1> {
+    match value {
+        None => out.push(OPTIONAL_ABSENT),
+        Some(value) => {
+            out.push(OPTIONAL_PRESENT);
+            put_bytes(out, value.as_bytes())?;
+        }
+    }
     Ok(())
 }
 
@@ -951,8 +1216,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        ArtifactRowV1, LexicalArtifactLayoutV1, RowDictionaryEntryV1, RowDictionaryTableV1,
-        RowDictionaryV1, decode_artifact_row, encode_artifact_row,
+        ArtifactRowV1, BlockRowV1, QualifiedNameV1, ROW_BLOCK_MAX_ROWS, RowDictionaryEntryV1,
+        RowDictionaryTableV1, RowDictionaryV1, StoredRowV1, decode_artifact_row, decode_row_block,
+        encode_artifact_row, encode_row_blocks,
     };
     use crate::retrieval::lexical::LexicalFieldV1;
     use crate::retrieval::lexical::projection::artifact::CodeLexicalArtifactErrorV1;
@@ -1109,17 +1375,14 @@ mod tests {
         row
     }
 
-    fn round_trip(
-        layout: LexicalArtifactLayoutV1,
-        row: &ArtifactRowV1,
-    ) -> (Vec<u8>, RowDictionaryTableV1, ArtifactRowV1) {
+    fn round_trip(row: &ArtifactRowV1) -> (Vec<u8>, RowDictionaryTableV1, ArtifactRowV1) {
         let mut dictionary = RowDictionaryTableV1::new();
-        let encoded = encode_artifact_row(layout, row, &mut dictionary).expect("encode");
+        let encoded = encode_artifact_row(row, &mut dictionary).expect("encode");
         let decoded = decode_artifact_row(
-            layout,
             &row.anchor.generation_id,
             row.id.as_str(),
             &encoded,
+            row.sanitized_text.as_str(),
             &dictionary,
         )
         .expect("decode");
@@ -1127,121 +1390,28 @@ mod tests {
     }
 
     #[test]
-    fn compact_v11_round_trip_is_byte_equivalent_to_logical_row() {
-        let row = sample_row();
-        let (encoded, dictionary, decoded) = round_trip(LexicalArtifactLayoutV1::V11, &row);
-        assert!(
-            encoded.starts_with(b"TDLR11\0"),
-            "v11 rows must carry the compact codec tag"
-        );
-        assert!(dictionary.is_empty(), "v11 rows carry their strings inline");
-        assert_eq!(decoded, row);
-        assert!(
-            encoded.len() < serde_json::to_vec(&row).expect("json").len(),
-            "compact rows must drop repeated identities"
-        );
-    }
-
-    #[test]
-    fn compact_decoder_fails_closed_without_the_v11_tag() {
-        let row = sample_row();
-        let json = serde_json::to_vec(&row).expect("json");
-        let error = decode_artifact_row(
-            LexicalArtifactLayoutV1::V11,
-            &row.anchor.generation_id,
-            row.id.as_str(),
-            &json,
-            &RowDictionaryTableV1::new(),
-        )
-        .expect_err("untagged JSON is not a v11 row");
-        assert!(error.to_string().contains("compact v11"));
-    }
-
-    #[test]
-    fn binary_v14_and_v15_emit_current_row_codec() {
-        for layout in [LexicalArtifactLayoutV1::V14, LexicalArtifactLayoutV1::V15] {
-            for row in [
-                sample_row(),
-                window_row(),
-                legacy_symbol_row(),
-                symbol_row(),
-            ] {
-                let (encoded, _, decoded) = round_trip(layout, &row);
-                assert!(
-                    encoded.starts_with(b"TDLR16\0"),
-                    "admission bases must emit the current row codec"
-                );
-                assert_eq!(decoded, row);
-            }
-        }
-    }
-
-    #[test]
-    fn binary_layouts_restore_legacy_one_byte_bitmap_rows() {
-        for layout in [
-            LexicalArtifactLayoutV1::V14,
-            LexicalArtifactLayoutV1::V15,
-            LexicalArtifactLayoutV1::V16,
+    fn binary_rows_round_trip_without_their_text() {
+        for row in [
+            sample_row(),
+            window_row(),
+            legacy_symbol_row(),
+            symbol_row(),
         ] {
-            for row in [sample_row(), window_row(), legacy_symbol_row()] {
-                let mut dictionary = RowDictionaryTableV1::new();
-                let encoded = super::encode_binary(
-                    &row,
-                    &mut dictionary,
-                    super::ROW_CODEC_V14_MAGIC,
-                    &super::LEGACY_FIELD_LENGTH_ORDER,
-                    false,
-                )
-                .expect("encode legacy");
-                assert!(encoded.starts_with(b"TDLR14\0"));
-                let decoded = decode_artifact_row(
-                    layout,
-                    &row.anchor.generation_id,
-                    row.id.as_str(),
-                    &encoded,
-                    &dictionary,
-                )
-                .expect("decode legacy under current layout");
-                assert_eq!(decoded, row);
-            }
+            let (encoded, _, decoded) = round_trip(&row);
+            assert_eq!(decoded, row);
+            assert!(
+                !encoded
+                    .windows(row.sanitized_text.as_str().len())
+                    .any(|window| window == row.sanitized_text.as_str().as_bytes()),
+                "the row block, not the row, stores the text"
+            );
         }
-    }
-
-    #[test]
-    fn binary_v16_round_trips_signature_and_documentation_fields() {
-        let row = symbol_row();
-        let (encoded, _, decoded) = round_trip(LexicalArtifactLayoutV1::V16, &row);
-        assert!(encoded.starts_with(b"TDLR16\0"));
-        assert_eq!(decoded, row);
-    }
-
-    #[test]
-    fn binary_v16_layout_reads_v14_admission_rows_after_successor_label() {
-        let row = symbol_row();
-        let (encoded, dictionary, _) = round_trip(LexicalArtifactLayoutV1::V14, &row);
-        assert!(encoded.starts_with(b"TDLR16\0"));
-        let decoded = decode_artifact_row(
-            LexicalArtifactLayoutV1::V16,
-            &row.anchor.generation_id,
-            row.id.as_str(),
-            &encoded,
-            &dictionary,
-        )
-        .expect("V16 layout must read current-codec admission rows");
-        assert_eq!(decoded, row);
     }
 
     #[test]
     fn binary_v14_references_one_file_and_one_symbol_entry_per_row() {
         let row = legacy_symbol_row();
-        let (encoded, dictionary, _) = round_trip(LexicalArtifactLayoutV1::V14, &row);
-        let (compact, _, _) = round_trip(LexicalArtifactLayoutV1::V13, &row);
-        assert!(
-            encoded.len() * 4 < compact.len(),
-            "v14 row {} bytes must be under a quarter of the {} byte v11 payload",
-            encoded.len(),
-            compact.len()
-        );
+        let (encoded, dictionary, _) = round_trip(&row);
         let entries = dictionary
             .values()
             .map(|bytes| RowDictionaryEntryV1::decode(bytes).expect("entry"))
@@ -1260,7 +1430,10 @@ mod tests {
                     .as_ref()
                     .map(|id| id.as_str().to_owned()),
                 simple_name: row.symbol_simple_name.clone(),
-                qualified_name: row.symbol_qualified_name.clone(),
+                qualified_name: row
+                    .symbol_qualified_name
+                    .as_deref()
+                    .map(|name| QualifiedNameV1::for_path(name, &row.logical_path)),
                 kind: row.symbol_kind.clone(),
                 signature: row.symbol_signature.clone(),
                 documentation: row.symbol_documentation.clone(),
@@ -1273,11 +1446,144 @@ mod tests {
                 .any(|window| window == parent_hex.as_bytes()),
             "a canonical parent id is stored as digest bytes, not hex"
         );
-        let (_, window_dictionary, _) = round_trip(LexicalArtifactLayoutV1::V14, &window_row());
+        let (_, window_dictionary, _) = round_trip(&window_row());
         assert_eq!(
             window_dictionary.len(),
             1,
             "a symbol-less window row references only its file entry"
+        );
+    }
+
+    fn block_row<'a>(
+        document_id: i64,
+        chunk_id: &'a str,
+        parent_chunk_id: Option<&'a str>,
+        text: &'a str,
+    ) -> BlockRowV1<'a> {
+        BlockRowV1 {
+            document_id,
+            chunk_id,
+            parent_chunk_id,
+            row: b"meta",
+            text,
+        }
+    }
+
+    #[test]
+    fn row_blocks_round_trip_share_parent_prefixes_and_bound_their_rows() {
+        let body_id = format!("chunk.v1.sha256:{}", "ab".repeat(32));
+        let body = "pub fn render(widget: &Widget) -> Frame {\n    widget.frame()\n}".repeat(20);
+        let signature = "pub fn render(widget: &Widget) -> Frame {";
+        let texts = (0..40)
+            .map(|ordinal| format!("let value_{ordinal} = compute(value);\n").repeat(8))
+            .collect::<Vec<_>>();
+        let chunk_ids = (0..40)
+            .map(|ordinal| format!("chunk.{ordinal}"))
+            .collect::<Vec<_>>();
+        let mut rows = vec![
+            block_row(10, "chunk.signature", Some(&body_id), signature),
+            block_row(11, &body_id, None, &body),
+            block_row(13, "chunk.unrelated", Some("chunk.absent"), "fn other() {}"),
+        ];
+        rows.extend(
+            texts
+                .iter()
+                .zip(&chunk_ids)
+                .enumerate()
+                .map(|(ordinal, (text, chunk_id))| {
+                    block_row(14 + ordinal as i64, chunk_id, None, text)
+                }),
+        );
+        let blocks = encode_row_blocks(&rows).expect("encode blocks");
+        assert_eq!(blocks[0].0, 10, "a block is keyed by its first document");
+        let decoded = blocks
+            .iter()
+            .flat_map(|(first, stored)| {
+                let rows = decode_row_block(*first, stored).expect("decode block");
+                assert!(rows.len() <= ROW_BLOCK_MAX_ROWS);
+                rows
+            })
+            .collect::<Vec<_>>();
+        let expected = rows
+            .iter()
+            .map(|row| StoredRowV1 {
+                document_id: u32::try_from(row.document_id).expect("document"),
+                chunk_id: row.chunk_id.to_owned(),
+                row: row.row.to_vec(),
+                text: row.text.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded, expected);
+        let raw_text_bytes = rows.iter().map(|row| row.text.len()).sum::<usize>();
+        let stored_bytes = blocks.iter().map(|(_, stored)| stored.len()).sum::<usize>();
+        assert!(
+            stored_bytes * 8 < raw_text_bytes,
+            "neighbouring rows must deflate together: {stored_bytes} of {raw_text_bytes} bytes"
+        );
+
+        let (first, stored) = &blocks[0];
+        let mut damaged = stored.clone();
+        let tail = damaged.len() - 4;
+        damaged[tail] ^= 0xff;
+        assert!(
+            decode_row_block(*first, &damaged).is_err(),
+            "damaged stream"
+        );
+        assert!(
+            decode_row_block(first + 1, stored).is_err(),
+            "wrong block key"
+        );
+        let mut trailing = stored.clone();
+        trailing.push(0);
+        assert!(
+            decode_row_block(*first, &trailing).is_err(),
+            "trailing byte"
+        );
+        assert!(
+            encode_row_blocks(&[block_row(5, "a", None, "x"), block_row(5, "b", None, "y")])
+                .is_err(),
+            "documents must ascend"
+        );
+    }
+
+    #[test]
+    fn symbol_entries_store_file_relative_names_and_digest_identities() {
+        let row = symbol_row();
+        let (_, dictionary, decoded) = round_trip(&row);
+        assert_eq!(decoded, row);
+        let symbol = dictionary
+            .values()
+            .find(|bytes| bytes.first() == Some(&super::ENTRY_SYMBOL))
+            .expect("symbol entry");
+        assert!(
+            !symbol
+                .windows(row.logical_path.len())
+                .any(|window| window == row.logical_path.as_bytes()),
+            "the qualified name must not repeat the file's logical path"
+        );
+        assert!(
+            !symbol
+                .windows(b"symbol.v1.sha256:".len())
+                .any(|window| window == b"symbol.v1.sha256:"),
+            "a canonical symbol id is stored as digest bytes, not hex"
+        );
+
+        let mut elsewhere = symbol_row();
+        elsewhere.symbol_qualified_name = Some("other/file.rs::probe".to_owned());
+        elsewhere.anchor.symbol_occurrence_id =
+            Some(SymbolOccurrenceId::new("symbol.literal").expect("literal symbol"));
+        let (_, _, decoded) = round_trip(&elsewhere);
+        assert_eq!(
+            decoded, elsewhere,
+            "names outside the row's file and non-canonical ids survive verbatim"
+        );
+        assert_eq!(
+            QualifiedNameV1::for_path("src/a.rs::f", "src/a.rs"),
+            QualifiedNameV1::InFile("f".to_owned())
+        );
+        assert_eq!(
+            QualifiedNameV1::for_path("src/a.rsx::f", "src/a.rs"),
+            QualifiedNameV1::Literal("src/a.rsx::f".to_owned())
         );
     }
 
@@ -1293,7 +1599,7 @@ mod tests {
             foreign.clone(),
         )
         .expect("foreign whole symbol");
-        let (_, dictionary, decoded) = round_trip(LexicalArtifactLayoutV1::V14, &row);
+        let (_, dictionary, decoded) = round_trip(&row);
         assert_eq!(decoded, row);
         assert_eq!(
             dictionary.len(),
@@ -1302,7 +1608,7 @@ mod tests {
         );
         let uppercase_hex = format!("chunk.v1.sha256:{}", "C0".repeat(32));
         row.anchor.parent_chunk_id = Some(CodeSearchChunkId::new(uppercase_hex).expect("upper"));
-        let (_, _, decoded) = round_trip(LexicalArtifactLayoutV1::V14, &row);
+        let (_, _, decoded) = round_trip(&row);
         assert_eq!(
             decoded, row,
             "uppercase hex is not canonical and must survive verbatim"
@@ -1312,17 +1618,17 @@ mod tests {
     #[test]
     fn binary_v14_decoder_fails_closed_on_truncation_trailing_bytes_and_missing_entries() {
         let row = legacy_symbol_row();
-        let (encoded, dictionary, _) = round_trip(LexicalArtifactLayoutV1::V14, &row);
+        let (encoded, dictionary, _) = round_trip(&row);
         let decode = |bytes: &[u8], dictionary: &RowDictionaryTableV1| {
             decode_artifact_row(
-                LexicalArtifactLayoutV1::V14,
                 &row.anchor.generation_id,
                 row.id.as_str(),
                 bytes,
+                row.sanitized_text.as_str(),
                 dictionary,
             )
         };
-        for cut in [7usize, 8, 20, 40, encoded.len() - 1] {
+        for cut in [0usize, 1, 8, 20, 40, encoded.len() - 1] {
             assert!(
                 decode(&encoded[..cut], &dictionary).is_err(),
                 "truncated at {cut}"
@@ -1331,11 +1637,6 @@ mod tests {
         let mut trailing = encoded.clone();
         trailing.push(0);
         assert!(decode(&trailing, &dictionary).is_err(), "trailing byte");
-        let (compact, _, _) = round_trip(LexicalArtifactLayoutV1::V13, &row);
-        assert!(
-            decode(&compact, &dictionary).is_err(),
-            "v11 payload under v14 layout"
-        );
         let mut missing = dictionary.clone();
         let file_id = *missing
             .iter()

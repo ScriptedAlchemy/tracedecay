@@ -46,9 +46,11 @@ pub use graph_replay_release::{
     CodeGenerationGraphReplayReleasePageV1, CodeGenerationGraphReplayReleaseV1,
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
 };
+use locking::acquire_generation_segments_lock_checked;
 pub use locking::{
     CodeGenerationStoreLockV1, acquire_code_generation_store_lock,
-    try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
+    acquire_generation_segments_publication_lock, try_acquire_code_generation_store_lock,
+    try_acquire_code_generation_store_read_lock,
 };
 pub use scope_roots::{
     RefusedCodeIndexScopeV1, SCOPE_ROOT_RECORD_FILE, ScopeRootAuthorityReceiptV1,
@@ -62,7 +64,7 @@ pub use scope_roots::{
     resolve_live_code_index_roots,
 };
 pub use text_artifacts::{
-    attach_verified_text_artifact_under_lock, replace_verified_text_artifact_under_lock,
+    attach_verified_text_artifact_under_lock, find_shared_text_artifact,
     withdraw_verified_text_artifact_under_lock,
 };
 
@@ -95,6 +97,7 @@ use text_artifacts::{
 };
 use text_artifacts::{
     execute_text_artifact_retention_under_store_lock, plan_collectable_text_artifacts_cancellable,
+    remove_retired_text_artifact_paths,
     recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
 };
 
@@ -110,6 +113,7 @@ pub const MAX_DURABLE_GENERATION_INDEX_BYTES_V1: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1: i64 = 7 * 24 * 60 * 60 * 1_000_000;
 pub const MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1: u64 = 512 * 1024;
 pub const CODE_TEXT_ARTIFACTS_DIRECTORY_V1: &str = "code-text-artifacts-v1";
+pub const CODE_TEXT_ARTIFACT_STAGING_DIRECTORY_V1: &str = "code-text-artifact-staging-v1";
 
 /// How long a code-index scope root must have been untouched before it can be
 /// classified as stranded and collected. A worktree can be unmounted, moved, or
@@ -214,6 +218,37 @@ pub struct DurableCodeTextArtifactDescriptorV1 {
     pub artifact_file: String,
     pub artifact_digest: ManifestDigest,
     pub artifact_size_bytes: u64,
+    /// The key of the content the artifact was built from, which lets a
+    /// sibling worktree sealing the same content adopt the artifact instead
+    /// of rebuilding it.
+    pub content_key: ManifestDigest,
+}
+
+/// A text artifact descriptor published before artifacts carried a content
+/// key. Every such artifact predates the current format, so it is never
+/// opened or adopted; the slot stays in the durable index, byte for byte, only
+/// until its generation seals a current artifact or leaves the index.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetiredCodeTextArtifactDescriptorV1 {
+    pub generation_id: CodeGenerationId,
+    pub artifact_file: String,
+    pub artifact_digest: ManifestDigest,
+    pub artifact_size_bytes: u64,
+}
+
+/// What a durable index entry records about its generation's text artifact.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum DurableTextArtifactSlotV1 {
+    Current(DurableCodeTextArtifactDescriptorV1),
+    Retired(RetiredCodeTextArtifactDescriptorV1),
+}
+
+impl From<DurableCodeTextArtifactDescriptorV1> for DurableTextArtifactSlotV1 {
+    fn from(descriptor: DurableCodeTextArtifactDescriptorV1) -> Self {
+        Self::Current(descriptor)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -242,7 +277,19 @@ pub struct DurableGenerationIndexEntryV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cardinality: Option<DurableGenerationCardinalityV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_artifact: Option<DurableCodeTextArtifactDescriptorV1>,
+    pub text_artifact: Option<DurableTextArtifactSlotV1>,
+}
+
+impl DurableGenerationIndexEntryV1 {
+    /// The generation's current-format text artifact; a retired descriptor
+    /// names nothing a reader may open.
+    #[must_use]
+    pub fn text_artifact(&self) -> Option<&DurableCodeTextArtifactDescriptorV1> {
+        match self.text_artifact.as_ref()? {
+            DurableTextArtifactSlotV1::Current(descriptor) => Some(descriptor),
+            DurableTextArtifactSlotV1::Retired(_) => None,
+        }
+    }
 }
 
 /// Apply the durable exact-generation history bounds in canonical oldest-first
@@ -381,7 +428,7 @@ impl<'entries> GenerationIndexByteAccountingV1<'entries> {
         let total = total
             .saturating_add(entry.size_bytes)
             .saturating_add(entry.segment_bytes);
-        match entry.text_artifact.as_ref() {
+        match entry.text_artifact() {
             Some(artifact) if self.artifacts_seen.insert(artifact.artifact_file.as_str()) => {
                 total.saturating_add(artifact.artifact_size_bytes)
             }
@@ -507,7 +554,6 @@ pub struct CodeGenerationRetentionGenerationV1 {
 pub enum CodeTextArtifactRetentionKindV1 {
     Completed,
     Staging,
-    Corrupt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -543,6 +589,14 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// pass's selected debris candidates. A descriptor shared by retained
     /// generations is counted once by its canonical artifact path.
     text_artifact_inventory_bytes: u64,
+    /// The active generation already names a text artifact and its resumable
+    /// staging file exists, so a successor build is in flight whose
+    /// publication replaces that artifact and leaves it unreferenced.
+    active_text_replacement_in_flight: bool,
+    /// Text-artifact paths of the per-scope layout no descriptor can name:
+    /// a scope's own completed-artifact directory and staging files in the
+    /// shared directory. Execution removes them whole.
+    retired_text_artifact_paths: Vec<PathBuf>,
     /// How thoroughly this plan proved generation integrity. Apply-mode
     /// execution refuses anything but [`GenerationDigestVerificationV1::Full`].
     pub verification: GenerationDigestVerificationV1,
@@ -574,6 +628,7 @@ impl CodeGenerationRetentionPlanV1 {
     pub fn has_collectable_work(&self) -> bool {
         !self.collectable_generations.is_empty()
             || !self.collectable_text_artifacts.is_empty()
+            || !self.retired_text_artifact_paths.is_empty()
             || self
                 .collectable_generation_segments
                 .may_have_collectable_segments()
@@ -583,6 +638,22 @@ impl CodeGenerationRetentionPlanV1 {
     #[must_use]
     pub const fn generation_segment_census(&self) -> GenerationSegmentCensusV1 {
         self.collectable_generation_segments
+    }
+
+    /// Whether superseded bytes are held live only by a holder that lets go
+    /// without waking maintenance: a superseded generation named by
+    /// `transient_pins` (the serving and text slots, which move when the
+    /// successor seats), or an in-flight replacement of the active
+    /// generation's text artifact. Maintenance keeps its short cadence while
+    /// this holds so the release is collected when it happens rather than at
+    /// the next full interval.
+    #[must_use]
+    pub fn awaits_transient_release(&self, transient_pins: &BTreeSet<CodeGenerationId>) -> bool {
+        self.active_text_replacement_in_flight
+            || self
+                .superseded_generations
+                .iter()
+                .any(|generation| transient_pins.contains(&generation.generation_id))
     }
 }
 
@@ -705,6 +776,8 @@ struct CodeTextArtifactRetentionTransactionV1 {
 struct CodeTextArtifactRetentionInventoryV1 {
     candidates: Vec<CodeTextArtifactRetentionCandidateV1>,
     unique_bytes: u64,
+    active_text_replacement_in_flight: bool,
+    retired_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -722,9 +795,52 @@ pub fn scoped_code_index_store_root(store_root: &Path, canonical_project_root: &
     store_root.join(code_index_scope_hash(canonical_project_root))
 }
 
+/// The directory that owns a store's content-addressed generation segments.
+///
+/// A store root named by its scope hash is one worktree's scope inside a
+/// project's `code-index-v1/`, and its segments live beside every other scope
+/// of that project, so worktrees that seal identical files store them once.
+/// Any other store root is a project directory of its own. Writers, readers,
+/// and the sweep resolve segments only through this.
+#[must_use]
+pub fn code_generation_segments_root(store_root: &Path) -> PathBuf {
+    generation_segment_project_root(store_root).join(GENERATION_SEGMENTS_DIRECTORY)
+}
+
+fn generation_segment_project_root(store_root: &Path) -> &Path {
+    match (
+        store_root.file_name().and_then(|name| name.to_str()),
+        store_root.parent(),
+    ) {
+        (Some(name), Some(project_root))
+            if is_code_index_scope_hash(name) && !project_root.as_os_str().is_empty() =>
+        {
+            project_root
+        }
+        _ => store_root,
+    }
+}
+
+/// Whether `store_root` shares its project's segments with sibling scopes.
+fn shares_project_generation_segments(store_root: &Path) -> bool {
+    generation_segment_project_root(store_root) != store_root
+}
+
+/// The directory that owns a store's completed, content-addressed text
+/// artifacts: the project's, beside its shared generation segments, so
+/// worktrees that seal identical trees store one artifact. Retention marks
+/// every scope's descriptors before collecting one.
 #[must_use]
 pub fn code_text_artifacts_root(store_root: &Path) -> PathBuf {
-    store_root.join(CODE_TEXT_ARTIFACTS_DIRECTORY_V1)
+    generation_segment_project_root(store_root).join(CODE_TEXT_ARTIFACTS_DIRECTORY_V1)
+}
+
+/// The directory that owns one scope's resumable text-artifact staging.
+/// Staging is named by the scope's sealed generation, so it stays with the
+/// scope that builds it.
+#[must_use]
+pub fn code_text_artifact_staging_root(store_root: &Path) -> PathBuf {
+    store_root.join(CODE_TEXT_ARTIFACT_STAGING_DIRECTORY_V1)
 }
 
 pub fn code_text_artifact_path(
@@ -792,6 +908,8 @@ fn unpublished_store_plan(
         collectable_text_artifacts: Vec::new(),
         collectable_generation_segments: GenerationSegmentCensusV1::NoneFound,
         text_artifact_inventory_bytes: 0,
+        active_text_replacement_in_flight: false,
+        retired_text_artifact_paths: Vec::new(),
         verification: GenerationDigestVerificationV1::Full,
         active_pointer: None,
     }
@@ -1155,6 +1273,9 @@ fn plan_code_generation_retention_with_verification_cancellable(
         collectable_text_artifacts: text_artifact_inventory.candidates,
         collectable_generation_segments,
         text_artifact_inventory_bytes: text_artifact_inventory.unique_bytes,
+        active_text_replacement_in_flight: text_artifact_inventory
+            .active_text_replacement_in_flight,
+        retired_text_artifact_paths: text_artifact_inventory.retired_paths,
         verification,
         active_pointer,
     })
@@ -1204,11 +1325,19 @@ fn sweep_unreferenced_generation_segments(
     apply: bool,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(bool, u64, bool), CodeGenerationRetentionErrorV1> {
-    let segments_root = store_root.join(GENERATION_SEGMENTS_DIRECTORY);
+    let retired_scope_segments = retired_scope_segment_directories(store_root)?;
+    if apply {
+        for directory in &retired_scope_segments {
+            std::fs::remove_dir_all(directory).map_err(storage)?;
+        }
+    } else if !retired_scope_segments.is_empty() {
+        return Ok((true, 0, false));
+    }
+    let segments_root = code_generation_segments_root(store_root);
     let entries = match std::fs::read_dir(&segments_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((false, 0, false));
+            return Ok((!retired_scope_segments.is_empty(), 0, false));
         }
         Err(error) => return Err(storage(error)),
     };
@@ -1246,6 +1375,15 @@ fn sweep_unreferenced_generation_segments(
                     })?
                     .to_owned()
             } else {
+                if let Some(digests) =
+                    tracedecay_graph_db::sealed_read_bundle_manifest_artifact_digests(&path)
+                        .map_err(|error| {
+                            CodeGenerationRetentionErrorV1::UnsafeState(error.to_string())
+                        })?
+                {
+                    live_segments.extend(digests);
+                    continue;
+                }
                 let Some(file_name) = generation_file_name(&path) else {
                     continue;
                 };
@@ -1300,12 +1438,14 @@ fn sweep_unreferenced_generation_segments(
         }
         Ok(())
     };
-    mark_root(&store_root.join(GENERATIONS_DIRECTORY), false)?;
+    for directory in segment_manifest_directories(store_root)? {
+        mark_root(&directory, false)?;
+    }
     if let Some(pool_root) = graph_replay_pool_root {
         mark_root(pool_root, true)?;
     }
 
-    let mut found = false;
+    let mut found = !retired_scope_segments.is_empty();
     let mut reclaimed = 0_u64;
     let mut reclaimed_segments = 0_usize;
     for entry in entries {
@@ -1321,10 +1461,12 @@ fn sweep_unreferenced_generation_segments(
             .strip_prefix("segment-")
             .and_then(|name| name.strip_suffix(".json"))
             .filter(|digest| is_lowercase_hex(digest, 64))
+            .map(|digest| format!("sha256:{digest}"))
+            .or_else(|| tracedecay_graph_db::sealed_read_bundle_artifact_file_digest(file_name))
         else {
             continue;
         };
-        if live_segments.contains(&format!("sha256:{digest}")) {
+        if live_segments.contains(&digest) {
             continue;
         }
         let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
@@ -1355,6 +1497,84 @@ fn sweep_unreferenced_generation_segments(
     ))
 }
 
+fn subdirectories(root: &Path) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(storage(error)),
+    };
+    let mut directories = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(storage)?;
+        if entry.file_type().map_err(storage)?.is_dir() {
+            directories.push(entry.path());
+        }
+    }
+    Ok(directories)
+}
+
+/// The scopes whose manifests can name the store's segments: the store alone,
+/// or in a shared project every worktree scope, including scopes quarantined
+/// by scope collection, which a recovery may still restore.
+fn segment_scope_roots(store_root: &Path) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
+    if !shares_project_generation_segments(store_root) {
+        return Ok(vec![store_root.to_path_buf()]);
+    }
+    let project_root = generation_segment_project_root(store_root);
+    let is_scope = |path: &PathBuf| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_code_index_scope_hash)
+    };
+    let mut scopes = subdirectories(project_root)?
+        .into_iter()
+        .filter(is_scope)
+        .collect::<Vec<_>>();
+    for stage in subdirectories(&project_root.join(SCOPE_RETENTION_QUARANTINE_DIRECTORY))? {
+        scopes.extend(subdirectories(&stage)?.into_iter().filter(is_scope));
+    }
+    Ok(scopes)
+}
+
+/// Every directory a manifest naming the store's segments can occupy: each
+/// scope's generations and the stages its retention quarantine may restore.
+fn segment_manifest_directories(
+    store_root: &Path,
+) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
+    let mut directories = Vec::new();
+    for scope in segment_scope_roots(store_root)? {
+        directories.push(scope.join(GENERATIONS_DIRECTORY));
+        directories.extend(subdirectories(&scope.join(QUARANTINE_DIRECTORY))?);
+    }
+    Ok(directories)
+}
+
+/// Per-scope segment directories from before segments moved to the project.
+/// No manifest this build reads names them, so the sweep removes them whole.
+fn retired_scope_segment_directories(
+    store_root: &Path,
+) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
+    if !shares_project_generation_segments(store_root) {
+        return Ok(Vec::new());
+    }
+    let mut directories = Vec::new();
+    for scope in segment_scope_roots(store_root)? {
+        let directory = scope.join(GENERATION_SEGMENTS_DIRECTORY);
+        match directory.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_dir() => directories.push(directory),
+            Ok(_) => {
+                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                    "retired scope segment path '{}' is not a directory",
+                    directory.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(storage(error)),
+        }
+    }
+    Ok(directories)
+}
+
 fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
     generation_file_digest(file_name).or_else(|| {
         let (digest, suffix) = file_name
@@ -1376,7 +1596,10 @@ fn store_may_hold_generation_segments(
     store_root: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    let mut entries = match std::fs::read_dir(store_root.join(GENERATION_SEGMENTS_DIRECTORY)) {
+    if !retired_scope_segment_directories(store_root)?.is_empty() {
+        return Ok(true);
+    }
+    let mut entries = match std::fs::read_dir(code_generation_segments_root(store_root)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(storage(error)),
@@ -1472,6 +1695,10 @@ pub fn execute_code_generation_retention_cancellable(
     let vector_readable_sources = plan.vector_readable_sources.clone();
     let _store_lock = try_acquire_code_generation_store_lock(store_root)?
         .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy)?;
+    // Retiring manifests and sweeping segments both change which segments
+    // are named; neither may interleave with another scope's publication,
+    // retention, or scope collection over the shared segment directory.
+    let _segments_lock = acquire_generation_segments_lock_checked(store_root, is_cancelled)?;
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -1632,6 +1859,8 @@ pub fn execute_code_generation_retention_cancellable(
             )?
         };
 
+    remove_retired_text_artifact_paths(&plan.retired_text_artifact_paths)?;
+
     let reclaimed_bytes = receipt
         .as_ref()
         .map(|receipt| receipt.reclaimed_bytes)
@@ -1687,6 +1916,9 @@ fn recover_code_generation_retention_cancellable(
     }
     let _store_lock = try_acquire_code_generation_store_lock(store_root)?
         .ok_or(CodeGenerationRetentionErrorV1::GenerationStoreBusy)?;
+    // Recovery may restore quarantined manifests into the generations
+    // directory, which a concurrent sweep over shared segments must not miss.
+    let _segments_lock = acquire_generation_segments_lock_checked(store_root, is_cancelled)?;
     if observe_cancel(is_cancelled) {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
     }
@@ -1942,7 +2174,7 @@ fn validate_durable_generation_index(
                     .to_owned(),
             ));
         }
-        if let Some(artifact) = entry.text_artifact.as_ref() {
+        if let Some(artifact) = entry.text_artifact() {
             validate_text_artifact_descriptor(artifact)?;
             if artifact.generation_id.as_str() != entry.generation_id {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(

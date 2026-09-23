@@ -5,7 +5,7 @@ use tracedecay_domain::*;
 fn extract_fixture() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.qb").unwrap();
     let extractor = QBasicExtractor;
-    let result = extractor.extract("sample.qb", &source);
+    let result = extractor.extract_artifact("sample.qb", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     result
 }

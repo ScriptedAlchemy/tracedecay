@@ -10,10 +10,10 @@
 //! socket-directory variant of the same contract refuses fast and typed at
 //! daemon bootstrap; background convergence must be just as truthful.
 //!
-//! Green means: an owned legacy mode self-heals (with the store converging to
-//! owner-private and serving), and an unhealable violation surfaces as a typed
-//! `parked` freshness state whose reason names the violation, while removing
-//! the violation lets the ordinary wake cadence resume without a remount.
+//! Green means: every violation, including a permissive mode, surfaces as a
+//! typed `parked` freshness state whose reason names the violation and is
+//! never rewritten in place, while removing the violation lets the ordinary
+//! wake cadence resume without a remount.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_code_index_retention::code_index_generations::{
-    code_text_artifacts_root, scoped_code_index_store_root,
+    code_text_artifact_staging_root, scoped_code_index_store_root,
 };
 
 use super::super::graph_activation::{
@@ -92,7 +92,7 @@ impl Fixture {
         let canonical_project = project.canonicalize().expect("canonical project root");
         let scoped = scoped_code_index_store_root(&store, &canonical_project);
         tracedecay_private_fs::create_private_directory(&scoped).expect("create scoped root");
-        let artifacts_root = code_text_artifacts_root(&scoped);
+        let artifacts_root = code_text_artifact_staging_root(&scoped);
         poison(&artifacts_root);
 
         let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
@@ -177,14 +177,14 @@ impl Fixture {
     }
 }
 
-/// An owned legacy artifacts root with a permissive mode is exactly the state
-/// older binaries left behind. Ownership is provable, so the worker heals it
-/// to owner-private in place and serving converges, no operator chmod, no
-/// parked state, no indefinite warming.
+/// A permissive artifacts root violates the owner-privacy contract; the
+/// worker never re-permissions it. It parks typed, leaves the mode exactly as
+/// found, and resumes on the ordinary wake cadence once the operator restores
+/// owner-only access.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_legacy_permissive_text_artifacts_root_self_heals_and_serves() {
+async fn a_permissive_text_artifacts_root_parks_typed_without_rewriting_its_mode() {
     let fixture = Fixture::mount_with_poisoned_artifacts_root(
-        "project.text-artifacts-root-self-heal",
+        "project.text-artifacts-root-permissive",
         |artifacts_root| {
             fs::create_dir_all(artifacts_root).expect("create artifacts root");
             fs::set_permissions(artifacts_root, fs::Permissions::from_mode(0o775))
@@ -193,47 +193,62 @@ async fn a_legacy_permissive_text_artifacts_root_self_heals_and_serves() {
     )
     .await;
 
-    let observed = fixture
+    let parked = fixture
+        .wait_for_freshness(|freshness| freshness.parked.is_some())
+        .await
+        .expect("freshness projection for the mounted worktree");
+    assert_eq!(
+        parked.staleness_state,
+        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Parked),
+        "a permissive root must park instead of serving: {parked:?}"
+    );
+    let park = parked.parked.as_ref().expect("typed parked state");
+    assert!(
+        park.reason.contains("code text artifacts root") && park.reason.contains("mode 775"),
+        "the parked reason must name the violated contract and observed mode: {}",
+        park.reason
+    );
+    let mode = |root: &Path| {
+        fs::metadata(root)
+            .expect("artifacts root metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(
+        mode(&fixture.artifacts_root),
+        0o775,
+        "the worker must not rewrite a root it did not create"
+    );
+
+    fs::set_permissions(&fixture.artifacts_root, fs::Permissions::from_mode(0o700))
+        .expect("operator restores owner-only access");
+    let recovered = fixture
         .wait_for_freshness(|freshness| {
-            freshness.staleness_state
-                == Some(
-                    tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
-                )
+            freshness.parked.is_none()
+                && freshness.staleness_state
+                    == Some(
+                        tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh,
+                    )
         })
         .await
         .expect("freshness projection for the mounted worktree");
-
-    assert_eq!(
-        observed.staleness_state,
-        Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Fresh),
-        "the healed store must converge to serving instead of warming forever: {observed:?}"
-    );
     assert!(
-        observed.parked.is_none(),
-        "a healed root must not stay parked: {:?}",
-        observed.parked
-    );
-    let mode = fs::metadata(&fixture.artifacts_root)
-        .expect("artifacts root metadata")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(
-        mode, 0o700,
-        "self-heal must tighten the legacy root to owner-private"
+        recovered.parked.is_none(),
+        "the park must clear once the operator fixes the mode: {recovered:?}"
     );
 
     fixture.registry.shutdown().await;
 }
 
-/// A violation ownership cannot prove away, here a foreign regular file
-/// squatting on the artifacts-root path, must park typed: the freshness
+/// A foreign regular file squatting on the artifacts-root path must park
+/// typed: the freshness
 /// projection names the exact violation and remediation instead of reporting
 /// "indexing" (surfaced as "warming") forever. Removing the violation lets
 /// the ordinary wake cadence resume without a remount, proving parked is
 /// visible-but-recoverable rather than permanently dead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unhealable_text_artifacts_root_parks_typed_and_recovers_when_fixed() {
+async fn a_squatted_text_artifacts_root_parks_typed_and_recovers_when_fixed() {
     let fixture = Fixture::mount_with_poisoned_artifacts_root(
         "project.text-artifacts-root-typed-park",
         |artifacts_root| {
@@ -310,7 +325,7 @@ async fn an_unhealable_text_artifacts_root_parks_typed_and_recovers_when_fixed()
 /// consumers of the sealed generation. Starting graph work while text is
 /// parked can hold the source text needs, cross the process RSS watermark,
 /// and then prevent text from reacquiring its reservation indefinitely. A
-/// text owner parked on an unhealable artifacts root makes the required
+/// text owner parked on an invalid artifacts root makes the required
 /// ordering observable: fresh graph activation must not start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked() {
@@ -336,7 +351,7 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
     assert_eq!(
         parked.staleness_state,
         Some(tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1::Parked),
-        "the text owner must park on the unhealable root: {parked:?}"
+        "the text owner must park on the invalid root: {parked:?}"
     );
 
     assert!(
@@ -368,20 +383,14 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
     fixture.registry.shutdown().await;
 }
 
-/// The published pass waits for the owners the seat needs, exact and
-/// lexical, and nothing more. The clone-fingerprint successor that follows
-/// the admission artifact re-decodes the whole sealed source into a second
-/// artifact; on the 772-file lifecycle fixture that pass alone held graph
-/// activation back by ~27 s (#1103). Fresh graph activation must start while
-/// that successor is still pending, and the successor must still finish on a
-/// later pass.
+/// The published pass waits for the owners the seat needs, and its single
+/// build seals every one of them: fresh graph activation starts on ready
+/// owners with no text projection work left behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fresh_graph_activation_starts_while_the_clone_successor_is_pending() {
-    let (fixture, admission) = Fixture::mount_with_poisoned_artifacts_root_held(
-        "project.graph-before-clone-successor",
-        |_| {},
-    )
-    .await;
+async fn fresh_graph_activation_starts_on_the_first_sealed_text_owner() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-on-first-seal", |_| {})
+            .await;
     let scope = fixture
         .registry
         .serving_code_scope(&fixture.project)
@@ -392,7 +401,7 @@ async fn fresh_graph_activation_starts_while_the_clone_successor_is_pending() {
 
     tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
         .await
-        .expect("fresh graph activation starts once exact and lexical owners are ready");
+        .expect("fresh graph activation starts once the query owners are ready");
     let canonical = fixture.project.canonicalize().expect("canonical project");
     let text = {
         let mounted = fixture.registry.mounted.lock().await;
@@ -407,27 +416,13 @@ async fn fresh_graph_activation_starts_while_the_clone_successor_is_pending() {
     .expect("the publication installed its text owner before activation");
     assert!(
         text.query_owners_are_ready(),
-        "graph activation must not start before exact and lexical owners are ready"
+        "graph activation must not start before the query owners are ready"
     );
     assert!(
-        text.text_projection_needs_work(),
-        "the clone-fingerprint successor must still be pending when activation starts"
+        !text.text_projection_needs_work(),
+        "the first seal leaves no text projection work behind"
     );
     gate.release();
-
-    let deadline = tokio::time::Instant::now() + CONVERGENCE_DEADLINE;
-    while text.text_projection_needs_work() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the clone successor must finish on a follow-up pass after the seat"
-        );
-        fixture.wake_without_new_input().await;
-        tokio::time::sleep(POLL_SPACING).await;
-    }
-    assert!(
-        text.query_owners_are_ready(),
-        "finishing the successor must keep exact and lexical owners ready"
-    );
     fixture.registry.shutdown().await;
 }
 

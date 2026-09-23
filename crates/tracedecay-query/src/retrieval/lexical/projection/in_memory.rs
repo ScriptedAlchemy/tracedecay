@@ -12,8 +12,8 @@ use roaring::RoaringBitmap;
 use tracedecay_code_index::production::VerifiedSealedLexicalSymbolDisplayV1;
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkV1, ExactFieldV1, ExactTechnicalTermV1,
-    ExtractionAdmittedChunkV1, FreshnessCompatibilityV1, RetrieverBatch, RetrieverCoverage,
-    RetrieverKind, RetrieverOutcome, SymbolOccurrenceId,
+    ExtractionAdmittedChunkV1, FreshnessCompatibilityV1, NodeKind, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SymbolOccurrenceId,
 };
 
 use super::super::{
@@ -360,8 +360,7 @@ impl CodeLexicalProjectionBuildV1 {
                         };
                         continue;
                     }
-                    let document = self.next_document;
-                    let chunk = self.chunks[document].take().ok_or_else(|| {
+                    let chunk = self.chunks[self.next_document].take().ok_or_else(|| {
                         RetrievalPortError::Contract(
                             "lexical projection row was advanced more than once".to_owned(),
                         )
@@ -396,6 +395,16 @@ impl CodeLexicalProjectionBuildV1 {
                         .symbol_occurrence_id
                         .as_ref()
                         .and_then(|symbol| self.symbol_displays.get(symbol));
+                    self.next_document += 1;
+                    remaining -= 1;
+                    // Same admission as the artifact: annotation uses mint no
+                    // lexical document.
+                    if symbol_display
+                        .is_some_and(|display| display.kind() == NodeKind::AnnotationUsage.as_str())
+                    {
+                        continue;
+                    }
+                    let document = self.rows.len();
                     let (mut row, fields) =
                         ProjectedChunkV1::from_ref(&chunk, logical_path, symbol_display);
                     row.anchor.generation_id = self.metadata.generation.clone();
@@ -410,8 +419,6 @@ impl CodeLexicalProjectionBuildV1 {
                         })?
                         .insert_row(document as u32, &row, &fields)?;
                     self.rows.push(row);
-                    self.next_document += 1;
-                    remaining -= 1;
                 }
                 CodeLexicalProjectionBuildPhaseV1::RawText { next_document } => {
                     if next_document == self.rows.len() {
@@ -1169,6 +1176,7 @@ mod deadline_budget_tests {
                 .expect("lexical"),
             exact_score_domain: ScoreDomainId::new(crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)
                 .expect("score"),
+            clone_route: None,
         }
     }
 

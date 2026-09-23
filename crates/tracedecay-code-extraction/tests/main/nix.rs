@@ -6,7 +6,7 @@ fn extract_sample() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.nix")
         .expect("failed to read sample.nix");
     let extractor = NixExtractor;
-    extractor.extract("sample.nix", &source)
+    extractor.extract_artifact("sample.nix", &source).result
 }
 
 #[test]
@@ -155,7 +155,7 @@ fn extract_flake() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample-flake.nix")
         .expect("failed to read sample-flake.nix");
     let extractor = NixExtractor;
-    extractor.extract("flake.nix", &source)
+    extractor.extract_artifact("flake.nix", &source).result
 }
 
 // -------------------------------------------------------------------

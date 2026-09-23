@@ -8,7 +8,9 @@ fn test_svelte_file_node() {
 export function greet(): void {}
 </script>
 <h1>Hello</h1>"#;
-    let result = SvelteExtractor.extract("Page.svelte", source);
+    let result = SvelteExtractor
+        .extract_artifact("Page.svelte", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -28,7 +30,9 @@ export function increment(n: number): number {
 
 function internal(): void {}
 </script>"#;
-    let result = SvelteExtractor.extract("Counter.svelte", source);
+    let result = SvelteExtractor
+        .extract_artifact("Counter.svelte", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -46,7 +50,9 @@ function internal(): void {}
 fn test_svelte_line_numbers_are_original_file_positions() {
     // `greet` is on line 2 (0-indexed) in the full .svelte file.
     let source = "<script lang=\"ts\">\n\nexport function greet(): void {}\n</script>\n<h1>hi</h1>";
-    let result = SvelteExtractor.extract("greet.svelte", source);
+    let result = SvelteExtractor
+        .extract_artifact("greet.svelte", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let greet = result.nodes.iter().find(|n| n.name == "greet").unwrap();
     assert_eq!(
@@ -59,7 +65,9 @@ fn test_svelte_line_numbers_are_original_file_positions() {
 #[test]
 fn test_svelte_no_script_block_returns_file_node_only() {
     let source = "<h1>Hello</h1>\n<p>World</p>";
-    let result = SvelteExtractor.extract("Static.svelte", source);
+    let result = SvelteExtractor
+        .extract_artifact("Static.svelte", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // Only the File node. No symbols to extract.
     let non_file: Vec<_> = result
@@ -73,7 +81,9 @@ fn test_svelte_no_script_block_returns_file_node_only() {
 #[test]
 fn test_svelte_fixture() {
     let source = include_str!("../../fixtures/sample.svelte");
-    let result = SvelteExtractor.extract("sample.svelte", source);
+    let result = SvelteExtractor
+        .extract_artifact("sample.svelte", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let names: Vec<_> = result.nodes.iter().map(|n| n.name.as_str()).collect();
     assert!(

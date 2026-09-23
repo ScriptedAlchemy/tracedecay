@@ -6,7 +6,7 @@ use tracedecay_domain::*;
 fn test_ts_file_node_is_root() {
     let source = r#"function main() {}"#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("test.ts", source);
+    let result = extractor.extract_artifact("test.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
         .nodes
@@ -28,7 +28,7 @@ export function greet(name: string): string {
 function internal(): void {}
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("greet.ts", source);
+    let result = extractor.extract_artifact("greet.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -49,7 +49,7 @@ fn test_ts_empty_jsdoc_comment_does_not_panic() {
 export function documented(): void {}
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("empty-jsdoc.ts", source);
+    let result = extractor.extract_artifact("empty-jsdoc.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let function = result
         .nodes
@@ -67,7 +67,9 @@ class C {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("anonymous-generator-method.ts", source);
+    let result = extractor
+        .extract_artifact("anonymous-generator-method.ts", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert!(
         result
@@ -84,7 +86,9 @@ fn test_ts_empty_decorator_name_does_not_panic() {
 class C {}
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("empty-decorator.ts", source);
+    let result = extractor
+        .extract_artifact("empty-decorator.ts", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     assert!(
         result
@@ -104,7 +108,7 @@ export const multiply = (a: number, b: number) => {
 };
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("arrow.ts", source);
+    let result = extractor.extract_artifact("arrow.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let arrows: Vec<_> = result
         .nodes
@@ -137,7 +141,7 @@ export class MyClass {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("class.ts", source);
+    let result = extractor.extract_artifact("class.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Check class
@@ -202,7 +206,7 @@ export interface Printable {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("iface.ts", source);
+    let result = extractor.extract_artifact("iface.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let interfaces: Vec<_> = result
@@ -233,7 +237,7 @@ export enum Color {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("color.ts", source);
+    let result = extractor.extract_artifact("color.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -264,7 +268,7 @@ import { foo, bar } from './utils';
 import * as path from 'path';
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("imports.ts", source);
+    let result = extractor.extract_artifact("imports.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let uses: Vec<_> = result
@@ -292,7 +296,7 @@ import type { Foo, Bar as Baz } from "pkg";
 import { localThing } from "./local";
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("imports.ts", source);
+    let result = extractor.extract_artifact("imports.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let use_refs: Vec<_> = result
@@ -320,7 +324,7 @@ export async function fetchData(url: string): Promise<string> {
 function syncHelper(): void {}
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("async.ts", source);
+    let result = extractor.extract_artifact("async.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -343,7 +347,7 @@ class Service {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("service.ts", source);
+    let result = extractor.extract_artifact("service.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let decorators: Vec<_> = result
@@ -379,7 +383,7 @@ namespace MyNamespace {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("ns.ts", source);
+    let result = extractor.extract_artifact("ns.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let namespaces: Vec<_> = result
@@ -410,7 +414,7 @@ function add(a: number, b: number): number {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("doc.ts", source);
+    let result = extractor.extract_artifact("doc.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -435,7 +439,7 @@ export function greet(name: string): string {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("doc_export.ts", source);
+    let result = extractor.extract_artifact("doc_export.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -466,7 +470,7 @@ function main(): void {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("calls.ts", source);
+    let result = extractor.extract_artifact("calls.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let call_refs: Vec<_> = result
@@ -495,7 +499,7 @@ export type StringOrNum = string | number;
 type ID = string;
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("types.ts", source);
+    let result = extractor.extract_artifact("types.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let aliases: Vec<_> = result
@@ -524,7 +528,7 @@ export class Child extends Base implements Printable {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("inherit.ts", source);
+    let result = extractor.extract_artifact("inherit.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Check for Extends unresolved ref
@@ -555,7 +559,7 @@ fn test_ts_contains_edges() {
 function foo(): void {}
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("edges.ts", source);
+    let result = extractor.extract_artifact("edges.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let file_node = result
@@ -593,7 +597,7 @@ export default class Foo {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("test.js", source);
+    let result = extractor.extract_artifact("test.js", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -626,7 +630,9 @@ export default class Foo {
 #[test]
 fn test_ts_unknown_language_key_surfaces_parse_error() {
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("test.definitely-not-registered", "const value = 1;");
+    let result = extractor
+        .extract_artifact("test.definitely-not-registered", "const value = 1;")
+        .result;
 
     assert!(
         result
@@ -652,7 +658,7 @@ export function App() {
 }
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("app.jsx", source);
+    let result = extractor.extract_artifact("app.jsx", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -680,7 +686,7 @@ export const Greeting: React.FC<Props> = ({ name }) => {
 };
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("greeting.tsx", source);
+    let result = extractor.extract_artifact("greeting.tsx", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let interfaces: Vec<_> = result
@@ -709,7 +715,7 @@ export const MAX_SIZE = 1024;
 const SECRET = "hidden";
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("consts.ts", source);
+    let result = extractor.extract_artifact("consts.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let consts: Vec<_> = result
@@ -732,7 +738,7 @@ const fetchData = async (url: string) => {
 };
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("async_arrow.ts", source);
+    let result = extractor.extract_artifact("async_arrow.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let arrows: Vec<_> = result
@@ -786,7 +792,7 @@ describe('math', () => {
 });
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("math.test.ts", source);
+    let result = extractor.extract_artifact("math.test.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns = ts_functions(&result);
@@ -835,7 +841,7 @@ describe('suite', () => {
 });
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("s.test.ts", source);
+    let result = extractor.extract_artifact("s.test.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // Helper function inside describe becomes its own Function node.
@@ -880,7 +886,7 @@ describe('mods', () => {
 });
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("mods.test.ts", source);
+    let result = extractor.extract_artifact("mods.test.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns = ts_functions(&result);
@@ -919,7 +925,7 @@ describe('todos', () => {
 });
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("todo.test.ts", source);
+    let result = extractor.extract_artifact("todo.test.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // it.todo has no callback -> a node is still emitted for the title,
     // but no calls are attributed.
@@ -937,7 +943,7 @@ describe('fnexpr', function () {
 });
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("fnexpr.test.ts", source);
+    let result = extractor.extract_artifact("fnexpr.test.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     // The template-literal title is captured (backticks stripped).
@@ -955,7 +961,7 @@ fn test_ts_expression_bodied_arrow_extracts_calls() {
 export const compute = (x: number) => transform(x);
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("compute.ts", source);
+    let result = extractor.extract_artifact("compute.ts", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let arrow = result
         .nodes
@@ -981,7 +987,9 @@ test.describe("", () => {
 });
 "#;
     let extractor = TypeScriptExtractor;
-    let result = extractor.extract("integration/fs-routes-test.ts", source);
+    let result = extractor
+        .extract_artifact("integration/fs-routes-test.ts", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns = ts_functions(&result);

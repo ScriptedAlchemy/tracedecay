@@ -17,7 +17,7 @@ def helper():
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("math.py", source);
+    let result = extractor.extract_artifact("math.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -40,7 +40,7 @@ async def fetch_data(url):
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("async_mod.py", source);
+    let result = extractor.extract_artifact("async_mod.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -62,7 +62,7 @@ class MyClass:
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("classes.py", source);
+    let result = extractor.extract_artifact("classes.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let classes: Vec<_> = result
         .nodes
@@ -85,7 +85,7 @@ class Dog:
         return item
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("dog.py", source);
+    let result = extractor.extract_artifact("dog.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -107,7 +107,7 @@ def my_func():
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("decorators.py", source);
+    let result = extractor.extract_artifact("decorators.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let decorators: Vec<_> = result
         .nodes
@@ -138,7 +138,7 @@ class MyClass:
         self._name = value
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("props.py", source);
+    let result = extractor.extract_artifact("props.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let decorators: Vec<_> = result
         .nodes
@@ -168,7 +168,7 @@ import os
 import sys
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("imports.py", source);
+    let result = extractor.extract_artifact("imports.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -187,7 +187,7 @@ from os.path import join, exists
 from collections import defaultdict
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("imports.py", source);
+    let result = extractor.extract_artifact("imports.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -249,7 +249,7 @@ def process():
 
     for (shape, path, source, kind, expected) in cases {
         let extractor = PythonExtractor;
-        let result = extractor.extract(path, source);
+        let result = extractor.extract_artifact(path, source).result;
         assert_node_docstring(shape, &result, kind, None, expected);
     }
 }
@@ -264,7 +264,7 @@ def public_func():
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("vis.py", source);
+    let result = extractor.extract_artifact("vis.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fns: Vec<_> = result
         .nodes
@@ -291,7 +291,7 @@ class MyClass:
         pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("vis2.py", source);
+    let result = extractor.extract_artifact("vis2.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -322,7 +322,7 @@ MIN_VALUE = 0
 some_var = "hello"
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("consts.py", source);
+    let result = extractor.extract_artifact("consts.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
         .nodes
@@ -347,7 +347,7 @@ def main():
     some_func(42)
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("main.py", source);
+    let result = extractor.extract_artifact("main.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let call_refs: Vec<_> = result
         .unresolved_refs
@@ -373,7 +373,7 @@ class Outer:
             pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("nested.py", source);
+    let result = extractor.extract_artifact("nested.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let classes: Vec<_> = result
         .nodes
@@ -396,7 +396,7 @@ def standalone():
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("edges.py", source);
+    let result = extractor.extract_artifact("edges.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let contains: Vec<_> = result
         .edges
@@ -421,7 +421,7 @@ class Dog(Animal):
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("inherit.py", source);
+    let result = extractor.extract_artifact("inherit.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let has_extends = result.edges.iter().any(|e| e.kind == EdgeKind::Extends)
         || result
@@ -452,7 +452,7 @@ class Child(Base, Mixin):
     pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("multi.py", source);
+    let result = extractor.extract_artifact("multi.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let extends_refs: Vec<_> = result
         .unresolved_refs
@@ -477,7 +477,7 @@ class MyClass:
         pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("pkg/module.py", source);
+    let result = extractor.extract_artifact("pkg/module.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -510,7 +510,7 @@ class Server:
         pass
 "#;
     let extractor = PythonExtractor;
-    let result = extractor.extract("server.py", source);
+    let result = extractor.extract_artifact("server.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes

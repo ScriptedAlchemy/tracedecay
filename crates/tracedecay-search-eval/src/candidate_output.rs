@@ -273,6 +273,7 @@ fn build_query_projections(
             tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
         )?,
         exact_score_domain: id(tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1)?,
+        clone_route: None,
     });
     // Canonical scope keys, deduplicated once; the position is the bucket id.
     let scope_keys = queries

@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use tracedecay_code_index::chunks::DeterministicCodeChunker;
 use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
 use tracedecay_domain::{
-    ChunkerRevision, ContentDigest, RepositoryId, SanitizerRevision, SourceSpan, SymbolOccurrenceId,
+    ChunkerRevision, ContentDigest, RepositoryId, SanitizerRevision, SensitivityLevelV1,
+    SourceSpan, SymbolOccurrenceId,
 };
 use tracedecay_privacy::{CodeSourceShapeV1, sanitize_code_source_bytes};
 
@@ -47,10 +48,16 @@ fn published_symbol_digests_cover_their_recorded_source_spans() {
         id::<SanitizerRevision>("sanitizer.v1"),
         id("policy.v1"),
         id::<ChunkerRevision>("chunker.v1"),
-        tracedecay_code_extraction::LanguageRegistry::new(),
     )
-    .index_file(&file, extraction.batch(), &descriptor, &NeverCancelled)
-    .expect("index Rust source");
+    .index_file_with_authority_from_extraction(
+        &file,
+        &extraction,
+        &descriptor,
+        SensitivityLevelV1::Public,
+        &NeverCancelled,
+    )
+    .expect("index Rust source")
+    .0;
 
     let mut published_spans = BTreeMap::<SymbolOccurrenceId, SourceSpan>::new();
     for chunk in &artifacts.chunks.chunks {

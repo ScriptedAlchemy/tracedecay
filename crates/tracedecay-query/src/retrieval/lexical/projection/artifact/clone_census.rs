@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Connection;
 use tracedecay_code_index::clones::{
-    CloneBodyEligibilityV1, CloneBodyOccurrenceV1, CloneBodyPayloadV1, CloneBodyRenameStatusV1,
-    CloneNormalizationClassV1,
+    CloneBodyEligibilityV1, CloneBodyRenameStatusV1, CloneNormalizationClassV1,
 };
 
+use super::clone_codec::{decode_clone_eligibility, decode_clone_payload, digest_from_key};
+use super::format::decode_fingerprint_postings;
 use super::{CodeLexicalArtifactErrorV1, sqlite_error};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,29 +51,25 @@ enum IncompleteRenameCoverageV1 {
 /// ones the per-occurrence rename counters distinguish.
 fn validate_stored_clone_payloads(
     connection: &Connection,
-) -> Result<HashMap<String, IncompleteRenameCoverageV1>, CodeLexicalArtifactErrorV1> {
+) -> Result<HashMap<i64, IncompleteRenameCoverageV1>, CodeLexicalArtifactErrorV1> {
     let mut incomplete_rename = HashMap::new();
     let mut statement = connection
-        .prepare("SELECT payload_digest, payload FROM clone_body_payloads ORDER BY payload_digest")
+        .prepare("SELECT ordinal, payload_digest, payload FROM clone_body_payloads ORDER BY ordinal")
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
-        let digest: String = row.get(0).map_err(sqlite_error)?;
-        let payload_bytes: Vec<u8> = row.get(1).map_err(sqlite_error)?;
-        let payload: CloneBodyPayloadV1 = serde_json::from_slice(&payload_bytes)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        if payload.payload_digest.as_str() != digest || payload.validate().is_err() {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "clone census found a payload outside its stored digest".to_owned(),
-            ));
-        }
+        let ordinal: i64 = row.get(0).map_err(sqlite_error)?;
+        let digest: Vec<u8> = row.get(1).map_err(sqlite_error)?;
+        let payload_bytes: Vec<u8> = row.get(2).map_err(sqlite_error)?;
+        let payload =
+            decode_clone_payload(&payload_bytes, digest_from_key(&digest)?.as_str())?;
         match payload.rename_coverage {
             CloneBodyRenameStatusV1::Complete => {}
             CloneBodyRenameStatusV1::Partial => {
-                incomplete_rename.insert(digest, IncompleteRenameCoverageV1::Partial);
+                incomplete_rename.insert(ordinal, IncompleteRenameCoverageV1::Partial);
             }
             CloneBodyRenameStatusV1::UnsupportedLanguage => {
-                incomplete_rename.insert(digest, IncompleteRenameCoverageV1::UnsupportedLanguage);
+                incomplete_rename.insert(ordinal, IncompleteRenameCoverageV1::UnsupportedLanguage);
             }
         }
     }
@@ -81,7 +78,6 @@ fn validate_stored_clone_payloads(
 
 pub(super) fn read_clone_index_census(
     connection: &Connection,
-    has_fingerprints: bool,
     hot_posting_threshold: u64,
 ) -> Result<CodeLexicalCloneIndexCensusV1, CodeLexicalArtifactErrorV1> {
     let mut census = CodeLexicalCloneIndexCensusV1::default();
@@ -90,29 +86,25 @@ pub(super) fn read_clone_index_census(
     // row; the occurrence total below proves none was dropped by it.
     let mut statement = connection
         .prepare(
-            "SELECT occurrence.payload_digest, occurrence.occurrence
+            "SELECT occurrence.payload_ordinal, occurrence.eligibility
              FROM clone_occurrences AS occurrence
              JOIN clone_body_payloads AS payload
-               ON payload.payload_digest = occurrence.payload_digest
-             ORDER BY occurrence.symbol_occurrence_id",
+               ON payload.ordinal = occurrence.payload_ordinal
+             ORDER BY occurrence.ordinal",
         )
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
-        let digest: String = row.get(0).map_err(sqlite_error)?;
-        let occurrence_bytes: Vec<u8> = row.get(1).map_err(sqlite_error)?;
-        let occurrence: CloneBodyOccurrenceV1 = serde_json::from_slice(&occurrence_bytes)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
-        if occurrence.payload_digest.as_str() != digest {
-            return Err(CodeLexicalArtifactErrorV1::Corrupt(
-                "clone census found a payload outside its occurrence binding".to_owned(),
-            ));
-        }
+        let payload_ordinal: i64 = row.get(0).map_err(sqlite_error)?;
+        let eligibility = row
+            .get_ref(1)
+            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
+            .map_err(sqlite_error)?;
         census.source_bodies = census.source_bodies.saturating_add(1);
-        match occurrence.eligibility {
+        match decode_clone_eligibility(eligibility)? {
             CloneBodyEligibilityV1::Eligible => {
                 census.eligible_source_bodies = census.eligible_source_bodies.saturating_add(1);
-                match incomplete_rename.get(&digest) {
+                match incomplete_rename.get(&payload_ordinal) {
                     None => {}
                     Some(IncompleteRenameCoverageV1::Partial) => {
                         census.rename_partial_bodies =
@@ -184,63 +176,82 @@ pub(super) fn read_clone_index_census(
     census.conservative_normalized_bodies = count(conservative)?;
     census.rename_normalized_bodies = count(rename)?;
 
-    if has_fingerprints {
-        let (fingerprint_bodies, fingerprint_postings, hot_postings, hot_rows): (
-            i64,
-            i64,
-            i64,
-            i64,
-        ) = connection
-            .query_row(
-                "SELECT
-                   (SELECT COUNT(DISTINCT symbol_occurrence_id) FROM clone_fingerprint_postings),
-                   (SELECT COUNT(*) FROM clone_fingerprint_postings),
-                   (SELECT COUNT(*) FROM clone_fingerprint_counts WHERE posting_count > ?1),
-                   (SELECT COALESCE(SUM(posting_count), 0) FROM clone_fingerprint_counts WHERE posting_count > ?1)",
-                [i64::try_from(hot_posting_threshold).map_err(|error| {
-                    CodeLexicalArtifactErrorV1::Contract(error.to_string())
-                })?],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
+    let (fingerprint_postings, hot_postings, hot_rows): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+               COALESCE(SUM(posting_count), 0),
+               COUNT(*) FILTER (WHERE posting_count > ?1),
+               COALESCE(SUM(posting_count) FILTER (WHERE posting_count > ?1), 0)
+             FROM clone_fingerprint_postings",
+            [i64::try_from(hot_posting_threshold)
+                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(sqlite_error)?;
+    // Bodies with positional fingerprints are the distinct occurrences their
+    // lists name.
+    let mut fingerprinted = HashSet::new();
+    let mut statement = connection
+        .prepare("SELECT postings FROM clone_fingerprint_postings")
+        .map_err(sqlite_error)?;
+    let mut rows = statement.query([]).map_err(sqlite_error)?;
+    while let Some(row) = rows.next().map_err(sqlite_error)? {
+        let encoded = row
+            .get_ref(0)
+            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
             .map_err(sqlite_error)?;
-        census.near_fingerprint_bodies = count(fingerprint_bodies)?;
-        census.near_fingerprint_postings = count(fingerprint_postings)?;
-        census.hot_postings = count(hot_postings)?;
-        census.hot_posting_rows = count(hot_rows)?;
+        fingerprinted.extend(
+            decode_fingerprint_postings(encoded)?
+                .into_iter()
+                .map(|(occurrence, _)| occurrence),
+        );
     }
+    let fingerprint_bodies = i64::try_from(fingerprinted.len())
+        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
+    census.near_fingerprint_bodies = count(fingerprint_bodies)?;
+    census.near_fingerprint_postings = count(fingerprint_postings)?;
+    census.hot_postings = count(hot_postings)?;
+    census.hot_posting_rows = count(hot_rows)?;
+
     Ok(census)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::clone_codec::{digest_key, encode_clone_eligibility, encode_clone_payload};
     use super::*;
     use rusqlite::params;
     use std::sync::Arc;
     use tracedecay_code_extraction::{
         CloneBodyTokenizationStatusV1, ConservativeCloneTokenV1, ExtractedCloneBodyV1,
     };
-    use tracedecay_domain::{
-        CodeGenerationId, NodeKind, ProjectId, RepositoryId, SourceSpan, SymbolOccurrenceId,
-    };
+    use tracedecay_code_index::clones::CloneBodyPayloadV1;
+    use tracedecay_domain::{NodeKind, SourceSpan};
 
-    /// The three tables the census reads. Triggers and the builder gate belong
-    /// to the write path, which no census read goes through.
+    /// The tables the census reads. Triggers and the builder gate belong to
+    /// the write path, which no census read goes through.
     fn census_schema(connection: &Connection) {
         connection
             .execute_batch(
                 "CREATE TABLE clone_body_payloads(
-                    payload_digest TEXT PRIMARY KEY,
+                    ordinal INTEGER PRIMARY KEY,
+                    payload_digest BLOB NOT NULL UNIQUE,
                     payload BLOB NOT NULL
                  );
                  CREATE TABLE clone_occurrences(
-                    symbol_occurrence_id TEXT PRIMARY KEY,
-                    payload_digest TEXT NOT NULL,
-                    occurrence BLOB NOT NULL
+                    ordinal INTEGER PRIMARY KEY,
+                    symbol_key BLOB NOT NULL UNIQUE,
+                    payload_ordinal INTEGER NOT NULL,
+                    eligibility BLOB NOT NULL
                  );
                  CREATE TABLE clone_exact_postings(
                     class INTEGER NOT NULL,
-                    digest TEXT NOT NULL,
-                    symbol_occurrence_id TEXT NOT NULL
+                    digest BLOB NOT NULL,
+                    occurrence_ordinal INTEGER NOT NULL
+                 );
+                 CREATE TABLE clone_fingerprint_postings(
+                    posting_count INTEGER NOT NULL,
+                    postings BLOB NOT NULL
                  );",
             )
             .expect("census schema");
@@ -277,43 +288,29 @@ mod tests {
         CloneBodyPayloadV1::from_extracted(&body).expect("canonical clone payload")
     }
 
-    fn store_payload(connection: &Connection, payload: &CloneBodyPayloadV1) {
+    /// Store `payload` and return its ordinal.
+    fn store_payload(connection: &Connection, payload: &CloneBodyPayloadV1) -> i64 {
         connection
             .execute(
                 "INSERT INTO clone_body_payloads(payload_digest, payload) VALUES (?1, ?2)",
                 params![
-                    payload.payload_digest.as_str(),
-                    serde_json::to_vec(payload).expect("payload json")
+                    digest_key(&payload.payload_digest).expect("payload digest key"),
+                    encode_clone_payload(payload).expect("payload bytes").0
                 ],
             )
             .expect("store payload");
+        connection.last_insert_rowid()
     }
 
-    fn store_occurrence(connection: &Connection, id: &str, payload: &CloneBodyPayloadV1) {
-        let occurrence = CloneBodyOccurrenceV1 {
-            project_id: ProjectId::new("project.clone-census").expect("project"),
-            repository_id: RepositoryId::new("repository.clone-census").expect("repository"),
-            worktree_id: None,
-            source_generation: CodeGenerationId::new("generation.clone-census")
-                .expect("generation"),
-            snapshot_digest: payload.body_digest.clone(),
-            symbol_occurrence_id: SymbolOccurrenceId::new(id).expect("symbol"),
-            path: "src/lib.rs".to_owned(),
-            body_span: SourceSpan {
-                start_byte: 0,
-                end_byte: 64,
-            },
-            payload_digest: payload.payload_digest.clone(),
-            eligibility: CloneBodyEligibilityV1::Eligible,
-        };
+    fn store_occurrence(connection: &Connection, id: &str, payload_ordinal: i64) {
         connection
             .execute(
-                "INSERT INTO clone_occurrences(symbol_occurrence_id, payload_digest, occurrence)
+                "INSERT INTO clone_occurrences(symbol_key, payload_ordinal, eligibility)
                  VALUES (?1, ?2, ?3)",
                 params![
                     id,
-                    payload.payload_digest.as_str(),
-                    serde_json::to_vec(&occurrence).expect("occurrence json")
+                    payload_ordinal,
+                    encode_clone_eligibility(CloneBodyEligibilityV1::Eligible)
                 ],
             )
             .expect("store occurrence");
@@ -327,13 +324,11 @@ mod tests {
     fn census_refuses_an_occurrence_whose_payload_row_is_absent() {
         let connection = Connection::open_in_memory().expect("census database");
         census_schema(&connection);
-        let present = payload(0);
-        let absent = payload(1);
-        store_payload(&connection, &present);
-        store_occurrence(&connection, "symbol.present", &present);
-        store_occurrence(&connection, "symbol.absent", &absent);
+        let present = store_payload(&connection, &payload(0));
+        store_occurrence(&connection, "symbol.present", present);
+        store_occurrence(&connection, "symbol.absent", present + 1);
 
-        let error = read_clone_index_census(&connection, false, 8)
+        let error = read_clone_index_census(&connection, 8)
             .expect_err("an occurrence without its payload row must refuse the census");
         assert!(
             matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)),
@@ -355,15 +350,14 @@ mod tests {
         let connection = Connection::open_in_memory().expect("census database");
         census_schema(&connection);
         for seed in 0..PAYLOADS {
-            let payload = payload(seed);
-            store_payload(&connection, &payload);
+            let ordinal = store_payload(&connection, &payload(seed));
             for index in 0..OCCURRENCES_PER_PAYLOAD {
-                store_occurrence(&connection, &format!("symbol.{seed}.{index}"), &payload);
+                store_occurrence(&connection, &format!("symbol.{seed}.{index}"), ordinal);
             }
         }
 
         let started = std::time::Instant::now();
-        let census = read_clone_index_census(&connection, false, 8).expect("census");
+        let census = read_clone_index_census(&connection, 8).expect("census");
         let elapsed = started.elapsed();
         assert_eq!(
             census.source_bodies,

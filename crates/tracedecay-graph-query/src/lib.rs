@@ -1,6 +1,6 @@
 //! Generation-pinned verified code-graph queries over daemon-resolved
 //! projections, plus the code-index-backed source readers
-//! (`context::{read_modes, source_read, markdown_sections}`) that hydrate
+//! (`context::{read_modes, source_read}`) that hydrate
 //! source evidence for those queries.
 //!
 //! This crate sits below the transport adapters (`tracedecay-mcp`, the root

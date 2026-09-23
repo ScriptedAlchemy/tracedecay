@@ -15,12 +15,14 @@ use tracedecay_domain::{
     TemporalModeV1, UtcMicros, WorkAttemptIdentityV1, WorkGraphVersionV1,
     WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
 };
-use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
-    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalSnapshotRequest,
-    TemporalSourceAccess, TemporalWatermarks,
-};
+use tracedecay_temporal_query::execution::BindingDigest;
+use tracedecay_temporal_query::ports::TemporalSnapshotRequest;
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalSourceAccess,
+    TemporalWatermarks,
+};
 
 use crate::retrieval::evidence_lanes::score_diagnostic;
 use crate::retrieval::evidence_lanes::{

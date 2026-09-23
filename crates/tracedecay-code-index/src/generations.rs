@@ -642,22 +642,22 @@ fn repository_discriminator(
         .collect())
 }
 
-/// Parse an identity minted by this planner. Legacy
-/// `generation.v1.<repo>.<seq>` parents remain accepted; current identities
-/// include a SHA-256 invalidation fingerprint suffix.
+/// Parse an identity minted by this planner:
+/// `generation.v1.<repo>.<seq>.<fingerprint>`, where the fingerprint is the
+/// 64-hex SHA-256 invalidation suffix. Any other shape is not ours.
 fn parse_minted_generation_id(generation_id: &CodeGenerationId) -> Option<(String, u64)> {
     let mut parts = generation_id.as_str().split('.');
     let scheme = parts.next()?;
     let version = parts.next()?;
     let discriminator = parts.next()?;
     let sequence = parts.next()?;
-    let fingerprint = parts.next();
-    if scheme != "generation" || version != "v1" || parts.next().is_some() {
-        return None;
-    }
-    if fingerprint.is_some_and(|fingerprint| {
-        fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }) {
+    let fingerprint = parts.next()?;
+    if scheme != "generation"
+        || version != "v1"
+        || parts.next().is_some()
+        || fingerprint.len() != 64
+        || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return None;
     }
     Some((discriminator.to_owned(), sequence.parse().ok()?))
@@ -958,11 +958,14 @@ mod tests {
 
         // Foreign parent: an identity this planner never minted.
         let mut foreign = genesis.clone();
-        foreign.generation_id = id("generation.v1.00000002.00000001");
+        let fingerprint = genesis
+            .generation_id
+            .as_str()
+            .rsplit('.')
+            .next()
+            .expect("minted fingerprint");
+        foreign.generation_id = id(&format!("generation.v1.00000002.00000001.{fingerprint}"));
         foreign.parent_generation = None;
-        foreign.invalidation_digest = foreign
-            .expected_legacy_invalidation_digest()
-            .expect("foreign invalidation digest");
         foreign.seal.expected_digest = expected_seal_digest(&foreign).expect("foreign reseal");
         assert_eq!(
             planner.plan_generation(&snapshot, Some(&foreign), UtcMicros(4_000)),

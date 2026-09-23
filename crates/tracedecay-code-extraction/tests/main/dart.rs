@@ -2,7 +2,7 @@ use tracedecay_code_extraction::{DartExtractor, LanguageExtractor};
 use tracedecay_domain::*;
 
 fn extract(source: &str) -> ExtractionResult {
-    DartExtractor.extract("test.dart", source)
+    DartExtractor.extract_artifact("test.dart", source).result
 }
 
 #[test]

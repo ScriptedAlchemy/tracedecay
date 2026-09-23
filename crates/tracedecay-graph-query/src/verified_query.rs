@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use serde_json::Value;
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
@@ -33,8 +32,7 @@ use super::{
     map_projection_error,
 };
 use crate::SourceReadContext;
-use crate::context::read_modes;
-use crate::context::source_read::{self, SourceReadOutput, SourceReadRequest};
+use crate::context::source_read;
 use tracedecay_session_memory::context::{RequestInterruption, run_deadline_signal_interruptible};
 
 /// Inputs required to admit and open one verified graph query.
@@ -232,15 +230,6 @@ impl VerifiedGraphQuery {
         Ok(self.bound_source()?.project_id())
     }
 
-    pub fn read_indexed_source_file(&self, file: &str) -> Result<String> {
-        let (absolute, _) = self.resolve_indexed_source_file(file)?;
-        tracedecay_runtime_core::sync::read_source_file(&absolute).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("cannot read indexed source file '{file}': {error}"),
-            }
-        })
-    }
-
     #[hotpath::measure(label = "usecases.graph.verified.dead_code", future = true)]
     pub async fn find_dead_code(
         &self,
@@ -291,23 +280,6 @@ impl VerifiedGraphQuery {
         .await
     }
 
-    #[hotpath::skip]
-    pub async fn read_source(&self, request: SourceReadRequest<'_>) -> Result<SourceReadOutput> {
-        let source = self.bound_source()?;
-        if request.project_id != source.project_id() {
-            return Err(graph_source_scope_mismatch());
-        }
-        self.await_bound(source_read::read_source(
-            source.project_root(),
-            source.db(),
-            source.read_only(),
-            &self.reader,
-            Arc::clone(&self.cancellation),
-            request,
-        ))
-        .await
-    }
-
     pub fn resolve_indexed_source_file(&self, file: &str) -> Result<(PathBuf, String)> {
         let source = self.bound_source()?;
         let (absolute, display) = source_read::resolve_indexed_source_file(
@@ -320,16 +292,6 @@ impl VerifiedGraphQuery {
             return Err(graph_source_scope_mismatch());
         }
         Ok((absolute, display))
-    }
-
-    pub fn render_map(&self, file_path: &str, kinds: Option<&[String]>) -> Result<Value> {
-        self.refuse_if_bound_closed()?;
-        read_modes::render_map(
-            &self.reader,
-            Arc::clone(&self.cancellation),
-            file_path,
-            kinds,
-        )
     }
 
     pub fn generation(&self) -> &CodeGenerationId {

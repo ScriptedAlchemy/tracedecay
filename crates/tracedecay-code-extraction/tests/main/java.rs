@@ -13,7 +13,9 @@ public class PanicReproduction {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("PanicReproduction.java", source);
+    let result = extractor
+        .extract_artifact("PanicReproduction.java", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let enums: Vec<_> = result
@@ -35,7 +37,7 @@ public class Main {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("src/Main.java", source);
+    let result = extractor.extract_artifact("src/Main.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let pkgs: Vec<_> = result
         .nodes
@@ -60,7 +62,7 @@ public class Calculator {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Calculator.java", source);
+    let result = extractor.extract_artifact("Calculator.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let classes: Vec<_> = result
         .nodes
@@ -89,7 +91,7 @@ public class Foo {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Foo.java", source);
+    let result = extractor.extract_artifact("Foo.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let methods: Vec<_> = result
         .nodes
@@ -116,7 +118,7 @@ public class Person {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Person.java", source);
+    let result = extractor.extract_artifact("Person.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let constructors: Vec<_> = result
         .nodes
@@ -136,7 +138,7 @@ public interface Drawable {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Drawable.java", source);
+    let result = extractor.extract_artifact("Drawable.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let ifaces: Vec<_> = result
         .nodes
@@ -163,7 +165,7 @@ public enum Color {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Color.java", source);
+    let result = extractor.extract_artifact("Color.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let enums: Vec<_> = result
         .nodes
@@ -189,7 +191,7 @@ public class Config {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Config.java", source);
+    let result = extractor.extract_artifact("Config.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
         .nodes
@@ -211,7 +213,7 @@ import static java.lang.Math.PI;
 public class Foo {}
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Foo.java", source);
+    let result = extractor.extract_artifact("Foo.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let uses: Vec<_> = result
         .nodes
@@ -231,7 +233,7 @@ class Worker extends Base implements Runnable {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Worker.java", source);
+    let result = extractor.extract_artifact("Worker.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let has_extends = result.edges.iter().any(|e| e.kind == EdgeKind::Extends)
         || result
@@ -257,7 +259,7 @@ public class Foo {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Foo.java", source);
+    let result = extractor.extract_artifact("Foo.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let annots: Vec<_> = result
@@ -295,7 +297,7 @@ public class Outer {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Outer.java", source);
+    let result = extractor.extract_artifact("Outer.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let inners: Vec<_> = result
         .nodes
@@ -317,7 +319,7 @@ public class Registry {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Registry.java", source);
+    let result = extractor.extract_artifact("Registry.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let init_blocks: Vec<_> = result
         .nodes
@@ -336,7 +338,7 @@ public abstract class Shape {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Shape.java", source);
+    let result = extractor.extract_artifact("Shape.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let abstract_methods: Vec<_> = result
         .nodes
@@ -356,7 +358,7 @@ public class Box<T> {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Box.java", source);
+    let result = extractor.extract_artifact("Box.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let generics: Vec<_> = result
         .nodes
@@ -379,7 +381,7 @@ public class App {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("App.java", source);
+    let result = extractor.extract_artifact("App.java", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let call_refs: Vec<_> = result
         .unresolved_refs
@@ -397,7 +399,9 @@ public @interface MyAnnotation {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("MyAnnotation.java", source);
+    let result = extractor
+        .extract_artifact("MyAnnotation.java", source)
+        .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let annots: Vec<_> = result
         .nodes
@@ -412,7 +416,7 @@ public @interface MyAnnotation {
 fn test_java_file_node_is_root() {
     let source = "public class Main {}";
     let extractor = JavaExtractor;
-    let result = extractor.extract("src/Main.java", source);
+    let result = extractor.extract_artifact("src/Main.java", source).result;
     let files: Vec<_> = result
         .nodes
         .iter()
@@ -431,7 +435,7 @@ public class Foo {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("Foo.java", source);
+    let result = extractor.extract_artifact("Foo.java", source).result;
     let contains: Vec<_> = result
         .edges
         .iter()
@@ -455,7 +459,7 @@ public class App {
 }
 "#;
     let extractor = JavaExtractor;
-    let result = extractor.extract("src/App.java", source);
+    let result = extractor.extract_artifact("src/App.java", source).result;
     let methods: Vec<_> = result
         .nodes
         .iter()

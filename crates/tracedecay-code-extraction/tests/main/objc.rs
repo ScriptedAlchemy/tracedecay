@@ -9,7 +9,7 @@ fn test_objc_extract_imports() {
 #include <stdio.h>
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let includes: Vec<_> = result
         .nodes
@@ -28,7 +28,7 @@ fn test_objc_extract_preprocessor_defines() {
 #define DEFAULT_PORT 8080
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let defs: Vec<_> = result
         .nodes
@@ -50,7 +50,7 @@ fn test_objc_extract_ns_enum() {
 };
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     // NS_ENUM may produce parse errors but we still extract useful data
     let enums: Vec<_> = result
         .nodes
@@ -94,7 +94,7 @@ fn test_objc_extract_protocol() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let protocols: Vec<_> = result
@@ -141,7 +141,7 @@ fn test_objc_extract_class_interface() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -198,7 +198,7 @@ fn test_objc_extract_class_with_protocol_conformance() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let classes: Vec<_> = result
@@ -271,7 +271,7 @@ fn test_objc_extract_implementation() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let impls: Vec<_> = result
@@ -331,7 +331,7 @@ void logMessage(LogLevel level, NSString *message) {
 }
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns: Vec<_> = result
@@ -373,7 +373,7 @@ fn test_objc_message_expression_calls() {
 @end
 "#;
     let extractor = ObjcExtractor;
-    let result = extractor.extract("sample.m", source);
+    let result = extractor.extract_artifact("sample.m", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let calls: Vec<_> = result

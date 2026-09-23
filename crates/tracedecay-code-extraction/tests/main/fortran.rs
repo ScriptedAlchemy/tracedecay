@@ -5,7 +5,7 @@ use tracedecay_domain::*;
 fn extract_fixture() -> ExtractionResult {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.f90").unwrap();
     let extractor = FortranExtractor;
-    let result = extractor.extract("sample.f90", &source);
+    let result = extractor.extract_artifact("sample.f90", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     result
 }

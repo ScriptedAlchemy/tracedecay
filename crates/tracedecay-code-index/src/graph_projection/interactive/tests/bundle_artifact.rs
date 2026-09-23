@@ -1,6 +1,7 @@
 //! Seal-time catalog artifact: the manifest-derived bundle artifact must
 //! install as a ready catalog identical to the one the projection warm scan
-//! builds, and a foreign or corrupt artifact must be a typed refusal.
+//! builds, carry no generation of its own, and a corrupt artifact must be a
+//! typed refusal.
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -237,24 +238,26 @@ fn catalog_with_reversed_receiver_span_is_refused() {
     ));
 }
 
+/// Linked worktrees seal the same graph under their own generations; the
+/// artifact must not tell them apart, or they could never share it. The
+/// generation binding is the per-generation bundle manifest's job.
 #[test]
-fn artifact_for_a_foreign_generation_is_a_typed_mismatch() {
+fn the_same_graph_under_another_generation_encodes_identical_bytes() {
     let bytes = encoded_fixture_artifact();
-    let foreign = code_graph_generation_id(
+    let mut other = production_manifest();
+    other.generation = code_graph_generation_id(
         &id::<CodeGenerationId>("generation.interactive.other"),
         &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
     )
-    .expect("foreign generation id");
-    let error = match decode_interactive_catalog_artifact(&bytes, foreign.as_str(), &NeverCancelled)
-    {
-        Ok(_) => panic!("foreign generation must be refused"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error,
-        CodeGraphProjectionError::GenerationMismatch
-    ));
+    .expect("other generation id");
+    assert_ne!(other.generation, production_manifest().generation);
+    let mut other_bytes = Vec::new();
+    write_interactive_catalog_artifact(&other, &mut other_bytes, &NeverCancelled)
+        .expect("encode catalog artifact under another generation");
+    assert_eq!(bytes, other_bytes);
+    decode_interactive_catalog_artifact(&other_bytes, &NeverCancelled)
+        .expect("the shared artifact decodes for either generation");
 }
 
 #[test]

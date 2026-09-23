@@ -16,11 +16,13 @@ use same_file::Handle;
 use sha2::{Digest, Sha256};
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationStoreLockV1, DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1,
-    DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
-    MAX_DURABLE_GENERATION_INDEX_BYTES_V1, MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1,
-    durable_generation_index_digest, retain_bounded_generation_index,
-    try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
+    CodeGenerationRetentionErrorV1, CodeGenerationStoreLockV1, DurableGenerationCardinalityV1,
+    DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
+    DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
+    MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_generation_segments_publication_lock,
+    code_generation_segments_root, durable_generation_index_digest,
+    retain_bounded_generation_index, try_acquire_code_generation_store_lock,
+    try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectionBatchRequestV1,
@@ -36,7 +38,7 @@ use crate::code_index::{
         CodeIndexInterruptionV1, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
         CodeIndexPublishedGenerationV1, SealedGenerationSegmentPublicationV1,
         SealedGenerationSegmentReadV1, SharedPhysicalCodeArtifactPoolV1,
-        UninterruptibleCodeIndexControlV1, VerifiedSealedTextGenerationMetadataV1,
+        VerifiedSealedTextGenerationMetadataV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
@@ -469,6 +471,9 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     active_path: PathBuf,
     pub(super) generations_root: PathBuf,
     segments_root: PathBuf,
+    /// Names this store's temporaries in a segment directory other worktree
+    /// scopes of the project publish into as well.
+    segment_temporary_prefix: String,
     pub(super) project_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
@@ -748,8 +753,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let generations_root = store_root.join("code-generations-v1");
         std::fs::create_dir_all(&generations_root)?;
-        let segments_root = store_root.join("code-generation-segments-v1");
+        let segments_root = code_generation_segments_root(store_root);
         std::fs::create_dir_all(&segments_root)?;
+        let segment_temporary_prefix = format!(
+            "{}.{}",
+            store_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| std::io::Error::other(
+                    "code-generation store root has no UTF-8 name"
+                ))?,
+            std::process::id()
+        );
         let _store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(|error| std::io::Error::other(error.to_string()))?
             .ok_or_else(|| std::io::Error::other("code-generation store has an active owner"))?;
@@ -760,7 +775,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             store_root,
             project_root,
         )?;
-        Self::remove_abandoned_evidence_packs(&segments_root)
+        Self::remove_abandoned_evidence_packs(&segments_root, store_root)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(Self {
             cache: Arc::new(DecodedGenerationCacheV1::default()),
@@ -772,6 +787,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
             segments_root,
+            segment_temporary_prefix,
             project_root: project_root.to_path_buf(),
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
@@ -910,9 +926,19 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .ok_or_else(|| Self::unavailable("generation store read lock is contended"))
     }
 
+    /// Only this scope's temporaries: the store lock held by the caller proves
+    /// no publication of this scope is in flight, and other scopes' are theirs.
     fn remove_abandoned_evidence_packs(
         segments_root: &Path,
+        store_root: &Path,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let prefix = format!(
+            ".evidence-pack-publication.{}.",
+            store_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| Self::unavailable("code-generation store root has no UTF-8 name"))?
+        );
         let mut removed = false;
         for entry in std::fs::read_dir(segments_root).map_err(Self::unavailable)? {
             let entry = entry.map_err(Self::unavailable)?;
@@ -920,7 +946,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if !name.starts_with(".evidence-pack-publication.") || !name.ends_with(".tmp") {
+            if !name.starts_with(&prefix) || !name.ends_with(".tmp") {
                 continue;
             }
             let metadata = entry.path().symlink_metadata().map_err(Self::unavailable)?;
@@ -998,8 +1024,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let temporary_path = self.segments_root.join(format!(
             ".segment-publication.{}.{}.tmp",
-            std::process::id(),
-            digest_hex
+            self.segment_temporary_prefix, digest_hex
         ));
         match temporary_path.symlink_metadata() {
             Ok(metadata) if metadata.file_type().is_file() => {
@@ -1602,8 +1627,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         match CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes) {
-            Ok(metadata) => Ok(metadata),
-            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => Ok(None),
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(
+                CodeIndexProductionErrorV1::SourceCommitmentsUnavailable
+                | CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_),
+            ) => Ok(None),
             Err(error) => Err(Self::corruption(error.to_string())),
         }
     }
@@ -1616,51 +1644,25 @@ impl DaemonCodeIndexPublicationStoreV1 {
         expected_file_digest: &ManifestDigest,
         lifetime_lock: CodeGenerationStoreLockV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
-        let monolithic = match CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
-            &mut *file,
-            admitted_len,
-            Some(expected_file_digest),
-            &UninterruptibleCodeIndexControlV1,
-        ) {
-            Ok(monolithic) => monolithic,
-            // A generation is a pure function of its source tree, so an
-            // envelope revision this build no longer reads is refused rather
-            // than repaired: abstain the way an incompatible generation does
-            // and let the scheduler rebuild it.
-            Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
-                tracing::warn!(
-                    target: "tracedecay::code_index",
-                    sealed_format_revision = revision,
-                    "{}",
-                    CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
-                );
-                return Ok(None);
-            }
-            Err(error @ CodeIndexProductionErrorV1::SealedRowContractRefused { revision, .. }) => {
-                tracing::warn!(
-                    target: "tracedecay::code_index",
-                    sealed_format_revision = revision,
-                    "{error}"
-                );
-                return Ok(None);
-            }
-            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        if monolithic.is_some() {
-            return Ok(monolithic);
-        }
         file.seek(SeekFrom::Start(0)).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation manifest seek failed: {error}"
             ))
         })?;
         let mut manifest = Vec::new();
-        file.read_to_end(&mut manifest).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation manifest read failed: {error}"
-            ))
-        })?;
+        Read::by_ref(file)
+            .take(admitted_len)
+            .read_to_end(&mut manifest)
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation manifest read failed: {error}"
+                ))
+            })?;
+        if u64::try_from(manifest.len()).ok() != Some(admitted_len) {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation length does not match its admitted length".to_owned(),
+            ));
+        }
         if Self::state_digest(&manifest) != expected_file_digest.as_str() {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation manifest filename digest does not match its bytes".to_owned(),
@@ -1696,11 +1698,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
             },
         ) {
             Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => Ok(None),
-            // The manifest revision is refused for the same reason a retired
-            // monolithic envelope is, and on the same terms: the generation is
-            // re-derivable from its source tree, so the scheduler rebuilds it
-            // instead of treating a shape this build no longer writes as
-            // corruption.
+            // A generation is a pure function of its source tree, so a
+            // manifest revision this build no longer reads is refused rather
+            // than repaired: abstain and let the scheduler rebuild it instead
+            // of treating a shape this build no longer writes as corruption.
             Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
                 tracing::warn!(
                     target: "tracedecay::code_index",
@@ -1710,7 +1711,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 );
                 Ok(None)
             }
-            result => result,
+            result => result.map(Some),
         }
     }
 
@@ -2358,9 +2359,20 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             Err(error) => return Err(Self::unavailable(error)),
         }
         let mut temporary = TemporaryGenerationFileV1::new(temporary_path);
+        // From the first segment write until the manifest naming them is
+        // durable, no sweep over the project's shared segments may run.
+        let segments_lock = acquire_generation_segments_publication_lock(store_root, &|| {
+            self.seal_checkpoint().is_err()
+        })
+        .map_err(|error| match error {
+            CodeGenerationRetentionErrorV1::Cancelled => {
+                CodeIndexPublicationStoreErrorV1::CompareAndSwap
+            }
+            error => Self::unavailable(error),
+        })?;
         let evidence_temporary_path = self.segments_root.join(format!(
             ".evidence-pack-publication.{}.tmp",
-            std::process::id()
+            self.segment_temporary_prefix
         ));
         let mut evidence_pack = TemporaryEvidencePackV1::create(evidence_temporary_path)?;
         let mut referenced_segment_bytes = 0_u64;
@@ -2548,6 +2560,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             }
         };
         evidence_pack.attach_to_manifest();
+        drop(segments_lock);
 
         let exact_git_evidence = self.exact_git_evidence(&generation)?;
         let mut generation_index = prior_pointer
