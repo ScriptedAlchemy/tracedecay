@@ -17,7 +17,7 @@ use tracedecay::test_support::host_admission::{
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::git_correlation::{
-    DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
+    DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource, normalize_worktree,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -518,7 +518,7 @@ async fn sessions_for_names_the_sessions_that_touched_the_git_ref() {
         .await,
         answer(
             "worktree",
-            &feature_worktree,
+            &normalize_worktree(&feature_worktree),
             "produced",
             json!([correlation_hit(
                 "s-feature",
@@ -700,7 +700,7 @@ fn correlation_hit(session_id: &str, branch: &str, worktree: &str, ts: i64) -> V
         "provider": "claude",
         "session_id": session_id,
         "branch": branch,
-        "worktree": worktree,
+        "worktree": normalize_worktree(worktree),
         "first_ts": ts,
         "last_ts": ts,
         "event_count": 1,

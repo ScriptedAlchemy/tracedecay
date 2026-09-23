@@ -1040,9 +1040,12 @@ pub(crate) struct TestTempDir {
 
 impl TestTempDir {
     pub(crate) fn new() -> Self {
-        Self {
-            dir: Some(TempDir::new().unwrap()),
-        }
+        // Keep fixture paths aligned with macOS's canonical /private/var project roots.
+        #[cfg(target_os = "macos")]
+        let dir = TempDir::new_in(canonicalize_test_dir(&std::env::temp_dir())).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let dir = TempDir::new().unwrap();
+        Self { dir: Some(dir) }
     }
 }
 

@@ -4552,7 +4552,7 @@ fn rss_scaled_request(file_count: usize) -> CodeIndexBuildRequestV1 {
 /// the restore issued, and the peak RSS it grew over a freshly reset high
 /// water mark.
 struct RssDecodeProbeV1 {
-    hwm_delta_kib: u64,
+    hwm_delta_kib: Option<u64>,
     evidence_reads: usize,
     evidence_read_whole: bool,
     largest_evidence_read: u64,
@@ -4566,13 +4566,16 @@ fn rss_measure_decode(
     manifest: &[u8],
     segments: &BTreeMap<String, Vec<u8>>,
     evidence_digest: &str,
+    measure_rss: bool,
 ) -> RssDecodeProbeV1 {
-    assert!(rss_reset_peak(), "reset VmHWM");
-    let hwm_before = rss_proc_kib("VmHWM").expect("VmHWM");
+    let hwm_before = measure_rss.then(|| {
+        assert!(rss_reset_peak(), "reset VmHWM");
+        rss_proc_kib("VmHWM").expect("VmHWM")
+    });
     let mut whole_reads = 0_usize;
     let mut ranged_reads = 0_usize;
     let mut probe = RssDecodeProbeV1 {
-        hwm_delta_kib: 0,
+        hwm_delta_kib: None,
         evidence_reads: 0,
         evidence_read_whole: false,
         largest_evidence_read: 0,
@@ -4618,15 +4621,17 @@ fn rss_measure_decode(
         })
         .expect("measured manifest decodes")
         .expect("measured manifest is the current partitioned revision");
-    let hwm_after = rss_proc_kib("VmHWM").expect("VmHWM");
+    let hwm_after = hwm_before.map(|_| rss_proc_kib("VmHWM").expect("VmHWM"));
     let file_count = restored.snapshot().files.len();
     drop(restored);
-    probe.hwm_delta_kib = hwm_after.saturating_sub(hwm_before);
+    probe.hwm_delta_kib = hwm_before
+        .zip(hwm_after)
+        .map(|(before, after)| after.saturating_sub(before));
     println!(
         "rss_probe form={label} files={file_count} whole_reads={whole_reads} \
 ranged_reads={ranged_reads} evidence_reads={} evidence_read_whole={} \
-largest_evidence_read={} largest_evidence_buffer={} hwm_before_kib={hwm_before} \
-hwm_after_kib={hwm_after} hwm_delta_kib={}",
+largest_evidence_read={} largest_evidence_buffer={} hwm_before_kib={hwm_before:?} \
+hwm_after_kib={hwm_after:?} hwm_delta_kib={:?}",
         probe.evidence_reads,
         probe.evidence_read_whole,
         probe.largest_evidence_read,
@@ -4759,13 +4764,13 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     /// Alternating paged/legacy rounds behind the discarded warm-up.
     const RSS_ROUNDS: usize = 4;
 
-    // VmHWM and `clear_refs` are Linux-only. The read-shape guard needs
-    // neither, so run it alone elsewhere rather than skipping the test.
-    let rss_readable = rss_proc_kib("VmHWM").is_some() && rss_reset_peak();
+    // VmHWM and `clear_refs` are Linux-only and mandatory there. The
+    // read-shape guard needs neither, so run it alone on other platforms.
+    let measure_rss = cfg!(target_os = "linux");
 
     // VmHWM is process-wide, so the reading only means anything while nothing
     // else is allocating: take it in a child that runs this test alone.
-    if rss_readable && std::env::var_os(RSS_CHILD).is_none() {
+    if measure_rss && std::env::var_os(RSS_CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([RSS_TEST, "--exact", "--nocapture", "--test-threads=1"])
             .env(RSS_CHILD, "1")
@@ -4789,12 +4794,14 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
         &fixture.paged_manifest,
         &fixture.segments,
         &fixture.evidence_digest,
+        measure_rss,
     );
     let legacy = rss_measure_decode(
         "legacy",
         &fixture.legacy_manifest,
         &fixture.segments,
         &fixture.evidence_digest,
+        measure_rss,
     );
 
     // --- Guard 1: the read shape, exact. ------------------------------------
@@ -4835,7 +4842,7 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
     );
 
     // --- Guard 2: peak RSS, noise-tolerant. ---------------------------------
-    if !rss_readable {
+    if !measure_rss {
         return;
     }
     // The first restore in a process pays a cold-start cost (the arena a
@@ -4851,8 +4858,10 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
                 &fixture.paged_manifest,
                 &fixture.segments,
                 &fixture.evidence_digest,
+                measure_rss,
             )
-            .hwm_delta_kib,
+            .hwm_delta_kib
+            .expect("Linux VmHWM measurement"),
         );
         legacy_hwm = legacy_hwm.min(
             rss_measure_decode(
@@ -4860,8 +4869,10 @@ fn legacy_generation_restore_does_not_materialize_its_evidence_segment() {
                 &fixture.legacy_manifest,
                 &fixture.segments,
                 &fixture.evidence_digest,
+                measure_rss,
             )
-            .hwm_delta_kib,
+            .hwm_delta_kib
+            .expect("Linux VmHWM measurement"),
         );
     }
     // The paged decode of the same generation is the control, not a warm-up:
