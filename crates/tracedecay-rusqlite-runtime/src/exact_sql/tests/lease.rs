@@ -174,7 +174,7 @@ fn active_transaction_hits_absolute_lease_and_releases_writer() {
 /// batches that each fit inside one execution, so the fixture itself never
 /// depends on the limit the test is about.
 fn seed_migration_source(channel: &ExactSqlHandle, rows: i64) {
-    const BATCH: i64 = 250_000;
+    const BATCH: i64 = 25_000;
     let mut seeded = 0;
     while seeded < rows {
         let batch = BATCH.min(rows - seeded);
@@ -199,10 +199,10 @@ fn seed_migration_source(channel: &ExactSqlHandle, rows: i64) {
 
 /// Rows the store-sized fixture seeds.
 ///
-/// Sized from this move's measured cost on this shape, about 1.6 µs a row,
-/// so the whole-table form needs several times the shortened test execution
-/// limit. A slower host only widens the overrun, so the refusal cannot stop
-/// firing; the fixture would have to get faster than the limit to go quiet.
+/// Sized for the retired projected-object copy's repeated JSON extraction:
+/// the whole-table form exceeds the shortened test execution limit, while a
+/// production-sized chunk of the same statement leaves headroom. The fixture
+/// seed uses smaller statements so seeding does not consume that limit.
 const STORE_SIZED_ROWS: i64 = 3_000_000;
 
 /// Why a store-sized migration cannot run as one statement inside a caller's
@@ -223,11 +223,14 @@ const STORE_SIZED_ROWS: i64 = 3_000_000;
 /// finishes a whole table is settled where the migrations live.
 #[test]
 fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
-    const MOVE: &str = "INSERT OR IGNORE INTO moved (key, mutation_digest, partition_digest)
+    // The non-null predicate is part of the real projected-object migration;
+    // dropping its second JSON extraction made this store-sized copy complete
+    // inside the test deadline on a fast host.
+    const MOVE: &str = "INSERT OR IGNORE INTO moved (key, mutation_digest)
                         SELECT key,
-                               json_extract(payload, '$.mutation_digest'),
-                               json_extract(payload, '$.partition_digest')
-                        FROM source WHERE key <= ?";
+                               json_extract(payload, '$.mutation_digest')
+                        FROM source WHERE key <= ?
+                          AND json_extract(payload, '$.mutation_digest') IS NOT NULL";
 
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
@@ -236,8 +239,7 @@ fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
             "CREATE TABLE source (key INTEGER PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE moved (
                 key INTEGER PRIMARY KEY,
-                mutation_digest TEXT NOT NULL,
-                partition_digest TEXT NOT NULL
+                mutation_digest TEXT NOT NULL
              );"
             .to_owned(),
         )
