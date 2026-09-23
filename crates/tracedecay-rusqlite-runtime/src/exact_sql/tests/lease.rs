@@ -199,10 +199,10 @@ fn seed_migration_source(channel: &ExactSqlHandle, rows: i64) {
 
 /// Rows the store-sized fixture seeds.
 ///
-/// Sized from this move's measured cost on this shape, about 1.6 µs a row,
-/// so the whole-table form needs several times the shortened test execution
-/// limit. A slower host only widens the overrun, so the refusal cannot stop
-/// firing; the fixture would have to get faster than the limit to go quiet.
+/// Sized for the retired projected-object copy's repeated JSON extraction:
+/// the whole-table form exceeds the shortened test execution limit, while a
+/// production-sized chunk of the same statement leaves headroom. The fixture
+/// seed uses smaller statements so seeding does not consume that limit.
 const STORE_SIZED_ROWS: i64 = 3_000_000;
 
 /// Why a store-sized migration cannot run as one statement inside a caller's
@@ -223,11 +223,15 @@ const STORE_SIZED_ROWS: i64 = 3_000_000;
 /// finishes a whole table is settled where the migrations live.
 #[test]
 fn a_store_sized_statement_is_refused_and_a_migration_chunk_has_headroom() {
+    // The non-null predicate is part of the real projected-object migration;
+    // dropping its second JSON extraction made this store-sized copy complete
+    // inside the test deadline on a fast host.
     const MOVE: &str = "INSERT OR IGNORE INTO moved (key, mutation_digest, partition_digest)
                         SELECT key,
                                json_extract(payload, '$.mutation_digest'),
                                json_extract(payload, '$.partition_digest')
-                        FROM source WHERE key <= ?";
+                        FROM source WHERE key <= ?
+                          AND json_extract(payload, '$.mutation_digest') IS NOT NULL";
 
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
