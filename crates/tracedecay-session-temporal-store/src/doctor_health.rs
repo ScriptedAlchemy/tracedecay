@@ -177,30 +177,26 @@ const REQUIRED_TRIGGERS: &[(&str, &str)] = &[
         "session_occurrences_fts_insert_v1",
         "CREATE TRIGGER session_occurrences_fts_insert_v1
          AFTER INSERT ON session_occurrences BEGIN
-             INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
-             VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+             INSERT INTO session_occurrences_fts(rowid, index_text)
+             VALUES (NEW.rowid, NEW.index_text);
          END",
     ),
     (
         "session_occurrences_fts_delete_v1",
         "CREATE TRIGGER session_occurrences_fts_delete_v1
          AFTER DELETE ON session_occurrences BEGIN
-             INSERT INTO session_occurrences_fts(
-                 session_occurrences_fts, rowid, index_text, snippet_text
-             )
-             VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
+             INSERT INTO session_occurrences_fts(session_occurrences_fts, rowid, index_text)
+             VALUES ('delete', OLD.rowid, OLD.index_text);
          END",
     ),
     (
         "session_occurrences_fts_update_v1",
         "CREATE TRIGGER session_occurrences_fts_update_v1
-         AFTER UPDATE OF index_text, snippet_text ON session_occurrences BEGIN
-             INSERT INTO session_occurrences_fts(
-                 session_occurrences_fts, rowid, index_text, snippet_text
-             )
-             VALUES ('delete', OLD.rowid, OLD.index_text, OLD.snippet_text);
-             INSERT INTO session_occurrences_fts(rowid, index_text, snippet_text)
-             VALUES (NEW.rowid, NEW.index_text, NEW.snippet_text);
+         AFTER UPDATE OF index_text ON session_occurrences BEGIN
+             INSERT INTO session_occurrences_fts(session_occurrences_fts, rowid, index_text)
+             VALUES ('delete', OLD.rowid, OLD.index_text);
+             INSERT INTO session_occurrences_fts(rowid, index_text)
+             VALUES (NEW.rowid, NEW.index_text);
          END",
     ),
     (

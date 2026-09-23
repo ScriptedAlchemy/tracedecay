@@ -1,17 +1,17 @@
 use std::marker::PhantomData;
 
-use super::{
-    ExecutionControl, MeasuredTemporalValue, ReadBudgetAccounting, TemporalPortError,
-    TemporalRecord,
+use crate::execution::ExecutionControl;
+use crate::ports::{
+    MeasuredTemporalValue, ReadBudgetAccounting, TemporalPortError, TemporalRecord,
 };
 use crate::ranking::RankingCandidate;
 
 const MAX_READ_ITEMS: usize = 8_192;
 const MAX_READ_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_READ_ITEM_BYTES: usize = 8 * 1024 * 1024;
-pub(super) const MAX_PAGE_ITEMS_CAP: usize = 1_024;
+pub(crate) const MAX_PAGE_ITEMS_CAP: usize = 1_024;
 const MAX_CONTINUATION_KEY_BYTES: usize = 4_096;
-pub(super) const MAX_BOUNDED_PAGE_PREALLOC: usize = 64;
+pub(crate) const MAX_BOUNDED_PAGE_PREALLOC: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageLimits {
@@ -24,7 +24,7 @@ pub struct PageLimits {
 /// Accounting for a request-shape ceiling check. A zero value is malformed
 /// rather than oversized, and reporting it as "requested 0" against a ceiling it
 /// never reached would be a fabricated number.
-pub(super) fn over_ceiling(requested: usize, ceiling: usize) -> Option<ReadBudgetAccounting> {
+pub(crate) fn over_ceiling(requested: usize, ceiling: usize) -> Option<ReadBudgetAccounting> {
     (requested > ceiling).then(|| ReadBudgetAccounting::requested(ceiling as u64, requested as u64))
 }
 
@@ -211,7 +211,7 @@ pub struct BoundedPage<T> {
     items: Vec<T>,
     encoded_bytes: usize,
     status: PageStatus,
-    pub(super) continuation: Option<PageKey>,
+    pub(crate) continuation: Option<PageKey>,
 }
 
 impl<T> BoundedPage<T> {
@@ -408,7 +408,7 @@ pub const CANDIDATE_READ_BUDGET: ReadBudgetResources = ReadBudgetResources {
     total_bytes: "candidate total bytes",
 };
 
-pub(super) const RECORD_READ_BUDGET: ReadBudgetResources = ReadBudgetResources {
+pub(crate) const RECORD_READ_BUDGET: ReadBudgetResources = ReadBudgetResources {
     item_count: "record item count",
     item_bytes: "record item bytes",
     total_bytes: "record total bytes",
@@ -499,7 +499,7 @@ impl<T: MeasuredTemporalValue> BoundedPageSink<'_, T> {
     }
 
     #[cfg(test)]
-    pub(super) fn preallocated_capacity(&self) -> usize {
+    pub(crate) fn preallocated_capacity(&self) -> usize {
         self.items.capacity()
     }
 

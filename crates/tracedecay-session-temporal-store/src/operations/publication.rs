@@ -1,9 +1,7 @@
 use std::sync::Mutex;
 
-use serde_json::{Value, json};
-use tracedecay_domain::{
-    EntityKind, RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorTargetV2,
-};
+use serde_json::Value;
+use tracedecay_domain::RetrievalAnchorId;
 use tracedecay_runtime_core::db::engine::params;
 
 use tracedecay_lcm::retrieval_content::projected_content_hash;
@@ -16,9 +14,8 @@ use tracedecay_lcm::{
 };
 
 use super::{
-    CanonicalPublicationManifest, FrozenPublicationReceipt, PUBLICATION_ROUTE, SANITIZER_VERSION,
-    generation, load_manifest, logical_identity_digest, receipt_id, sources, summary_projection,
-    unixepoch,
+    CanonicalPublicationManifest, FrozenPublicationReceipt, SANITIZER_VERSION, generation,
+    load_manifest, logical_identity_digest, receipt_id, sources, summary_projection, unixepoch,
 };
 use crate::relations::{SessionRelationProjection, SummaryRelationNode, SummarySourceRef};
 
@@ -183,13 +180,20 @@ pub async fn publish_immutable_summary(
     );
     let source_horizon = sources::source_horizon_json(&sources, draft.source_time_end);
     let owner_json = sources::session_owner_json(conn, &draft.provider, &draft.session_id).await?;
-    sources::insert_compatibility_source_anchors(conn, &sources, &owner_json).await?;
-    let typed_summary_anchor =
-        sources::build_summary_anchor(conn, summary_id, &sources, created_at).await?;
-    let summary_anchor_id = typed_summary_anchor.as_ref().map_or_else(
-        || format!("anchor_summary_{}", projected_content_hash(summary_id)),
-        |anchor| anchor.anchor_id().as_str().to_string(),
-    );
+    sources::insert_unobserved_raw_anchors(conn, &sources, &owner_json).await?;
+    let source_ids = sources
+        .iter()
+        .map(|source| source.canonical.id.as_str())
+        .collect::<Vec<_>>();
+    let summary_anchor = sources::derive_summary_anchor(
+        conn,
+        summary_id,
+        &source_ids,
+        &owner_json,
+        &source_horizon,
+        created_at,
+    )
+    .await?;
     let receipt_id = receipt_id(summary_id, &summary_hash);
     let manifest = CanonicalPublicationManifest::from_publication(
         draft,
@@ -197,7 +201,7 @@ pub async fn publish_immutable_summary(
         &sources,
         source_horizon.clone(),
         owner_json.clone(),
-        summary_anchor_id.clone(),
+        summary_anchor.anchor_id.clone(),
         receipt_id.clone(),
         publication.predecessor_summary_id.clone(),
         logical_identity,
@@ -205,21 +209,12 @@ pub async fn publish_immutable_summary(
     let publication_json = serde_json::to_string(&manifest)
         .map_err(|error| LcmError::Db(format!("encode summary publication manifest: {error}")))?;
 
-    sources::insert_summary_anchor(
-        conn,
-        &summary_anchor_id,
-        summary_id,
-        &owner_json,
-        &source_horizon,
-        created_at,
-        typed_summary_anchor.as_ref(),
-    )
-    .await?;
+    sources::insert_anchor(conn, &summary_anchor, summary_id).await?;
     insert_canonical_node(
         conn,
         summary_id,
         draft.session_id.as_str(),
-        &summary_anchor_id,
+        &summary_anchor.anchor_id,
         draft.summary_text.as_str(),
         &source_horizon,
         &publication_json,
@@ -390,45 +385,23 @@ async fn verify_summary_anchor(
     manifest: &CanonicalPublicationManifest,
     created_at: i64,
 ) -> Result<(), LcmError> {
-    let expected_anchor_json = json!({
-        "kind": "immutable_session_summary",
-        "anchor_id": manifest.summary_anchor_id,
-        "summary_id": summary_id,
-        "owner": serde_json::from_str::<Value>(&manifest.owner_json).unwrap_or(Value::Null),
-        "source_horizon": serde_json::from_str::<Value>(&manifest.source_horizon_json)
-            .unwrap_or(Value::Null),
-        "ingested_at": created_at,
-        "payload_access": "eligible",
-        "retention_class": "retention.session-summary",
-    })
-    .to_string();
-    let mut rows = conn
-        .query(
-            "SELECT anchor_json, owner_json, projection_generation
-             FROM retrieval_anchors WHERE anchor_id = ?1",
-            params![manifest.summary_anchor_id.as_str()],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(conflict(summary_id));
-    };
-    let actual_anchor_json = row.get::<String>(0)?;
-    let actual_owner_json = row.get::<String>(1)?;
-    let typed_match = serde_json::from_str::<RetrievalAnchorRecord>(&actual_anchor_json)
-        .ok()
-        .is_some_and(|anchor| {
-            anchor.anchor_id().as_str() == manifest.summary_anchor_id
-                && anchor.owner_column_matches(actual_owner_json.as_str())
-                && matches!(
-                    anchor.target(),
-                    RetrievalAnchorTargetV2::Entity(entity)
-                        if entity.kind == EntityKind::SessionSummary
-                            && entity.id.as_str() == summary_id
-                )
-        });
-    let legacy_match =
-        actual_anchor_json == expected_anchor_json && actual_owner_json == manifest.owner_json;
-    if (!legacy_match && !typed_match) || row.get::<String>(2)? != PUBLICATION_ROUTE {
+    let source_ids = manifest
+        .canonical_sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect::<Vec<_>>();
+    let expected = sources::derive_summary_anchor(
+        conn,
+        summary_id,
+        &source_ids,
+        &manifest.owner_json,
+        &manifest.source_horizon_json,
+        created_at,
+    )
+    .await?;
+    if expected.anchor_id != manifest.summary_anchor_id
+        || !sources::stored_anchor_matches(conn, &expected).await?
+    {
         return Err(LcmError::SummarySourceNotOwnedBySession);
     }
     Ok(())

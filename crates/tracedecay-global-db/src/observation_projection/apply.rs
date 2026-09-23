@@ -36,7 +36,7 @@ fn decode_canonical_envelope(
 pub(in super::super) fn derive_projection(
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<ObservationProjection> {
-    tracedecay_session_temporal_store::derive_projection(observation)
+    tracedecay_store::derive_canonical_projection(observation)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

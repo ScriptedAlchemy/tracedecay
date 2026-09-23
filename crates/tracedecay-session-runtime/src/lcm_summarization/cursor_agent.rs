@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_lcm::LcmSummaryRequest;
-use tracedecay_sessions::runtime::codex_app_server::strip_reasoning_tags;
+use tracedecay_sessions::runtime::hosts::codex_app_server::strip_reasoning_tags;
 
 const CURSOR_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CURSOR_SUMMARY_CHILD";
 

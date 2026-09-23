@@ -571,17 +571,9 @@ fn list_project_directories_page(
     let directories = page
         .entries
         .into_iter()
-        .map(|entry| match entry {
-            super::orphan_stores::ProjectDirectoryWorkV1::Project(name) => {
-                let path = projects_dir.join(&name);
-                (name, path)
-            }
-            super::orphan_stores::ProjectDirectoryWorkV1::Quarantine {
-                quarantine_name, ..
-            } => {
-                let path = projects_dir.join(&quarantine_name);
-                (quarantine_name, path)
-            }
+        .map(|name| {
+            let path = projects_dir.join(&name);
+            (name, path)
         })
         .collect::<Vec<_>>();
     Ok(ProjectDirectoryPage {

@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde_json::json;
 use tracedecay_domain::{
-    AnchorDurabilityClass, AnchorSourceGenerationV2, CanonicalObservationEnvelopeV1,
+    AnchorDurabilityClass, AnchorSourceGeneration, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     ComponentVersion, CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass, FactOwnerV1,
     GenerationBoundRepositoryProvenanceV1, ObservationId, ObservationIdentityMaterialV1,
@@ -10,7 +10,7 @@ use tracedecay_domain::{
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, ProjectId,
     ProjectionGenerationId, ProviderId, ProviderUsageContractDimensionV1, RefId,
     RepositoryEvidenceV1, RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
-    RetentionClass, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1, SessionId, UtcMicros, VectorWatermark,
 };
@@ -20,7 +20,7 @@ use tracedecay_store::{
     ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
     ObservationWrite, RetrievalAnchorDispositionRecordV1, SESSION_MESSAGE_PROJECTOR_VERSION,
     StorageRuntimeErrorV1, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    build_observation_retrieval_anchor,
 };
 
 use crate::operation::StorageOperationError;
@@ -124,7 +124,7 @@ fn anchored_at(write: ObservationWrite, ingested_at: UtcMicros) -> AnchoredObser
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "runtime.fixture.v1")
             .unwrap();
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         ingested_at,
@@ -234,8 +234,8 @@ fn repository_write_for(
         Some(write.observation().observation_id().clone()),
     )
     .unwrap();
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::RepositoryCapture {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::RepositoryCapture {
             repository_id: binding.capture().repository_id().clone(),
             capture_id: binding.capture_id().clone(),
             receipt: write.observation().receipt().receipt().clone(),
@@ -245,9 +245,7 @@ fn repository_write_for(
         occurred_at: None,
         ingested_at: UtcMicros(clock),
         evidence_class,
-        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
-            binding.capture_id().clone(),
-        ),
+        source_generation: AnchorSourceGeneration::RepositoryCapture(binding.capture_id().clone()),
         projection_generation: write.projection_generation().clone(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
@@ -623,7 +621,7 @@ fn replay_with_different_anchor_fails_without_mutating_authority_rows() {
     let authorization =
         build_observation_resolution_authorization_v1(write.observation(), "runtime.fixture.v1")
             .unwrap();
-    let conflicting_anchor = build_observation_retrieval_anchor_v2(
+    let conflicting_anchor = build_observation_retrieval_anchor(
         write.observation(),
         conflicting_generation.clone(),
         UtcMicros(1),

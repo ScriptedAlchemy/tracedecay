@@ -7,7 +7,8 @@ use tracedecay_domain::{
     TemporalValidityV1, UtcMicros,
 };
 
-use super::super::ports::{ExecutionControl, ReadBudgetAccounting, TemporalPortError};
+use super::super::execution::ExecutionControl;
+use super::super::ports::{ReadBudgetAccounting, TemporalPortError};
 use super::resolver::{
     resolve_temporal, resolve_temporal_controlled, resolve_temporal_with_checkpoints,
 };

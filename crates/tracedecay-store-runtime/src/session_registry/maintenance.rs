@@ -78,21 +78,18 @@ enum SchemaConvergenceTarget {
         database: RegisteredGlobalDbLeaseV1,
         convergence: RegisteredSchemaConvergence,
     },
-    RuntimeLedger(Database),
 }
 
 impl SchemaConvergenceTarget {
     fn binding(&self) -> &StoreRuntimeBindingV1 {
         match self {
             Self::Registered { database, .. } => database.binding(),
-            Self::RuntimeLedger(database) => database.registered_binding(),
         }
     }
 
     fn db_path(&self) -> &Path {
         match self {
             Self::Registered { database, .. } => database.db_path(),
-            Self::RuntimeLedger(database) => database.canonical_database_path(),
         }
     }
 
@@ -102,16 +99,12 @@ impl SchemaConvergenceTarget {
                 database,
                 convergence,
             } => database.converge_schema(*convergence).await,
-            Self::RuntimeLedger(database) => {
-                tracedecay_global_db::schema_stages::converge_runtime_writer_ledger(database).await
-            }
         }
     }
 
     async fn release_connection_memory(&self) -> Result<()> {
         match self {
             Self::Registered { database, .. } => database.release_connection_memory().await,
-            Self::RuntimeLedger(database) => database.release_connection_memory().await,
         }
     }
 }
@@ -279,20 +272,9 @@ impl RegisteredSchemaConvergenceMaintenance {
         });
     }
 
-    pub(super) fn schedule_runtime_ledger(&self, database: Database) {
-        self.schedule_target(SchemaConvergenceTarget::RuntimeLedger(database));
-    }
-
     fn schedule_target(&self, target: SchemaConvergenceTarget) {
         let shard_id = target.binding().shard_id.clone();
-        let stage = match &target {
-            SchemaConvergenceTarget::Registered { .. } => {
-                SchemaConvergenceStageV1::RegisteredSchema
-            }
-            SchemaConvergenceTarget::RuntimeLedger(_) => {
-                SchemaConvergenceStageV1::RuntimeWriterLedger
-            }
-        };
+        let stage = SchemaConvergenceStageV1::RegisteredSchema;
         let mut tasks = self
             .tasks
             .lock()

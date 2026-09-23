@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 pub use crate::contracts::validate_payload_ref;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
-use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc, util};
+use super::{LcmError, LcmPayloadExpansion, LcmPayloadRef, gc};
 
 mod delete_recovery;
 mod filesystem_authority;
@@ -159,10 +160,9 @@ fn write_external_payload_inner(
         content,
         metadata_json,
     } = write;
-    let content_hash = util::sha256_hex(content.as_bytes());
-    let owner_hash = util::sha256_hex(
-        format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes(),
-    );
+    let content_hash = sha256_hex(content.as_bytes());
+    let owner_hash =
+        sha256_hex(format!("{provider}\0{session_id}\0{message_id}\0{content_hash}").as_bytes());
     let payload_ref = format!("payload_{owner_hash}.payload");
     validate_payload_ref(&payload_ref)?;
 

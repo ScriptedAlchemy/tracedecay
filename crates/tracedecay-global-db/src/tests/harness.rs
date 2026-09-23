@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbOwnerV1};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
@@ -583,7 +584,7 @@ impl HostAdmissionTestRuntimeV1 {
             HOST_ADMISSION_TEST_BACKGROUND_CPU
                 .get_or_init(|| Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN))),
         );
-        tracedecay_sessions::runtime::codex::CodexDiscoveryHub::default()
+        tracedecay_sessions::runtime::hosts::codex::CodexDiscoveryHub::default()
             .configure_preparation_resources(memory, background_cpu)
             .map_err(
                 |error| tracedecay_domain::errors::TraceDecayError::Database {
@@ -999,10 +1000,10 @@ impl HostAdmissionTestRuntimeV1 {
         }
 
         let external_content = "canonical external payload";
-        let external_hash = tracedecay_lcm::util::sha256_hex(external_content.as_bytes());
-        let raw_hash = tracedecay_lcm::util::sha256_hex(b"canonical raw message");
-        let child_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical child summary");
-        let parent_summary_hash = tracedecay_lcm::util::sha256_hex(b"canonical parent summary");
+        let external_hash = sha256_hex(external_content.as_bytes());
+        let raw_hash = sha256_hex(b"canonical raw message");
+        let child_summary_hash = sha256_hex(b"canonical child summary");
+        let parent_summary_hash = sha256_hex(b"canonical parent summary");
         let payload_dir = database
             .db_path()
             .parent()
@@ -1033,22 +1034,20 @@ impl HostAdmissionTestRuntimeV1 {
                  );
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, metadata_json
                  ) VALUES (
                     'codex', 'message-a', 'session-a', 11, 'assistant', 0, 11,
                     'canonical raw message', '{raw_hash}', 'inline', NULL,
-                    'canonical raw message', 'canonical raw message', 0, 0,
                     '{raw_message_metadata}'
                  );
                  INSERT INTO lcm_raw_messages(
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, placeholder_text,
+                    metadata_json
                  ) VALUES (
                     'codex', 'message-b', 'session-a', 12, 'tool', 1, 12,
                     NULL, '{external_hash}', 'external', 'payload-a',
-                    'canonical external payload', 'canonical external payload', 0, 0,
+                    'canonical external payload',
                     '{external_message_metadata}'
                  );
                  INSERT INTO lcm_summary_nodes(

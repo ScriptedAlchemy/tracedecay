@@ -1,9 +1,9 @@
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
-use tracedecay_domain::RetrievalAnchorId;
+use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId, RetrievalAnchorRecord};
 use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionStateV1, RetrievalAnchorDerivativeV1,
-    RetrievalAnchorDispositionRecordV1, RetrievalAnchorOwnerV1, RetrievalAnchorReadOperationV1,
-    RetrievalAnchorReadResultV1, RetrievalAnchorTombstoneV1, StoredRetrievalAnchorRecordV1,
+    RetrievalAnchorDispositionRecordV1, RetrievalAnchorReadOperationV1,
+    RetrievalAnchorReadResultV1, RetrievalAnchorTombstoneV1,
 };
 
 use super::support::{decode, encode, idempotent_insert, invalid};
@@ -163,8 +163,8 @@ impl RetrievalAnchorExecutor {
 fn read_anchor(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
-) -> rusqlite::Result<Option<StoredRetrievalAnchorRecordV1>> {
+    owner: &FactOwnerV1,
+) -> rusqlite::Result<Option<RetrievalAnchorRecord>> {
     let owner_json = encode(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(current_state(
         connection,
@@ -183,10 +183,10 @@ fn read_anchor(
         )
         .optional()?
         .map(|(record_json, projection_generation)| {
-            let record: StoredRetrievalAnchorRecordV1 = decode(record_json)?;
+            let record: RetrievalAnchorRecord = decode(record_json)?;
             record.validate().map_err(invalid)?;
             if record.anchor_id() != anchor_id
-                || record.owner() != *owner
+                || FactOwnerV1::from(record.owner().clone()) != *owner
                 || record.projection_generation().as_str() != projection_generation
             {
                 return Err(invalid("retrieval anchor record identity mismatch"));
@@ -199,7 +199,7 @@ fn read_anchor(
 fn current_state(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
+    owner: &FactOwnerV1,
     owner_json: &str,
 ) -> rusqlite::Result<Option<AnchorDispositionStateV1>> {
     current_record(connection, anchor_id, owner, owner_json)
@@ -209,7 +209,7 @@ fn current_state(
 fn current_record(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
+    owner: &FactOwnerV1,
     owner_json: &str,
 ) -> rusqlite::Result<Option<RetrievalAnchorDispositionRecordV1>> {
     connection
@@ -261,7 +261,7 @@ fn current_record(
 fn read_derivatives(
     connection: &rusqlite::Connection,
     anchor_id: &RetrievalAnchorId,
-    owner: &RetrievalAnchorOwnerV1,
+    owner: &FactOwnerV1,
 ) -> rusqlite::Result<Vec<RetrievalAnchorDerivativeV1>> {
     let owner_json = encode(owner)?;
     if !AnchorDispositionStateV1::serves_derivatives(current_state(

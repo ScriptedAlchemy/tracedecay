@@ -52,69 +52,6 @@ fn ledger_records_share_the_callers_transaction_boundary() {
     );
 }
 
-/// Ordinary writer initialization installs the current target without doing
-/// store-sized work, while the retained receipt remains available to lookup.
-#[test]
-fn initialize_schema_leaves_retired_idempotency_for_background_convergence() {
-    let mut connection = Connection::open_in_memory().unwrap();
-    let metadata = metadata("operation.migrated", "key.migrated", 'a');
-    let binding = binding(&metadata);
-    // Seed the retired shape exactly as an older binary created it, then
-    // commit one receipt into it through the current ledger code by
-    // temporarily giving the old table the current name.
-    let transaction = connection.transaction().unwrap();
-    initialize_schema(&transaction).unwrap();
-    let receipt = commit(&transaction, &metadata);
-    transaction
-        .execute_batch(
-            "CREATE TABLE td_runtime_writer_idempotency_v1 (
-                shard_json TEXT NOT NULL,
-                incarnation INTEGER NOT NULL,
-                authority_epoch INTEGER NOT NULL,
-                idempotency_key TEXT NOT NULL,
-                request_digest TEXT NOT NULL,
-                original_receipt_json TEXT NOT NULL,
-                transaction_scope_json TEXT NOT NULL,
-                operation_id TEXT NOT NULL,
-                durability_json TEXT NOT NULL,
-                committed_at_micros INTEGER NOT NULL,
-                PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key)
-             ) WITHOUT ROWID;
-             INSERT INTO td_runtime_writer_idempotency_v1
-                SELECT * FROM td_runtime_writer_idempotency_v2;
-             DROP TABLE td_runtime_writer_idempotency_v2;",
-        )
-        .unwrap();
-    transaction.commit().unwrap();
-
-    let transaction = connection.transaction().unwrap();
-    initialize_schema(&transaction).unwrap();
-    let retired_present: i64 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'table' AND name = 'td_runtime_writer_idempotency_v1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(retired_present, 1, "ordinary initialization retains V1");
-    let migrated: i64 = transaction
-        .query_row(
-            "SELECT COUNT(*) FROM td_runtime_writer_idempotency_v2",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(migrated, 0, "ordinary initialization does not copy history");
-    assert_eq!(
-        lookup_receipt(&transaction, &binding, &metadata.idempotency, true).unwrap(),
-        Some(receipt),
-        "the writer can replay from V1 while convergence is pending"
-    );
-    initialize_schema(&transaction).unwrap();
-    assert!(current_watermark(&transaction, &binding).unwrap().is_some());
-}
-
 #[test]
 fn commit_uses_one_replay_and_conflict_disposition() {
     let mut connection = Connection::open_in_memory().unwrap();
@@ -148,14 +85,14 @@ fn malformed_canonical_json_fails_closed() {
     transaction.commit().unwrap();
     connection
         .execute(
-            "UPDATE td_runtime_writer_idempotency_v2 SET original_receipt_json = '{}'",
+            "UPDATE td_runtime_writer_idempotency_v2 SET transaction_id = ''",
             [],
         )
         .unwrap();
 
     let transaction = connection.transaction().unwrap();
     assert!(matches!(
-        lookup_receipt(&transaction, &binding, &metadata.idempotency, false),
+        lookup_receipt(&transaction, &binding, &metadata.idempotency),
         Err(LedgerError::Corrupt { .. })
     ));
 }

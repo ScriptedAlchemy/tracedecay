@@ -84,10 +84,9 @@ async fn seed_legacy_inline_row(
         .execute(
             "INSERT INTO lcm_raw_messages(
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
+                content, content_hash, storage_kind, payload_ref, metadata_json
              )
-             VALUES ('cursor', ?1, ?2, 'user', 1, 10, ?3, ?4, 'inline', NULL, ?3, ?3, 0, 0, ?5)",
+             VALUES ('cursor', ?1, ?2, 'user', 1, 10, ?3, ?4, 'inline', NULL, ?5)",
             params![
                 message_id,
                 session_id,
@@ -154,10 +153,10 @@ async fn seed_legacy_external_row(
         .execute(
             "INSERT INTO lcm_raw_messages(
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
+                content, content_hash, storage_kind, payload_ref, placeholder_text,
+                metadata_json
              )
-             VALUES ('cursor', ?1, ?2, 'user', 2, 20, NULL, ?3, 'external', ?4, ?5, ?5, 0, 0, ?6)",
+             VALUES ('cursor', ?1, ?2, 'user', 2, 20, NULL, ?3, 'external', ?4, ?5, ?6)",
             params![
                 message_id,
                 session_id,
@@ -195,10 +194,9 @@ async fn seed_unreceipted_row(
         .execute(
             "INSERT INTO lcm_raw_messages(
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
+                content, content_hash, storage_kind, payload_ref, metadata_json
              )
-             VALUES ('cursor', ?1, ?2, 'assistant', 3, 30, ?3, ?4, 'inline', NULL, ?3, ?3, 0, 0, NULL)",
+             VALUES ('cursor', ?1, ?2, 'assistant', 3, 30, ?3, ?4, 'inline', NULL, NULL)",
             params![
                 message_id,
                 session_id,

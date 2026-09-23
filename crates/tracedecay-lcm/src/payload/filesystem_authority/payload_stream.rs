@@ -218,7 +218,7 @@ fn io_error(error: std::io::Error) -> LcmError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::sha256_hex;
+    use tracedecay_domain::canonical_text::sha256_hex;
 
     const WINDOW: usize = 4 * 1024;
 

@@ -1,17 +1,11 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracedecay_store::{
-    CommitSequenceV1, ShardWatermarkV1, StoreCommitReceiptV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, UnavailableReasonV1,
+    CommitSequenceV1, ShardWatermarkV1, StoreCommitReceiptV1, StoreRuntimeBindingV1, StoreShardIdV1,
 };
-
-use crate::read_consistency::{CommitWatermarkSource, WatermarkSourceState};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitWatermarkPublicationError {
@@ -75,10 +69,9 @@ struct Channels {
 /// The small capability a writer calls only after its transaction commits.
 ///
 /// Publication is strictly monotonic and fenced to the bindings supplied at
-/// construction. Keeping this capability distinct from the subscription makes
-/// it impossible for readers or telemetry to advance commit truth.
+/// construction.
 pub struct CommittedWatermarkPublisher {
-    channels: Arc<Channels>,
+    channels: Channels,
 }
 
 impl CommittedWatermarkPublisher {
@@ -113,14 +106,8 @@ impl CommittedWatermarkPublisher {
             }
         }
         Ok(Self {
-            channels: Arc::new(Channels { by_shard }),
+            channels: Channels { by_shard },
         })
-    }
-
-    pub fn subscribe(&self) -> CommitWatermarkSubscription {
-        CommitWatermarkSubscription {
-            channels: Arc::clone(&self.channels),
-        }
     }
 
     pub(crate) fn current(&self, shard_id: &StoreShardIdV1) -> Option<ShardWatermarkV1> {
@@ -178,53 +165,5 @@ impl CommittedWatermarkPublisher {
             true
         });
         outcome
-    }
-}
-
-/// Read-only view over committed writer notifications.
-#[derive(Clone)]
-pub struct CommitWatermarkSubscription {
-    channels: Arc<Channels>,
-}
-
-impl CommitWatermarkSource for CommitWatermarkSubscription {
-    fn current(&self, shard_id: &StoreShardIdV1) -> WatermarkSourceState {
-        self.channels
-            .by_shard
-            .get(shard_id)
-            .map(|sender| WatermarkSourceState::Available(sender.borrow().clone()))
-            .unwrap_or(WatermarkSourceState::Unavailable(
-                UnavailableReasonV1::MissingAuthority,
-            ))
-    }
-
-    fn wait_for_change<'a>(
-        &'a self,
-        shard_id: &'a StoreShardIdV1,
-        after: &'a ShardWatermarkV1,
-    ) -> Pin<Box<dyn Future<Output = WatermarkSourceState> + Send + 'a>> {
-        let receiver = self
-            .channels
-            .by_shard
-            .get(shard_id)
-            .map(watch::Sender::subscribe);
-        Box::pin(async move {
-            let Some(mut receiver) = receiver else {
-                return WatermarkSourceState::Unavailable(UnavailableReasonV1::MissingAuthority);
-            };
-            loop {
-                let current = receiver.borrow_and_update().clone();
-                if !current.same_history_as(after)
-                    || current.commit_sequence > after.commit_sequence
-                {
-                    return WatermarkSourceState::Available(current);
-                }
-                if receiver.changed().await.is_err() {
-                    return WatermarkSourceState::Unavailable(
-                        UnavailableReasonV1::MissingAuthority,
-                    );
-                }
-            }
-        })
     }
 }

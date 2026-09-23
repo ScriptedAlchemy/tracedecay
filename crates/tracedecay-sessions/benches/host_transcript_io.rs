@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
+use tracedecay_sessions::runtime::hosts::vibe::VibeSource;
 use tracedecay_sessions::runtime::source::{TranscriptDiscoveryBounds, TranscriptSource};
-use tracedecay_sessions::runtime::vibe::VibeSource;
 
 fn write_vibe_session(root: &Path, name: &str, mtime_secs: u64) {
     let dir = root.join(name);

@@ -9,12 +9,12 @@ use tracedecay_domain::{
     SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1, TemporalModeV1,
 };
 
-use super::request::validate_label;
-use super::{
-    BindingDigest, ExecutionLimitTighteningError, ExecutionLimits, MeasuredTemporalValue,
-    TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
-};
 use crate::candidates::CandidateChannel;
+use crate::execution::{BindingDigest, ExecutionLimitTighteningError, ExecutionLimits};
+use crate::ports::validate_label;
+use crate::ports::{
+    MeasuredTemporalValue, TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
+};
 use crate::ranking::RankingCandidate;
 use crate::resolution::types::ValidatedAuthorization;
 
@@ -162,11 +162,10 @@ pub struct KernelVersions {
     pub configuration_digest: BindingDigest,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TemporalParticipantAuthorization {
     #[serde(rename = "a")]
     Authorized,
-    #[default]
     #[serde(rename = "n")]
     Denied,
 }
@@ -185,8 +184,6 @@ pub enum TemporalSourceAccess {
     Deleted,
     #[serde(rename = "x")]
     Redacted,
-    #[serde(rename = "n")]
-    LegacyUnauthorized,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,7 +192,7 @@ pub struct TemporalParticipantGeneration {
     #[serde(rename = "s")]
     session_id: SessionId,
     #[serde(rename = "i")]
-    pub(super) source_id: String,
+    pub(crate) source_id: String,
     #[serde(rename = "g")]
     generation: u64,
     #[serde(rename = "w")]
@@ -212,7 +209,7 @@ pub struct TemporalParticipantGeneration {
     configuration_digest: String,
     #[serde(rename = "a")]
     authorization_digest: String,
-    #[serde(default, rename = "q")]
+    #[serde(rename = "q")]
     authorization: TemporalParticipantAuthorization,
     #[serde(rename = "z")]
     access: TemporalSourceAccess,
@@ -294,16 +291,12 @@ impl TemporalParticipantGeneration {
     }
 
     /// Snapshot authority is independent from per-source lifecycle state.
-    ///
-    /// The legacy unauthorized source wire state remains denied for old signed
-    /// manifests, while every newly built manifest uses the dedicated,
-    /// fail-closed authorization field.
     #[hotpath::skip]
     pub const fn is_authorized_for_snapshot(&self) -> bool {
         matches!(
             self.authorization,
             TemporalParticipantAuthorization::Authorized
-        ) && !matches!(self.access, TemporalSourceAccess::LegacyUnauthorized)
+        )
     }
 
     #[hotpath::skip]
@@ -443,8 +436,7 @@ impl TemporalParticipantManifest {
                         SessionSourceCoverageStateV1::Redacted,
                         SessionSourceCoverageReasonV1::Redacted,
                     ),
-                    TemporalSourceAccess::Unavailable
-                    | TemporalSourceAccess::LegacyUnauthorized => (
+                    TemporalSourceAccess::Unavailable => (
                         SessionSourceCoverageStateV1::Unavailable,
                         SessionSourceCoverageReasonV1::Unavailable,
                     ),

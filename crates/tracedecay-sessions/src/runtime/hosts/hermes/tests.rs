@@ -204,7 +204,6 @@ async fn cancelled_hermes_sweep_stops_before_opening_the_host_database() {
     let dir = tempfile::tempdir().unwrap();
     let source = HermesProfileSource {
         state_db: dir.path().join("state.db"),
-        legacy_project_pin: None,
         profile: Some("cancelled-fixture".to_string()),
     };
     let cancellation = ObservationCancellation::default();
@@ -1550,7 +1549,6 @@ mod destination_routing_tests {
         GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
     };
 
-    use super::super::ingest::HermesProfileSource;
     use super::super::routing::turn_project_locations_for_destinations;
     use super::super::rows::HermesRow;
 
@@ -1608,11 +1606,6 @@ mod destination_routing_tests {
         let cwd = project_root.join("packages/app");
         std::fs::create_dir_all(&cwd).expect("cwd");
         let rows = vec![row_with_cwd(&cwd)];
-        let source = HermesProfileSource {
-            state_db: temp.path().join("state.db"),
-            legacy_project_pin: None,
-            profile: None,
-        };
         let previous = StoredCursor::default();
         let mut persisted = previous;
         let mut routes = HashMap::new();
@@ -1622,8 +1615,7 @@ mod destination_routing_tests {
             retrying_identity,
         )];
         assert!(
-            turn_project_locations_for_destinations(&rows, &first_matchers, &source, &mut routes)
-                .is_err()
+            turn_project_locations_for_destinations(&rows, &first_matchers, &mut routes).is_err()
         );
         assert_eq!(persisted, previous);
         assert!(routes.is_empty(), "unknown routes must not be cached");
@@ -1633,7 +1625,7 @@ mod destination_routing_tests {
             retrying_identity,
         )];
         let locations =
-            turn_project_locations_for_destinations(&rows, &retry_matchers, &source, &mut routes)
+            turn_project_locations_for_destinations(&rows, &retry_matchers, &mut routes)
                 .expect("the same source rows should route after identity recovers");
         assert_eq!(
             locations[0].by_row_id.get(&1).copied(),
@@ -1655,13 +1647,15 @@ async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
     // The pin resolver is a root-registered port and stays unwired in this
     // crate's tests, so the project qualifies as a candidate destination by
-    // carrying an initialized project database instead of a config pin.
+    // being a git worktree instead of carrying a config pin.
     let project_root = dir.path().join("project");
-    let project_db = project_root
-        .join(tracedecay_runtime_core::config::TRACEDECAY_DIR)
-        .join(tracedecay_runtime_core::config::DB_FILENAME);
-    std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
-    std::fs::write(&project_db, b"").unwrap();
+    std::fs::create_dir_all(&project_root).unwrap();
+    let init = std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
+        .args(["init", "-q"])
+        .current_dir(&project_root)
+        .status()
+        .unwrap();
+    assert!(init.success());
     let home = dir.path().join("hermes-home");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(home.join("state.db"), b"this is not a sqlite database").unwrap();

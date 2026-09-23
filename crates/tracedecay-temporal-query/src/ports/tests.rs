@@ -2,7 +2,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tracedecay_domain::{
     RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageStateV1,
@@ -10,13 +10,26 @@ use tracedecay_domain::{
 };
 
 use super::cursor_authentication::MAX_CURSOR_SECRET_BYTES;
-use super::execution::{MAX_READ_ITEMS, MAX_READ_TOTAL_BYTES};
-use super::paging::{MAX_BOUNDED_PAGE_PREALLOC, MAX_PAGE_ITEMS_CAP};
 use super::*;
 use crate::candidates::{CandidateChannel, CandidatePlan};
+use crate::execution::{
+    BindingDigest, ExecutionControl, ExecutionLimitTighteningError, ExecutionLimits,
+    MAX_READ_ITEMS, MAX_READ_TOTAL_BYTES,
+};
+use crate::paging::{
+    CANDIDATE_READ_BUDGET, CandidatePageSink, CandidateReadState, MAX_BOUNDED_PAGE_PREALLOC,
+    MAX_PAGE_ITEMS_CAP, PageKey, PageLimits, PageRequest, PageStatus, TemporalRecordPageSink,
+    TemporalRecordReadState,
+};
 use crate::ranking::RankingCandidate;
 use crate::resolution::summary::SummarySourceState;
 use crate::resolution::types::ValidatedAuthorization;
+use crate::snapshot::{
+    KernelVersions, MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES, MAX_TEMPORAL_PARTICIPANTS,
+    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
+    TemporalParticipantManifest, TemporalPreparedCandidateCohort, TemporalSourceAccess,
+    TemporalWatermarks,
+};
 use crate::test_support::block_on;
 
 fn session_id() -> SessionId {
@@ -191,21 +204,6 @@ struct ScopeObservingPort {
 }
 
 impl TemporalReadPort for ScopeObservingPort {
-    fn produce_candidate_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _plan: &'a CandidatePlan,
-        _request: PageRequest,
-        _sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async {
-            Err(TemporalPortError::Read {
-                operation: "legacy candidate entry point",
-                message: "scope-aware kernel must not call the legacy entry point".to_string(),
-            })
-        })
-    }
-
     fn produce_candidate_page_for_scope<'a>(
         &'a self,
         scope: &'a TemporalRetrievalScope,
@@ -220,21 +218,6 @@ impl TemporalReadPort for ScopeObservingPort {
                 .expect("observed lock")
                 .push(scope.clone());
             Ok(PageStatus::Complete)
-        })
-    }
-
-    fn produce_temporal_record_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _candidates: &'a [RankingCandidate],
-        _request: PageRequest,
-        _sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async {
-            Err(TemporalPortError::Read {
-                operation: "legacy record entry point",
-                message: "scope-aware kernel must not call the legacy entry point".to_string(),
-            })
         })
     }
 
@@ -472,8 +455,9 @@ struct PagingPort {
 }
 
 impl TemporalReadPort for PagingPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         request: PageRequest,
@@ -497,8 +481,9 @@ impl TemporalReadPort for PagingPort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         _request: PageRequest,
@@ -536,83 +521,12 @@ fn bounded_async_pull_streams_multiple_pages_without_preloaded_vecs() {
     });
 }
 
-struct OversizedPort;
-
-struct PreparationFromReadPort<'a> {
-    port: &'a dyn TemporalReadPort,
-    snapshot: &'a TemporalExecutionSnapshot,
-    plan: &'a CandidatePlan,
-}
-
-impl TemporalCandidatePreparationPort for PreparationFromReadPort<'_> {
-    fn produce_prepared_candidate_page<'a>(
-        &'a self,
-        request: PageRequest,
-        sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        self.port
-            .produce_candidate_page(self.snapshot, self.plan, request, sink)
-    }
-}
-
-impl TemporalReadPort for OversizedPort {
-    fn produce_candidate_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _plan: &'a CandidatePlan,
-        _request: PageRequest,
-        sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async move {
-            sink.push(candidate("x".repeat(1024)))?;
-            Ok(PageStatus::Complete)
-        })
-    }
-
-    fn produce_temporal_record_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _candidates: &'a [RankingCandidate],
-        _request: PageRequest,
-        _sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async { Ok(PageStatus::Complete) })
-    }
-}
-
-#[test]
-fn prepared_cohort_preserves_typed_candidate_byte_budget_failure() {
-    block_on(async {
-        let limits = ExecutionLimits {
-            candidate_limit: 1,
-            candidate_total_bytes: 128,
-            candidate_item_bytes: 128,
-            ..ExecutionLimits::default()
-        };
-        let snapshot = snapshot_with_control(ExecutionControl::default());
-        let request = snapshot.request().clone().with_limits(limits);
-        let plan = CandidatePlan::default();
-        let port = PreparationFromReadPort {
-            port: &OversizedPort,
-            snapshot: &snapshot,
-            plan: &plan,
-        };
-
-        assert_eq!(
-            prepare_temporal_candidate_cohort(&request, &port).await,
-            Err(TemporalPortError::BudgetExceeded {
-                resource: "candidate item bytes",
-                accounting: Some(ReadBudgetAccounting::requested(128, 1_313)),
-            })
-        );
-    });
-}
-
 struct OverproducingPort;
 
 impl TemporalReadPort for OverproducingPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         _request: PageRequest,
@@ -625,8 +539,9 @@ impl TemporalReadPort for OverproducingPort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         _request: PageRequest,
@@ -665,8 +580,9 @@ struct CancellingPort {
 }
 
 impl TemporalReadPort for CancellingPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         _request: PageRequest,
@@ -681,8 +597,9 @@ impl TemporalReadPort for CancellingPort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         _request: PageRequest,
@@ -713,89 +630,6 @@ fn async_pull_observes_live_cancellation_midstream() {
     });
 }
 
-#[test]
-fn prepared_cohort_preserves_live_cancellation() {
-    block_on(async {
-        let control = ExecutionControl::default();
-        let snapshot = snapshot_with_control(control.clone());
-        let entered = Arc::new(AtomicBool::new(false));
-        let producer = CancellingPort {
-            control,
-            entered: Arc::clone(&entered),
-        };
-        let plan = CandidatePlan::default();
-        let port = PreparationFromReadPort {
-            port: &producer,
-            snapshot: &snapshot,
-            plan: &plan,
-        };
-
-        let result = prepare_temporal_candidate_cohort(snapshot.request(), &port).await;
-
-        assert!(entered.load(Ordering::Acquire));
-        assert_eq!(result, Err(TemporalPortError::Cancelled));
-    });
-}
-
-struct DeadlineCrossingPort {
-    deadline: Instant,
-    entered: Arc<AtomicBool>,
-}
-
-impl TemporalReadPort for DeadlineCrossingPort {
-    fn produce_candidate_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _plan: &'a CandidatePlan,
-        _request: PageRequest,
-        _sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        let deadline = self.deadline;
-        let entered = Arc::clone(&self.entered);
-        Box::pin(async move {
-            entered.store(true, Ordering::Release);
-            while Instant::now() < deadline {
-                std::hint::spin_loop();
-            }
-            Ok(PageStatus::Complete)
-        })
-    }
-
-    fn produce_temporal_record_page<'a>(
-        &'a self,
-        _snapshot: &'a TemporalExecutionSnapshot,
-        _candidates: &'a [RankingCandidate],
-        _request: PageRequest,
-        _sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        Box::pin(async { Ok(PageStatus::Complete) })
-    }
-}
-
-#[test]
-fn prepared_cohort_preserves_deadline_after_producer_work() {
-    block_on(async {
-        let deadline = Instant::now() + Duration::from_millis(100);
-        let snapshot = snapshot_with_control(ExecutionControl::new(Some(deadline)));
-        let entered = Arc::new(AtomicBool::new(false));
-        let producer = DeadlineCrossingPort {
-            deadline,
-            entered: Arc::clone(&entered),
-        };
-        let plan = CandidatePlan::default();
-        let port = PreparationFromReadPort {
-            port: &producer,
-            snapshot: &snapshot,
-            plan: &plan,
-        };
-
-        let result = prepare_temporal_candidate_cohort(snapshot.request(), &port).await;
-
-        assert!(entered.load(Ordering::Acquire));
-        assert_eq!(result, Err(TemporalPortError::DeadlineExceeded));
-    });
-}
-
 fn summary_record(anchor_id: &str) -> TemporalRecord {
     TemporalRecord::SummarySource(SummarySourceRecord {
         anchor_id: anchor(anchor_id),
@@ -820,8 +654,9 @@ impl AlwaysMorePort {
 }
 
 impl TemporalReadPort for AlwaysMorePort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         request: PageRequest,
@@ -839,8 +674,9 @@ impl TemporalReadPort for AlwaysMorePort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         request: PageRequest,
@@ -865,8 +701,9 @@ struct ExactCompletePort {
 }
 
 impl TemporalReadPort for ExactCompletePort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         request: PageRequest,
@@ -889,8 +726,9 @@ impl TemporalReadPort for ExactCompletePort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         request: PageRequest,
@@ -917,8 +755,9 @@ impl TemporalReadPort for ExactCompletePort {
 struct OversizedRecordPort;
 
 impl TemporalReadPort for OversizedRecordPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         _request: PageRequest,
@@ -927,8 +766,9 @@ impl TemporalReadPort for OversizedRecordPort {
         Box::pin(async { Ok(PageStatus::Complete) })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         _request: PageRequest,
@@ -1512,8 +1352,9 @@ struct StableIdPort {
 }
 
 impl TemporalReadPort for StableIdPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         _request: PageRequest,
@@ -1525,8 +1366,9 @@ impl TemporalReadPort for StableIdPort {
         })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         _request: PageRequest,
@@ -1567,8 +1409,9 @@ fn candidate_pull_observes_post_authorization_tightening() {
 struct UnreachableReadPort;
 
 impl TemporalReadPort for UnreachableReadPort {
-    fn produce_candidate_page<'a>(
+    fn produce_candidate_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _plan: &'a CandidatePlan,
         _request: PageRequest,
@@ -1577,8 +1420,9 @@ impl TemporalReadPort for UnreachableReadPort {
         Box::pin(async { panic!("looser candidate read state reached the producer") })
     }
 
-    fn produce_temporal_record_page<'a>(
+    fn produce_temporal_record_page_for_scope<'a>(
         &'a self,
+        _scope: &'a TemporalRetrievalScope,
         _snapshot: &'a TemporalExecutionSnapshot,
         _candidates: &'a [RankingCandidate],
         _request: PageRequest,
@@ -1705,8 +1549,9 @@ fn continuation_key_enforces_exact_byte_cap() {
             key_len: usize,
         }
         impl TemporalReadPort for ContinuationPort {
-            fn produce_candidate_page<'a>(
+            fn produce_candidate_page_for_scope<'a>(
                 &'a self,
+                _scope: &'a TemporalRetrievalScope,
                 _snapshot: &'a TemporalExecutionSnapshot,
                 _plan: &'a CandidatePlan,
                 _request: PageRequest,
@@ -1718,8 +1563,9 @@ fn continuation_key_enforces_exact_byte_cap() {
                     Ok(PageStatus::More)
                 })
             }
-            fn produce_temporal_record_page<'a>(
+            fn produce_temporal_record_page_for_scope<'a>(
                 &'a self,
+                _scope: &'a TemporalRetrievalScope,
                 _snapshot: &'a TemporalExecutionSnapshot,
                 _candidates: &'a [RankingCandidate],
                 _request: PageRequest,
@@ -1755,78 +1601,6 @@ fn continuation_key_enforces_exact_byte_cap() {
                 accounting: Some(ReadBudgetAccounting::requested(256, 257)),
             })
         );
-    });
-}
-
-#[test]
-fn legacy_only_port_fails_closed_for_root_wide_scope() {
-    block_on(async {
-        struct LegacyOnlyPort;
-        impl TemporalReadPort for LegacyOnlyPort {
-            fn produce_candidate_page<'a>(
-                &'a self,
-                _snapshot: &'a TemporalExecutionSnapshot,
-                _plan: &'a CandidatePlan,
-                _request: PageRequest,
-                _sink: &'a mut CandidatePageSink<'_>,
-            ) -> PortFuture<'a, PageStatus> {
-                Box::pin(async { Ok(PageStatus::Complete) })
-            }
-            fn produce_temporal_record_page<'a>(
-                &'a self,
-                _snapshot: &'a TemporalExecutionSnapshot,
-                _candidates: &'a [RankingCandidate],
-                _request: PageRequest,
-                _sink: &'a mut TemporalRecordPageSink<'_>,
-            ) -> PortFuture<'a, PageStatus> {
-                Box::pin(async { Ok(PageStatus::Complete) })
-            }
-        }
-        let request = TemporalSnapshotRequest::new(
-            session_id(),
-            digest('0'),
-            digest('1'),
-            digest('2'),
-            TemporalModeV1::Current,
-            RetrievalGrainV1::LogicalMessage,
-        )
-        .expect("valid request")
-        .with_retrieval_scope(TemporalRetrievalScope::AllSessionsInAuthorizedRoot);
-        let snapshot = TemporalExecutionSnapshot::new(
-            request,
-            TemporalWatermarks {
-                generation: 1,
-                source: 0,
-                projection: 0,
-                index: 0,
-                summary: 0,
-            },
-            KernelVersions {
-                schema: 1,
-                ranking: 1,
-                configuration_digest: BindingDigest::new("configuration_digest", digest('3'))
-                    .expect("valid digest"),
-            },
-            None,
-        )
-        .expect("valid snapshot");
-        let mut candidate_state =
-            CandidateReadState::new(PageLimits::new(1, 1024, 1024, 1).expect("limits"));
-        let err = pull_candidate_page(
-            &LegacyOnlyPort,
-            &snapshot,
-            &CandidatePlan::default(),
-            &mut candidate_state,
-        )
-        .await
-        .expect_err("root-wide must not use silent legacy default");
-        assert!(matches!(
-            err,
-            TemporalPortError::Read {
-                operation: "produce candidate page for scope",
-                ..
-            }
-        ));
     });
 }
 
@@ -1923,15 +1697,10 @@ fn authorized_lifecycle_states_do_not_become_snapshot_denials() {
 }
 
 #[test]
-fn manifests_without_explicit_authorization_fail_closed() {
+fn manifests_without_explicit_authorization_are_rejected() {
     let participant = participant("session.stale", "claude", 1);
     let mut wire = serde_json::to_value(participant).unwrap();
     wire.as_object_mut().unwrap().remove("q");
-    let stale: TemporalParticipantGeneration = serde_json::from_value(wire).unwrap();
 
-    assert_eq!(
-        stale.authorization(),
-        TemporalParticipantAuthorization::Denied
-    );
-    assert!(!stale.is_authorized_for_snapshot());
+    assert!(serde_json::from_value::<TemporalParticipantGeneration>(wire).is_err());
 }

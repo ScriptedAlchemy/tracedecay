@@ -99,8 +99,6 @@ pub(super) fn sliced_message(
         content_hash: None,
         storage_kind: LcmStorageKindV1::CanonicalOccurrence,
         payload_ref: None,
-        legacy_source: false,
-        legacy_truncated: false,
         metadata_json: result.message.metadata_json,
     }
 }
@@ -267,7 +265,6 @@ pub(super) fn expansion(value: LcmExpandResponse) -> LcmExpansionV1 {
             .collect(),
         payload_ref: value.payload_ref,
         from_current_session: value.from_current_session,
-        externalized_note: value.externalized_note,
         source_pagination: value.source_pagination.map(|page| LcmSourcePaginationV1 {
             source_limit: page.source_limit,
             returned_sources: page.returned_sources,
@@ -524,8 +521,6 @@ fn raw_message(value: LcmRawMessage) -> LcmRawMessageV1 {
         content_hash: value.content_hash,
         storage_kind: storage_kind(value.storage_kind),
         payload_ref: value.payload_ref,
-        legacy_source: value.legacy_source,
-        legacy_truncated: value.legacy_truncated,
         metadata_json: value.metadata_json,
     }
 }
@@ -542,8 +537,6 @@ fn raw_message_metadata(value: LcmRawMessageMetadata) -> LcmRawMessageMetadataV1
         content_hash: value.content_hash,
         storage_kind: storage_kind(value.storage_kind),
         payload_ref: value.payload_ref,
-        legacy_source: value.legacy_source,
-        legacy_truncated: value.legacy_truncated,
         metadata_json: value.metadata_json,
     }
 }

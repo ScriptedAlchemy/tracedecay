@@ -20,6 +20,7 @@ use tracedecay_domain::{BrainId, ProjectId, SessionId, UserProfileId, UtcMicros}
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 use tracedecay_sessions::serving::{
     SessionProjectionServingState, SessionProjectionServingStatusPort,
@@ -764,7 +765,8 @@ impl DaemonSessionSyncService {
         let mut active_after: Option<SessionId> = None;
         loop {
             let page = {
-                let discovery = database.pending_session_temporal_refresh_page_result(
+                let discovery = SessionTemporalAccess::new(&**database)
+                    .pending_session_temporal_refresh_page_result(
                     page_limit,
                     active_scan_slots,
                     active_after.as_ref(),

@@ -42,7 +42,7 @@ use tracedecay_session_memory::memory_mutation::{
 use tracedecay_session_memory::memory_tracking::{TrackedExplicitSearch, track_explicit_search};
 use tracedecay_session_runtime::retained::map_execution_error;
 
-use crate::session_registry::{DaemonSessionRuntimeRegistryV1, open_user_memory_db};
+use crate::session_registry::DaemonSessionRuntimeRegistryV1;
 
 macro_rules! execute_scoped_memory {
     (
@@ -80,7 +80,7 @@ macro_rules! execute_scoped_memory {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
                 let (database, _) = bounded_memory_operation($context, async {
                     hotpath::future!(
-                        open_user_memory_db(registry),
+                        registry.profile_memory(),
                         label = "daemon.retained.memory.open_profile"
                     )
                     .await

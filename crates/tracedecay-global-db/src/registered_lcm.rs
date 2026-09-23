@@ -13,9 +13,11 @@ use tracedecay_lcm::{
     types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
-use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::ports::TemporalPortError;
 
 use super::RegisteredGlobalDb;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_session_temporal_store::operations as session_temporal_operations;
 use tracedecay_session_temporal_store::seed_session_relation_projection;
 use tracedecay_session_temporal_store::store::execution_control_graph_cancellation;
@@ -95,7 +97,7 @@ impl RegisteredGlobalDb {
     #[hotpath::measure(future = true, label = "global_db.registered.lcm.grep")]
     pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
         let git_scope_session_ids =
-            tracedecay_session_temporal_store::SessionTemporalAccess::new(self)
+            SessionTemporalAccess::new(self)
                 .git_scope_session_ids(&request.git_filter)
                 .map_err(|error| LcmError::Db(error.to_string()))?;
         SessionStoreAccess::new(self)
@@ -210,7 +212,7 @@ impl RegisteredGlobalDb {
         before_commit()?;
         transaction.commit().await?;
         check_execution(control)?;
-        self.apply_active_session_relation_projection(
+        SessionTemporalAccess::new(self).apply_active_session_relation_projection(
             &session_id,
             execution_control_graph_cancellation(control),
         )
@@ -297,7 +299,7 @@ impl RegisteredGlobalDb {
         payload_rollback.disarm();
         if !response.summary_nodes.is_empty() {
             check_execution(control)?;
-            self.apply_active_session_relation_projection(
+            SessionTemporalAccess::new(self).apply_active_session_relation_projection(
                 &session_id,
                 execution_control_graph_cancellation(control),
             )

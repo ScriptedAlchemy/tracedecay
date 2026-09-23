@@ -15,7 +15,7 @@ use serde::Serialize;
 use tracedecay_domain::{
     AnchorResolutionStateV2, AuthorizedAnchorResolution, CoverageReportV1, DomainError,
     FactOwnerV1, FrozenWatermarkResolutionV1, PayloadAccessState, ResolutionAuthorizationV1,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, VectorWatermark, canonical_sha256,
+    RetrievalAnchorId, RetrievalAnchorRecord, VectorWatermark, canonical_sha256,
 };
 use tracedecay_store::ObservedEvidenceAnchorResolution;
 
@@ -41,7 +41,7 @@ struct UnresolvedAnchorDigestV1<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvidenceAnchorResolutionReport {
     resolution: AuthorizedAnchorResolution,
-    record: Option<RetrievalAnchorRecordV2>,
+    record: Option<RetrievalAnchorRecord>,
 }
 
 impl EvidenceAnchorResolutionReport {
@@ -149,7 +149,7 @@ impl EvidenceAnchorResolutionReport {
     /// The single authoritative retained record, when the store resolved one.
     /// The record is immutable metadata; its declared `payload_access` says
     /// whether the retained payload may be accessed.
-    pub fn record(&self) -> Option<&RetrievalAnchorRecordV2> {
+    pub fn record(&self) -> Option<&RetrievalAnchorRecord> {
         self.record.as_ref()
     }
 }
@@ -170,11 +170,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tracedecay_domain::{
-        AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2,
+        AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration,
         CanonicalObservationIdV1, CapabilityId, EvidenceClass, ManifestDigest, ObservationScopeV1,
         PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId, RetentionClass,
-        RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, ShardId,
-        UtcMicros, WatermarkDriftV1,
+        RetrievalAnchorRecordParts, RetrievalAnchorTarget, ScopeResolutionId, ShardId, UtcMicros,
+        WatermarkDriftV1,
     };
 
     use super::*;
@@ -201,16 +201,16 @@ mod tests {
         }
     }
 
-    fn record_with_access(payload_access: PayloadAccessState) -> RetrievalAnchorRecordV2 {
+    fn record_with_access(payload_access: PayloadAccessState) -> RetrievalAnchorRecord {
         let observation_id = CanonicalObservationIdV1::new(SHA256_FIXTURE).unwrap();
-        RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-            target: RetrievalAnchorTargetV2::ExactObservation(observation_id.clone()),
+        RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+            target: RetrievalAnchorTarget::ExactObservation(observation_id.clone()),
             owner: ObservationScopeV1::Profile,
             aliases: vec![],
             occurred_at: None,
             ingested_at: UtcMicros(1),
             evidence_class: EvidenceClass::Observed,
-            source_generation: AnchorSourceGenerationV2::Observation(
+            source_generation: AnchorSourceGeneration::Observation(
                 tracedecay_domain::ObservationSourceGenerationV1::new(1).unwrap(),
             ),
             projection_generation: ProjectionGenerationId::new("projection.fixture.v1").unwrap(),

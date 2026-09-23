@@ -382,8 +382,7 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                 session_id, generation, occurrence_id, source_observation_id,
                 source_provider, projection_output_ordinal, retrieval_anchor_id,
                 role, knowledge_at, valid_time_json, evidence_json,
-                sanitized_content_digest, sanitized_content_bytes,
-                snippet_text, index_text
+                sanitized_content_digest, sanitized_content_bytes, index_text
              )
              SELECT
                 printf('root-session-%02d', value % 8),
@@ -399,7 +398,6 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                 '{{}}',
                 '0000000000000000000000000000000000000000000000000000000000000000',
                 15,
-                'root occurrence',
                 'root occurrence'
              FROM sequence;"
         ))

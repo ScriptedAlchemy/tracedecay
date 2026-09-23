@@ -220,8 +220,6 @@ pub(crate) const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             output_message_id TEXT NOT NULL,
             message_json TEXT NOT NULL CHECK(json_valid(message_json)),
             content_hash TEXT NOT NULL,
-            snippet_text TEXT NOT NULL,
-            index_text TEXT NOT NULL,
             PRIMARY KEY(projector_version, generation, output_provider, output_message_id),
             FOREIGN KEY(projector_version, generation)
                 REFERENCES observation_projection_rebuilds(projector_version, generation)
@@ -413,8 +411,6 @@ const CURRENT_REBUILD_MESSAGE_COLUMNS: &[&str] = &[
     "output_message_id",
     "message_json",
     "content_hash",
-    "snippet_text",
-    "index_text",
 ];
 const CURRENT_REBUILD_PROVIDER_USAGE_COLUMNS: &[&str] = &[
     "projector_version",

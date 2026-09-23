@@ -11,7 +11,7 @@ use tracedecay_store::{
     SessionTemporalDigestV1, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, storage, storage_message,
@@ -837,7 +837,7 @@ pub(super) async fn projection_coverage(
     .await?;
     let fts = digest_query_rows(
         conn,
-        "SELECT json_array(occurrence.occurrence_id, fts.index_text, fts.snippet_text)
+        "SELECT json_array(occurrence.occurrence_id, fts.index_text)
          FROM session_occurrences AS occurrence
          JOIN session_occurrences_fts AS fts ON fts.rowid = occurrence.rowid
          WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2

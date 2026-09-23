@@ -15,6 +15,7 @@ use rusqlite::backup::StepResult;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
+use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::rename_noreplace;
 
 #[path = "sqlite_snapshot_connection.rs"]
@@ -660,7 +661,7 @@ enum SnapshotSourcePolicy {
 
 struct ScratchDirectory {
     path: PathBuf,
-    owner_lock: Option<File>,
+    owner_lock: Option<FileLease>,
 }
 
 impl Drop for ScratchDirectory {
@@ -1102,6 +1103,7 @@ fn create_scratch_directory(
     ensure_private_root(root, expected_uid)?;
     let cleanup_lock = open_private_lock(&root.join(".cleanup.lock"), true)?;
     cleanup_lock.lock()?;
+    let cleanup_lock = FileLease::held(cleanup_lock, "sqlite_read_snapshot.cleanup");
     cleanup_stale_directories(root)?;
     for _ in 0..100 {
         let id = NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed);
@@ -1110,7 +1112,8 @@ fn create_scratch_directory(
             Ok(()) => {
                 let owner_lock = open_private_lock(&path.join(".owner.lock"), true)?;
                 owner_lock.lock()?;
-                cleanup_lock.unlock()?;
+                let owner_lock = FileLease::held(owner_lock, "sqlite_read_snapshot.owner");
+                cleanup_lock.release()?;
                 return Ok(ScratchDirectory {
                     path,
                     owner_lock: Some(owner_lock),

@@ -77,11 +77,7 @@ pub(super) fn load_next_pending_projection(
         == SourceDeletionSemanticsV1::CompleteSnapshotAbsence
         && receipt.snapshot_completion().is_some()
     {
-        load_current_mutations(
-            connection,
-            "external_source_projected_objects_v2",
-            binding.binding_id.as_str(),
-        )?
+        load_current_mutations(connection, "external_source_projected_objects_v2", binding)?
     } else {
         Vec::new()
     };
@@ -125,23 +121,44 @@ pub(super) fn load_next_pending_projection_any(
     load_next_pending_projection(connection, &identity)
 }
 
-#[hotpath::measure(label = "rusqlite.external_source.load_commit_receipt_by_idempotency")]
-pub(super) fn load_commit_receipt_by_idempotency(
+/// The replay identity a key committed, whether or not its full receipt is
+/// still retained.
+#[hotpath::measure(label = "rusqlite.external_source.load_commit_receipt_summary")]
+pub(super) fn load_commit_receipt_summary(
     connection: &rusqlite::Connection,
     binding: &SourceBindingIdentityV1,
     key: &tracedecay_domain::ManifestDigest,
-) -> rusqlite::Result<Option<SourceCommitReceiptV1>> {
-    load_slim_optional(
-        connection,
-        "SELECT receipt_json FROM external_source_commit_receipts_v2
-         WHERE binding_id = ?1 AND idempotency_key = ?2",
-        binding.binding_id.as_str(),
-        key.as_str(),
-    )?
-    .map(|slim| super::slim::hydrate_commit_receipt(connection, binding.binding_id.as_str(), &slim))
-    .transpose()
+) -> rusqlite::Result<Option<SourceCommitReceiptSummaryV1>> {
+    let row = connection
+        .prepare_cached(
+            "SELECT request_digest, receipt_digest, mutation_digests_json
+             FROM external_source_commit_receipts_v2
+             WHERE binding_id = ?1 AND idempotency_key = ?2",
+        )?
+        .query_row(params![binding.binding_id.as_str(), key.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .optional()?;
+    let Some((request_digest, receipt_digest, mutation_digests)) = row else {
+        return Ok(None);
+    };
+    SourceCommitReceiptSummaryV1::new(
+        binding.clone(),
+        key.clone(),
+        tracedecay_domain::ManifestDigest::new(request_digest).map_err(invalid)?,
+        tracedecay_domain::ManifestDigest::new(receipt_digest).map_err(invalid)?,
+        decode(mutation_digests)?,
+    )
+    .map(Some)
+    .map_err(invalid)
 }
 
+/// A receipt still retained in full: the binding's current receipt or one
+/// awaiting projection.
 #[hotpath::measure(label = "rusqlite.external_source.load_commit_receipt_by_digest")]
 pub(super) fn load_commit_receipt_by_digest(
     connection: &rusqlite::Connection,
@@ -150,12 +167,12 @@ pub(super) fn load_commit_receipt_by_digest(
 ) -> rusqlite::Result<Option<SourceCommitReceiptV1>> {
     load_slim_optional(
         connection,
-        "SELECT receipt_json FROM external_source_commit_receipts_v2
+        "SELECT receipt_json FROM external_source_retained_receipts_v1
          WHERE binding_id = ?1 AND receipt_digest = ?2",
         binding.binding_id.as_str(),
         digest,
     )?
-    .map(|slim| super::slim::hydrate_commit_receipt(connection, binding.binding_id.as_str(), &slim))
+    .map(|slim| super::slim::hydrate_commit_receipt(connection, binding, &slim))
     .transpose()
 }
 
@@ -196,9 +213,7 @@ pub(super) fn load_projection_receipt_by_digest(
         binding.binding_id.as_str(),
         digest,
     )?
-    .map(|slim| {
-        super::slim::hydrate_projection_receipt(connection, binding.binding_id.as_str(), &slim)
-    })
+    .map(|slim| super::slim::hydrate_projection_receipt(connection, binding, &slim))
     .transpose()
 }
 

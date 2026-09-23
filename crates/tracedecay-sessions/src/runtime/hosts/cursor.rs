@@ -1036,7 +1036,7 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 pub struct CursorSweepSource {
     cursor_projects_dir: PathBuf,
     /// Session ids already owned by the richer composer store
-    /// ([`crate::runtime::cursor_composer`]). Transcript files whose stem is
+    /// ([`crate::runtime::hosts::cursor_composer`]). Transcript files whose stem is
     /// one of these are skipped so the two Cursor sources never double-ingest.
     skip_session_ids: std::collections::HashSet<String>,
     user_registered_slugs: Option<std::collections::HashSet<String>>,

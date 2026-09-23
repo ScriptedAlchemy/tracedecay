@@ -14,13 +14,12 @@ use admission::{validate_temporal_fts_contracts, validate_temporal_fts_match};
 const OPERATION: &str = "initialize session temporal schema";
 const MIGRATION_NAME: &str = "session-temporal";
 const SESSION_TEMPORAL_AUTHORITY: &str = "session temporal";
-const RELEASED_SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 3;
 pub(crate) use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
 
 const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
     (
         "session_occurrences_fts",
-        "createvirtualtablesession_occurrences_ftsusingfts5(index_text,snippet_text,content='session_occurrences',content_rowid='rowid')",
+        "createvirtualtablesession_occurrences_ftsusingfts5(index_text,content='session_occurrences',content_rowid='rowid')",
     ),
     (
         "session_summary_nodes_fts",
@@ -358,7 +357,7 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
             AND sanitized_content_digest NOT GLOB '*[^0-9a-f]*'
         ),
         sanitized_content_bytes INTEGER NOT NULL CHECK(sanitized_content_bytes >= 0),
-        snippet_text TEXT NOT NULL,
+        snippet_text TEXT NOT NULL GENERATED ALWAYS AS (index_text) VIRTUAL,
         index_text TEXT NOT NULL,
         PRIMARY KEY(session_id, generation, occurrence_id),
         FOREIGN KEY(session_id, generation)
@@ -570,7 +569,6 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
 
     CREATE VIRTUAL TABLE IF NOT EXISTS session_occurrences_fts USING fts5(
         index_text,
-        snippet_text,
         content='session_occurrences',
         content_rowid='rowid'
     );

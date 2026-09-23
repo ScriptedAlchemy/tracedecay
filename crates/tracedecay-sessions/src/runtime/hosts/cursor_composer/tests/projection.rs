@@ -116,7 +116,8 @@ fn write_composer_state(
 }
 
 fn write_cursor_jsonl(home: &std::path::Path, project: &std::path::Path, session_id: &str) {
-    let slug = crate::runtime::cursor::cursor_project_slug(project).expect("Cursor project slug");
+    let slug =
+        crate::runtime::hosts::cursor::cursor_project_slug(project).expect("Cursor project slug");
     let transcript_dir = home
         .join(".cursor")
         .join("projects")
@@ -326,7 +327,7 @@ async fn queued_jsonl_projection_does_not_hide_new_message_from_the_same_session
 
     let jsonl = crate::runtime::with_transcript_source_home(
         home.path().to_path_buf(),
-        crate::runtime::cursor::try_ingest_cursor_project_sweep_capped(
+        crate::runtime::hosts::cursor::try_ingest_cursor_project_sweep_capped(
             project.path(),
             &admission,
             project_id,
@@ -478,7 +479,7 @@ async fn capture_admission_failure_defers_owned_session_before_jsonl_handoff() {
     assert_eq!(outcome.messages_upserted, 0);
     let jsonl = crate::runtime::with_transcript_source_home(
         home.path().to_path_buf(),
-        crate::runtime::cursor::try_ingest_cursor_project_sweep_capped(
+        crate::runtime::hosts::cursor::try_ingest_cursor_project_sweep_capped(
             project.path(),
             &admission,
             project_id,

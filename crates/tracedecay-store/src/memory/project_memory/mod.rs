@@ -3,7 +3,7 @@ use tracedecay_domain::canonical_text::is_canonical_text_within;
 use tracedecay_domain::{
     Confidence, DomainError, FactAssertionId, FactCategoryV1, FactEventId, FactId,
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, SanitizerDispositionV1, UtcMicros,
+    RetrievalAnchorId, RetrievalAnchorRecord, SanitizerDispositionV1, UtcMicros,
 };
 
 use super::queries::{MAX_CURRENT_LIMIT, MAX_LINEAGE_LIMIT};
@@ -503,7 +503,7 @@ impl ProjectMemoryFactHistoryV1 {
 pub struct ProjectMemoryFactInspectionV1 {
     fact: ProjectMemoryFactV1,
     history: ProjectMemoryFactHistoryV1,
-    anchors: Vec<RetrievalAnchorRecordV2>,
+    anchors: Vec<RetrievalAnchorRecord>,
     status: ProjectMemoryFactStatusV1,
 }
 
@@ -511,7 +511,7 @@ impl ProjectMemoryFactInspectionV1 {
     pub fn new(
         fact: ProjectMemoryFactV1,
         history: ProjectMemoryFactHistoryV1,
-        anchors: Vec<RetrievalAnchorRecordV2>,
+        anchors: Vec<RetrievalAnchorRecord>,
         status: ProjectMemoryFactStatusV1,
     ) -> FactStoreResult<Self> {
         history.validate_for_owner(fact.owner())?;
@@ -566,7 +566,7 @@ impl ProjectMemoryFactInspectionV1 {
     pub fn history(&self) -> &ProjectMemoryFactHistoryV1 {
         &self.history
     }
-    pub fn anchors(&self) -> &[RetrievalAnchorRecordV2] {
+    pub fn anchors(&self) -> &[RetrievalAnchorRecord] {
         &self.anchors
     }
     pub fn status(&self) -> &ProjectMemoryFactStatusV1 {

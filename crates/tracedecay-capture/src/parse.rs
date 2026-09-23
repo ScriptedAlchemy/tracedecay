@@ -10,7 +10,7 @@ use tracedecay_domain::{
 };
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub enum ClaudeRecordParseErrorV1 {
+pub enum ObservationRecordParseErrorV1 {
     #[error("Claude record is empty")]
     Empty,
     #[error("Claude record exceeds the byte limit")]
@@ -59,10 +59,10 @@ impl ParseLimits {
 
 /// Parsed and structurally bounded evidence for one complete Claude JSONL record.
 ///
-/// Construction is intentionally restricted to [`parse_claude_record_v1`].
+/// Construction is intentionally restricted to [`parse_observation_record_v1`].
 /// Callers may inspect the parsed object to resolve scope, then move the token
 /// into the sanitizer without serializing or parsing it again.
-pub struct ParsedClaudeRecordV1 {
+pub struct ParsedObservationRecordV1 {
     value: Value,
     source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
@@ -73,7 +73,7 @@ pub struct ParsedClaudeRecordV1 {
     canonical_provider: Option<ProviderId>,
 }
 
-impl ParsedClaudeRecordV1 {
+impl ParsedObservationRecordV1 {
     pub fn value(&self) -> &Value {
         &self.value
     }
@@ -115,9 +115,6 @@ impl ParsedClaudeRecordV1 {
         Ok(())
     }
 }
-
-pub type ParsedObservationRecordV1 = ParsedClaudeRecordV1;
-pub type ObservationRecordParseErrorV1 = ClaudeRecordParseErrorV1;
 
 /// Structurally validated native JSON that may be normalized independently
 /// for several observation scopes without decoding or hashing the source bytes
@@ -172,13 +169,6 @@ fn decoded_value_retained_bytes(value: &Value) -> u64 {
     )
     .unwrap_or(u64::MAX)
     .saturating_add(payload(value))
-}
-
-pub fn parse_claude_record_v1(
-    record: &[u8],
-    source_range: ObservationSourceRangeV1,
-) -> Result<ParsedClaudeRecordV1, ClaudeRecordParseErrorV1> {
-    parse_observation_record_v1(record, source_range, ObservationOrderingDomainV1::FileBytes)
 }
 
 pub fn parse_observation_record_v1(
@@ -248,10 +238,10 @@ fn prepare_observation_record(
 ) -> Result<PreparedObservationRecordV1, ObservationRecordParseErrorV1> {
     let limits = ParseLimits::default_policy();
     validate_record_frame(record, source_range, ordering_domain, limits)?;
-    let native =
-        serde_json::from_slice::<Value>(record).map_err(|_| ClaudeRecordParseErrorV1::Malformed)?;
+    let native = serde_json::from_slice::<Value>(record)
+        .map_err(|_| ObservationRecordParseErrorV1::Malformed)?;
     if !native.is_object() {
-        return Err(ClaudeRecordParseErrorV1::NonObject);
+        return Err(ObservationRecordParseErrorV1::NonObject);
     }
     validate_structure(&native, limits)?;
     let retained_bytes = decoded_value_retained_bytes(&native);
@@ -301,15 +291,15 @@ fn finish_canonical_envelope(
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
     envelope
         .validate()
-        .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+        .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
     if envelope.evidence().ordering_domain() != ordering_domain
         || envelope.evidence().range() != source_range
     {
-        return Err(ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope);
+        return Err(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope);
     }
     let canonical_provider = envelope.provider().clone();
     let value = serde_json::to_value(&envelope)
-        .map_err(|_| ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)?;
+        .map_err(|_| ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)?;
     let structure = validate_structure(&value, ParseLimits::default_policy())?;
     Ok(ParsedObservationRecordV1 {
         value,
@@ -331,10 +321,10 @@ fn parse_observation_record(
     limits: ParseLimits,
 ) -> Result<ParsedObservationRecordV1, ObservationRecordParseErrorV1> {
     validate_record_frame(record, source_range, ordering_domain, limits)?;
-    let value =
-        serde_json::from_slice::<Value>(record).map_err(|_| ClaudeRecordParseErrorV1::Malformed)?;
+    let value = serde_json::from_slice::<Value>(record)
+        .map_err(|_| ObservationRecordParseErrorV1::Malformed)?;
     if !value.is_object() {
-        return Err(ClaudeRecordParseErrorV1::NonObject);
+        return Err(ObservationRecordParseErrorV1::NonObject);
     }
     let structure = validate_structure(&value, limits)?;
     Ok(ParsedObservationRecordV1 {
@@ -392,17 +382,17 @@ fn validate_record_frame(
     source_range: ObservationSourceRangeV1,
     ordering_domain: ObservationOrderingDomainV1,
     limits: ParseLimits,
-) -> Result<(), ClaudeRecordParseErrorV1> {
+) -> Result<(), ObservationRecordParseErrorV1> {
     if record.is_empty() {
-        return Err(ClaudeRecordParseErrorV1::Empty);
+        return Err(ObservationRecordParseErrorV1::Empty);
     }
     if record.len() > limits.record_bytes {
-        return Err(ClaudeRecordParseErrorV1::TooLarge);
+        return Err(ObservationRecordParseErrorV1::TooLarge);
     }
     if ordering_domain == ObservationOrderingDomainV1::FileBytes {
         let range_len = source_range.end() - source_range.start();
         if u64::try_from(record.len()).ok() != Some(range_len) {
-            return Err(ClaudeRecordParseErrorV1::RangeLengthMismatch);
+            return Err(ObservationRecordParseErrorV1::RangeLengthMismatch);
         }
     }
     Ok(())
@@ -417,7 +407,7 @@ struct StructureMetrics {
 fn validate_structure(
     value: &Value,
     limits: ParseLimits,
-) -> Result<StructureMetrics, ClaudeRecordParseErrorV1> {
+) -> Result<StructureMetrics, ObservationRecordParseErrorV1> {
     let mut stack = vec![(value, 1usize)];
     let mut values = 0usize;
     let mut max_depth = 0usize;
@@ -425,10 +415,10 @@ fn validate_structure(
         values = values.saturating_add(1);
         max_depth = max_depth.max(depth);
         if values > limits.values {
-            return Err(ClaudeRecordParseErrorV1::TooManyValues);
+            return Err(ObservationRecordParseErrorV1::TooManyValues);
         }
         if depth > limits.depth {
-            return Err(ClaudeRecordParseErrorV1::TooDeep);
+            return Err(ObservationRecordParseErrorV1::TooDeep);
         }
         match current {
             Value::Object(fields) => {
@@ -464,7 +454,7 @@ mod canonical_envelope_tests {
     fn message_envelope(
         content: Value,
         range: ObservationSourceRangeV1,
-    ) -> Result<CanonicalObservationEnvelopeV1, ClaudeRecordParseErrorV1> {
+    ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
         CanonicalObservationEnvelopeV1::new(
             ProviderId::new("codex").unwrap(),
             "message",
@@ -480,7 +470,7 @@ mod canonical_envelope_tests {
             }],
             CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
         )
-        .map_err(|_| ClaudeRecordParseErrorV1::NormalizationFailed)
+        .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
     }
 
     fn native_record(content: &Value) -> (Vec<u8>, ObservationSourceRangeV1) {
@@ -688,7 +678,7 @@ mod canonical_envelope_tests {
             (at_limit, Ok(())),
             (
                 at_limit + 1,
-                Err(ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope),
+                Err(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope),
             ),
         ] {
             let content = Value::String("a".repeat(content_len));
@@ -725,7 +715,7 @@ mod canonical_envelope_tests {
                 |native| message_envelope(native["content"].clone(), other),
             )
             .err(),
-            Some(ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)
+            Some(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
         );
         assert_eq!(
             parse_normalized_observation_record_v1(
@@ -735,7 +725,7 @@ mod canonical_envelope_tests {
                 |native| message_envelope(native["content"].clone(), range),
             )
             .err(),
-            Some(ClaudeRecordParseErrorV1::InvalidCanonicalEnvelope)
+            Some(ObservationRecordParseErrorV1::InvalidCanonicalEnvelope)
         );
     }
 }

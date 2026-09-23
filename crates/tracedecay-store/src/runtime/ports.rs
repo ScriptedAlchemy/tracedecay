@@ -1,21 +1,17 @@
-use std::future::Future;
-use std::pin::Pin;
-
 use super::{
     CommitSequenceV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
     GraphNodeV1, GraphSearchResultV1, GraphStatsV1, MaintenanceTelemetryV1, OperationPriorityV1,
     ReaderHealthLeaseIdV1, ReaderHealthLeaseV1, RuntimeCancellationIdentityV1,
     RuntimeCancellationStageV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
     RuntimeTransactionScopeV1, SaturationScopeV1, ShardWatermarkV1, SnapshotLeaseIdV1,
-    SnapshotLeaseV1, StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, StoreCommitReceiptV1,
-    StoreRuntimeBindingV1, UnavailableReasonV1, WatermarkCoverageStatusV1,
+    SnapshotLeaseV1, StorageRuntimeContractErrorV1, StoreCommitReceiptV1, StoreRuntimeBindingV1,
+    UnavailableReasonV1, WatermarkCoverageStatusV1,
 };
 use super::{
     RepositoryOperationEnvelopeV1, RepositoryReadOperationV1, RepositoryReadResultV1,
     StoreAuthorityEpochV1, StoreShardIdV1,
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use thiserror::Error;
 
 /// One caller-owned monotonic interruption decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,7 +99,7 @@ impl RuntimeSubmitRequestV1 {
 }
 
 /// Idempotent write outcomes, including expected admission and cancellation
-/// states. Driver failures remain `StorageRuntimePortErrorV1`; these variants
+/// states. Driver failures remain `StorageRuntimeErrorV1`; these variants
 /// are stable runtime decisions callers must handle explicitly.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -818,98 +814,6 @@ fn binding_matches_watermark(
     binding.shard_id == watermark.shard_id
         && binding.incarnation == watermark.incarnation
         && binding.authority_epoch == watermark.authority_epoch
-}
-
-fn validate_probe(
-    control: &RuntimeRequestControlV1,
-    probe: &dyn RuntimeRequestProbeV1,
-) -> Result<(), StorageRuntimeContractErrorV1> {
-    if probe.cancellation_identity() != &control.cancellation {
-        return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-            field: "runtime cancellation probe identity",
-        });
-    }
-    if probe.deadline_identity() != &control.deadline {
-        return Err(StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-            field: "runtime deadline probe identity",
-        });
-    }
-    Ok(())
-}
-
-fn read_interruption(
-    probe: &dyn RuntimeRequestProbeV1,
-) -> Result<Option<RuntimeReadOutcomeV1>, StorageRuntimeContractErrorV1> {
-    let reason = match probe.interruption() {
-        Some(RuntimeInterruptionV1::Cancelled) => UnavailableReasonV1::Cancelled,
-        Some(RuntimeInterruptionV1::DeadlineExceeded) => UnavailableReasonV1::DeadlineExceeded,
-        None => return Ok(None),
-    };
-    RuntimeReadOutcomeV1::new(
-        None,
-        RuntimeReadCoverageV1::Unavailable {
-            coverage: None,
-            reason,
-        },
-    )
-    .map(Some)
-}
-
-#[derive(Debug, Error)]
-pub enum StorageRuntimePortErrorV1 {
-    #[error("invalid storage runtime request: {0}")]
-    InvalidRequest(StorageRuntimeContractErrorV1),
-    #[error("invalid storage runtime response: {0}")]
-    InvalidResponse(StorageRuntimeContractErrorV1),
-    #[error(transparent)]
-    Runtime(Box<StorageRuntimeErrorV1>),
-}
-
-impl From<StorageRuntimeErrorV1> for StorageRuntimePortErrorV1 {
-    fn from(error: StorageRuntimeErrorV1) -> Self {
-        Self::Runtime(Box::new(error))
-    }
-}
-
-pub type StorageRuntimePortResultV1<T> = Result<T, StorageRuntimePortErrorV1>;
-pub type StorageRuntimePortFutureV1<'a, T> =
-    Pin<Box<dyn Future<Output = StorageRuntimePortResultV1<T>> + Send + 'a>>;
-
-/// Object-safe std-only asynchronous read boundary.
-pub trait StorageRuntimeReadPort: Send + Sync {
-    fn dispatch_read<'a>(
-        &'a self,
-        request: RuntimeReadRequestV1,
-        probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeReadOutcomeV1>;
-
-    fn read<'a>(
-        &'a self,
-        request: RuntimeReadRequestV1,
-        probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeReadOutcomeV1> {
-        Box::pin(async move {
-            request
-                .validate()
-                .and_then(|()| validate_probe(request.control(), probe))
-                .map_err(StorageRuntimePortErrorV1::InvalidRequest)?;
-            if let Some(outcome) =
-                read_interruption(probe).map_err(StorageRuntimePortErrorV1::InvalidResponse)?
-            {
-                return Ok(outcome);
-            }
-            let outcome = self.dispatch_read(request.clone(), probe).await?;
-            outcome
-                .validate_for(&request)
-                .map_err(StorageRuntimePortErrorV1::InvalidResponse)?;
-            if let Some(interrupted) =
-                read_interruption(probe).map_err(StorageRuntimePortErrorV1::InvalidResponse)?
-            {
-                return Ok(interrupted);
-            }
-            Ok(outcome)
-        })
-    }
 }
 
 // Keep the single-shard requirement helper explicit so adapter migrations do

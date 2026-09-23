@@ -30,6 +30,9 @@ use tracedecay_store::{
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
+use tracedecay_code_index_retention::code_index_generations::{
+    acquire_generation_segments_publication_lock, code_generation_segments_root,
+};
 use tracedecay_code_index_runtime::{
     CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1, CodeGraphSeatRuntimePortV1,
 };
@@ -39,6 +42,8 @@ pub(super) use memory_runtime::{
     MemoryGraphRuntimeTaskContext, inline_graph_publication_input_digest,
 };
 pub(super) mod graph_attachment;
+#[cfg(test)]
+mod linked_bundle_tests;
 #[cfg(test)]
 mod sealed_publication_tests;
 mod seals;
@@ -265,7 +270,7 @@ impl GraphCancellation for ResidentMemoryGuardedGraphCancellationV1 {
     }
 }
 
-struct MaintenanceGraphCancellationV1(tracedecay_session_memory::context::CancellationToken);
+struct MaintenanceGraphCancellationV1(tracedecay_runtime_core::cancellation::CancellationToken);
 
 impl GraphCancellation for MaintenanceGraphCancellationV1 {
     fn is_cancelled(&self) -> bool {
@@ -1225,8 +1230,21 @@ impl RetainedCodeGraphRuntimeV1 {
     pub fn sweep_aborted_read_bundle_temporaries(&self) -> std::result::Result<(), GraphDbError> {
         tracedecay_graph_db::sweep_aborted_sealed_read_bundle_temporaries(
             &self.generations_root,
+            &self.read_bundle_artifacts_root()?,
             &self.sealed_state_digest,
         )
+    }
+
+    fn code_store_root(&self) -> std::result::Result<&std::path::Path, GraphDbError> {
+        self.generations_root
+            .parent()
+            .ok_or_else(|| GraphDbError::unavailable("code generations root has no store root"))
+    }
+
+    /// Bundle artifacts live beside the generation segments that every
+    /// worktree scope of the project shares, so identical graphs store one.
+    fn read_bundle_artifacts_root(&self) -> std::result::Result<std::path::PathBuf, GraphDbError> {
+        Ok(code_generation_segments_root(self.code_store_root()?))
     }
 
     #[hotpath::measure(label = "daemon.session_registry.publish_snapshot")]
@@ -2352,6 +2370,7 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         tracedecay_graph_db::load_sealed_read_bundle_artifact(
             &self.generations_root,
+            &self.read_bundle_artifacts_root()?,
             &self.sealed_state_digest,
             &identity,
             tracedecay_code_index::graph_projection::INTERACTIVE_CATALOG_ARTIFACT_NAME,
@@ -2383,8 +2402,15 @@ impl RetainedCodeGraphRuntimeV1 {
         };
         let stage = || {
             self.sweep_aborted_read_bundle_temporaries()?;
+            let artifacts_root = self.read_bundle_artifacts_root()?;
+            std::fs::create_dir_all(&artifacts_root).map_err(|error| {
+                GraphDbError::unavailable(format!(
+                    "failed to create the sealed read bundle artifact root: {error}"
+                ))
+            })?;
             let mut writer = tracedecay_graph_db::SealedReadBundleWriterV1::create(
                 &self.generations_root,
+                &artifacts_root,
                 &self.sealed_state_digest,
             )?;
             writer.stage_artifact(
@@ -2423,13 +2449,22 @@ impl RetainedCodeGraphRuntimeV1 {
         let Some(writer) = writer else {
             return;
         };
-        match writer.commit(identity, &|| {
-            if self.lifecycle_cancelled.load(Ordering::Acquire) {
-                Err(GraphDbError::Cancelled)
-            } else {
-                Ok(())
-            }
-        }) {
+        let cancelled = || self.lifecycle_cancelled.load(Ordering::Acquire);
+        let commit = || {
+            // A placed artifact is unreferenced until its manifest lands; the
+            // shared lock keeps the project's segment sweep out until then.
+            let _segments_lock =
+                acquire_generation_segments_publication_lock(self.code_store_root()?, &cancelled)
+                    .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+            writer.commit(identity, &|| {
+                if cancelled() {
+                    Err(GraphDbError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
+        };
+        match commit() {
             Ok(manifest) => {
                 tracing::info!(
                     generation = %self.generation_id,
@@ -2697,7 +2732,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         project_id: ProjectId,
         project_database: &tracedecay_runtime_core::db::Database,
-        cancellation: &tracedecay_session_memory::context::CancellationToken,
+        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
         after: Option<GraphProjectionIdentityV1>,
     ) -> std::result::Result<Option<GraphProjectionIdentityV1>, GraphDbError> {
         let project_shard = StoreShardIdV1::project(
@@ -2811,7 +2846,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         project_database: &tracedecay_runtime_core::db::Database,
         generation: &CodeGenerationId,
         generation_file: &str,
-        cancellation: &tracedecay_session_memory::context::CancellationToken,
+        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> std::result::Result<bool, GraphDbError> {
         let sealed_digest = sealed_digest_from_generation_file(generation_file)?;
         let replay_root = project_database

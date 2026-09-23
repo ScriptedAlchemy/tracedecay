@@ -6,8 +6,11 @@ use std::fs::File;
 use std::io;
 
 pub mod capability_dir;
+mod file_lease;
 pub mod framed_log;
 mod rename_noreplace;
+
+pub use file_lease::FileLease;
 #[cfg(windows)]
 pub mod windows_file;
 

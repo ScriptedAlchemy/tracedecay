@@ -149,11 +149,9 @@ async fn seed_raw_messages(conn: &Connection, texts: &[String]) {
             batch.push_str(&format!(
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, metadata_json
                  ) VALUES ('{PROVIDER}', '{message_id}', '{SESSION}', 'assistant', 1, 2,
-                    {literal}, '{message_id}-hash', 'inline', NULL, {literal},
-                    {literal}, 0, 0, NULL);\n"
+                    {literal}, '{message_id}-hash', 'inline', NULL, NULL);\n"
             ));
         }
         conn.execute_batch(&batch)

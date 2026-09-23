@@ -1,10 +1,10 @@
 use tracedecay_domain::TemporalModeV1;
 use tracedecay_runtime_core::db::engine::Value as SqlValue;
 
-use tracedecay_temporal_query::ports::{
-    PageRequest, TemporalExecutionSnapshot, TemporalPortError, TemporalRetrievalScope,
-};
+use tracedecay_temporal_query::paging::PageRequest;
+use tracedecay_temporal_query::ports::{TemporalPortError, TemporalRetrievalScope};
 use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 mod relations;
 

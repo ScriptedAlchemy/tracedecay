@@ -6,7 +6,7 @@
 
 use tracedecay_domain::{
     EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, ObservationSourceCursorV1,
-    ProjectionGenerationId, RetrievalAnchorRecordV2,
+    ProjectionGenerationId, RetrievalAnchorRecord,
 };
 use tracedecay_store::{
     ObservationCommitReceipt, RepositoryProvenanceAttachmentV1, StoredObservationRowV1,
@@ -120,7 +120,7 @@ pub(super) fn decode_observation_row(
     {
         return Err(invalid("observation committed cursor binding mismatch"));
     }
-    let retrieval_anchor: RetrievalAnchorRecordV2 = decode(
+    let retrieval_anchor: RetrievalAnchorRecord = decode(
         retrieval_anchor.ok_or_else(|| invalid("observation retrieval anchor is missing"))?,
     )?;
     let projection_generation = ProjectionGenerationId::new(
@@ -129,7 +129,7 @@ pub(super) fn decode_observation_row(
     )
     .map_err(invalid)?;
     let repository_anchor = repository_anchor
-        .map(decode::<RetrievalAnchorRecordV2>)
+        .map(decode::<RetrievalAnchorRecord>)
         .transpose()?;
     let expected_repository_owner = repository_anchor
         .as_ref()

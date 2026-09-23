@@ -37,7 +37,7 @@ pub(super) struct PreparedPayload {
 #[derive(Clone, Debug)]
 pub(super) struct PreparedSource {
     pub canonical: CanonicalSourceBinding,
-    pub compatibility_anchor: bool,
+    pub unobserved_raw_anchor: bool,
     pub timestamp: i64,
     pub payload: Option<PreparedPayload>,
 }

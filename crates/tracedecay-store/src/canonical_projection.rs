@@ -204,7 +204,7 @@ fn derive_canonical_projection_for(
                 timestamp,
                 ordinal,
                 source_offset,
-                &metadata_json,
+                metadata_json.as_deref(),
                 projected,
             ),
         ));
@@ -221,7 +221,7 @@ fn derive_canonical_projection_for(
                 derived.fields.timestamp.or(timestamp),
                 ordinal,
                 source_offset,
-                &metadata_json,
+                metadata_json.as_deref(),
                 derived.fields,
             ),
         ));
@@ -241,7 +241,7 @@ fn canonical_session_message_record(
     timestamp: Option<i64>,
     ordinal: i64,
     source_offset: Option<i64>,
-    metadata_json: &str,
+    metadata_json: Option<&str>,
     fields: CanonicalMessageFields,
 ) -> SessionMessageRecord {
     SessionMessageRecord {
@@ -257,7 +257,7 @@ fn canonical_session_message_record(
         tool_names: fields.tool_names,
         source_path: None,
         source_offset,
-        metadata_json: Some(metadata_json.to_owned()),
+        metadata_json: metadata_json.map(str::to_owned),
     }
 }
 
@@ -374,25 +374,20 @@ fn canonical_session_metadata(
 fn canonical_message_metadata(
     envelope: &CanonicalObservationEnvelopeV1,
     session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> ProjectionStoreResult<String> {
+) -> ProjectionStoreResult<Option<String>> {
     canonical_message_metadata_for(CanonicalRendering::Current, envelope, session_metadata)
 }
 
+/// Message metadata holds only what the envelope does not: session, tool, and
+/// provider-semantics keys. The envelope itself stays in its `observations`
+/// row; [`message_metadata_with_envelope`] merges the two for readers that
+/// render the full record.
 fn canonical_message_metadata_for(
     rendering: CanonicalRendering,
     envelope: &CanonicalObservationEnvelopeV1,
     session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> ProjectionStoreResult<String> {
-    let serde_json::Value::Object(mut metadata) = serde_json::to_value(envelope)
-        .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))?
-    else {
-        return Err(ProjectionStoreError::Contract(
-            ObservationContractError::CanonicalEncoding,
-        ));
-    };
-    if let Some(session_metadata) = session_metadata {
-        metadata.extend(session_metadata.clone());
-    }
+) -> ProjectionStoreResult<Option<String>> {
+    let mut metadata = session_metadata.cloned().unwrap_or_default();
     if let Some(normalize) =
         tool_metadata_normalizer(metadata.get("source").and_then(serde_json::Value::as_str))
     {
@@ -413,8 +408,28 @@ fn canonical_message_metadata_for(
     {
         metadata.extend(semantics.metadata);
     }
-    serde_json::to_string(&metadata)
-        .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
+    serialize_metadata_map(&metadata)
+}
+
+/// The full message metadata: the observation `envelope` payload overlaid by
+/// the row's stored keys, byte-identical to a row that embedded the envelope.
+pub fn message_metadata_with_envelope(
+    stored: Option<&str>,
+    envelope: &serde_json::Value,
+) -> ProjectionStoreResult<String> {
+    let encoding = || ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding);
+    let serde_json::Value::Object(mut metadata) = envelope.clone() else {
+        return Err(encoding());
+    };
+    if let Some(stored) = stored {
+        let serde_json::Value::Object(stored) =
+            serde_json::from_str(stored).map_err(|_| encoding())?
+        else {
+            return Err(encoding());
+        };
+        metadata.extend(stored);
+    }
+    serde_json::to_string(&metadata).map_err(|_| encoding())
 }
 
 fn canonical_workflow_facts(
@@ -1243,7 +1258,9 @@ mod tests {
             canonical_session_metadata_map("cursor", Some(&cursor_transcript_session_fields()));
 
         let metadata: serde_json::Value = serde_json::from_str(
-            &canonical_message_metadata(&envelope, Some(&session_metadata)).unwrap(),
+            &canonical_message_metadata(&envelope, Some(&session_metadata))
+                .unwrap()
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(metadata["tool_calls"][0]["id"], "tool.dispatch");
@@ -1269,6 +1286,7 @@ mod tests {
                     Some(&other_source),
                 )),
             )
+            .unwrap()
             .unwrap(),
         )
         .unwrap();
@@ -1362,7 +1380,8 @@ mod tests {
         );
         assert_eq!(fields.kind, "goal_context");
         let metadata: serde_json::Value =
-            serde_json::from_str(&canonical_message_metadata(&envelope, None).unwrap()).unwrap();
+            serde_json::from_str(&canonical_message_metadata(&envelope, None).unwrap().unwrap())
+                .unwrap();
         assert_eq!(metadata["source"], "codex_rollout");
         assert_eq!(metadata["codex_internal_context"], "goal");
         assert_eq!(
@@ -1447,8 +1466,20 @@ mod tests {
         );
 
         let session_metadata_map = canonical_session_metadata_map("codex", Some(&fields));
+        let stored = canonical_message_metadata(&envelope, Some(&session_metadata_map))
+            .unwrap()
+            .unwrap();
+        let stored_metadata: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert!(
+            stored_metadata.get("stable_record_id").is_none() && stored_metadata.get("facts").is_none(),
+            "the envelope is stored once, in its observation row: {stored}"
+        );
         let message_metadata: serde_json::Value = serde_json::from_str(
-            &canonical_message_metadata(&envelope, Some(&session_metadata_map)).unwrap(),
+            &message_metadata_with_envelope(
+                Some(&stored),
+                &serde_json::to_value(&envelope).unwrap(),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(

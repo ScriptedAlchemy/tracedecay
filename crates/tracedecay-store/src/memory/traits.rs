@@ -1,6 +1,6 @@
 use std::future::Future;
 use tracedecay_domain::RunId;
-use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2};
+use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecord};
 
 use super::ProjectMemoryAutomationRunReceiptsV1;
 use super::{
@@ -82,7 +82,7 @@ pub trait FactStore: Send + Sync {
     fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
-    ) -> impl Future<Output = FactStoreResult<Option<RetrievalAnchorRecordV2>>> + Send;
+    ) -> impl Future<Output = FactStoreResult<Option<RetrievalAnchorRecord>>> + Send;
 }
 
 /// Single typed authority boundary for canonical project memory.

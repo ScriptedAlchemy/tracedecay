@@ -1,10 +1,10 @@
 use serde_json::json;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGeneration, CapabilityId,
     ComponentVersion, CoverageReportV1, EvidenceClass, ObservationId,
     ObservationIdentityMaterialV1, PayloadAccessState, PayloadReferenceV1,
     PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
-    ResolutionAuthorizationV1, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
+    ResolutionAuthorizationV1, RetrievalAnchorRecordParts, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, SessionId,
     UtcMicros, VectorWatermark,
 };
@@ -81,15 +81,15 @@ fn authorization() -> ResolutionAuthorizationV1 {
 fn anchor(
     observation: &DurableObservationV1,
     owner: ObservationScopeV1,
-    aliases: Vec<NativeAliasV2>,
+    aliases: Vec<NativeAlias>,
     ingested_at: i64,
-) -> RetrievalAnchorRecordV2 {
+) -> RetrievalAnchorRecord {
     anchor_with_provenance(
         observation,
         owner,
         aliases,
         ingested_at,
-        AnchorSourceGenerationV2::Observation(observation.identity().generation()),
+        AnchorSourceGeneration::Observation(observation.identity().generation()),
         vec![observation.observation_id().clone()],
     )
 }
@@ -97,13 +97,13 @@ fn anchor(
 fn anchor_with_provenance(
     observation: &DurableObservationV1,
     owner: ObservationScopeV1,
-    aliases: Vec<NativeAliasV2>,
+    aliases: Vec<NativeAlias>,
     ingested_at: i64,
-    source_generation: AnchorSourceGenerationV2,
+    source_generation: AnchorSourceGeneration,
     source_observations: Vec<CanonicalObservationIdV1>,
-) -> RetrievalAnchorRecordV2 {
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone()),
+) -> RetrievalAnchorRecord {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::ExactObservation(observation.observation_id().clone()),
         owner,
         aliases,
         occurred_at: None,
@@ -206,9 +206,7 @@ fn anchored_write_rejects_mismatched_source_generation_and_lineage() {
                 ObservationScopeV1::Profile,
                 vec![],
                 1,
-                AnchorSourceGenerationV2::Observation(
-                    ObservationSourceGenerationV1::new(8).unwrap()
-                ),
+                AnchorSourceGeneration::Observation(ObservationSourceGenerationV1::new(8).unwrap()),
                 vec![candidate.observation_id().clone()],
             ),
             projection_generation(),
@@ -223,7 +221,7 @@ fn anchored_write_rejects_mismatched_source_generation_and_lineage() {
                 ObservationScopeV1::Profile,
                 vec![],
                 1,
-                AnchorSourceGenerationV2::Observation(candidate.identity().generation()),
+                AnchorSourceGeneration::Observation(candidate.identity().generation()),
                 vec![
                     candidate.observation_id().clone(),
                     other.observation_id().clone(),

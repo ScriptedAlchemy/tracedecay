@@ -24,7 +24,7 @@ use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryOperationEnvelopeV1,
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
-    SourceCommitApplyOutcomeV1, SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1,
+    SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1, SourceCommitV1, SourceObjectMutationV1,
     SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
     SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit, build_source_projection,
 };
@@ -68,8 +68,8 @@ const HOST_EXTERNAL_SOURCE_PROJECTOR: &str = "projector.host-observation.externa
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeSourceCaptureOutcomeV1 {
-    Projected(SourceCommitReceiptV1),
-    ProjectionPending(SourceCommitReceiptV1),
+    Projected(SourceCommitReceiptSummaryV1),
+    ProjectionPending(SourceCommitReceiptSummaryV1),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -423,11 +423,14 @@ impl RuntimeExternalSourceStore {
             }
             match apply_source_commit(current, commit.clone()).map_err(invalid)? {
                 SourceCommitApplyOutcomeV1::Committed(state) => {
-                    settled[slot] = Some((binding_identity.clone(), state.receipt().clone()));
+                    settled[slot] = Some((
+                        binding_identity.clone(),
+                        SourceCommitReceiptSummaryV1::of(state.receipt()),
+                    ));
                     states.insert(binding_identity.clone(), Some(*state));
                 }
                 SourceCommitApplyOutcomeV1::ExactDuplicate(receipt) => {
-                    settled[slot] = Some((binding_identity, *receipt));
+                    settled[slot] = Some((binding_identity, SourceCommitReceiptSummaryV1::of(&receipt)));
                     continue;
                 }
             }
@@ -612,11 +615,12 @@ impl RuntimeExternalSourceStore {
             .read_receipt(binding.clone(), key)
             .await?
             .ok_or(RuntimeExternalSourceErrorV1::IdempotencyConflict)?;
-        if !retained
-            .mutations()
-            .iter()
-            .any(|mutation| mutation.observation() == previous)
-        {
+        let committed_previous = current
+            .and_then(|state| state.latest_mutation(object.native_object()))
+            .is_some_and(|mutation| {
+                mutation.observation() == previous && retained.committed(mutation)
+            });
+        if !committed_previous {
             return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
         }
         Ok(Some(previous.revision().clone()))
@@ -687,12 +691,14 @@ impl RuntimeExternalSourceStore {
             let Some(retained) = self.read_receipt(binding.clone(), key).await? else {
                 return Ok(false);
             };
-            return Ok(retained.mutations().iter().any(|mutation| {
-                mutation.observation() == latest
-                    && mutation.predecessor() == Some(object.revision())
-                    && mutation.transition() == SourceObjectTransitionV1::Successor
-                    && state.latest_mutation(object.native_object()) == Some(mutation)
-            }));
+            return Ok(state
+                .latest_mutation(object.native_object())
+                .is_some_and(|mutation| {
+                    mutation.observation() == latest
+                        && mutation.predecessor() == Some(object.revision())
+                        && mutation.transition() == SourceObjectTransitionV1::Successor
+                        && retained.committed(mutation)
+                }));
         }
         Ok(false)
     }
@@ -750,7 +756,7 @@ impl RuntimeExternalSourceStore {
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
         idempotency_key: ManifestDigest,
-    ) -> Result<Option<SourceCommitReceiptV1>, RuntimeExternalSourceErrorV1> {
+    ) -> Result<Option<SourceCommitReceiptSummaryV1>, RuntimeExternalSourceErrorV1> {
         let operation = ExternalSourceReadOperationV1::CommitReceipt {
             binding,
             idempotency_key,

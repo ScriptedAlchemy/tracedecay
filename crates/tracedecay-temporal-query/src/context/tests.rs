@@ -16,7 +16,8 @@ use super::{
     MAX_CONTEXT_FRAME_ITEMS, MAX_CONTEXT_OUTPUT_BYTES, OrderedTextContextAssembler,
     TemporalContextFrames, TokenPolicy, VersionedTokenEstimator,
 };
-use crate::ports::{ExecutionControl, ReadBudgetAccounting, TemporalPortError};
+use crate::execution::ExecutionControl;
+use crate::ports::{ReadBudgetAccounting, TemporalPortError};
 use crate::resolution::summary::{SummaryLineageRejection, SummaryOmission};
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HydratedPayload {
@@ -331,7 +332,7 @@ fn unavailable_hydration_states_have_explicit_metadata_only_reasons() {
             ContextOmissionReasonV1::Unavailable,
         ),
         (
-            HydrationStateV1::UnverifiableLegacy,
+            HydrationStateV1::Unverifiable,
             ContextOmissionReasonV1::Unavailable,
         ),
     ];

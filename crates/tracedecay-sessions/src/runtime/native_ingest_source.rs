@@ -22,7 +22,7 @@ pub fn native_ingest_source_identity(
     source_key: Option<&str>,
 ) -> TranscriptIngestResult<ObservationSourceIdentityV1> {
     if provider == "codex" && source_key.is_none() {
-        return crate::runtime::codex::codex_observation_source_v2(session_id);
+        return crate::runtime::hosts::codex::codex_observation_source_v2(session_id);
     }
     if matches!(provider, "cline" | "roo-code" | "kilo") && source_key.is_none() {
         return Ok(ClineTranscriptStream::ApiHistory
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn codex_lookup_uses_the_v2_authority_not_the_legacy_session_source() {
         let written =
-            crate::runtime::codex::codex_observation_source_v2("codex-goal-dedupe").unwrap();
+            crate::runtime::hosts::codex::codex_observation_source_v2("codex-goal-dedupe").unwrap();
         let looked_up = native_ingest_source_identity("codex", "codex-goal-dedupe", None).unwrap();
         let legacy = ObservationSourceIdentityV1::for_provider(
             ProviderId::new("codex").unwrap(),

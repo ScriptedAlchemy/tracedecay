@@ -6,7 +6,7 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{SessionStoreResult, SessionTemporalProjectionBatchV1};
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::super::query::{PERSIST_OPERATION, generation_i64, storage, storage_message};
 use super::super::rebuild::checkpoint_relation_rebuild_control;

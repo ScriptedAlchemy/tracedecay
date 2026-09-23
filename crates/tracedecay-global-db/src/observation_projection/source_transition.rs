@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClineTranscriptStream, DurableObservationV1, FactOwnerV1,
-    ObservationIdentityMaterialV1, RetrievalAnchorRecordV2, RetrievalAnchorTargetV2,
+    ObservationIdentityMaterialV1, RetrievalAnchorRecord, RetrievalAnchorTarget,
     cline_task_native_observation_id, prove_cline_native_source_transition,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
@@ -386,7 +386,7 @@ pub(super) async fn settle_native_source_transition(
 async fn observation_anchor(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
-) -> ProjectionStoreResult<RetrievalAnchorRecordV2> {
+) -> ProjectionStoreResult<RetrievalAnchorRecord> {
     let mut rows = conn
         .query(
             "SELECT anchor.anchor_json FROM observation_retrieval_anchors AS binding
@@ -404,11 +404,11 @@ async fn observation_anchor(
     let json: String = row
         .get(0)
         .map_err(|error| storage("read native source anchor", error))?;
-    let anchor: RetrievalAnchorRecordV2 = serde_json::from_str(&json)
+    let anchor: RetrievalAnchorRecord = serde_json::from_str(&json)
         .map_err(|error| storage("decode native source anchor", error))?;
     anchor.validate()?;
     if anchor.target()
-        != &RetrievalAnchorTargetV2::ExactObservation(observation.observation_id().clone())
+        != &RetrievalAnchorTarget::ExactObservation(observation.observation_id().clone())
     {
         return Err(ProjectionStoreError::ProvenanceCollision);
     }
@@ -419,7 +419,7 @@ async fn read_transition_anchors(
     conn: &impl QueryExecutor,
     predecessor: &DurableObservationV1,
     successor: &DurableObservationV1,
-) -> ProjectionStoreResult<(RetrievalAnchorRecordV2, RetrievalAnchorRecordV2)> {
+) -> ProjectionStoreResult<(RetrievalAnchorRecord, RetrievalAnchorRecord)> {
     let old = observation_anchor(conn, predecessor).await?;
     let new = observation_anchor(conn, successor).await?;
     let old_auth = old.authorization();

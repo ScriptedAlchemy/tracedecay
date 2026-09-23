@@ -1,9 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
-use tracedecay_lcm::retrieval_content::{
-    derived_text_for_index, derived_text_for_snippet, projected_content_hash,
-};
+use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::{
     Database,
     engine::{Executor, QueryExecutor, Row, params},
@@ -1342,18 +1340,14 @@ async fn write_staged_message(
 ) -> ProjectionStoreResult<()> {
     let json = encode_json(message, "encode staged projection message")?;
     let content_hash = projected_content_hash(&message.text);
-    let snippet = derived_text_for_snippet(&message.text);
-    let index = derived_text_for_index(&message.text);
     conn.execute(
         "INSERT INTO observation_projection_rebuild_messages (
             projector_version, generation, output_provider, output_message_id,
-            message_json, content_hash, snippet_text, index_text
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            message_json, content_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(projector_version, generation, output_provider, output_message_id)
          DO UPDATE SET message_json = excluded.message_json,
-                       content_hash = excluded.content_hash,
-                       snippet_text = excluded.snippet_text,
-                       index_text = excluded.index_text",
+                       content_hash = excluded.content_hash",
         params![
             SESSION_MESSAGE_PROJECTOR_VERSION,
             generation,
@@ -1361,8 +1355,6 @@ async fn write_staged_message(
             message.message_id.as_str(),
             json.as_str(),
             content_hash.as_str(),
-            snippet.as_str(),
-            index.as_str(),
         ],
     )
     .await
@@ -2275,16 +2267,14 @@ async fn activate_rebuild_messages(
         &format!(
             "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp, content,
-            content_hash, storage_kind, payload_ref, snippet_text, index_text,
-            legacy_source, legacy_truncated, metadata_json
+            content_hash, storage_kind, payload_ref, placeholder_text, metadata_json
          )
          SELECT output_provider, output_message_id,
                 {lcm_session_id},
                 {lcm_role},
                 {lcm_ordinal},
                 {lcm_timestamp},
-                {lcm_text}, content_hash, 'inline', NULL,
-                snippet_text, index_text, 0, 0,
+                {lcm_text}, content_hash, 'inline', NULL, NULL,
                 {lcm_metadata}
          FROM observation_projection_rebuild_messages
          WHERE projector_version = ?1 AND generation = ?2 AND output_provider <> 'hermes'
@@ -2297,10 +2287,7 @@ async fn activate_rebuild_messages(
             content_hash = excluded.content_hash,
             storage_kind = excluded.storage_kind,
             payload_ref = excluded.payload_ref,
-            snippet_text = excluded.snippet_text,
-            index_text = excluded.index_text,
-            legacy_source = 0,
-            legacy_truncated = 0,
+            placeholder_text = excluded.placeholder_text,
             metadata_json = excluded.metadata_json"
         ),
         params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],

@@ -7,7 +7,7 @@ use tracedecay_domain::{
     SessionId, SessionRefreshKeyV1, SessionRefreshOperationIdV1, SessionSourceCoverageReceiptV1,
     SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::common::{
     SessionRefreshBeginOrJoinPermit, SessionRefreshCancelPermit, SessionRefreshCompletePermit,

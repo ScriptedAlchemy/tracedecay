@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config;
 
-pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const PROFILE_IDENTITY_FILENAME: &str = "profile-identity.json";
 /// File name of the profile-scoped exclusive daemon-authority lock. Single
@@ -153,7 +152,6 @@ pub fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageMode {
-    ProjectLocal,
     ProfileSharded,
 }
 
@@ -191,21 +189,18 @@ pub struct StoreLayout {
     pub project_root: PathBuf,
     pub data_root: PathBuf,
     pub graph_db_path: PathBuf,
-    pub config_path: PathBuf,
     pub branch_meta_path: PathBuf,
     pub sessions_db_path: PathBuf,
     pub response_handle_root: PathBuf,
     pub lcm_payload_root: PathBuf,
     pub dashboard_root: PathBuf,
     pub manifest_path: Option<PathBuf>,
-    pub dirty_path: PathBuf,
     pub sync_lock_path: PathBuf,
     pub branch_add_lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectStorageStatus {
-    RepoLocal,
     ProfileSharded,
     ManifestReconstructable,
     Stale,
@@ -222,7 +217,6 @@ pub struct ProjectStorageLocation {
 impl ProjectStorageStatus {
     pub fn label(self) -> &'static str {
         match self {
-            Self::RepoLocal => "repo-local",
             Self::ProfileSharded => "profile-sharded",
             Self::ManifestReconstructable => "manifest-reconstructable",
             Self::Stale => "stale",
@@ -230,7 +224,7 @@ impl ProjectStorageStatus {
     }
 
     pub fn is_live(self) -> bool {
-        matches!(self, Self::RepoLocal | Self::ProfileSharded)
+        self == Self::ProfileSharded
     }
 }
 
@@ -252,20 +246,17 @@ fn classify_layout_storage(project_root: &Path, layout: StoreLayout) -> ProjectS
         .manifest_path
         .as_ref()
         .is_some_and(|path| path.is_file());
-    let status = match layout.storage_mode {
-        StorageMode::ProjectLocal if graph_exists => ProjectStorageStatus::RepoLocal,
-        StorageMode::ProfileSharded if graph_exists => ProjectStorageStatus::ProfileSharded,
-        StorageMode::ProfileSharded if manifest_exists => {
-            ProjectStorageStatus::ManifestReconstructable
-        }
-        _ => ProjectStorageStatus::Stale,
+    let status = if graph_exists {
+        ProjectStorageStatus::ProfileSharded
+    } else if manifest_exists {
+        ProjectStorageStatus::ManifestReconstructable
+    } else {
+        ProjectStorageStatus::Stale
     };
-    let marker_root = (layout.storage_mode == StorageMode::ProfileSharded)
-        .then(|| project_root.join(config::TRACEDECAY_DIR));
     ProjectStorageLocation {
         project_root: project_root.to_path_buf(),
         data_root: layout.data_root,
-        marker_root,
+        marker_root: Some(project_root.join(config::TRACEDECAY_DIR)),
         status,
     }
 }
@@ -441,7 +432,6 @@ pub enum ProfileShardNonCanonicalReasonV1 {
     ManifestSchemaMismatch,
     ManifestProjectIdMismatch,
     ManifestStoreKindMismatch,
-    ManifestStorageModeMismatch,
     ManifestSessionsDbPathMismatch,
     ManifestDataRootUnavailable,
     ManifestDataRootMismatch,
@@ -458,7 +448,6 @@ impl ProfileShardNonCanonicalReasonV1 {
             Self::ManifestSchemaMismatch => "manifest_schema_mismatch",
             Self::ManifestProjectIdMismatch => "manifest_project_id_mismatch",
             Self::ManifestStoreKindMismatch => "manifest_store_kind_mismatch",
-            Self::ManifestStorageModeMismatch => "manifest_storage_mode_mismatch",
             Self::ManifestSessionsDbPathMismatch => "manifest_sessions_db_path_mismatch",
             Self::ManifestDataRootUnavailable => "manifest_data_root_unavailable",
             Self::ManifestDataRootMismatch => "manifest_data_root_mismatch",
@@ -476,7 +465,6 @@ pub struct PrivateStoreIo;
 
 mod identity;
 mod layout;
-mod legacy_layouts;
 mod manifest;
 mod paths_and_io;
 mod profile_identity;
@@ -484,8 +472,8 @@ mod profile_identity;
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use identity::pin_fixture_repository_identity;
 pub use identity::{
-    has_repository_identity_marker, legacy_enrollment_marker_path, read_legacy_enrollment_marker,
-    read_repository_identity_marker, repository_identity_path, write_repository_identity_marker,
+    has_repository_identity_marker, read_repository_identity_marker, repository_identity_path,
+    write_repository_identity_marker,
 };
 pub(crate) use layout::has_path_local_profile_store;
 pub use layout::{
@@ -495,7 +483,6 @@ pub use layout::{
     resolve_layout, resolve_layout_for_current_profile, resolve_lcm_payload_root,
     resolve_persisted_layout, resolve_project_session_db_path, resolve_response_handle_root,
 };
-pub use legacy_layouts::matching_legacy_profile_layouts;
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
 pub use paths_and_io::{
     acquire_sidecar_lock_blocking, append_lock_path, reject_symlink_components,
@@ -509,7 +496,6 @@ pub use profile_identity::{
 
 #[cfg(test)]
 use paths_and_io::open_lock_file;
-use paths_and_io::validate_enrollment_marker;
 
 include!("storage/tests.rs");
 include!("storage/identity_tests.rs");

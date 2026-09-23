@@ -1,6 +1,6 @@
 use super::common::*;
 use super::*;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 struct CapabilityDeniedSessionPorts {
     capabilities: SessionTemporalCapabilitiesV1,

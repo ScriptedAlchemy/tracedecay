@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use tracedecay_contracts::{CancellationSignal, Deadline};
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_lcm::{LcmCompressionRequest, LcmCompressionResponse, LcmError, LcmSummarizerMode};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
@@ -339,7 +340,7 @@ impl DaemonLcmEffectService {
         let recovered = self
             .control
             .execute(&execution, async {
-                self.db
+                SessionTemporalAccess::new(&*self.db)
                     .recover_pending_session_relation_projection_page(
                         RELATION_PAGE_LIMIT,
                         tracedecay_session_temporal_store::store::execution_control_graph_cancellation(

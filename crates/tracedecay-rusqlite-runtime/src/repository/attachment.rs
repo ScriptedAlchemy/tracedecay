@@ -1105,6 +1105,11 @@ mod tests {
 
             attachment.drain().unwrap();
             attachment.close_and_join().unwrap();
+            assert_eq!(
+                fs::metadata(&wal_path).map_or(0, |metadata| metadata.len()),
+                0,
+                "a graceful close must return the whole WAL to the database"
+            );
             {
                 let state = attachment.lock_state();
                 assert!(state.closed);

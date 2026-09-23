@@ -21,7 +21,7 @@ use tracedecay_store::{
     RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
     RuntimeTransactionScopeV1, StoreClientIdV1, StoreCommitReceiptV1, StoreIdempotencyKeyV1,
     StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
 const CHANNEL_CAPACITY: usize = 128;
@@ -655,7 +655,7 @@ fn prepare_request(
     let authorization =
         build_observation_resolution_authorization_v1(&observation, PROJECTION_GENERATION)
             .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
-    let anchor = build_observation_retrieval_anchor_v2(
+    let anchor = build_observation_retrieval_anchor(
         &observation,
         projection_generation.clone(),
         committed_at,

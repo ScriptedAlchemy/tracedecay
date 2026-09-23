@@ -76,7 +76,7 @@ impl Fixture {
             "cline-retained-test",
         )
         .unwrap();
-        let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+        let anchor = tracedecay_store::build_observation_retrieval_anchor(
             &observation,
             generation.clone(),
             UtcMicros(1),

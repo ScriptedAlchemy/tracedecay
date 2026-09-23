@@ -1925,7 +1925,7 @@ mod tests {
         AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjection,
         ObservationProjectionStore, ObservationStore, ObservationWrite,
         SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
-        build_observation_retrieval_anchor_v2,
+        build_observation_retrieval_anchor,
     };
 
     use super::{
@@ -2271,7 +2271,7 @@ mod tests {
         let generation = ProjectionGenerationId::new("projection.audit-test").unwrap();
         let authorization =
             build_observation_resolution_authorization_v1(&observation, "audit-test").unwrap();
-        let anchor = build_observation_retrieval_anchor_v2(
+        let anchor = build_observation_retrieval_anchor(
             &observation,
             generation.clone(),
             UtcMicros(1),
@@ -2637,7 +2637,7 @@ mod tests {
                 "audit-batch",
             )
             .unwrap();
-            let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+            let anchor = tracedecay_store::build_observation_retrieval_anchor(
                 write.observation(),
                 generation.clone(),
                 UtcMicros(1),
@@ -2743,7 +2743,7 @@ mod tests {
         let authorization =
             build_observation_resolution_authorization_v1(write.observation(), "cursor-fixture")
                 .unwrap();
-        let anchor = build_observation_retrieval_anchor_v2(
+        let anchor = build_observation_retrieval_anchor(
             write.observation(),
             projection_generation.clone(),
             UtcMicros(1),
@@ -2802,8 +2802,7 @@ mod tests {
             .execute(
                 "UPDATE lcm_raw_messages
                  SET content = ?3, content_hash = ?4, storage_kind = 'inline',
-                     payload_ref = NULL, snippet_text = ?3, index_text = ?3,
-                     metadata_json = ?5
+                     payload_ref = NULL, placeholder_text = NULL, metadata_json = ?5
                  WHERE provider = ?1 AND message_id = ?2",
                 params![
                     "cursor",

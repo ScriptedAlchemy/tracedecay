@@ -339,7 +339,7 @@ fn anchored_write_with_cursor(
         "collision-test",
     )
     .unwrap();
-    let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+    let anchor = tracedecay_store::build_observation_retrieval_anchor(
         write.observation(),
         projection_generation.clone(),
         UtcMicros(1),
@@ -2605,14 +2605,14 @@ fn replace_vibe_eof(transcript: &Path, body: &str) {
 }
 
 async fn run_vibe_trigger(
-    source: &tracedecay_sessions::runtime::vibe::VibeSource,
+    source: &tracedecay_sessions::runtime::hosts::vibe::VibeSource,
     workspace: &Path,
     admission: &ProductionJsonlAdmission,
 ) -> Result<
-    tracedecay_sessions::runtime::vibe::VibeCaptureOutcome,
+    tracedecay_sessions::runtime::hosts::vibe::VibeCaptureOutcome,
     tracedecay_sessions::runtime::source::TranscriptIngestError,
 > {
-    tracedecay_sessions::runtime::vibe::capture_vibe_observations(
+    tracedecay_sessions::runtime::hosts::vibe::capture_vibe_observations(
         admission,
         source,
         workspace,
@@ -2637,7 +2637,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
     std::fs::create_dir_all(&workspace).unwrap();
     let vibe_home = tmp.path().join("vibe-home");
     let transcript = write_vibe_fixture(&vibe_home, &workspace, "original eof record");
-    let source = tracedecay_sessions::runtime::vibe::VibeSource::with_vibe_home(&vibe_home)
+    let source = tracedecay_sessions::runtime::hosts::vibe::VibeSource::with_vibe_home(&vibe_home)
         .for_user_scope(Vec::new());
     let runtime = HostAdmissionTestRuntimeV1::profile_with_session_capture_resources(
         tmp.path().join("profile"),
@@ -3316,10 +3316,11 @@ async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate(
     .unwrap();
     let generation = ObservationSourceGenerationV1::new(7).unwrap();
     let cursor_at = |offset: u64, resume_fingerprint: u64| {
-        ObservationSourceCursorV1::new(
+        ObservationSourceCursorV1::for_ordering(
             source.clone(),
             ObservationScopeV1::Profile,
             generation,
+            ObservationOrderingDomainV1::FileBytes,
             offset,
         )
         .unwrap()

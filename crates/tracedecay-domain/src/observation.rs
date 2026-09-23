@@ -787,22 +787,6 @@ pub struct ObservationSourceCursorV1 {
 }
 
 impl ObservationSourceCursorV1 {
-    /// Constructs the legacy-compatible file-byte cursor.
-    pub fn new(
-        source: ObservationSourceIdentityV1,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-        byte_offset: u64,
-    ) -> Result<Self, ObservationContractError> {
-        Self::for_ordering(
-            source,
-            scope,
-            generation,
-            ObservationOrderingDomainV1::FileBytes,
-            byte_offset,
-        )
-    }
-
     pub fn for_ordering(
         source: ObservationSourceIdentityV1,
         scope: ObservationScopeV1,
@@ -2683,8 +2667,6 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         Ok(observation)
     }
 }
-
-pub type DurableClaudeObservationV1 = DurableObservationV1;
 
 /// Relationship between an existing record and a candidate retry.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

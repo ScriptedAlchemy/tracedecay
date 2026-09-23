@@ -50,10 +50,11 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let scope = tracedecay_domain::ObservationScopeV1::Project {
         project_id: tracedecay_domain::ProjectId::new("project.fixture").unwrap(),
     };
-    let cursor = tracedecay_domain::ObservationSourceCursorV1::new(
+    let cursor = tracedecay_domain::ObservationSourceCursorV1::for_ordering(
         source.clone(),
         scope.clone(),
         tracedecay_domain::ObservationSourceGenerationV1::new(1).unwrap(),
+        tracedecay_domain::ObservationOrderingDomainV1::FileBytes,
         72,
     )
     .unwrap();

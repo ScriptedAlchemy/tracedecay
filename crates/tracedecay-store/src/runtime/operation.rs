@@ -4,12 +4,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracedecay_domain::{ObservationScopeV1, UtcMicros};
 
 use crate::{
-    AnchoredObservationWrite, ConfigurationCommitV1, DiagnosticGenerationSupersessionV1,
-    EvidenceAssemblyWriteV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationCursorAdvance,
-    RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1, RetrievalAnchorDerivativeV1,
-    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
-    SourceAcquisitionQueueCasV1, SourceCommitV1, SourceProjectionCommitV1,
-    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    AnchoredObservationWrite, ConfigurationCommitV1, FactWriteBatch, GitIndexTransactionRecordV1,
+    ObservationCursorAdvance, RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1,
+    RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
+    SanitizedCleanDiagnosticSnapshotV1, SourceAcquisitionQueueCasV1, SourceCommitV1,
+    SourceProjectionCommitV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 use super::identity::{canonical_id, validate_canonical_id};
@@ -776,8 +775,6 @@ pub enum RepositoryWritePayloadV1 {
     RemoteObservationReplay(Box<RemoteObservationReplayWriteV1>),
     RemoteWriterFenceInstall(Box<RemoteWriterFenceInstallV1>),
     Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
-    DiagnosticSupersession(Box<DiagnosticGenerationSupersessionV1>),
-    EvidenceAssembly(Box<EvidenceAssemblyWriteV1>),
     ExternalSource(Box<SourceCommitV1>),
     ExternalSourceBatch(Box<[SourceCommitV1]>),
     ExternalSourceProjection(Box<SourceProjectionCommitV1>),
@@ -801,8 +798,6 @@ impl RepositoryWritePayloadV1 {
             Self::RemoteObservationReplay(_) => "replay remote observation",
             Self::RemoteWriterFenceInstall(_) => "install remote writer fence",
             Self::Diagnostics(_) => "publish diagnostics",
-            Self::DiagnosticSupersession(_) => "supersede diagnostic generation",
-            Self::EvidenceAssembly(_) => "publish evidence assembly",
             Self::ExternalSource(_) => "commit external source",
             Self::ExternalSourceBatch(_) => "commit external source batch",
             Self::ExternalSourceProjection(_) => "project external source",
@@ -830,8 +825,6 @@ impl RepositoryWritePayloadV1 {
             | Self::RemoteWriterFenceInstall(_) => "observation",
             Self::Fact(_)
             | Self::Diagnostics(_)
-            | Self::DiagnosticSupersession(_)
-            | Self::EvidenceAssembly(_)
             | Self::RetrievalAnchorDisposition(_)
             | Self::RetrievalAnchorDerivative(_) => "project",
             Self::ExternalSource(_)
@@ -869,15 +862,7 @@ impl RepositoryWritePayloadV1 {
                     StoreShardScopeV1::ProfileMemory | StoreShardScopeV1::Project { .. }
                 )
             }
-            Self::Diagnostics(_) | Self::DiagnosticSupersession(_) => {
-                matches!(scope, StoreShardScopeV1::Project { .. })
-            }
-            Self::EvidenceAssembly(_) => matches!(
-                scope,
-                StoreShardScopeV1::Project { .. }
-                    | StoreShardScopeV1::ProjectSessions { .. }
-                    | StoreShardScopeV1::ProfileSessions
-            ),
+            Self::Diagnostics(_) => matches!(scope, StoreShardScopeV1::Project { .. }),
             Self::ExternalSource(commit) => matches!(
                 (&commit.binding().owner, scope),
                 (
@@ -968,11 +953,6 @@ impl RepositoryWritePayloadV1 {
                         }
                     })
                 }
-                Self::EvidenceAssembly(write) => write.validate().map_err(|_| {
-                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                        payload: self.name(),
-                    }
-                }),
                 Self::ExternalSource(commit) => commit.validate().map_err(|_| {
                     StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                         payload: self.name(),
@@ -994,11 +974,6 @@ impl RepositoryWritePayloadV1 {
                     }
                 }),
                 Self::ExternalSourceAcquisition(command) => command.validate().map_err(|_| {
-                    StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
-                        payload: self.name(),
-                    }
-                }),
-                Self::DiagnosticSupersession(request) => request.validate().map_err(|_| {
                     StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                         payload: self.name(),
                     }
@@ -1076,17 +1051,6 @@ impl RepositoryOperationEnvelopeV1 {
                     operation: self.payload.family_name(),
                     shard_family: "memory",
                 });
-            }
-            if let RepositoryWritePayloadV1::EvidenceAssembly(write) = &self.payload {
-                let exact_owner = write.owner.owner.profile_id()
-                    == &self.metadata.shard_id.profile_id
-                    && write.owner.owner.project_id() == self.metadata.shard_id.scope.project_id();
-                if !exact_owner {
-                    return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                        operation: self.payload.family_name(),
-                        shard_family: "project",
-                    });
-                }
             }
             if let RepositoryWritePayloadV1::ExternalSource(commit) = &self.payload {
                 let exact_owner = match (&commit.binding().owner, &self.metadata.shard_id.scope) {
@@ -1247,18 +1211,14 @@ fn fact_owner_matches_shard(
 }
 
 fn retrieval_anchor_owner_matches_shard(
-    owner: &crate::RetrievalAnchorOwnerV1,
+    owner: &tracedecay_domain::FactOwnerV1,
     shard_id: &StoreShardIdV1,
 ) -> bool {
     match owner {
-        crate::RetrievalAnchorOwnerV1::V3(owner) => {
-            owner.profile_id() == &shard_id.profile_id
-                && owner.project_id() == shard_id.scope.project_id()
+        tracedecay_domain::FactOwnerV1::Project { project_id } => {
+            shard_id.scope.project_id() == Some(project_id)
         }
-        crate::RetrievalAnchorOwnerV1::V2(tracedecay_domain::FactOwnerV1::Project {
-            project_id,
-        }) => shard_id.scope.project_id() == Some(project_id),
-        crate::RetrievalAnchorOwnerV1::V2(tracedecay_domain::FactOwnerV1::Profile) => {
+        tracedecay_domain::FactOwnerV1::Profile => {
             matches!(&shard_id.scope, StoreShardScopeV1::ProfileSessions)
         }
     }

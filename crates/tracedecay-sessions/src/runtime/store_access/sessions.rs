@@ -9,7 +9,7 @@ use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, 
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
 
 use crate::runtime::SessionMessageSearchResult;
-use crate::runtime::codex::codex_cursor_key;
+use crate::runtime::hosts::codex::codex_cursor_key;
 use tracedecay_lcm::retrieval_content::{
     RelatedMessageCopyIdentity, dedupe_related_message_copies, rerank_fetch_limit,
 };
@@ -775,58 +775,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             });
         }
 
-        let mut legacy_sql = "SELECT
-                s.provider, s.session_id, s.project_key, s.project_path, s.title, s.started_at,
-                s.ended_at, s.transcript_path, s.metadata_json, s.parent_session_id,
-                s.is_subagent, s.agent_id, s.parent_tool_use_id,
-                m.provider, m.message_id, m.session_id, m.role, m.timestamp, m.ordinal, m.text,
-                m.kind, m.model, m.tool_names, m.source_path, m.source_offset, m.metadata_json
-             FROM session_messages m
-             JOIN sessions s ON s.provider = m.provider AND s.session_id = m.session_id
-             WHERE m.kind = 'goal'
-               AND m.ordinal = (
-                   SELECT MAX(m2.ordinal) FROM session_messages m2
-                   WHERE m2.provider = m.provider
-                     AND m2.session_id = m.session_id
-                     AND m2.kind = 'goal'
-               )
-               AND NOT EXISTS (
-                   SELECT 1 FROM observation_workflow_facts w
-                   WHERE w.projector_version = ?1
-                     AND w.provider = m.provider
-                     AND w.session_id = m.session_id
-                     AND w.semantic_kind = 'goal'
-               )"
-        .to_owned();
-        let mut legacy_params = vec![Value::Text(SESSION_MESSAGE_PROJECTOR_VERSION.to_owned())];
-        if let Some(project_key) = project_key {
-            push_project_identity_predicate(&mut legacy_sql, &mut legacy_params, project_key);
-        }
-        legacy_params.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
-        let _ = write!(
-            legacy_sql,
-            " ORDER BY (m.timestamp IS NULL) ASC, m.timestamp DESC, m.ordinal DESC LIMIT ?{}",
-            legacy_params.len()
-        );
-        let mut rows = snapshot
-            .query(&legacy_sql, legacy_params)
-            .await
-            .map_err(|error| session_db_operation_error(OPERATION, error))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| session_db_operation_error(OPERATION, error))?
-        {
-            let session = row_to_session(&row)
-                .map_err(|message| session_db_operation_message(OPERATION, message))?;
-            let message = row_to_message(&row, 13)
-                .map_err(|message| session_db_operation_message(OPERATION, message))?;
-            results.push(SessionMessageSearchResult {
-                session,
-                message,
-                score: 0.0,
-            });
-        }
         results.sort_by(|left, right| {
             descending_timestamp(left.message.timestamp, right.message.timestamp)
                 .then_with(|| right.message.ordinal.cmp(&left.message.ordinal))

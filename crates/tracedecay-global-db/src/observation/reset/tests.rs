@@ -88,12 +88,12 @@ fn seed_active_temporal_generation(conn: &rusqlite::Connection) {
             (session_id, generation, occurrence_id, source_observation_id,
              source_provider, projection_output_ordinal, retrieval_anchor_id,
              role, knowledge_at, valid_time_json, evidence_json,
-             sanitized_content_digest, sanitized_content_bytes, snippet_text, index_text)
+             sanitized_content_digest, sanitized_content_bytes, index_text)
          VALUES ('session.fixture', 1, 'occurrence.fixture', 'observation.legacy',
                  'claude', 0, 'anchor.fixture', 'user', 5,
                  '{\"kind\":\"unknown\"}', '{}',
                  '0000000000000000000000000000000000000000000000000000000000000000',
-                 0, 'snippet', 'index');
+                 0, 'index');
          INSERT INTO session_current_entities
             (session_id, generation, entity_kind, entity_id, current_occurrence_id,
              coverage_json)
@@ -1229,13 +1229,18 @@ async fn host_observation_journal_resets_with_the_stream() {
                 'digest.frontier', '{}', 'digest.receipt'
              );
              INSERT INTO external_source_commit_receipts_v2 (
-                binding_id, idempotency_key, request_digest, definition_revision,
-                binding_revision, predecessor_frontier_digest,
-                successor_frontier_digest, receipt_digest, receipt_json
+                binding_id, idempotency_key, request_digest, receipt_digest,
+                mutation_digests_json
              ) VALUES (
                 'binding.host', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                1, 1, 'digest.pred', 'digest.succ', 'digest.receipt', '{}'
+                'digest.receipt', '[]'
+             );
+             INSERT INTO external_source_retained_receipts_v1 (
+                binding_id, receipt_digest, predecessor_frontier_digest,
+                successor_frontier_digest, receipt_json
+             ) VALUES (
+                'binding.host', 'digest.receipt', 'digest.pred', 'digest.succ', '{}'
              );",
         )
         .expect("seed a host-observation journal");
@@ -1245,9 +1250,10 @@ async fn host_observation_journal_resets_with_the_stream() {
     let report = reset_refused_observation_authority(&mut raw)
         .expect("scoped reset of a store with a host-observation journal");
     assert_eq!(
-        report.cleared_external_source_rows, 2,
-        "state and receipt must be accounted for: {report:?}"
+        report.cleared_external_source_rows, 3,
+        "state, receipt summary, and retained receipt must be accounted for: {report:?}"
     );
     assert_eq!(count(&raw, "external_source_states_v1"), 0);
     assert_eq!(count(&raw, "external_source_commit_receipts_v2"), 0);
+    assert_eq!(count(&raw, "external_source_retained_receipts_v1"), 0);
 }

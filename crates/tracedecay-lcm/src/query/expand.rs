@@ -31,7 +31,6 @@ pub async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref: None,
                 from_current_session: Some(true),
-                externalized_note: None,
                 source_pagination: None,
             })
         }
@@ -64,7 +63,6 @@ pub async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref,
                 from_current_session: Some(from_current_session),
-                externalized_note: None,
                 source_pagination: None,
             })
         }
@@ -92,7 +90,6 @@ pub async fn expand(
                 summary_sources,
                 payload_ref: None,
                 from_current_session: None,
-                externalized_note: None,
                 source_pagination: Some(source_pagination),
             })
         }
@@ -131,7 +128,6 @@ pub async fn expand(
                 summary_sources: Vec::new(),
                 payload_ref: Some(expansion.payload_ref),
                 from_current_session: None,
-                externalized_note: None,
                 source_pagination: None,
             })
         }

@@ -38,10 +38,7 @@ fn queued_fact_write_rechecks_authority_before_opening_a_transaction() {
 }
 
 #[test]
-fn queued_evidence_and_anchor_writes_recheck_authority_before_sql_dispatch() {
-    let evidence = RepositoryWritePayloadV1::EvidenceAssembly(Box::new(
-        crate::repository::evidence_assembly::tests::write_fixture("authority.test"),
-    ));
+fn queued_anchor_writes_recheck_authority_before_sql_dispatch() {
     let anchor = RepositoryWritePayloadV1::RetrievalAnchorDisposition(Box::new(
         RetrievalAnchorDispositionRecordV1::new(
             "disposition.authority.fixture",
@@ -57,10 +54,7 @@ fn queued_evidence_and_anchor_writes_recheck_authority_before_sql_dispatch() {
         .unwrap(),
     ));
 
-    for (label, payload, digest_byte) in [
-        ("evidence", evidence, 'e'),
-        ("retrieval_anchor", anchor, 'r'),
-    ] {
+    for (label, payload, digest_byte) in [("retrieval_anchor", anchor, 'r')] {
         let database = TestDatabase::new();
         let request = project_fixture_request(
             &format!("operation.authority.{label}"),

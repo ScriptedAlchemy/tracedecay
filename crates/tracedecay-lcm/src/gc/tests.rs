@@ -2,6 +2,7 @@ use std::fs;
 
 use crate::schema;
 use crate::util::{self, file_mtime_seconds};
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 
 use super::pending_delete::{PENDING_PAYLOAD_DELETE_ERROR_PREFIX, pending_payload_delete_key};
@@ -114,8 +115,7 @@ struct RawMessage<'a> {
     storage_kind: &'a str,
     payload_ref: Option<&'a str>,
     content: Option<&'a str>,
-    snippet_text: &'a str,
-    index_text: &'a str,
+    placeholder_text: Option<&'a str>,
     metadata_json: Option<&'a str>,
 }
 
@@ -123,9 +123,9 @@ async fn insert_raw_message(conn: &Connection, message: RawMessage<'_>) -> Resul
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, legacy_source, legacy_truncated, metadata_json
-         ) VALUES (?1, ?2, ?3, 'assistant', 1, 2, ?4, ?5, ?6, ?7, ?8, ?9, 0, 0, ?10)",
+            content, content_hash, storage_kind, payload_ref, placeholder_text,
+            metadata_json
+         ) VALUES (?1, ?2, ?3, 'assistant', 1, 2, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             PROVIDER,
             message.message_id,
@@ -134,8 +134,7 @@ async fn insert_raw_message(conn: &Connection, message: RawMessage<'_>) -> Resul
             format!("{}-hash", message.message_id),
             message.storage_kind,
             message.payload_ref,
-            message.snippet_text,
-            message.index_text,
+            message.placeholder_text,
             message.metadata_json
         ],
     )
@@ -176,8 +175,7 @@ async fn seed_payload(
             storage_kind: "external",
             payload_ref: Some(&payload_ref.payload_ref),
             content: None,
-            snippet_text: &placeholder,
-            index_text: &placeholder,
+            placeholder_text: Some(&placeholder),
             metadata_json: Some(&placeholder),
         },
     )
@@ -270,8 +268,7 @@ async fn referenced_payload_refs_ignores_tombstoned_placeholders() -> Result<(),
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&live),
-            snippet_text: &live,
-            index_text: &live,
+            placeholder_text: None,
             metadata_json: None,
         },
     )
@@ -284,8 +281,7 @@ async fn referenced_payload_refs_ignores_tombstoned_placeholders() -> Result<(),
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&tombstoned),
-            snippet_text: &tombstoned,
-            index_text: &tombstoned,
+            placeholder_text: None,
             metadata_json: None,
         },
     )
@@ -1210,7 +1206,7 @@ fn committed_delete_quarantine_preserves_rename_replacement() -> Result<(), Stri
     let path = dir.join(PRIMARY_REF);
     let original = b"original payload";
     fs::write(&path, original).map_err(|err| err.to_string())?;
-    let expected_hash = util::sha256_hex(original);
+    let expected_hash = sha256_hex(original);
 
     let removal = payload::remove_committed_payload_file_with(
         temp.path(),
@@ -1244,7 +1240,7 @@ fn committed_delete_quarantine_restores_in_place_rewrite() -> Result<(), String>
     let path = dir.join(PRIMARY_REF);
     let original = b"original payload";
     fs::write(&path, original).map_err(|err| err.to_string())?;
-    let expected_hash = util::sha256_hex(original);
+    let expected_hash = sha256_hex(original);
 
     let removal = payload::remove_committed_payload_file_with(
         temp.path(),
@@ -1272,7 +1268,7 @@ fn committed_delete_quarantine_restores_in_place_rewrite() -> Result<(), String>
 #[test]
 fn committed_delete_requires_exact_hash_byte_and_char_sizes() -> Result<(), String> {
     let original = "héllo 雪";
-    let expected_hash = util::sha256_hex(original.as_bytes());
+    let expected_hash = sha256_hex(original.as_bytes());
     let expected_bytes = original.len() as u64;
     let expected_chars = original.chars().count() as u64;
     for (hash, bytes, chars) in [
@@ -1333,7 +1329,7 @@ fn committed_delete_retry_succeeds_after_same_id_content_restore() -> Result<(),
     fs::create_dir(&dir).map_err(|err| err.to_string())?;
     let path = dir.join(PRIMARY_REF);
     let original = b"original";
-    let expected_hash = util::sha256_hex(original);
+    let expected_hash = sha256_hex(original);
     fs::write(&path, original).map_err(|err| err.to_string())?;
 
     let first = payload::remove_committed_payload_file_with(
@@ -1795,8 +1791,7 @@ async fn residual_sweep_rows_visited(decoys: usize) -> Result<usize, String> {
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&live),
-            snippet_text: &live,
-            index_text: &live,
+            placeholder_text: None,
             metadata_json: Some(&live),
         },
     )
@@ -1812,8 +1807,7 @@ async fn residual_sweep_rows_visited(decoys: usize) -> Result<usize, String> {
                 storage_kind: "inline",
                 payload_ref: None,
                 content: Some(&prose),
-                snippet_text: &prose,
-                index_text: &prose,
+                placeholder_text: None,
                 metadata_json: Some(&prose),
             },
         )
@@ -1913,8 +1907,7 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&live),
-            snippet_text: &live,
-            index_text: &live,
+            placeholder_text: None,
             metadata_json: Some(&live),
         },
     )
@@ -1927,8 +1920,7 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&already_gcd),
-            snippet_text: &already_gcd,
-            index_text: &already_gcd,
+            placeholder_text: None,
             metadata_json: Some(&already_gcd),
         },
     )
@@ -1941,8 +1933,7 @@ async fn narrowed_prefilter_rewrites_the_same_rows() -> Result<(), String> {
             storage_kind: "inline",
             payload_ref: None,
             content: Some(&prose),
-            snippet_text: &prose,
-            index_text: &prose,
+            placeholder_text: None,
             metadata_json: Some(&prose),
         },
     )

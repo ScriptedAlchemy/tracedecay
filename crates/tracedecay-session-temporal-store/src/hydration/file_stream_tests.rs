@@ -23,11 +23,14 @@ use tempfile::tempdir;
 use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1};
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
+use tracedecay_temporal_query::execution::{BindingDigest, ExecutionControl, ExecutionLimits};
 use tracedecay_temporal_query::ports::{
-    BindingDigest, ExecutionControl, ExecutionLimits, KernelVersions, ReadBudgetAccounting,
-    TemporalExecutionSnapshot, TemporalPortError, TemporalSnapshotRequest, TemporalWatermarks,
+    ReadBudgetAccounting, TemporalPortError, TemporalSnapshotRequest,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_temporal_query::snapshot::{
+    KernelVersions, TemporalExecutionSnapshot, TemporalWatermarks,
+};
 
 use super::{
     BackendFuture, BoundedPayload, HydrationAuthorization, HydrationError, HydrationResolution,

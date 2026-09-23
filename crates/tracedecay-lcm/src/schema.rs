@@ -9,7 +9,14 @@ use super::{LcmError, LcmRawMessage, raw};
 #[cfg(test)]
 use super::util;
 
-pub const LCM_SCHEMA_VERSION: i64 = 8;
+/// Version 10 message and raw rows no longer carry a copy of their observation
+/// envelope; readers join it from the `observations` row. Raw rows store their
+/// body once: `snippet_text` and `index_text` are virtual columns computing
+/// [`crate::retrieval_content::derived_text_for_snippet`] and
+/// [`crate::retrieval_content::derived_text_for_index`] from `content`, or
+/// from `placeholder_text` when the body lives outside the row. Older stores
+/// require a profile reset.
+pub const LCM_SCHEMA_VERSION: i64 = 10;
 
 const MIGRATION_NAME: &str = "lcm";
 
@@ -32,9 +39,6 @@ const MIGRATION_NAME: &str = "lcm";
 /// live in [`super::query`]; the raw direct-user candidate predicate lives in
 /// [`super::query::grep`].
 pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
-    "CREATE INDEX IF NOT EXISTS idx_lcm_raw_legacy_truncated
-         ON lcm_raw_messages(provider, session_id)
-         WHERE legacy_truncated != 0;",
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_lossy_ingest
          ON lcm_raw_messages(provider, session_id)
          WHERE metadata_json IS NOT NULL
@@ -279,10 +283,23 @@ pub async fn ensure_lcm_schema_in_transaction(
             content_hash TEXT NOT NULL,
             storage_kind TEXT NOT NULL CHECK(storage_kind IN ('inline', 'external')),
             payload_ref TEXT,
-            snippet_text TEXT NOT NULL,
-            index_text TEXT NOT NULL,
-            legacy_source INTEGER NOT NULL DEFAULT 0,
-            legacy_truncated INTEGER NOT NULL DEFAULT 0,
+            placeholder_text TEXT,
+            snippet_text TEXT NOT NULL GENERATED ALWAYS AS (
+                CASE
+                    WHEN content IS NULL THEN COALESCE(placeholder_text, '')
+                    WHEN length(content) <= 4096 THEN content
+                    ELSE substr(content, 1, 4054)
+                        || char(10) || '[derived snippet truncated by tracedecay]'
+                END
+            ) VIRTUAL,
+            index_text TEXT NOT NULL GENERATED ALWAYS AS (
+                CASE
+                    WHEN content IS NULL THEN COALESCE(placeholder_text, '')
+                    WHEN length(content) <= 65536 THEN content
+                    ELSE substr(content, 1, 65494)
+                        || char(10) || '[derived snippet truncated by tracedecay]'
+                END
+            ) VIRTUAL,
             metadata_json TEXT,
             UNIQUE(provider, message_id),
             FOREIGN KEY(provider, session_id)
@@ -633,8 +650,6 @@ mod tests {
                 payload_ref TEXT,
                 snippet_text TEXT NOT NULL,
                 index_text TEXT NOT NULL,
-                legacy_source INTEGER NOT NULL DEFAULT 0,
-                legacy_truncated INTEGER NOT NULL DEFAULT 0,
                 metadata_json TEXT,
                 UNIQUE(provider, message_id)
             );",
@@ -922,7 +937,6 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         for index in [
-            "idx_lcm_raw_legacy_truncated",
             "idx_lcm_raw_lossy_ingest",
             "idx_lcm_summary_nodes_depth_tokens",
             "idx_lcm_external_payloads_owner_bytes",
@@ -1019,6 +1033,92 @@ mod tests {
             .expect_err("database failure must not collapse to absence");
 
         assert!(matches!(error, LcmError::Db(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_retrieval_columns_derive_exactly_what_the_application_derives()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );
+            INSERT INTO sessions VALUES ('cursor', 'session-1');",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        conn.execute_batch(crate::test_support::SESSION_GENERATION_SCHEMA)
+            .await
+            .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        let cap = crate::MAX_DERIVED_TEXT_CHARS;
+        let snippet_cap = crate::retrieval_content::MAX_DERIVED_SNIPPET_CHARS;
+        let bodies = [
+            String::new(),
+            "short body".to_owned(),
+            "a".repeat(snippet_cap),
+            "a".repeat(snippet_cap + 1),
+            "雪🦀é".repeat(snippet_cap),
+            "x".repeat(cap),
+            "雪".repeat(cap + 1),
+        ];
+        for (ordinal, body) in bodies.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO lcm_raw_messages (
+                    provider, message_id, session_id, role, ordinal, content,
+                    content_hash, storage_kind
+                 ) VALUES ('cursor', ?1, 'session-1', 'user', ?2, ?3, 'hash', 'inline')",
+                params![format!("inline-{ordinal}"), ordinal as i64, body.as_str()],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, content,
+                content_hash, storage_kind, payload_ref, placeholder_text
+             ) VALUES ('cursor', 'external', 'session-1', 'user', 99, NULL,
+                       'hash', 'external', 'ref', '[payload ref=ref]')",
+            (),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let mut rows = conn
+            .query(
+                "SELECT message_id, content, placeholder_text, snippet_text, index_text
+                 FROM lcm_raw_messages ORDER BY ordinal",
+                (),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut checked = 0;
+        while let Some(row) = rows.next().await.map_err(|error| error.to_string())? {
+            let message_id: String = row.get(0).map_err(|error| error.to_string())?;
+            let content: Option<String> = row.get(1).map_err(|error| error.to_string())?;
+            let placeholder: Option<String> = row.get(2).map_err(|error| error.to_string())?;
+            let snippet: String = row.get(3).map_err(|error| error.to_string())?;
+            let index: String = row.get(4).map_err(|error| error.to_string())?;
+            let source = content.or(placeholder).unwrap_or_default();
+            assert_eq!(
+                snippet,
+                crate::retrieval_content::derived_text_for_snippet(&source),
+                "{message_id} snippet"
+            );
+            assert_eq!(
+                index,
+                crate::retrieval_content::derived_text_for_index(&source),
+                "{message_id} index"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, bodies.len() + 1);
         Ok(())
     }
 

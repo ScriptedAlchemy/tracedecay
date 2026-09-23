@@ -14,13 +14,13 @@ use gix::bstr::ByteSlice;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::{encode_lowercase_hex, encode_tagged_lowercase_hex};
 use tracedecay_domain::{
-    AnchorDurabilityClass, AnchorSourceGenerationV2, CommitId, CoverageReportV1,
+    AnchorDurabilityClass, AnchorSourceGeneration, CommitId, CoverageReportV1,
     DurableObservationV1, EvidenceAvailabilityV1, EvidenceClass,
     GenerationBoundRepositoryProvenanceV1, PayloadAccessState, PrivacyDomainBoundLocatorDigest,
     ProjectId, ProjectionGenerationId, RefId, RepositoryDirtyStateV1, RepositoryEvidenceV1,
     RepositoryId, RepositoryProvenanceV1, RepositoryRemoteIdentityV1, ResolutionAuthorizationV1,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, TreeId,
-    UtcMicros, VectorWatermark, WorktreeId,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget, TreeId, UtcMicros,
+    VectorWatermark, WorktreeId,
 };
 
 const MAX_REMOTE_IDENTITY_BYTES: usize = 8 * 1024;
@@ -304,7 +304,7 @@ impl<'a> ObservationProjectId<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedRepositoryProvenanceV1 {
     availability: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1>,
-    anchor: Option<RetrievalAnchorRecordV2>,
+    anchor: Option<RetrievalAnchorRecord>,
 }
 
 impl PreparedRepositoryProvenanceV1 {
@@ -320,7 +320,7 @@ impl PreparedRepositoryProvenanceV1 {
         &self.availability
     }
 
-    pub fn anchor(&self) -> Option<&RetrievalAnchorRecordV2> {
+    pub fn anchor(&self) -> Option<&RetrievalAnchorRecord> {
         self.anchor.as_ref()
     }
 }
@@ -496,21 +496,19 @@ fn prepare_generation_binding(
         };
     };
     let capture = binding.capture();
-    let target = RetrievalAnchorTargetV2::RepositoryCapture {
+    let target = RetrievalAnchorTarget::RepositoryCapture {
         repository_id: capture.repository_id().clone(),
         capture_id: binding.capture_id().clone(),
         receipt: observation.receipt().receipt().clone(),
     };
-    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target,
         owner: observation.scope().clone(),
         aliases: vec![],
         occurred_at: None,
         ingested_at,
         evidence_class: EvidenceClass::Observed,
-        source_generation: AnchorSourceGenerationV2::RepositoryCapture(
-            binding.capture_id().clone(),
-        ),
+        source_generation: AnchorSourceGeneration::RepositoryCapture(binding.capture_id().clone()),
         projection_generation: projection_generation.clone(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),

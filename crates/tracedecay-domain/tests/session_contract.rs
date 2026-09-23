@@ -673,7 +673,7 @@ fn hydration_and_omission_values_round_trip_every_variant_and_reject_unknown_val
         HydrationStateV1::RetentionExpired,
         HydrationStateV1::Unauthorized,
         HydrationStateV1::Locked,
-        HydrationStateV1::UnverifiableLegacy,
+        HydrationStateV1::Unverifiable,
     ] {
         assert_json_round_trip!(state);
         assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());

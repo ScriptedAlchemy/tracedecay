@@ -107,7 +107,7 @@ pub(super) async fn read_host_provider_coverage(
 pub(super) async fn read_codex_history_frontier(
     admission: &dyn HostAdmission,
     scope: &ObservationScopeV1,
-) -> TranscriptIngestResult<crate::runtime::codex::CodexDiscoveryFrontier> {
+) -> TranscriptIngestResult<crate::runtime::hosts::codex::CodexDiscoveryFrontier> {
     let stored_frontier = admission
         .get_parse_offset(scope, CODEX_HISTORY_FRONTIER_KEY)
         .await
@@ -122,14 +122,17 @@ pub(super) async fn read_codex_history_frontier(
             crate::runtime::snapshot_observation::host_admission_error("codex", outcome)
         })?
         .unwrap_or_default();
-    crate::runtime::codex::CodexDiscoveryFrontier::from_parse_offsets(stored_frontier, stored_epoch)
+    crate::runtime::hosts::codex::CodexDiscoveryFrontier::from_parse_offsets(
+        stored_frontier,
+        stored_epoch,
+    )
 }
 
 pub(super) async fn persist_codex_history_frontier(
     admission: &dyn HostAdmission,
     scope: &ObservationScopeV1,
-    expected: crate::runtime::codex::CodexDiscoveryFrontier,
-    frontier: crate::runtime::codex::CodexDiscoveryFrontier,
+    expected: crate::runtime::hosts::codex::CodexDiscoveryFrontier,
+    frontier: crate::runtime::hosts::codex::CodexDiscoveryFrontier,
 ) -> TranscriptIngestResult<()> {
     let (frontier_offset, epoch_offset) = frontier.into_parse_offsets();
     let (expected_frontier, expected_epoch) = expected.into_parse_offsets();

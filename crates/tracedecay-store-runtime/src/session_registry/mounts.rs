@@ -576,10 +576,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             label = "daemon.session_registry.mount.schema_migrate"
         )
         .await?;
-        if self.long_lived_session_maintenance {
-            self.registered_schema_convergence
-                .schedule_runtime_ledger(database.clone());
-        }
         let database_issuer = owner.weak_lease_issuer();
         let graph = Arc::new(std::sync::Mutex::new(
             MemoryGraphAttachmentStateV1::Warming {
@@ -846,10 +842,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                         format!("{error:?}"),
                     )
                 })?;
-                if self.long_lived_session_maintenance {
-                    self.registered_schema_convergence
-                        .schedule_runtime_ledger(database.clone());
-                }
                 admission.publish(owner)?;
                 (database, true, existed)
             }

@@ -23,7 +23,7 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, SanitizationReceiptV1,
 };
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
-use tracedecay_store::{ObservationBatchFallbackCause, ParseOffset};
+use tracedecay_store::ParseOffset;
 
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
@@ -80,7 +80,6 @@ pub struct HostAdmissionOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostAdmissionRecovery {
-    BatchRequiresScalarFallback(ObservationBatchFallbackCause),
     DeterministicContentRefusal,
 }
 
@@ -112,17 +111,6 @@ impl HostAdmissionOutcome {
             retryable,
             reason_code,
             recovery: None,
-            storage_cause: None,
-        }
-    }
-
-    #[hotpath::skip]
-    pub const fn batch_requires_scalar_fallback(cause: ObservationBatchFallbackCause) -> Self {
-        Self {
-            status: HostAdmissionStatus::Backpressured,
-            retryable: true,
-            reason_code: Some("batch_requires_scalar_fallback"),
-            recovery: Some(HostAdmissionRecovery::BatchRequiresScalarFallback(cause)),
             storage_cause: None,
         }
     }
@@ -1039,9 +1027,6 @@ pub(crate) mod test_support {
                 ObservationApplicationError::Cancelled => {
                     HostAdmissionOutcome::retained_backpressured("admission_cancelled")
                 }
-                ObservationApplicationError::Store(
-                    ObservationStoreError::BatchRequiresScalarFallback { cause },
-                ) => HostAdmissionOutcome::batch_requires_scalar_fallback(cause),
                 _ => HostAdmissionOutcome::registered_authority_unavailable(),
             }
         }

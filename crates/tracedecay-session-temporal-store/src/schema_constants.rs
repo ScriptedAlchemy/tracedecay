@@ -1,6 +1,8 @@
 //! Session-temporal schema identity shared with registered-store admission.
 
-pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 4;
+/// Version 5 stores occurrence text once: `snippet_text` is a virtual alias
+/// of `index_text`, and full-text search indexes only `index_text`.
+pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 5;
 
 pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (
@@ -236,7 +238,6 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "evidence_json",
             "sanitized_content_digest",
             "sanitized_content_bytes",
-            "snippet_text",
             "index_text",
         ],
     ),
@@ -328,6 +329,6 @@ pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "checked_at",
         ],
     ),
-    ("session_occurrences_fts", &["index_text", "snippet_text"]),
+    ("session_occurrences_fts", &["index_text"]),
     ("session_summary_nodes_fts", &["summary_text", "index_text"]),
 ];

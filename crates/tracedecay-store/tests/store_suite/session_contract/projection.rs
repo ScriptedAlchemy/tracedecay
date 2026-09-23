@@ -1,6 +1,6 @@
 use super::common::*;
 use super::*;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 #[test]
 fn rebuild_and_activation_validate_session_capability_and_generation_transition() {

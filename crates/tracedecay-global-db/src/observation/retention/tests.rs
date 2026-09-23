@@ -234,10 +234,11 @@ async fn seed_cursor_advance_history(conn: &RetentionTestStore) -> Result<(), St
     .await
     .map_err(|error| format!("install cursor immutability: {error}"))?;
     let current_generation = 1_u64;
-    let current_cursor = ObservationSourceCursorV1::new(
+    let current_cursor = ObservationSourceCursorV1::for_ordering(
         source.clone(),
         scope.clone(),
         ObservationSourceGenerationV1::new(current_generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         30,
     )
     .unwrap();

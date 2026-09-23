@@ -12,7 +12,7 @@ use super::{Projection, anchor_matches, commit_fact_tx};
 use tracedecay_domain::{
     Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
-    RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
+    RetrievalAnchorRecord, ShardDispositionV1, UtcMicros,
 };
 use tracedecay_runtime_core::db::DatabaseMemoryTransaction as Transaction;
 use tracedecay_runtime_core::db::build_qmark_placeholders;
@@ -847,7 +847,7 @@ async fn query_fact_coverage_tx(
         .map_err(|error| storage_error(QUERY_OPERATION, error))?
     {
         let anchor_id = row_string(&row, 0, QUERY_OPERATION)?;
-        let anchor = from_json::<RetrievalAnchorRecordV2>(
+        let anchor = from_json::<RetrievalAnchorRecord>(
             &row_string(&row, 1, QUERY_OPERATION)?,
             QUERY_OPERATION,
         )?;
@@ -875,7 +875,7 @@ async fn query_fact_coverage_tx(
 
 fn classify_fact_coverage(
     effective_access: PayloadAccessState,
-    anchor: Option<&RetrievalAnchorRecordV2>,
+    anchor: Option<&RetrievalAnchorRecord>,
 ) -> FactQueryCoverageV1 {
     let (visible, hidden, unknown, mut redacted, frontier_count) = match anchor {
         None => (0, 0, 1, 0, 1),
@@ -909,7 +909,7 @@ fn classify_fact_coverage(
     };
     let anchor_access = anchor.map_or(
         PayloadAccessState::Eligible,
-        RetrievalAnchorRecordV2::payload_access,
+        RetrievalAnchorRecord::payload_access,
     );
     if effective_access == PayloadAccessState::Redacted
         || anchor_access == PayloadAccessState::Redacted
@@ -928,7 +928,7 @@ fn classify_fact_coverage(
 pub(in crate::fact_store) async fn get_retrieval_anchor_tx(
     snapshot: &Transaction<'_>,
     query: &RetrievalAnchorQuery,
-) -> FactStoreResult<Option<RetrievalAnchorRecordV2>> {
+) -> FactStoreResult<Option<RetrievalAnchorRecord>> {
     let owner = OwnerKey::new(query.owner())?;
     let mut rows = snapshot
         .query(
@@ -953,7 +953,7 @@ pub(in crate::fact_store) async fn get_retrieval_anchor_tx(
     else {
         return Ok(None);
     };
-    let anchor = from_json::<RetrievalAnchorRecordV2>(
+    let anchor = from_json::<RetrievalAnchorRecord>(
         &row_string(&row, 0, QUERY_OPERATION)?,
         QUERY_OPERATION,
     )?;

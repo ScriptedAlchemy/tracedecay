@@ -20,7 +20,10 @@ use tracedecay_runtime_core::db::{
 };
 
 use super::cursor_agent::{CursorAgentSummaryConfig, summarize_with_cursor_agent};
-use super::{AuthoritativeSummary, LcmPredecessorRangeState, SummaryResolutionError};
+use super::{
+    AuthoritativeSummary, LcmPredecessorRangeState, MESSAGE_ENVELOPE_COLUMN,
+    SummaryResolutionError, decode_message_envelope,
+};
 
 /// One `session_messages` row offered to the recognizers.
 ///
@@ -208,28 +211,15 @@ async fn claude_summary_pair_is_exact(
     if summary_id.as_str() != summary_message_id {
         return Ok(false);
     }
-    // Production Claude ingest stores the boundary as `compact_boundary:{uuid}`
-    // while the summary parent remains the raw uuid. Accept either spelling.
-    let production_boundary_id = format!("compact_boundary:{}", boundary_id.as_str());
     let mut rows = snapshot
         .query(
-            "SELECT metadata_json
-             FROM session_messages
-             WHERE provider = ?1 AND session_id = ?2
-               AND message_id IN (?3, ?4)
-               AND kind IN ('compact_boundary', 'compaction')
-             ORDER BY
-               CASE WHEN json_extract(metadata_json, '$.canonical_envelope') IS NOT NULL
-                    THEN 0 ELSE 1 END,
-               CASE WHEN message_id LIKE 'compact_boundary:%' THEN 0 ELSE 1 END,
-               message_id
-             LIMIT 1",
-            params![
-                provider,
-                session_id.as_str(),
-                boundary_id.as_str(),
-                production_boundary_id.as_str(),
-            ],
+            &format!(
+                "SELECT {MESSAGE_ENVELOPE_COLUMN}
+                 FROM session_messages AS message
+                 WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
+                   AND kind = 'compaction'"
+            ),
+            params![provider, session_id.as_str(), boundary_id.as_str()],
         )
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
@@ -240,18 +230,13 @@ async fn claude_summary_pair_is_exact(
     else {
         return Ok(false);
     };
-    let metadata = row
-        .get::<Option<String>>(0)
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let Some(metadata) = metadata
-        .as_deref()
-        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+    let Some(boundary) = decode_message_envelope(
+        row.get::<Option<String>>(0)
+            .map_err(|error| LcmError::Db(error.to_string()))?
+            .as_deref(),
+    )?
     else {
         return Ok(false);
-    };
-    let boundary = match super::decode_canonical_observation_metadata(metadata)? {
-        super::CanonicalObservationMetadata::Envelope(envelope) => envelope,
-        super::CanonicalObservationMetadata::Unrecognized => return Ok(false),
     };
     let anchor = boundary.facts().iter().find_map(|fact| match fact {
         CanonicalObservationFactV1::Compaction {
@@ -324,11 +309,11 @@ async fn codex_app_server_summary(
     timeout: Duration,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
     let mut config =
-        tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig::from_env();
+        tracedecay_sessions::runtime::hosts::codex_app_server::CodexAppServerSummaryConfig::from_env();
     config.timeout = config.timeout.min(timeout);
     let source_range = request.source_range.clone();
     let result = tokio::task::spawn_blocking(move || {
-        tracedecay_sessions::runtime::codex_app_server::summarize_with_codex_app_server(
+        tracedecay_sessions::runtime::hosts::codex_app_server::summarize_with_codex_app_server(
             &request, &config,
         )
     })

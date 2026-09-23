@@ -4,7 +4,7 @@ use std::{
 };
 
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use tracedecay_store::{
     SessionGenerationActivatePermit, SessionGenerationActivationReceiptV1,
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn graph_cancellation_observes_the_callers_execution_control() {
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        let control = tracedecay_temporal_query::execution::ExecutionControl::default();
         let cancellation = execution_control_graph_cancellation(&control);
 
         assert!(!cancellation.is_cancelled());
@@ -398,13 +398,13 @@ mod tests {
 
     #[test]
     fn graph_cancellation_observes_deadlines_and_work_budgets() {
-        let expired = tracedecay_temporal_query::ports::ExecutionControl::new(Some(
+        let expired = tracedecay_temporal_query::execution::ExecutionControl::new(Some(
             std::time::Instant::now(),
         ));
         assert!(execution_control_graph_cancellation(&expired).is_cancelled());
 
         let budgeted =
-            tracedecay_temporal_query::ports::ExecutionControl::default().with_work_limit(1);
+            tracedecay_temporal_query::execution::ExecutionControl::default().with_work_limit(1);
         let cancellation = execution_control_graph_cancellation(&budgeted);
         assert!(!cancellation.is_cancelled());
         assert!(cancellation.is_cancelled());

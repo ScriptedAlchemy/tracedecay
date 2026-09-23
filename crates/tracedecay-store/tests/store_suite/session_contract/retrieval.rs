@@ -1,6 +1,6 @@
 use super::common::*;
 use super::*;
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 #[test]
 fn frozen_snapshots_preserve_exact_session_and_reject_cross_session_reads() {

@@ -16,8 +16,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::harness::{EXTERNAL_PAYLOAD, INLINE_PAYLOAD, PROJECT_ID, RegisteredTemporalHarness};
 use crate::context::{
-    BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
-    RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
+    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
     application_observed_at, session_application_grant_digest,
 };
 use crate::session::{
@@ -26,6 +26,7 @@ use crate::session::{
     SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
     SessionScopeAuthorizer, SessionTemporalQuery,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 const DIGEST: [u8; 32] = [0x5a; 32];
 

@@ -87,9 +87,14 @@ pub(crate) fn authority_fixture(
         payload,
     )
     .expect("durable observation");
-    let cursor =
-        ObservationSourceCursorV1::new(source, ObservationScopeV1::Profile, generation, end)
-            .expect("committed source cursor");
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        source,
+        ObservationScopeV1::Profile,
+        generation,
+        ObservationOrderingDomainV1::FileBytes,
+        end,
+    )
+    .expect("committed source cursor");
     (observation, cursor)
 }
 
@@ -136,10 +141,11 @@ pub(super) async fn seed_observation(
 /// The same cursor shifted along its ordering domain.
 pub(super) fn shift(cursor: &ObservationSourceCursorV1, delta: i64) -> ObservationSourceCursorV1 {
     let position = u64::try_from(i64::try_from(cursor.position()).unwrap() + delta).unwrap();
-    ObservationSourceCursorV1::new(
+    ObservationSourceCursorV1::for_ordering(
         cursor.source().clone(),
         cursor.scope().clone(),
         cursor.generation(),
+        ObservationOrderingDomainV1::FileBytes,
         position,
     )
     .expect("shifted source cursor")

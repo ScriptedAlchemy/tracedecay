@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    AnchorDurabilityClass, AnchorSourceGenerationV2, EntityId, EntityKind, EntityRef,
-    EvidenceClass, PayloadAccessState, ProjectionGenerationId, RetentionClass,
-    RetrievalAnchorRecord, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, UtcMicros,
+    AnchorDurabilityClass, AnchorSourceGeneration, EntityId, EntityKind, EntityRef, EvidenceClass,
+    PayloadAccessState, ProjectionGenerationId, RetentionClass, RetrievalAnchorRecord,
+    RetrievalAnchorRecordParts, RetrievalAnchorTarget, UtcMicros,
 };
 use tracedecay_runtime_core::db::engine::params;
 
@@ -250,8 +250,9 @@ fn validate_raw_source(
 }
 
 /// Binds a validated raw source to its canonical anchor; `None` is the typed
-/// "no canonical anchor in this store" outcome, the only case that writes a
-/// legacy compatibility anchor.
+/// "no canonical anchor in this store" outcome of a raw row with no durable
+/// observation behind it (an active replay message persisted by compression),
+/// the only case that writes an unobserved raw-message anchor.
 async fn prepare_raw_source(
     conn: &impl crate::handle::SessionTemporalExec,
     raw: ValidatedRawSource,
@@ -270,7 +271,7 @@ async fn prepare_raw_source(
     } else {
         None
     };
-    let (canonical_id, compatibility_anchor, timestamp) = match canonical_anchor {
+    let (canonical_id, unobserved_raw_anchor, timestamp) = match canonical_anchor {
         Some(canonical) => canonical.clone(),
         None => {
             let source_timestamp = raw
@@ -278,7 +279,7 @@ async fn prepare_raw_source(
                 .map(normalize_timestamp)
                 .ok_or_else(|| unavailable(&raw.store_id.to_string(), "unverifiable_timestamp"))?;
             (
-                compatibility_anchor_id(
+                unobserved_raw_anchor_id(
                     &raw.provider,
                     &raw.session_id,
                     raw.store_id,
@@ -294,7 +295,7 @@ async fn prepare_raw_source(
             kind: "anchor".to_string(),
             id: canonical_id,
         },
-        compatibility_anchor,
+        unobserved_raw_anchor,
         timestamp,
         payload,
     })
@@ -350,7 +351,7 @@ fn prepare_summary_source(
             kind: "summary".to_string(),
             id: node_id.to_string(),
         },
-        compatibility_anchor: false,
+        unobserved_raw_anchor: false,
         timestamp,
         payload: None,
     })
@@ -484,7 +485,7 @@ pub(super) async fn session_owner_json(
     Ok(owner_json_for(provider, session_id, &project_key))
 }
 
-fn compatibility_anchor_id(
+fn unobserved_raw_anchor_id(
     provider: &str,
     session_id: &str,
     store_id: i64,
@@ -526,88 +527,90 @@ pub(super) fn source_horizon_json(
     .to_string()
 }
 
-pub(super) async fn insert_compatibility_source_anchors(
+pub(super) async fn insert_unobserved_raw_anchors(
     conn: &impl crate::handle::SessionTemporalExec,
     sources: &[PreparedSource],
     owner_json: &str,
 ) -> Result<(), LcmError> {
     let mut seen = BTreeSet::new();
-    for source in sources.iter().filter(|source| source.compatibility_anchor) {
+    for source in sources.iter().filter(|source| source.unobserved_raw_anchor) {
         if !seen.insert(source.canonical.id.as_str()) {
             continue;
         }
-        let anchor_json = json!({
-            "kind": "legacy_lcm_raw_message",
-            "anchor_id": source.canonical.id,
-            "owner": serde_json::from_str::<Value>(owner_json).unwrap_or(Value::Null),
-            "ingested_at": source.timestamp,
-            "payload_access": "eligible",
-            "retention_class": "retention.legacy-lcm",
-        })
-        .to_string();
-        conn.execute(
-            "INSERT OR IGNORE INTO retrieval_anchors (
-                anchor_id, anchor_json, owner_json, projection_generation
-             ) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                source.canonical.id.as_str(),
-                anchor_json.as_str(),
-                owner_json,
-                PUBLICATION_ROUTE,
-            ],
-        )
-        .await?;
-        verify_anchor(
-            conn,
-            &source.canonical.id,
-            &anchor_json,
-            owner_json,
-            &source.canonical.id,
-        )
-        .await?;
+        let anchor = StoredAnchor {
+            anchor_id: source.canonical.id.clone(),
+            anchor_json: json!({
+                "kind": "lcm_unobserved_raw_message",
+                "anchor_id": source.canonical.id,
+                "owner": serde_json::from_str::<Value>(owner_json).unwrap_or(Value::Null),
+                "ingested_at": source.timestamp,
+                "payload_access": "eligible",
+                "retention_class": "retention.lcm-raw-message",
+            })
+            .to_string(),
+            owner_json: owner_json.to_string(),
+        };
+        insert_anchor(conn, &anchor, &source.canonical.id).await?;
     }
     Ok(())
 }
 
-pub(super) async fn build_summary_anchor(
+/// One `retrieval_anchors` row exactly as publication writes it.
+pub(super) struct StoredAnchor {
+    pub anchor_id: String,
+    pub anchor_json: String,
+    pub owner_json: String,
+}
+
+/// Derives a summary's retrieval anchor from its canonical sources.
+///
+/// The first source (in source order) with a typed observation-backed anchor
+/// makes the summary anchor a typed [`RetrievalAnchorRecord`] inheriting its
+/// owner, watermark, coverage, observations, and authorization. Sources with
+/// no typed anchor (unobserved raw rows, child summaries) carry none of that
+/// authority, so such a summary gets a session-owned anchor instead. Anchors
+/// are immutable, so publication and exact replay derive the same row.
+pub(super) async fn derive_summary_anchor(
     conn: &impl crate::handle::SessionTemporalExec,
     summary_id: &str,
-    sources: &[PreparedSource],
+    source_ids: &[&str],
+    owner_json: &str,
+    source_horizon_json: &str,
     created_at: i64,
-) -> Result<Option<RetrievalAnchorRecord>, LcmError> {
-    let mut retained_source = None;
-    for source in sources {
-        let mut rows = conn
-            .query(
-                "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
-                params![source.canonical.id.as_str()],
-            )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            continue;
-        };
-        let encoded = row.get::<String>(0)?;
-        if let Ok(anchor) = serde_json::from_str::<RetrievalAnchorRecord>(&encoded) {
-            retained_source = Some(anchor);
-            break;
-        }
-    }
-    let Some(source) = retained_source else {
-        return Ok(None);
+) -> Result<StoredAnchor, LcmError> {
+    let Some(source) = first_typed_source_anchor(conn, source_ids).await? else {
+        let anchor_id = format!("anchor_summary_{}", projected_content_hash(summary_id));
+        let anchor_json = json!({
+            "kind": "immutable_session_summary",
+            "anchor_id": anchor_id,
+            "summary_id": summary_id,
+            "owner": serde_json::from_str::<Value>(owner_json).unwrap_or(Value::Null),
+            "source_horizon": serde_json::from_str::<Value>(source_horizon_json)
+                .unwrap_or(Value::Null),
+            "ingested_at": created_at,
+            "payload_access": "eligible",
+            "retention_class": "retention.session-summary",
+        })
+        .to_string();
+        return Ok(StoredAnchor {
+            anchor_id,
+            anchor_json,
+            owner_json: owner_json.to_string(),
+        });
     };
-    let target = RetrievalAnchorTargetV2::Entity(EntityRef {
+    let target = RetrievalAnchorTarget::Entity(EntityRef {
         id: EntityId::new(summary_id.to_string())
             .map_err(|error| LcmError::Db(error.to_string()))?,
         kind: EntityKind::SessionSummary,
     });
-    RetrievalAnchorRecord::new(RetrievalAnchorRecordV2Parts {
+    let anchor = RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
         target,
         owner: source.owner().clone(),
         aliases: Vec::new(),
         occurred_at: None,
         ingested_at: UtcMicros(created_at),
         evidence_class: EvidenceClass::DerivedExact,
-        source_generation: AnchorSourceGenerationV2::Unknown,
+        source_generation: AnchorSourceGeneration::Unknown,
         projection_generation: ProjectionGenerationId::new(PUBLICATION_ROUTE)
             .map_err(|error| LcmError::Db(error.to_string()))?,
         projection_watermark: source.projection_watermark().clone(),
@@ -620,89 +623,84 @@ pub(super) async fn build_summary_anchor(
             .map_err(|error| LcmError::Db(error.to_string()))?,
         durability: AnchorDurabilityClass::DurableEvidence,
     })
-    .map(Some)
-    .map_err(|error| LcmError::Db(error.to_string()))
-}
-
-pub(super) async fn insert_summary_anchor(
-    conn: &impl crate::handle::SessionTemporalExec,
-    anchor_id: &str,
-    summary_id: &str,
-    owner_json: &str,
-    source_horizon_json: &str,
-    created_at: i64,
-    typed_anchor: Option<&RetrievalAnchorRecord>,
-) -> Result<(), LcmError> {
-    let stored_owner_json = match typed_anchor {
-        Some(anchor) => anchor
+    .map_err(|error| LcmError::Db(error.to_string()))?;
+    Ok(StoredAnchor {
+        anchor_id: anchor.anchor_id().as_str().to_string(),
+        anchor_json: serde_json::to_string(&anchor)
+            .map_err(|error| LcmError::Db(format!("encode summary anchor: {error}")))?,
+        owner_json: anchor
             .owner_column_json()
             .map_err(|error| LcmError::Db(format!("encode summary anchor owner: {error}")))?,
-        None => owner_json.to_string(),
-    };
-    let anchor_json = match typed_anchor {
-        Some(anchor) => serde_json::to_string(anchor)
-            .map_err(|error| LcmError::Db(format!("encode summary anchor: {error}")))?,
-        None => json!({
-            "kind": "immutable_session_summary",
-            "anchor_id": anchor_id,
-            "summary_id": summary_id,
-            "owner": serde_json::from_str::<Value>(owner_json).unwrap_or(Value::Null),
-            "source_horizon": serde_json::from_str::<Value>(source_horizon_json)
-                .unwrap_or(Value::Null),
-            "ingested_at": created_at,
-            "payload_access": "eligible",
-            "retention_class": "retention.session-summary",
-        })
-        .to_string(),
-    };
+    })
+}
+
+async fn first_typed_source_anchor(
+    conn: &impl crate::handle::SessionTemporalExec,
+    source_ids: &[&str],
+) -> Result<Option<RetrievalAnchorRecord>, LcmError> {
+    let encoded_ids =
+        serde_json::to_string(source_ids).map_err(|error| LcmError::Db(error.to_string()))?;
+    let mut rows = conn
+        .query(
+            "SELECT anchor_id, anchor_json FROM retrieval_anchors
+             WHERE anchor_id IN (SELECT value FROM json_each(?1))",
+            params![encoded_ids],
+        )
+        .await?;
+    let mut typed = BTreeMap::new();
+    while let Some(row) = rows.next().await? {
+        let anchor_id: String = row.get(0)?;
+        if let Ok(anchor) = serde_json::from_str::<RetrievalAnchorRecord>(&row.get::<String>(1)?) {
+            typed.insert(anchor_id, anchor);
+        }
+    }
+    Ok(source_ids.iter().find_map(|id| typed.remove(*id)))
+}
+
+pub(super) async fn insert_anchor(
+    conn: &impl crate::handle::SessionTemporalExec,
+    anchor: &StoredAnchor,
+    conflict_id: &str,
+) -> Result<(), LcmError> {
     conn.execute(
         "INSERT OR IGNORE INTO retrieval_anchors (
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES (?1, ?2, ?3, ?4)",
         params![
-            anchor_id,
-            anchor_json.as_str(),
-            stored_owner_json.as_str(),
+            anchor.anchor_id.as_str(),
+            anchor.anchor_json.as_str(),
+            anchor.owner_json.as_str(),
             PUBLICATION_ROUTE
         ],
     )
     .await?;
-    verify_anchor(
-        conn,
-        anchor_id,
-        &anchor_json,
-        &stored_owner_json,
-        summary_id,
-    )
-    .await
-}
-
-async fn verify_anchor(
-    conn: &impl crate::handle::SessionTemporalExec,
-    anchor_id: &str,
-    anchor_json: &str,
-    owner_json: &str,
-    conflict_id: &str,
-) -> Result<(), LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT anchor_json, owner_json, projection_generation
-             FROM retrieval_anchors WHERE anchor_id = ?1",
-            params![anchor_id],
-        )
-        .await?;
-    let Some(row) = rows.next().await? else {
-        return Err(LcmError::SummarySourceNotOwnedBySession);
-    };
-    if row.get::<String>(0)? != anchor_json
-        || row.get::<String>(1)? != owner_json
-        || row.get::<String>(2)? != PUBLICATION_ROUTE
-    {
+    if !stored_anchor_matches(conn, anchor).await? {
         return Err(LcmError::ImmutableSummaryConflict {
             summary_id: conflict_id.to_string(),
         });
     }
     Ok(())
+}
+
+/// Whether the stored row for `anchor.anchor_id` is byte-identical to the
+/// row publication writes; a missing row is a mismatch.
+pub(super) async fn stored_anchor_matches(
+    conn: &impl crate::handle::SessionTemporalExec,
+    anchor: &StoredAnchor,
+) -> Result<bool, LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT anchor_json, owner_json, projection_generation
+             FROM retrieval_anchors WHERE anchor_id = ?1",
+            params![anchor.anchor_id.as_str()],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(false);
+    };
+    Ok(row.get::<String>(0)? == anchor.anchor_json
+        && row.get::<String>(1)? == anchor.owner_json
+        && row.get::<String>(2)? == PUBLICATION_ROUTE)
 }
 
 pub(super) async fn insert_payload_manifests(

@@ -6,7 +6,7 @@ use tracedecay_domain::{
     ContextOmissionReasonV1, HydrationStateV1, RetrievalGrainV1,
 };
 
-use super::super::ports::ExecutionControl;
+use super::super::execution::ExecutionControl;
 use super::super::resolution::summary::SummaryOmission;
 use super::assembly::{try_reserve, validate_bundle};
 use super::wire::{

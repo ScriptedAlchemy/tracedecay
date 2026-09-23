@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracedecay_automation_runtime::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
@@ -50,7 +49,6 @@ mod code_reads;
 pub mod maintenance;
 mod memory_graph_reconciliation_tasks;
 mod mounts;
-mod profile_memory;
 mod remote_recovery;
 mod retained_hook_tasks;
 mod terminal_tasks;
@@ -62,8 +60,6 @@ use retained_hook_tasks::RetainedHookTasks;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub use mounts::SessionGraphPublicationTestGate;
-
-pub use profile_memory::open_user_memory_db;
 
 /// RAII hold for a root-owned remote-recovery writer admission.
 ///
@@ -3255,20 +3251,6 @@ impl DaemonSessionRuntimeRegistryV1 {
     {
         self.retained_hook_tasks
             .retain(provider, session_id, operation)
-    }
-}
-
-impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
-    fn profile_id(&self) -> &tracedecay_domain::configuration::UserProfileId {
-        self.identity.profile_id()
-    }
-
-    fn profile_sessions(&self) -> RuntimeFuture<'_, RegisteredGlobalDbLeaseV1> {
-        Box::pin(DaemonSessionRuntimeRegistryV1::profile_sessions(self))
-    }
-
-    fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {
-        Box::pin(open_user_memory_db(self))
     }
 }
 

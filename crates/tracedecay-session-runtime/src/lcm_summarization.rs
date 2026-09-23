@@ -85,8 +85,10 @@ pub(super) async fn native_summary_evidence(
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let (candidate_sql, candidate_params) = if let Some(required) = required_source {
         (
-            "SELECT message.message_id, message.text, message.kind, message.metadata_json,
-                    source_range.from_store_id, source_range.to_store_id, raw.store_id
+            format!(
+                "SELECT message.message_id, message.text, message.kind, message.metadata_json,
+                    source_range.from_store_id, source_range.to_store_id, raw.store_id,
+                    {MESSAGE_ENVELOPE_COLUMN}
              FROM lcm_raw_predecessor_ranges AS source_range
              JOIN lcm_raw_messages AS raw
                ON raw.provider = source_range.provider
@@ -100,13 +102,16 @@ pub(super) async fn native_summary_evidence(
                AND source_range.to_store_id = ?3
                AND length(trim(message.text)) > 0
              ORDER BY raw.store_id, raw.message_id
-             LIMIT 2",
+             LIMIT 2"
+            ),
             params![provider, session_id, required.source_range.to_store_id,],
         )
     } else {
         (
-            "SELECT message.message_id, message.text, message.kind, message.metadata_json,
-                    source_range.from_store_id, source_range.to_store_id, raw.store_id
+            format!(
+                "SELECT message.message_id, message.text, message.kind, message.metadata_json,
+                    source_range.from_store_id, source_range.to_store_id, raw.store_id,
+                    {MESSAGE_ENVELOPE_COLUMN}
              FROM session_messages AS message
              LEFT JOIN lcm_raw_messages AS raw
                ON raw.provider = message.provider
@@ -119,12 +124,13 @@ pub(super) async fn native_summary_evidence(
              WHERE message.provider = ?1 AND message.session_id = ?2
                AND length(trim(message.text)) > 0
              ORDER BY message.ordinal DESC, message.message_id DESC
-             LIMIT 512",
+             LIMIT 512"
+            ),
             params![provider, session_id],
         )
     };
     let mut rows = snapshot
-        .query(candidate_sql, candidate_params)
+        .query(&candidate_sql, candidate_params)
         .await
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let mut candidates = Vec::new();
@@ -148,25 +154,19 @@ pub(super) async fn native_summary_evidence(
                 .map_err(|error| LcmError::Db(error.to_string()))?,
             row.get::<Option<i64>>(6)
                 .map_err(|error| LcmError::Db(error.to_string()))?,
+            row.get::<Option<String>>(7)
+                .map_err(|error| LcmError::Db(error.to_string()))?,
         ));
     }
     drop(rows);
     let recognizers = native_summary_recognizers(provider);
     let mut previous_native_store_id = None;
     let mut matched = None;
-    for (message_id, text, kind, metadata_json, range_from, range_to, store_id) in
+    for (message_id, text, kind, metadata_json, range_from, range_to, store_id, envelope_json) in
         candidates.into_iter().rev()
     {
-        let Some(metadata) = metadata_json
-            .as_deref()
-            .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
-        else {
-            continue;
-        };
-        let envelope = match decode_canonical_observation_metadata(metadata.clone())? {
-            CanonicalObservationMetadata::Envelope(envelope) => Some(envelope),
-            CanonicalObservationMetadata::Unrecognized => None,
-        };
+        let metadata = parse_message_metadata(metadata_json.as_deref());
+        let envelope = decode_message_envelope(envelope_json.as_deref())?;
         let candidate = NativeSummaryCandidate {
             provider,
             message_id: &message_id,
@@ -254,14 +254,17 @@ async fn native_store_is_recognized(
 ) -> Result<bool, LcmError> {
     let mut rows = snapshot
         .query(
-            "SELECT message.message_id, message.text, message.kind, message.metadata_json
+            &format!(
+                "SELECT message.message_id, message.text, message.kind, message.metadata_json,
+                        {MESSAGE_ENVELOPE_COLUMN}
              FROM lcm_raw_messages AS raw
              JOIN session_messages AS message
                ON message.provider = raw.provider
               AND message.message_id = raw.message_id
               AND message.session_id = raw.session_id
              WHERE raw.provider = ?1 AND raw.session_id = ?2 AND raw.store_id = ?3
-             LIMIT 1",
+             LIMIT 1"
+            ),
             params![provider, session_id, store_id],
         )
         .await
@@ -282,18 +285,17 @@ async fn native_store_is_recognized(
     let kind = row
         .get::<Option<String>>(2)
         .map_err(|error| LcmError::Db(error.to_string()))?;
-    let metadata = row
-        .get::<Option<String>>(3)
-        .map_err(|error| LcmError::Db(error.to_string()))?
-        .and_then(|metadata| serde_json::from_str::<Value>(&metadata).ok());
+    let metadata = parse_message_metadata(
+        row.get::<Option<String>>(3)
+            .map_err(|error| LcmError::Db(error.to_string()))?
+            .as_deref(),
+    );
+    let envelope = decode_message_envelope(
+        row.get::<Option<String>>(4)
+            .map_err(|error| LcmError::Db(error.to_string()))?
+            .as_deref(),
+    )?;
     drop(rows);
-    let Some(metadata) = metadata else {
-        return Ok(false);
-    };
-    let envelope = match decode_canonical_observation_metadata(metadata.clone())? {
-        CanonicalObservationMetadata::Envelope(envelope) => Some(envelope),
-        CanonicalObservationMetadata::Unrecognized => None,
-    };
     let candidate = NativeSummaryCandidate {
         provider,
         message_id: &message_id,
@@ -310,34 +312,39 @@ async fn native_store_is_recognized(
     Ok(false)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum CanonicalObservationMetadata {
-    Envelope(Box<CanonicalObservationEnvelopeV1>),
-    Unrecognized,
+/// The canonical envelope of the newest observation projected into the
+/// `message` row. Message metadata does not embed it: the observation row is
+/// its only copy. Rows no observation projected (direct transcript ingest)
+/// select NULL.
+pub(super) const MESSAGE_ENVELOPE_COLUMN: &str =
+    "(SELECT json_extract(observation.observation_json, '$.payload')
+      FROM observation_projection_provenance AS provenance
+      JOIN observations AS observation
+        ON observation.observation_id = provenance.observation_id
+      WHERE provenance.output_provider = message.provider
+        AND provenance.output_message_id = message.message_id
+      ORDER BY observation.sequence DESC
+      LIMIT 1)";
+
+/// Stored message metadata, or `Null` when the row has none or it is not JSON.
+fn parse_message_metadata(metadata: Option<&str>) -> Value {
+    metadata
+        .and_then(|metadata| serde_json::from_str(metadata).ok())
+        .unwrap_or(Value::Null)
 }
 
-/// Decode persisted observation metadata.
-///
-/// A nested `canonical_envelope` is the persisted pairing authority: if that
-/// key is present it must decode, and a broken envelope is a typed error
-/// rather than a silent fallthrough onto the stripped metadata. Providers
-/// that never persist the nested key still decode the whole object, and a
-/// missing or non-envelope object is [`CanonicalObservationMetadata::Unrecognized`].
-pub(super) fn decode_canonical_observation_metadata(
-    mut metadata: Value,
-) -> Result<CanonicalObservationMetadata, LcmError> {
-    let Some(object) = metadata.as_object_mut() else {
-        return Ok(CanonicalObservationMetadata::Unrecognized);
-    };
-    object.remove("ingest_protection");
-    if let Some(envelope) = object.remove("canonical_envelope") {
-        return serde_json::from_value(envelope)
-            .map(|envelope| CanonicalObservationMetadata::Envelope(Box::new(envelope)))
-            .map_err(|error| LcmError::Db(format!("canonical_envelope decode failed: {error}")));
-    }
-    Ok(serde_json::from_value(metadata)
-        .map(|envelope| CanonicalObservationMetadata::Envelope(Box::new(envelope)))
-        .unwrap_or(CanonicalObservationMetadata::Unrecognized))
+/// A projected row's observation payload is a validated canonical envelope, so
+/// one that does not decode is corruption, never an unrecognized row.
+pub(super) fn decode_message_envelope(
+    envelope: Option<&str>,
+) -> Result<Option<Box<CanonicalObservationEnvelopeV1>>, LcmError> {
+    envelope
+        .map(|envelope| {
+            serde_json::from_str(envelope).map(Box::new).map_err(|error| {
+                LcmError::Db(format!("message observation envelope decode failed: {error}"))
+            })
+        })
+        .transpose()
 }
 
 async fn native_source_membership_is_exact(
@@ -401,31 +408,23 @@ impl From<LcmError> for SummaryResolutionError {
 }
 
 #[cfg(test)]
-mod decode_canonical_observation_metadata_tests {
-    use super::{CanonicalObservationMetadata, decode_canonical_observation_metadata};
-    use serde_json::json;
+mod decode_message_envelope_tests {
+    use super::decode_message_envelope;
 
     #[test]
-    fn nested_envelope_decode_failure_is_typed() {
-        let error = decode_canonical_observation_metadata(json!({
-            "canonical_envelope": {"not": "an envelope"}
-        }))
-        .expect_err("broken nested envelope must not fall through");
+    fn corrupt_observation_envelope_is_typed() {
+        let error = decode_message_envelope(Some(r#"{"not": "an envelope"}"#))
+            .expect_err("a corrupt observation payload must not read as unrecognized");
         assert!(
             error
                 .to_string()
-                .contains("canonical_envelope decode failed"),
+                .contains("message observation envelope decode failed"),
             "typed envelope failure: {error}"
         );
     }
 
     #[test]
-    fn missing_nested_envelope_stays_unrecognized() {
-        let decoded = decode_canonical_observation_metadata(json!({"source": "codex"}))
-            .expect("absent nested envelope is not a decode error");
-        assert!(matches!(
-            decoded,
-            CanonicalObservationMetadata::Unrecognized
-        ));
+    fn unprojected_row_has_no_envelope() {
+        assert!(decode_message_envelope(None).unwrap().is_none());
     }
 }

@@ -6,9 +6,9 @@
 
 use rusqlite::{OptionalExtension, params};
 use tracedecay_domain::{
-    AnchorSourceGenerationV2, DurableObservationV1, EvidenceAvailabilityV1, FactOwnerV1,
+    AnchorSourceGeneration, DurableObservationV1, EvidenceAvailabilityV1, FactOwnerV1,
     GenerationBoundRepositoryProvenanceV1, ObservationSourceCursorV1, RepositoryProvenanceV1,
-    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
     prove_cline_native_source_transition,
 };
 use tracedecay_store::{
@@ -92,7 +92,7 @@ pub(super) fn cursor_advance_receipt_matches(
 
 pub(super) fn persist_retrieval_anchor(
     connection: &rusqlite::Connection,
-    anchor: &RetrievalAnchorRecordV2,
+    anchor: &RetrievalAnchorRecord,
 ) -> rusqlite::Result<()> {
     let anchor_json = encode(anchor)?;
     let owner_json = encode(anchor.owner())?;
@@ -135,7 +135,7 @@ pub(super) fn persist_retrieval_anchor(
 
 fn verify_retrieval_anchor(
     connection: &rusqlite::Connection,
-    anchor: &RetrievalAnchorRecordV2,
+    anchor: &RetrievalAnchorRecord,
 ) -> rusqlite::Result<()> {
     let owner_json = encode(anchor.owner())?;
     let stored = connection
@@ -155,7 +155,7 @@ fn verify_retrieval_anchor(
     let Some((stored_anchor_json, stored_owner_json, stored_projection_generation)) = stored else {
         return Err(invalid("retrieval anchor identity collision"));
     };
-    let stored_anchor: RetrievalAnchorRecordV2 = decode(stored_anchor_json)?;
+    let stored_anchor: RetrievalAnchorRecord = decode(stored_anchor_json)?;
     if !stored_anchor.is_semantic_replay_of(anchor)
         || stored_owner_json != owner_json
         || stored_projection_generation != anchor.projection_generation().as_str()
@@ -202,7 +202,7 @@ fn verify_retrieval_anchor(
 // immutable historical anchor replay requires the exact supersession receipt.
 fn cline_alias_transition_is_valid(
     connection: &rusqlite::Connection,
-    anchor: &RetrievalAnchorRecordV2,
+    anchor: &RetrievalAnchorRecord,
     current_anchor_id: &str,
 ) -> rusqlite::Result<bool> {
     let Some(current_json) = connection
@@ -215,10 +215,10 @@ fn cline_alias_transition_is_valid(
     else {
         return Ok(false);
     };
-    let current: RetrievalAnchorRecordV2 = decode(current_json)?;
+    let current: RetrievalAnchorRecord = decode(current_json)?;
     let (
-        RetrievalAnchorTargetV2::ExactObservation(anchor_observation_id),
-        RetrievalAnchorTargetV2::ExactObservation(current_observation_id),
+        RetrievalAnchorTarget::ExactObservation(anchor_observation_id),
+        RetrievalAnchorTarget::ExactObservation(current_observation_id),
     ) = (anchor.target(), current.target())
     else {
         return Ok(false);
@@ -280,7 +280,7 @@ fn cline_alias_transition_is_valid(
     let disposition: RetrievalAnchorDispositionRecordV1 = decode(disposition_json)?;
     disposition.validate().map_err(invalid)?;
     Ok(disposition.anchor_id() == anchor.anchor_id()
-        && disposition.owner().v2() == Some(&FactOwnerV1::from(anchor.owner().clone()))
+        && *disposition.owner() == FactOwnerV1::from(anchor.owner().clone())
         && disposition.state() == AnchorDispositionStateV1::Superseded
         && disposition.reason_class() == AnchorDispositionReasonClassV1::Correction
         && disposition.superseded_by() == Some(current.anchor_id()))
@@ -499,7 +499,7 @@ pub(super) fn verify_observation_authority(
 fn repository_replay_anchor(
     attachment: &RepositoryProvenanceAttachmentV1,
     retained_json: &str,
-) -> rusqlite::Result<Option<RetrievalAnchorRecordV2>> {
+) -> rusqlite::Result<Option<RetrievalAnchorRecord>> {
     let retained: EvidenceAvailabilityV1<GenerationBoundRepositoryProvenanceV1> =
         decode(retained_json.to_owned())?;
     let (Some(old), Some(new), Some(anchor)) = (
@@ -534,7 +534,7 @@ fn repository_replay_anchor(
     if !same_json(retained_json, &encode(&normalized)?) {
         return Ok(None);
     }
-    let RetrievalAnchorTargetV2::RepositoryCapture {
+    let RetrievalAnchorTarget::RepositoryCapture {
         repository_id,
         receipt,
         ..
@@ -542,8 +542,8 @@ fn repository_replay_anchor(
     else {
         return Ok(None);
     };
-    RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
-        target: RetrievalAnchorTargetV2::RepositoryCapture {
+    RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
+        target: RetrievalAnchorTarget::RepositoryCapture {
             repository_id: repository_id.clone(),
             capture_id: old.capture_id().clone(),
             receipt: receipt.clone(),
@@ -553,7 +553,7 @@ fn repository_replay_anchor(
         occurred_at: anchor.occurred_at(),
         ingested_at: anchor.ingested_at(),
         evidence_class: anchor.evidence_class(),
-        source_generation: AnchorSourceGenerationV2::RepositoryCapture(old.capture_id().clone()),
+        source_generation: AnchorSourceGeneration::RepositoryCapture(old.capture_id().clone()),
         projection_generation: anchor.projection_generation().clone(),
         projection_watermark: anchor.projection_watermark().clone(),
         coverage: anchor.coverage().clone(),

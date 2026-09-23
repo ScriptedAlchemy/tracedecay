@@ -7,11 +7,12 @@ use tracedecay_runtime_core::db::engine::Value as SqlValue;
 use tracedecay_temporal_query::candidates::{
     CandidateChannel, CandidateClause, is_fts_boolean_operator,
 };
+use tracedecay_temporal_query::paging::{CandidateFieldCaps, PageRequest};
 use tracedecay_temporal_query::ports::{
-    CandidateFieldCaps, PageRequest, ReadBudgetAccounting, TemporalExecutionSnapshot,
-    TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
+    ReadBudgetAccounting, TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
+use tracedecay_temporal_query::snapshot::TemporalExecutionSnapshot;
 
 use super::super::sql::{TemporalSqlRead, TemporalSqlRow, TemporalSqlRows};
 use super::cursors::*;

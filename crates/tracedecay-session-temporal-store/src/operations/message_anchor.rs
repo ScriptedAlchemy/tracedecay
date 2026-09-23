@@ -34,7 +34,8 @@ use tracedecay_store::derive_canonical_projection;
 use super::sources::unavailable;
 
 /// Resolved canonical source binding: anchor id, whether the publication still
-/// has to write a compatibility anchor row, and the source's knowledge time.
+/// has to write an unobserved raw-message anchor row, and the source's
+/// knowledge time.
 pub(super) type ResolvedMessageAnchor = (String, bool, i64);
 
 /// One materialized occurrence row of a requested message.
@@ -51,8 +52,8 @@ struct MaterializedOccurrence {
 /// source order) for one session, reading the shared authorities once.
 ///
 /// A message absent from the returned map has no canonical anchor in this
-/// store at all, the only case in which the publication falls back to a
-/// legacy compatibility anchor. A refusal raised by one message's own
+/// store at all (a raw row with no durable observation behind it), the only
+/// case in which the publication writes an unobserved raw-message anchor. A refusal raised by one message's own
 /// evidence names that message; a refusal the shared observation scan raises
 /// before any message matched (missing or undecodable observation authority)
 /// names the first still-unresolved message in source order, which is the
@@ -480,13 +481,13 @@ mod tests {
 
     fn fixture_anchor(
         observation: &DurableObservationV1,
-    ) -> tracedecay_domain::RetrievalAnchorRecordV2 {
+    ) -> tracedecay_domain::RetrievalAnchorRecord {
         let authorization = tracedecay_store::build_observation_resolution_authorization_v1(
             observation,
             "message-anchor-test",
         )
         .expect("anchor authorization");
-        tracedecay_store::build_observation_retrieval_anchor_v2(
+        tracedecay_store::build_observation_retrieval_anchor(
             observation,
             ProjectionGenerationId::new("projection.message-anchor-test.v1")
                 .expect("projection generation"),
@@ -507,13 +508,11 @@ mod tests {
         conn.execute_batch(&format!(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
+                content, content_hash, storage_kind, payload_ref, metadata_json
              ) VALUES (
                 'codex', 'message.source', 'session.message-anchor', 41,
                 'assistant', 0, {timestamp_sql}, 'source body',
-                'sha256:source-body', 'inline', NULL, 'source body', 'source body',
-                0, 0, NULL
+                'sha256:source-body', 'inline', NULL, NULL
              );",
         ))
         .await
@@ -524,7 +523,7 @@ mod tests {
         conn: &impl crate::handle::SessionTemporalExec,
         observation_json: &str,
         observation: &DurableObservationV1,
-        anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
+        anchor: &tracedecay_domain::RetrievalAnchorRecord,
         owner_json: &str,
     ) {
         seed_canonical_binding_at(conn, observation_json, observation, anchor, owner_json, 1).await;
@@ -534,7 +533,7 @@ mod tests {
         conn: &impl crate::handle::SessionTemporalExec,
         observation_json: &str,
         observation: &DurableObservationV1,
-        anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
+        anchor: &tracedecay_domain::RetrievalAnchorRecord,
         owner_json: &str,
         sequence: i64,
     ) {
@@ -634,12 +633,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, payload_ref, snippet_text,
-                    index_text, legacy_source, legacy_truncated, metadata_json
+                    content, content_hash, storage_kind, payload_ref, metadata_json
                  ) VALUES (
                     'codex', ?1, 'session.message-anchor', ?2, 'assistant', ?3, 1715000001,
-                    'source body', 'sha256:source-body', 'inline', NULL, 'source body',
-                    'source body', 0, 0, NULL
+                    'source body', 'sha256:source-body', 'inline', NULL, NULL
                  )",
                 params![format!("message.source.{index}"), 41 + index, index],
             )
@@ -653,7 +650,7 @@ mod tests {
     async fn materialize_occurrence(
         conn: &impl crate::handle::SessionTemporalExec,
         observation: &DurableObservationV1,
-        anchor: &tracedecay_domain::RetrievalAnchorRecordV2,
+        anchor: &tracedecay_domain::RetrievalAnchorRecord,
         message_id: &str,
     ) {
         // The generation lifecycle guards admit only building -> ready -> active.
@@ -675,11 +672,11 @@ mod tests {
                 session_id, generation, occurrence_id, source_observation_id, source_provider,
                 projection_output_ordinal, retrieval_anchor_id, message_id, role, knowledge_at,
                 valid_time_json, evidence_json, sanitized_content_digest,
-                sanitized_content_bytes, snippet_text, index_text
+                sanitized_content_bytes, index_text
              ) VALUES (
                 'session.message-anchor', 1, ?1, ?2, 'codex', 0, ?3, ?1, 'assistant',
                 1715000002, '{\"kind\":\"unknown\"}', '{}',
-                '0000000000000000000000000000000000000000000000000000000000000000', 0, '', ''
+                '0000000000000000000000000000000000000000000000000000000000000000', 0, ''
              )",
             params![
                 message_id,
@@ -786,25 +783,25 @@ mod tests {
             .expect("summary node count value")
     }
 
-    async fn legacy_anchor_count(conn: &impl crate::handle::SessionTemporalExec) -> i64 {
+    async fn unobserved_raw_anchor_count(conn: &impl crate::handle::SessionTemporalExec) -> i64 {
         let mut rows = conn
             .query(
                 "SELECT COUNT(*) FROM retrieval_anchors
-                 WHERE json_extract(anchor_json, '$.kind') = 'legacy_lcm_raw_message'",
+                 WHERE json_extract(anchor_json, '$.kind') = 'lcm_unobserved_raw_message'",
                 (),
             )
             .await
-            .expect("legacy anchor count");
+            .expect("unobserved raw anchor count");
         rows.next()
             .await
-            .expect("legacy anchor row")
-            .expect("legacy anchor count row")
+            .expect("unobserved raw anchor row")
+            .expect("unobserved raw anchor count row")
             .get(0)
-            .expect("legacy anchor count value")
+            .expect("unobserved raw anchor count value")
     }
 
     #[tokio::test]
-    async fn malformed_canonical_observation_never_falls_back_to_a_legacy_anchor() {
+    async fn malformed_canonical_observation_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
@@ -831,7 +828,7 @@ mod tests {
 
         let result = publish(&conn).await;
 
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceUnavailable { ref reason, .. })
@@ -868,7 +865,7 @@ mod tests {
 
         let result = publish(&conn).await;
 
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceUnavailable { ref reason, .. })
@@ -877,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ownership_mismatched_canonical_binding_never_falls_back_to_a_legacy_anchor() {
+    async fn ownership_mismatched_canonical_binding_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
@@ -902,7 +899,7 @@ mod tests {
 
         let result = publish(&conn).await;
 
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceNotOwnedBySession)
@@ -910,7 +907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_exact_canonical_binding_never_falls_back_to_a_legacy_anchor() {
+    async fn non_exact_canonical_binding_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
@@ -937,7 +934,7 @@ mod tests {
 
         let result = publish(&conn).await;
 
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceNotOwnedBySession)
@@ -945,7 +942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_canonical_anchor_binding_never_falls_back_to_a_legacy_anchor() {
+    async fn missing_canonical_anchor_binding_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
@@ -967,7 +964,7 @@ mod tests {
 
         let result = publish(&conn).await;
 
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceUnavailable { ref reason, .. })
@@ -976,7 +973,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_session_owner_never_inserts_a_legacy_anchor() {
+    async fn unavailable_session_owner_never_inserts_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
@@ -997,7 +994,7 @@ mod tests {
 
         let result = publish(&conn).await;
 
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceNotOwnedBySession)
@@ -1005,7 +1002,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_raw_timestamp_never_inserts_a_zero_time_legacy_anchor() {
+    async fn malformed_raw_timestamp_never_inserts_a_zero_time_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
             .await
@@ -1019,7 +1016,7 @@ mod tests {
 
         let result = publish(&conn).await;
 
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert!(matches!(
             result,
             Err(LcmError::SummarySourceUnavailable { ref reason, .. })
@@ -1156,7 +1153,7 @@ mod tests {
         let prepared_bindings = |sources: &[super::super::PreparedSource]| {
             sources
                 .iter()
-                .map(|source| (source.canonical.id.clone(), source.compatibility_anchor))
+                .map(|source| (source.canonical.id.clone(), source.unobserved_raw_anchor))
                 .collect::<Vec<_>>()
         };
 
@@ -1223,7 +1220,7 @@ mod tests {
 
     /// A mixed publication refuses on the first source (in source order) that
     /// fails its own check, with that source's typed refusal, and leaves
-    /// nothing published: no summary node and no legacy anchor.
+    /// nothing published: no summary node and no unobserved raw anchor.
     #[tokio::test]
     async fn mixed_source_publication_refuses_on_the_first_failing_source() {
         let directory = tempdir().expect("temporary directory");
@@ -1235,7 +1232,7 @@ mod tests {
             .expect("profile database")
             .writer_connection()
             .expect("profile writer");
-        // 41: canonical anchor; 42: no canonical evidence (legacy fallback);
+        // 41: canonical anchor; 42: no canonical evidence (unobserved raw row);
         // 43: ambiguous (two exact anchors project it); 44: retention-expired;
         // 45: foreign session.
         seed_raw_sources(&conn, 4).await;
@@ -1285,12 +1282,10 @@ mod tests {
              VALUES ('codex', 'session.foreign', 'user', '/foreign');
              INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, store_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
+                content, content_hash, storage_kind, payload_ref, metadata_json
              ) VALUES (
                 'codex', 'message.foreign', 'session.foreign', 45, 'assistant', 0, 1715000001,
-                'foreign body', 'sha256:foreign-body', 'inline', NULL, 'foreign body',
-                'foreign body', 0, 0, NULL
+                'foreign body', 'sha256:foreign-body', 'inline', NULL, NULL
              );",
         )
         .await
@@ -1308,12 +1303,12 @@ mod tests {
             Err(LcmError::SummarySourceUnavailable { ref source_id, ref reason })
                 if source_id == "44" && reason == "retention_expired"
         ));
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert_eq!(summary_node_count(&conn).await, 0);
 
         // The ambiguous source (43) is refused by its own evidence even though
-        // the canonical (41) and legacy-fallback (42) sources ahead of it are
-        // fine; the fallback anchor for 42 is never written.
+        // the canonical (41) and unobserved (42) sources ahead of it are
+        // fine; the unobserved anchor for 42 is never written.
         let result = super::super::publication::publish_immutable_summary(
             &conn,
             publication_over(&[41, 42, 43]),
@@ -1325,19 +1320,19 @@ mod tests {
             Err(LcmError::SummarySourceUnavailable { ref source_id, ref reason })
                 if source_id == "message.source.2" && reason == "ambiguous_anchor"
         ));
-        assert_eq!(legacy_anchor_count(&conn).await, 0);
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 0);
         assert_eq!(summary_node_count(&conn).await, 0);
 
         // Without the failing sources the same publication commits: 41 keeps
-        // its canonical anchor and 42 falls back to exactly one legacy anchor.
+        // its canonical anchor and 42 gets exactly one unobserved raw anchor.
         super::super::publication::publish_immutable_summary(
             &conn,
             publication_over(&[41, 42]),
             &empty_relation_projection(),
         )
         .await
-        .expect("publication over canonical and legacy sources");
-        assert_eq!(legacy_anchor_count(&conn).await, 1);
+        .expect("publication over canonical and unobserved sources");
+        assert_eq!(unobserved_raw_anchor_count(&conn).await, 1);
         assert_eq!(summary_node_count(&conn).await, 1);
     }
 }

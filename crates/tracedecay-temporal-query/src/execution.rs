@@ -9,12 +9,13 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use super::{ReadBudgetAccounting, TemporalPortError, over_ceiling};
+use crate::paging::over_ceiling;
+use crate::ports::{ReadBudgetAccounting, TemporalPortError};
 
 const SHA256_PREFIX: &str = "sha256:";
 const SHA256_HEX_LEN: usize = 64;
-pub(super) const MAX_READ_ITEMS: usize = 8_192;
-pub(super) const MAX_READ_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_READ_ITEMS: usize = 8_192;
+pub(crate) const MAX_READ_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_READ_ITEM_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONTINUATION_KEY_BYTES: usize = 4_096;
 
@@ -186,12 +187,12 @@ impl ExecutionLimits {
 
 #[derive(Clone)]
 pub struct ExecutionControl {
-    pub(super) cancellation: Arc<AtomicBool>,
-    pub(super) deadline: Option<Instant>,
-    pub(super) remaining_work: Option<Arc<AtomicUsize>>,
+    pub(crate) cancellation: Arc<AtomicBool>,
+    pub(crate) deadline: Option<Instant>,
+    pub(crate) remaining_work: Option<Arc<AtomicUsize>>,
     /// The ceiling `remaining_work` started from, so an exhausted checkpoint can
     /// report the budget it spent instead of only naming the resource.
-    pub(super) work_limit: Option<usize>,
+    pub(crate) work_limit: Option<usize>,
 }
 
 impl ExecutionControl {

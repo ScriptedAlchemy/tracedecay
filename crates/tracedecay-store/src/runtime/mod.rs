@@ -88,8 +88,7 @@ pub use outbox::{
 pub use ports::{
     RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1,
     RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1, StorageRuntimePortErrorV1, StorageRuntimePortFutureV1,
-    StorageRuntimePortResultV1, StorageRuntimeReadPort, single_shard_required_coverage_v1,
+    RuntimeSubmitRequestV1, single_shard_required_coverage_v1,
 };
 pub use repository_read::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesPageV1,

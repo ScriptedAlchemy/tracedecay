@@ -1173,24 +1173,6 @@ impl StoreRuntimeClientLease {
     }
 }
 
-impl tracedecay_store::StorageRuntimeReadPort for StoreRuntimeClientLease {
-    fn dispatch_read<'a>(
-        &'a self,
-        request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &'a dyn tracedecay_store::RuntimeRequestProbeV1,
-    ) -> tracedecay_store::StorageRuntimePortFutureV1<'a, tracedecay_store::RuntimeReadOutcomeV1>
-    {
-        Box::pin(async move {
-            StoreRuntimeClientLease::dispatch_read(self, request, probe).map_err(|_| {
-                tracedecay_store::StorageRuntimeErrorV1::Infrastructure {
-                    operation: "dispatch registered runtime read".to_owned(),
-                }
-                .into()
-            })
-        })
-    }
-}
-
 impl fmt::Debug for StoreRuntimeClientLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

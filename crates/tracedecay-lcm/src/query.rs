@@ -1193,7 +1193,7 @@ mod tests {
                      )
                      INSERT INTO lcm_raw_messages (
                          provider, message_id, session_id, role, ordinal, timestamp,
-                         content, content_hash, storage_kind, snippet_text, index_text
+                         content, content_hash, storage_kind
                      )
                      SELECT 'cursor',
                             printf('background-%09d', value),
@@ -1203,9 +1203,7 @@ mod tests {
                             value,
                             'retained background history',
                             printf('hash-%09d', value),
-                            'inline',
-                            'retained background history',
-                            'retained background history'
+                            'inline'
                      FROM fixture",
                     start = seeded + 1,
                     end = seeded + batch,
@@ -1219,14 +1217,12 @@ mod tests {
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, snippet_text, index_text
+                content, content_hash, storage_kind
              ) VALUES
                 ('cursor', 'direct-user-match', 'session-direct-user', 'user', ?1, ?1,
-                 'unique:needle direct user', 'direct-user-hash', 'inline',
-                 'unique:needle direct user', 'unique:needle direct user'),
+                 'unique:needle direct user', 'direct-user-hash', 'inline'),
                 ('cursor', 'single-session-match', 'session-single', 'assistant', ?2, ?2,
-                 'unique:needle single session', 'single-session-hash', 'inline',
-                 'unique:needle single session', 'unique:needle single session')",
+                 'unique:needle single session', 'single-session-hash', 'inline')",
             params![rows + 1, rows + 2],
         )
         .await
@@ -1375,24 +1371,19 @@ mod tests {
             "{}alert:marker lossless tail",
             "filler ".repeat(crate::MAX_DERIVED_TEXT_CHARS)
         );
-        let index_text = crate::derived_text_for_index(&content);
         assert!(
-            !index_text.contains("alert:marker"),
+            !crate::derived_text_for_index(&content).contains("alert:marker"),
             "fixture must place the exact term beyond the FTS-derived text cap"
         );
         conn.execute(
             "INSERT INTO lcm_raw_messages (
                 provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, snippet_text, index_text
+                content, content_hash, storage_kind
              ) VALUES (
                 'cursor', 'tail-match', 'session-a', 'assistant', 1, 1,
-                ?1, 'hash', 'inline', ?2, ?3
+                ?1, 'hash', 'inline'
              )",
-            params![
-                content,
-                crate::retrieval_content::derived_text_for_snippet(&index_text),
-                index_text
-            ],
+            params![content],
         )
         .await
         .expect("lossless raw fixture");
@@ -1437,10 +1428,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
-                    content, content_hash, storage_kind, snippet_text, index_text
+                    content, content_hash, storage_kind
                  ) VALUES (
                     'cursor', ?1, 'session-a', 'assistant', ?2, ?2,
-                    '雪 candidate', 'hash', 'inline', '雪 candidate', '雪 candidate'
+                    '雪 candidate', 'hash', 'inline'
                  )",
                 params![format!("message-{ordinal}"), ordinal],
             )

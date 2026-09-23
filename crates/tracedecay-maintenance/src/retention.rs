@@ -23,23 +23,21 @@ use std::fmt;
 
 use serde::Serialize;
 pub use tracedecay_automation::config::{
-    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_LEGACY_SESSION_RETENTION_DAYS, RetentionConfig,
+    DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS, DEFAULT_SESSION_MESSAGE_RETENTION_DAYS,
+    RetentionConfig,
 };
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
-/// Free-page compaction for tracked branch databases, off the hot path
-/// (plan 38, §6).
-pub mod branch_compaction;
 /// Bounded retention for unmounted profile-sharded stores.
 pub mod cold_store;
 /// Read-only diagnostics over retention-owned state.
 pub mod diagnostics;
 /// Exact-liveness mark-and-sweep for immutable derived code generations.
-/// Store-owned quarantine and collection for corruption/recovery artifacts
-/// found beside live databases (plan 38, §5).
+/// Detection and deletion of corruption/recovery artifacts found beside live
+/// databases (plan 38, §5).
 pub mod incident_debris;
 /// Bounded compaction for stores retained by live runtime authorities.
 pub mod live_compaction;

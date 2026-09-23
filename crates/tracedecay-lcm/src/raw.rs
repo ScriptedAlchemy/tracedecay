@@ -24,11 +24,11 @@ use super::{
 pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, legacy_source, legacy_truncated, metadata_json";
+                    snippet_text, metadata_json";
 pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
-                    '' AS snippet_text, legacy_source, legacy_truncated, metadata_json";
+                    '' AS snippet_text, metadata_json";
 /// Two variables per identity stay below SQLite's default 999-variable ceiling.
 const RAW_MESSAGE_IDENTITY_BATCH_SIZE: usize = 400;
 
@@ -48,9 +48,7 @@ pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata,
         content_hash,
         storage_kind,
         payload_ref: row.get(10)?,
-        legacy_source: row.get::<i64>(12)? != 0,
-        legacy_truncated: row.get::<i64>(13)? != 0,
-        metadata_json: row.get(14)?,
+        metadata_json: row.get(12)?,
     })
 }
 
@@ -395,8 +393,6 @@ async fn upsert_inline_raw_message(
     text: &str,
     metadata_json: Option<&str>,
 ) -> Result<(), LcmError> {
-    let snippet = derived_text_for_snippet(text);
-    let index = derived_text_for_index(text);
     let content_hash = projected_content_hash(text);
     upsert_owned_raw_message(
         conn,
@@ -406,8 +402,7 @@ async fn upsert_inline_raw_message(
             content_hash: content_hash.as_str(),
             storage_kind: LcmStorageKind::Inline,
             payload_ref: None,
-            snippet: snippet.as_str(),
-            index_text: index.as_str(),
+            placeholder: None,
             metadata_json,
         },
     )
@@ -419,8 +414,9 @@ struct OwnedRawMessageWrite<'a> {
     content_hash: &'a str,
     storage_kind: LcmStorageKind,
     payload_ref: Option<&'a str>,
-    snippet: &'a str,
-    index_text: &'a str,
+    /// Retrieval text of a body stored outside the row; the snippet and
+    /// index columns derive from it in place of `content`.
+    placeholder: Option<&'a str>,
     metadata_json: Option<&'a str>,
 }
 
@@ -433,10 +429,10 @@ async fn upsert_owned_raw_message(
         .execute(
             "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, legacy_source, legacy_truncated, metadata_json
+            content, content_hash, storage_kind, payload_ref, placeholder_text,
+            metadata_json
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, 0, ?13)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(provider, message_id) DO UPDATE SET
             session_id = excluded.session_id,
             role = excluded.role,
@@ -446,10 +442,7 @@ async fn upsert_owned_raw_message(
             content_hash = excluded.content_hash,
             storage_kind = excluded.storage_kind,
             payload_ref = excluded.payload_ref,
-            snippet_text = excluded.snippet_text,
-            index_text = excluded.index_text,
-            legacy_source = 0,
-            legacy_truncated = 0,
+            placeholder_text = excluded.placeholder_text,
             metadata_json = excluded.metadata_json
          WHERE lcm_raw_messages.session_id = excluded.session_id",
             params![
@@ -463,8 +456,7 @@ async fn upsert_owned_raw_message(
                 write.content_hash,
                 write.storage_kind.as_str(),
                 write.payload_ref,
-                write.snippet,
-                write.index_text,
+                write.placeholder,
                 write.metadata_json,
             ],
         )
@@ -834,8 +826,7 @@ pub async fn commit_staged_raw_message(
             content_hash: whole_message.payload_ref.content_hash.as_str(),
             storage_kind: LcmStorageKind::External,
             payload_ref: Some(whole_message.payload_ref.payload_ref.as_str()),
-            snippet: whole_message.placeholder.as_str(),
-            index_text: whole_message.placeholder.as_str(),
+            placeholder: Some(whole_message.placeholder.as_str()),
             metadata_json: Some(whole_message.metadata_json.as_str()),
         },
     )

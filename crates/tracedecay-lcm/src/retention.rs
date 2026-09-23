@@ -1007,8 +1007,7 @@ async fn offload_one(
              content_hash = ?2,
              storage_kind = 'external',
              payload_ref = ?3,
-             snippet_text = ?4,
-             index_text = ?4
+             placeholder_text = ?4
          WHERE r.store_id = ?1
            AND r.provider = ?5
            AND r.session_id = ?6

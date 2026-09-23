@@ -30,7 +30,7 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use super::output;
 use super::{
     cursor, message_type, optional_provider, optional_usize, relationship_scope, required,
-    session_id, specific_provider, temporal_mode, time_filter, trimmed, unsigned_i64,
+    session_id, specific_provider, time_filter, trimmed, unsigned_i64,
 };
 use crate::retained::session_retrieval_unavailable_detail;
 use crate::session_retrieval::{
@@ -99,11 +99,7 @@ pub(super) async fn execute_load_session(
         provider,
         "",
         cursor(request.cursor.as_deref())?,
-        temporal_mode(
-            request.temporal_mode,
-            request.as_of_micros,
-            TemporalModeV1::Forensic,
-        )?,
+        request.temporal_mode.unwrap_or(TemporalModeV1::Forensic),
         bounded_limit(request.limit, 50)?,
         default_context_budget(),
         SessionRetrievalScope::Session(session_id.clone()),
@@ -202,11 +198,7 @@ pub(super) async fn execute_grep(
         provider,
         query_text,
         cursor(request.cursor.as_deref())?,
-        temporal_mode(
-            request.temporal_mode,
-            request.as_of_micros,
-            TemporalModeV1::Current,
-        )?,
+        request.temporal_mode.unwrap_or(TemporalModeV1::Current),
         bounded_limit(request.limit, 10)?,
         default_context_budget(),
         retrieval_scope,

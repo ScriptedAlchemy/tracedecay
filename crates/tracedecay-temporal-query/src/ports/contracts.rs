@@ -6,17 +6,18 @@ use std::pin::Pin;
 use serde::Serialize;
 use tracedecay_domain::{LogicalCopyRecordV1, SessionSummaryRecordV1};
 
-use super::{
-    BoundedPage, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState,
-    ExecutionLimits, PageRequest, PageStatus, RECORD_READ_BUDGET, ReadBudgetResources, ReadState,
-    TemporalExecutionSnapshot, TemporalPortError, TemporalPreparedCandidateCohort,
-    TemporalRecordPageSink, TemporalRecordReadState, TemporalRetrievalScope,
-    TemporalSnapshotRequest, await_controlled,
-};
+use super::{TemporalPortError, TemporalRetrievalScope, TemporalSnapshotRequest};
 use crate::candidates::{CandidateChannel, CandidatePlan};
+use crate::execution::{ExecutionLimits, await_controlled};
+use crate::paging::{
+    BoundedPage, CANDIDATE_READ_BUDGET, CandidateFieldCaps, CandidatePageSink, CandidateReadState,
+    PageRequest, PageStatus, RECORD_READ_BUDGET, ReadBudgetResources, ReadState,
+    TemporalRecordPageSink, TemporalRecordReadState,
+};
 use crate::ranking::RankingCandidate;
 use crate::resolution::summary::SummarySourceState;
 use crate::resolution::types::{ResolutionAssertion, ResolutionOccurrence};
+use crate::snapshot::TemporalExecutionSnapshot;
 
 const MAX_READ_ITEM_BYTES: usize = 8 * 1024 * 1024;
 
@@ -48,14 +49,6 @@ pub type PortFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TemporalPortError>> + Send + 'a>>;
 
 pub trait TemporalReadPort: Send + Sync {
-    fn produce_candidate_page<'a>(
-        &'a self,
-        snapshot: &'a TemporalExecutionSnapshot,
-        plan: &'a CandidatePlan,
-        request: PageRequest,
-        sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus>;
-
     fn produce_candidate_page_for_scope<'a>(
         &'a self,
         scope: &'a TemporalRetrievalScope,
@@ -63,28 +56,6 @@ pub trait TemporalReadPort: Send + Sync {
         plan: &'a CandidatePlan,
         request: PageRequest,
         sink: &'a mut CandidatePageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        match scope {
-            TemporalRetrievalScope::Session(_) => {
-                self.produce_candidate_page(snapshot, plan, request, sink)
-            }
-            TemporalRetrievalScope::AllSessionsInAuthorizedRoot => Box::pin(async {
-                Err(TemporalPortError::Read {
-                    operation: "produce candidate page for scope",
-                    message:
-                        "root-wide retrieval requires an explicit scope-aware port implementation"
-                            .to_string(),
-                })
-            }),
-        }
-    }
-
-    fn produce_temporal_record_page<'a>(
-        &'a self,
-        snapshot: &'a TemporalExecutionSnapshot,
-        candidates: &'a [RankingCandidate],
-        request: PageRequest,
-        sink: &'a mut TemporalRecordPageSink<'_>,
     ) -> PortFuture<'a, PageStatus>;
 
     fn produce_temporal_record_page_for_scope<'a>(
@@ -94,91 +65,7 @@ pub trait TemporalReadPort: Send + Sync {
         candidates: &'a [RankingCandidate],
         request: PageRequest,
         sink: &'a mut TemporalRecordPageSink<'_>,
-    ) -> PortFuture<'a, PageStatus> {
-        match scope {
-            TemporalRetrievalScope::Session(_) => {
-                self.produce_temporal_record_page(snapshot, candidates, request, sink)
-            }
-            TemporalRetrievalScope::AllSessionsInAuthorizedRoot => Box::pin(async {
-                Err(TemporalPortError::Read {
-                    operation: "produce temporal record page for scope",
-                    message:
-                        "root-wide retrieval requires an explicit scope-aware port implementation"
-                            .to_string(),
-                })
-            }),
-        }
-    }
-}
-
-/// Bounded producer used before a root-wide participant manifest exists.
-///
-/// The implementation is captured inside the already-authorized global DB
-/// read snapshot; this port owns no authorization or persistence authority.
-pub trait TemporalCandidatePreparationPort: Send + Sync {
-    fn produce_prepared_candidate_page<'a>(
-        &'a self,
-        request: PageRequest,
-        sink: &'a mut CandidatePageSink<'_>,
     ) -> PortFuture<'a, PageStatus>;
-}
-
-#[hotpath::measure(future = true, label = "temporal_query.candidates.prepare")]
-pub async fn prepare_temporal_candidate_cohort(
-    request: &TemporalSnapshotRequest,
-    port: &impl TemporalCandidatePreparationPort,
-) -> Result<TemporalPreparedCandidateCohort, TemporalPortError> {
-    request.execution_control().checkpoint()?;
-    let limits = request.limits();
-    let candidate_page_items = limits.candidate_limit.min(64);
-    let candidate_limits = super::PageLimits::new(
-        limits.candidate_limit,
-        limits.candidate_total_bytes,
-        limits.candidate_item_bytes,
-        candidate_page_items,
-    )?;
-    let mut state = CandidateReadState::new(candidate_limits);
-    let mut candidates = Vec::with_capacity(limits.candidate_limit.min(256));
-    loop {
-        let limits = begin_pull_request(
-            request,
-            &state,
-            |limits| {
-                (
-                    limits.candidate_limit,
-                    limits.candidate_total_bytes,
-                    limits.candidate_item_bytes,
-                )
-            },
-            CANDIDATE_READ_BUDGET,
-        )?;
-        let control = request.execution_control();
-        let field_caps = CandidateFieldCaps::new(
-            limits.candidate_stable_id_bytes,
-            limits.candidate_anchor_id_bytes,
-            limits.candidate_metadata_field_bytes,
-        );
-        let page_request = state.request(limits.candidate_key_bytes, Some(field_caps));
-        let mut sink = state.begin_page(
-            control,
-            limits.candidate_key_bytes,
-            Some(field_caps),
-            CANDIDATE_READ_BUDGET,
-        );
-        let status = await_controlled(
-            control,
-            port.produce_prepared_candidate_page(page_request, &mut sink),
-        )
-        .await?;
-        let page = sink.finish(status)?;
-        let page = commit_pulled_page(&mut state, page, CANDIDATE_READ_BUDGET)?;
-        let status = page.status();
-        candidates.extend(page.into_items());
-        if status == PageStatus::Complete {
-            break;
-        }
-    }
-    TemporalPreparedCandidateCohort::new(candidates)
 }
 
 pub fn begin_prepared_candidate_pull(

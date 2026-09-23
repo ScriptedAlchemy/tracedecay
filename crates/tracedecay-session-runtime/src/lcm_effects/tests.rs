@@ -1,12 +1,22 @@
 use super::*;
 use serde_json::Value;
-use tracedecay_domain::SessionId;
+use tracedecay_domain::{
+    CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1,
+    ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceCursorV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, PayloadReferenceV1,
+    ProjectionGenerationId, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 use tracedecay_lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-use tracedecay_store::ParseOffset;
+use tracedecay_store::{
+    AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
+    ParseOffset, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor, derive_canonical_projection,
+};
 
 mod compression_ownership;
 
@@ -133,8 +143,7 @@ async fn retained_relation_recovery_preserves_typed_cancellation() {
     let control = LcmEffectControl::new(None, Some(&cancellation));
     let execution = control.execution_control();
 
-    let error = harness
-        .registered
+    let error = SessionTemporalAccess::new(&*harness.registered)
         .recover_pending_session_relation_projection_page(
             1,
             tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
@@ -230,7 +239,7 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
     let session_id = SessionId::new("compress-session").unwrap();
     let relation_ids = [summary.node_id.clone()];
     let read_control = execution_control();
-    let (_, relations) = db
+    let (_, relations) = SessionTemporalAccess::new(&*db)
         .active_session_summary_relations(
             &session_id,
             &relation_ids,
@@ -244,7 +253,7 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
     assert_eq!(relations.len(), 1);
     assert_eq!(relations[0].sources.len(), summary.source_refs.len());
     assert_eq!(
-        db.recover_pending_session_relation_projections(
+        SessionTemporalAccess::new(&*db).recover_pending_session_relation_projections(
             1,
             tracedecay_session_temporal_store::store::execution_control_graph_cancellation(
                 &read_control,
@@ -262,7 +271,7 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
     let harness = harness.restart().await;
     let restarted = harness.registered.clone();
     let restart_control = execution_control();
-    let (_, restarted_relations) = restarted
+    let (_, restarted_relations) = SessionTemporalAccess::new(&*restarted)
         .active_session_summary_relations(
             &session_id,
             &relation_ids,
@@ -329,11 +338,12 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
         assert!(db.upsert_session(&session(provider, session_id)).await);
     }
     let cursor_text = "exact Cursor Composer compacted text";
-    let cursor_metadata = canonical_envelope(
+    let cursor_summary = canonical_record(canonical_envelope(
         "cursor",
         "cursor-native-session",
         "cursor-summary",
         None,
+        10,
         vec![
             serde_json::json!({
                 "kind": "message",
@@ -345,17 +355,8 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
                 "summary": cursor_text
             }),
         ],
-    );
-    insert_summary_evidence(
-        (&db, "cursor"),
-        "cursor-native-session",
-        "cursor-summary",
-        10,
-        cursor_text,
-        "message",
-        &cursor_metadata,
-    )
-    .await;
+    ));
+    ingest_canonical(&db, "cursor-native-session", &[], &[&cursor_summary]).await;
     insert_summary_evidence(
         (&db, "codex"),
         "codex-native-session",
@@ -384,11 +385,12 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
     .await;
 
     let claude_text = "exact Claude compact summary wrapper and body";
-    let claude_summary_metadata = canonical_envelope(
+    let claude_summary = canonical_record(canonical_envelope(
         "claude",
         "claude-native-session",
         "claude-summary",
         Some("claude-boundary"),
+        11,
         vec![
             serde_json::json!({
                 "kind": "message",
@@ -403,17 +405,8 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
                 }
             }),
         ],
-    );
-    insert_summary_evidence(
-        (&db, "claude"),
-        "claude-native-session",
-        "claude-summary",
-        11,
-        claude_text,
-        "message",
-        &claude_summary_metadata,
-    )
-    .await;
+    ));
+    ingest_canonical(&db, "claude-native-session", &[], &[&claude_summary]).await;
 
     let cursor = super::super::lcm_summarization::native_summary_evidence(
         &db,
@@ -475,11 +468,12 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
     assert_eq!(codex.text, "exact Codex plaintext summary");
     assert_eq!(codex.route, "codex_native_compaction");
 
-    let boundary_metadata = canonical_envelope(
+    let boundary = canonical_record(canonical_envelope(
         "claude",
         "claude-native-session",
         "claude-boundary",
         None,
+        12,
         vec![
             serde_json::json!({
                 "kind": "boundary",
@@ -494,97 +488,8 @@ async fn native_summary_evidence_requires_exact_cursor_text_and_claude_pair_iden
                 }
             }),
         ],
-    );
-    insert_summary_evidence(
-        (&db, "claude"),
-        "claude-native-session",
-        "claude-boundary",
-        10,
-        "Claude compaction boundary",
-        "compaction",
-        &boundary_metadata,
-    )
-    .await;
-    let claude = super::super::lcm_summarization::native_summary_evidence(
-        &db,
-        "claude",
-        "claude-native-session",
-        None,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(claude.text, claude_text);
-    assert_eq!(claude.route, "claude_native_compaction");
-}
-
-#[tokio::test]
-async fn claude_native_compaction_recognizes_production_boundary_id() {
-    let harness = RegisteredGlobalDbHarness::open("lcm-claude-prod-boundary").await;
-    let db = harness.registered.clone();
-    assert!(
-        db.upsert_session(&session("claude", "claude-native-session"))
-            .await
-    );
-    let claude_text = "production Claude compact pair body";
-    let summary_metadata = canonical_envelope(
-        "claude",
-        "claude-native-session",
-        "aaaaaaaa-0000-4000-8000-000000000001",
-        Some("ffffffff-0000-4000-8000-000000000001"),
-        vec![
-            serde_json::json!({
-                "kind": "message",
-                "role": "user",
-                "content": claude_text
-            }),
-            serde_json::json!({
-                "kind": "compaction",
-                "summary": {
-                    "isCompactSummary": true,
-                    "isVisibleInTranscriptOnly": true
-                }
-            }),
-        ],
-    );
-    insert_summary_evidence(
-        (&db, "claude"),
-        "claude-native-session",
-        "aaaaaaaa-0000-4000-8000-000000000001",
-        11,
-        claude_text,
-        "message",
-        &summary_metadata,
-    )
-    .await;
-    let boundary_envelope = canonical_envelope(
-        "claude",
-        "claude-native-session",
-        "ffffffff-0000-4000-8000-000000000001",
-        Some("pre-compact-parent"),
-        vec![serde_json::json!({
-            "kind": "compaction",
-            "summary": {
-                "preservedSegment": {
-                    "anchorUuid": "aaaaaaaa-0000-4000-8000-000000000001"
-                }
-            }
-        })],
-    );
-    insert_summary_evidence(
-        (&db, "claude"),
-        "claude-native-session",
-        "compact_boundary:ffffffff-0000-4000-8000-000000000001",
-        10,
-        "Claude compaction boundary",
-        "compact_boundary",
-        &serde_json::json!({
-            "source": "claude_compact_boundary",
-            "trigger": "manual",
-            "canonical_envelope": boundary_envelope
-        }),
-    )
-    .await;
+    ));
+    ingest_canonical(&db, "claude-native-session", &[], &[&boundary]).await;
     let claude = super::super::lcm_summarization::native_summary_evidence(
         &db,
         "claude",
@@ -613,62 +518,45 @@ async fn ingest_claude_compact_pair(db: &RegisteredGlobalDb, session_id: &str, l
         record.role = leading_role.to_string();
         messages.push(record);
     }
-    let mut boundary = message(session_id, 3);
-    boundary.provider = "claude".to_string();
-    boundary.message_id = boundary_id.clone();
-    boundary.role = "system".to_string();
-    boundary.kind = Some("compaction".to_string());
-    boundary.metadata_json = Some(
-        canonical_envelope(
-            "claude",
-            session_id,
-            &boundary_id,
-            None,
-            vec![
-                serde_json::json!({
-                    "kind": "boundary",
-                    "boundary_kind": "compaction_boundary"
-                }),
-                serde_json::json!({
-                    "kind": "compaction",
-                    "summary": {"preservedSegment": {"anchorUuid": summary_id}}
-                }),
-            ],
-        )
-        .to_string(),
-    );
-    messages.push(boundary);
-    let mut summary = message(session_id, 4);
-    summary.provider = "claude".to_string();
-    summary.message_id = summary_id.clone();
-    summary.role = "user".to_string();
-    summary.text = "authoritative Claude compaction".to_string();
-    summary.metadata_json = Some(
-        canonical_envelope(
-            "claude",
-            session_id,
-            &summary_id,
-            Some(&boundary_id),
-            vec![serde_json::json!({
+    let boundary = canonical_record(canonical_envelope(
+        "claude",
+        session_id,
+        &boundary_id,
+        None,
+        3,
+        vec![
+            serde_json::json!({
+                "kind": "boundary",
+                "boundary_kind": "compaction_boundary"
+            }),
+            serde_json::json!({
+                "kind": "compaction",
+                "summary": {"preservedSegment": {"anchorUuid": summary_id}}
+            }),
+        ],
+    ));
+    let summary = canonical_record(canonical_envelope(
+        "claude",
+        session_id,
+        &summary_id,
+        Some(&boundary_id),
+        4,
+        vec![
+            serde_json::json!({
+                "kind": "message",
+                "role": "user",
+                "content": "authoritative Claude compaction"
+            }),
+            serde_json::json!({
                 "kind": "compaction",
                 "summary": {
                     "isCompactSummary": true,
                     "isVisibleInTranscriptOnly": true
                 }
-            })],
-        )
-        .to_string(),
-    );
-    messages.push(summary);
-    assert!(
-        db.upsert_transcript_batch(
-            &session("claude", session_id),
-            &messages,
-            &format!("/tmp/{session_id}.jsonl"),
-            ParseOffset::default(),
-        )
-        .await
-    );
+            }),
+        ],
+    ));
+    ingest_canonical(db, session_id, &messages, &[&boundary, &summary]).await;
 }
 
 /// An absent predecessor interval must never reach a published summary as
@@ -850,18 +738,13 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
         record.message_id = format!("claude-before-first-{ordinal}");
         messages.push(record);
     }
-    let first_summary_id = "claude-first-summary";
-    let first_boundary_id = "claude-first-boundary";
-    let mut first_boundary = message(session_id, 4);
-    first_boundary.provider = "claude".to_string();
-    first_boundary.message_id = first_boundary_id.to_string();
-    first_boundary.kind = Some("compaction".to_string());
-    first_boundary.metadata_json = Some(
-        canonical_envelope(
+    let compact_pair = |boundary_id: &str, summary_id: &str, ordinal: u64, text: &str| {
+        let boundary = canonical_record(canonical_envelope(
             "claude",
             session_id,
-            first_boundary_id,
+            boundary_id,
             None,
+            ordinal,
             vec![
                 serde_json::json!({
                     "kind": "boundary",
@@ -869,96 +752,56 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
                 }),
                 serde_json::json!({
                     "kind": "compaction",
-                    "summary": {"preservedSegment": {"anchorUuid": first_summary_id}}
+                    "summary": {"preservedSegment": {"anchorUuid": summary_id}}
                 }),
             ],
-        )
-        .to_string(),
-    );
-    messages.push(first_boundary);
-    let mut first_summary = message(session_id, 5);
-    first_summary.provider = "claude".to_string();
-    first_summary.message_id = first_summary_id.to_string();
-    first_summary.text = "first authoritative Claude compaction".to_string();
-    first_summary.metadata_json = Some(
-        canonical_envelope(
+        ));
+        let summary = canonical_record(canonical_envelope(
             "claude",
             session_id,
-            first_summary_id,
-            Some(first_boundary_id),
-            vec![serde_json::json!({
-                "kind": "compaction",
-                "summary": {
-                    "isCompactSummary": true,
-                    "isVisibleInTranscriptOnly": true
-                }
-            })],
-        )
-        .to_string(),
+            summary_id,
+            Some(boundary_id),
+            ordinal + 1,
+            vec![
+                serde_json::json!({
+                    "kind": "message",
+                    "role": "assistant",
+                    "content": text
+                }),
+                serde_json::json!({
+                    "kind": "compaction",
+                    "summary": {
+                        "isCompactSummary": true,
+                        "isVisibleInTranscriptOnly": true
+                    }
+                }),
+            ],
+        ));
+        (boundary, summary)
+    };
+    let first_summary_id = "claude-first-summary";
+    let (first_boundary, first_summary) = compact_pair(
+        "claude-first-boundary",
+        first_summary_id,
+        4,
+        "first authoritative Claude compaction",
     );
-    messages.push(first_summary);
+    ingest_canonical(&db, session_id, &messages, &[&first_boundary, &first_summary]).await;
+    let mut between = Vec::new();
     for ordinal in 6..=520 {
         let mut record = message(session_id, ordinal);
         record.provider = "claude".to_string();
         record.message_id = format!("claude-between-{ordinal}");
-        messages.push(record);
+        between.push(record);
     }
     let second_summary_id = "claude-second-summary";
-    let second_boundary_id = "claude-second-boundary";
-    let mut second_boundary = message(session_id, 521);
-    second_boundary.provider = "claude".to_string();
-    second_boundary.message_id = second_boundary_id.to_string();
-    second_boundary.kind = Some("compaction".to_string());
-    second_boundary.metadata_json = Some(
-        canonical_envelope(
-            "claude",
-            session_id,
-            second_boundary_id,
-            None,
-            vec![
-                serde_json::json!({
-                    "kind": "boundary",
-                    "boundary_kind": "compaction_boundary"
-                }),
-                serde_json::json!({
-                    "kind": "compaction",
-                    "summary": {"preservedSegment": {"anchorUuid": second_summary_id}}
-                }),
-            ],
-        )
-        .to_string(),
+    let (second_boundary, second_summary) = compact_pair(
+        "claude-second-boundary",
+        second_summary_id,
+        521,
+        "second authoritative Claude compaction",
     );
-    messages.push(second_boundary);
-    let mut second_summary = message(session_id, 522);
-    second_summary.provider = "claude".to_string();
-    second_summary.message_id = second_summary_id.to_string();
-    second_summary.text = "second authoritative Claude compaction".to_string();
-    second_summary.metadata_json = Some(
-        canonical_envelope(
-            "claude",
-            session_id,
-            second_summary_id,
-            Some(second_boundary_id),
-            vec![serde_json::json!({
-                "kind": "compaction",
-                "summary": {
-                    "isCompactSummary": true,
-                    "isVisibleInTranscriptOnly": true
-                }
-            })],
-        )
-        .to_string(),
-    );
-    messages.push(second_summary);
-    assert!(
-        db.upsert_transcript_batch(
-            &session("claude", session_id),
-            &messages,
-            "/tmp/claude-successive-native-ranges.jsonl",
-            ParseOffset::default(),
-        )
-        .await
-    );
+    ingest_canonical(&db, session_id, &between, &[&second_boundary, &second_summary]).await;
 
     let snapshot = db.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -991,9 +834,11 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
         .find(|(_, message_id, _)| message_id == second_summary_id)
         .unwrap()
         .0;
+    // Compression pins `system` rows (the compaction boundaries) apart from
+    // the conversational backlog a native summary is compared against.
     let first_sources = raw
         .iter()
-        .filter(|(store_id, _, _)| *store_id < first_summary_store_id)
+        .filter(|(store_id, _, role)| *store_id < first_summary_store_id && role != "system")
         .map(
             |(store_id, _, role)| tracedecay_lcm::LcmSummarySourceMessage {
                 store_id: *store_id,
@@ -1038,8 +883,10 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
     let restarted = harness.registered.clone();
     let second_sources = raw
         .iter()
-        .filter(|(store_id, _, _)| {
-            *store_id >= first_summary_store_id && *store_id < second_summary_store_id
+        .filter(|(store_id, _, role)| {
+            *store_id >= first_summary_store_id
+                && *store_id < second_summary_store_id
+                && role != "system"
         })
         .map(
             |(store_id, _, role)| tracedecay_lcm::LcmSummarySourceMessage {
@@ -1924,7 +1771,7 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
         .unwrap();
     transaction.commit().await.unwrap();
 
-    db.recover_pending_session_relation_projection_page(
+    SessionTemporalAccess::new(&*db).recover_pending_session_relation_projection_page(
         16,
         std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
     )
@@ -2045,26 +1892,18 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
                 .unwrap();
         }
         let native_text = "one native summary for the entire retained session";
-        let metadata = canonical_envelope(
+        let native_summary = canonical_record(canonical_envelope(
             "cursor",
             session_id,
             "session-wide-native-summary",
             None,
+            u64::try_from(RAW_ROWS + 1).unwrap(),
             vec![serde_json::json!({
                 "kind": "compaction",
                 "summary": native_text
             })],
-        );
-        insert_summary_evidence(
-            (&db, "cursor"),
-            session_id,
-            "session-wide-native-summary",
-            RAW_ROWS + 1,
-            native_text,
-            "message",
-            &metadata,
-        )
-        .await;
+        ));
+        ingest_canonical(&db, session_id, &[], &[&native_summary]).await;
 
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
@@ -2786,9 +2625,8 @@ async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
             .execute(
                 "INSERT INTO lcm_raw_messages (
                         provider, message_id, session_id, role, ordinal, timestamp,
-                        content, content_hash, storage_kind, snippet_text, index_text,
-                        metadata_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?2, 'inline', '', '', '{}')",
+                        content, content_hash, storage_kind, metadata_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?2, 'inline', '{}')",
                 params![
                     record.provider.as_str(),
                     record.message_id.as_str(),
@@ -2864,10 +2702,9 @@ fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
                 .execute(
                     "INSERT INTO lcm_raw_messages (
                             provider, message_id, session_id, role, ordinal, timestamp,
-                            content, content_hash, storage_kind, snippet_text, index_text,
-                            metadata_json
+                            content, content_hash, storage_kind, metadata_json
                          ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, '', ?1,
-                                   'inline', '', '', '{}')",
+                                   'inline', '{}')",
                     params![format!("barrier-message-{ordinal}"), session_id, ordinal],
                 )
                 .await
@@ -2965,11 +2802,14 @@ fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
     });
 }
 
+/// A canonical record at transcript `ordinal`; its source range is the
+/// ordinal too, so records of one session must be projected in ordinal order.
 fn canonical_envelope(
     provider: &str,
     session_id: &str,
     message_id: &str,
     parent_message_id: Option<&str>,
+    ordinal: u64,
     facts: Vec<Value>,
 ) -> Value {
     let mut relations = serde_json::json!({
@@ -2988,9 +2828,129 @@ fn canonical_envelope(
         "facts": facts,
         "evidence": {
             "ordering_domain": "file_bytes",
-            "range": {"start": 1, "end": 2}
+            "range": {"start": ordinal, "end": ordinal + 1},
+            "native_sequence": ordinal
         }
     })
+}
+
+/// A canonical Claude or Cursor record as production stores it: the message
+/// row is the observation's projection, and the envelope lives only in the
+/// observation row.
+struct CanonicalRecord {
+    observation: DurableObservationV1,
+    message: SessionMessageRecord,
+}
+
+fn canonical_record(envelope: Value) -> CanonicalRecord {
+    let typed: CanonicalObservationEnvelopeV1 = serde_json::from_value(envelope.clone()).unwrap();
+    let record_id = typed.stable_record_id().as_str();
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new(format!("receipt.lcm-effects.{record_id}")).unwrap(),
+            ComponentVersion::new("sanitizer.lcm-effects-fixture.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&envelope).unwrap()),
+    )
+    .unwrap();
+    let observation = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_provider(
+                typed.provider().clone(),
+                typed.relations().session_id().clone(),
+            )
+            .unwrap(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            typed.evidence().range(),
+            typed.evidence().ordering_domain(),
+            typed.stable_record_id().clone(),
+        )
+        .unwrap(),
+        receipt,
+        RetentionClass::new("retention.lcm-effects-fixture").unwrap(),
+        envelope,
+    )
+    .unwrap();
+    let message = derive_canonical_projection(&observation)
+        .unwrap()
+        .messages()
+        .next()
+        .expect("canonical record projects a message")
+        .message()
+        .clone();
+    CanonicalRecord {
+        observation,
+        message,
+    }
+}
+
+/// Ingests `messages` followed by each record's projected row through the
+/// transcript path, then persists and projects each record's observation so
+/// the row's envelope authority exists exactly as capture leaves it.
+async fn ingest_canonical(
+    db: &RegisteredGlobalDb,
+    session_id: &str,
+    messages: &[SessionMessageRecord],
+    records: &[&CanonicalRecord],
+) {
+    let provider = records[0].message.provider.as_str();
+    let mut batch = messages.to_vec();
+    batch.extend(records.iter().map(|record| record.message.clone()));
+    assert!(
+        db.upsert_transcript_batch(
+            &session(provider, session_id),
+            &batch,
+            &format!("/tmp/{session_id}.jsonl"),
+            ParseOffset::default(),
+        )
+        .await
+    );
+    let store = db.observation_store();
+    for record in records {
+        let observation = &record.observation;
+        let previous = store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap();
+        let next = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .unwrap();
+        let write = ObservationWrite::new(observation.clone(), previous, next).unwrap();
+        let generation = ProjectionGenerationId::new(format!(
+            "projection.lcm-effects.{}",
+            record.message.message_id
+        ))
+        .unwrap();
+        let authorization = build_observation_resolution_authorization_v1(
+            write.observation(),
+            tracedecay_store::OBSERVATION_CAPTURE_AUTHORITY_V1,
+        )
+        .unwrap();
+        let anchor = build_observation_retrieval_anchor(
+            write.observation(),
+            generation.clone(),
+            UtcMicros(1),
+            authorization,
+        )
+        .unwrap();
+        store
+            .persist_observation(AnchoredObservationWrite::new(write, anchor, generation).unwrap())
+            .await
+            .unwrap();
+        store
+            .project_observation(observation.observation_id())
+            .await
+            .unwrap();
+    }
 }
 
 async fn insert_summary_evidence(
@@ -3160,7 +3120,6 @@ done
             assert_eq!(response.status, "ok");
             assert_eq!(response.summary_nodes_created, 1);
             assert_eq!(response.summary_nodes[0].summary_text, expected);
-            assert!(!response.fallback_used);
             assert_eq!(
                 response.relation_projection_status,
                 LcmRelationProjectionStatus::Applied

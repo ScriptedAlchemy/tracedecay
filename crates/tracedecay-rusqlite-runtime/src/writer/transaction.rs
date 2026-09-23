@@ -16,11 +16,11 @@ use crate::{
     RuntimeWriteAuthorityStage,
     admission::QueueItem,
     connection,
-    read_consistency::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
     telemetry::{
         LockWorkScope, WriterBatchMetrics, WriterLockWorkSnapshot, WriterTelemetry,
         WriterTransactionMetrics, WriterTransactionOutcome, take_observed_vm,
     },
+    watermark::{CommitWatermarkPublicationError, CommittedWatermarkPublisher},
 };
 
 use super::{
@@ -627,10 +627,7 @@ mod tests {
     use tracedecay_store::{CommitSequenceV1, StoreCommitReceiptV1};
 
     use super::*;
-    use crate::{
-        read_consistency::{CommitWatermarkSource, WatermarkSourceState},
-        test_support::{binding, metadata},
-    };
+    use crate::test_support::{binding, metadata};
 
     fn receipt(sequence: u64) -> (StoreRuntimeBindingV1, StoreCommitReceiptV1) {
         let metadata = metadata("operation.publish", "key.publish", 'a');
@@ -658,11 +655,9 @@ mod tests {
         )
         .unwrap();
 
-        let WatermarkSourceState::Available(observed) =
-            publisher.subscribe().current(&binding.shard_id)
-        else {
-            panic!("committed watermark must be available");
-        };
+        let observed = publisher
+            .current(&binding.shard_id)
+            .expect("committed watermark must be available");
         assert_eq!(observed.commit_sequence, receipt.commit_sequence);
         assert_eq!(observed.shard_id, receipt.shard_id);
         assert_eq!(observed.incarnation, receipt.incarnation);
@@ -677,11 +672,9 @@ mod tests {
 
         publish_results([&result], &publisher).unwrap();
 
-        let WatermarkSourceState::Available(observed) =
-            publisher.subscribe().current(&binding.shard_id)
-        else {
-            panic!("initial watermark must be available");
-        };
+        let observed = publisher
+            .current(&binding.shard_id)
+            .expect("initial watermark must be available");
         assert_eq!(observed.commit_sequence, CommitSequenceV1(0));
     }
 }

@@ -14,16 +14,11 @@
 //! are mounted. Every payload and read operation an application actually
 //! constructs today routes through here: facts, observations and cursor
 //! advances, diagnostics, evidence assembly, external sources, retrieval-anchor
-//! dispositions and derivatives. Three surfaces are wired and tested here;
-//! their live writers remain elsewhere:
-//!
-//! - the profile/configuration family
-//!   ([`RepositoryWritePayloadV1::Configuration`] and every
-//!   [`RepositoryReadOperationV1::Profile`] operation), whose live writer is
-//!   still `crates/tracedecay-global-db/src/configuration/store.rs`;
-//! - [`RepositoryWritePayloadV1::DiagnosticSupersession`] and the
-//!   `Stale`/`SupersessionChain` diagnostic reads, whose live engine is still
-//!   `src/diagnostics_store.rs`;
+//! dispositions and derivatives. The profile/configuration family
+//! ([`RepositoryWritePayloadV1::Configuration`] and every
+//! [`RepositoryReadOperationV1::Profile`] operation) is wired and tested here,
+//! but its live writer is still
+//! `crates/tracedecay-global-db/src/configuration/store.rs`.
 //!
 //! `Code` operations cross the graph-db boundary, while `Effects` operations
 //! are owned by the writer ledger; both dispatch arms here reject them.
@@ -31,7 +26,6 @@
 mod attachment;
 mod configuration;
 mod diagnostics;
-pub(crate) mod evidence_assembly;
 mod external_source;
 mod fact;
 mod graph_publication;
@@ -56,14 +50,7 @@ pub use attachment::{
 };
 pub use configuration::ConfigurationExecutor;
 pub use diagnostics::DiagnosticExecutor;
-pub use evidence_assembly::EvidenceAssemblyExecutor;
-#[cfg(feature = "test-transport")]
-#[doc(hidden)]
-pub use evidence_assembly::tests::write_fixture_for_project;
-pub use external_source::{
-    EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor, RETIRED_MUTATION_COPY_CHUNK_ROWS,
-    RETIRED_MUTATION_COPY_TABLES,
-};
+pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
 pub use graph_publication::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
 pub use observation::cursor_authority as observation_cursor_authority;
@@ -138,14 +125,6 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             }
             RepositoryWritePayloadV1::Diagnostics(snapshot) => {
                 self.project.execute_diagnostic_write(savepoint, snapshot)?;
-            }
-            RepositoryWritePayloadV1::DiagnosticSupersession(request) => {
-                self.project
-                    .execute_diagnostic_supersession(savepoint, request)?;
-            }
-            RepositoryWritePayloadV1::EvidenceAssembly(write) => {
-                self.project
-                    .execute_evidence_assembly_write(savepoint, write)?;
             }
             RepositoryWritePayloadV1::ExternalSource(commit) => {
                 self.project

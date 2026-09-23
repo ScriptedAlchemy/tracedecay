@@ -76,7 +76,6 @@ impl LcmDaemonStore for FakeStore {
                 replay_token_estimate: 0,
                 replay_over_budget: false,
                 compression_attempts: 0,
-                fallback_used: false,
                 context_recovery_hint: None,
                 retry_status: None,
                 relation_projection_status:

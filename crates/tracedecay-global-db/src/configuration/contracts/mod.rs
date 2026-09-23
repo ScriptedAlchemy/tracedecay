@@ -9,9 +9,9 @@ pub mod ports;
 pub mod types;
 
 pub use ports::{
-    ConfigurationClock, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
-    CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort, ScopeRevalidationEvidenceV1,
+    ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationMutationAuthorizationPort,
+    ConfigurationOperationFuture, CurrentConfigurationMutationAuthorizationV1, ScopeResolutionPort,
+    ScopeRevalidationEvidenceV1,
 };
 pub use types::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,

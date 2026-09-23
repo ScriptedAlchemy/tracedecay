@@ -16,7 +16,7 @@ use tracedecay_store::{
     SessionRefreshStateV1, SessionRefreshTerminalStateV1, SessionStoreError, SessionStoreResult,
     SessionTemporalProjectionBatchReceiptV1, SessionTemporalProjectionBatchV1,
 };
-use tracedecay_temporal_query::ports::ExecutionControl;
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 use super::cursor_keys::ensure_active_session_cursor_key_in_transaction;
 use super::projection::{

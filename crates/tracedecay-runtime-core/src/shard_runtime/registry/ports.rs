@@ -157,20 +157,12 @@ async fn publish_lifecycle_runtime(
     }
     if request.mode == StoreRuntimeOpenMode::Existing
         && runtime_core_final_schema_applies(&request.binding.shard_id.scope)
-    {
-        if let Err(error) =
-            step_final_schema_before_existing_publication(&request, attachment.as_physical()).await
-        {
-            attachment.abort(request.locator.is_prospective());
-            return Err(error);
-        }
-        if let Err(error) =
+        && let Err(error) =
             verify_final_schema_before_existing_publication(&request, attachment.as_physical())
                 .await
-        {
-            attachment.abort(request.locator.is_prospective());
-            return Err(error);
-        }
+    {
+        attachment.abort(request.locator.is_prospective());
+        return Err(error);
     }
     if let Err(error) = runtime.transition(RuntimeMaintenanceStateV1::Ready) {
         attachment.abort(request.locator.is_prospective());
@@ -398,36 +390,6 @@ async fn authorized_schema_connection(
             message: error.to_string(),
         })?;
     Ok(crate::db::engine::Connection::attach(handle))
-}
-
-/// Steps an existing runtime-core store that is exactly one sanctioned step
-/// behind the final shape before admission verifies it. Only a request that
-/// carries an active write authority may step; a read-only mount falls
-/// through to the verifier, which names this writer-side remedy.
-async fn step_final_schema_before_existing_publication(
-    request: &ShardRuntimeBuildRequest,
-    attachment: &dyn PhysicalRuntimeAttachment,
-) -> Result<(), StoreRuntimeRegistryFailure> {
-    const OPERATION: &str = "step final schema for existing SQLite runtime";
-    let Some(authority) = request.database_authority.as_ref() else {
-        return Ok(());
-    };
-    if authority.require_active_write_scope(OPERATION).is_err() {
-        return Ok(());
-    }
-    let connection = authorized_schema_connection(request, attachment, OPERATION).await?;
-    crate::db::migrations::step_schema_if_pending(&connection)
-        .await
-        .map(|_stepped| ())
-        .map_err(|error| match error {
-            tracedecay_domain::errors::TraceDecayError::ResetRequired { authority, reason } => {
-                StoreRuntimeRegistryFailure::ResetRequired { authority, reason }
-            }
-            error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: OPERATION,
-                message: error.to_string(),
-            },
-        })
 }
 
 async fn install_final_schema_before_publication(

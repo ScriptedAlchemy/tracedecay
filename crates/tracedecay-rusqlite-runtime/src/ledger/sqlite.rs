@@ -2,7 +2,8 @@ use std::ops::Deref;
 
 use rusqlite::{Savepoint, Statement, Transaction};
 use tracedecay_store::{
-    DurabilityClassV1, RuntimeTransactionScopeV1, ShardWatermarkV1, StoreCommitReceiptV1,
+    DurabilityClassV1, OperationPriorityV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
+    StoreCommitReceiptV1,
     StoreIncarnationV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, StoreShardIdV1,
     TransactionalOutboxEntryV1,
 };
@@ -65,6 +66,7 @@ impl_canonical_json!(
     StoreShardIdV1,
     RuntimeTransactionScopeV1,
     DurabilityClassV1,
+    OperationPriorityV1,
     ShardWatermarkV1,
     StoreCommitReceiptV1,
     TransactionalOutboxEntryV1,

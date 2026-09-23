@@ -1,7 +1,8 @@
 use serde::Serialize;
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1};
 
-use super::{BindingDigest, ExecutionControl, ExecutionLimits, TemporalPortError};
+use super::TemporalPortError;
+use crate::execution::{BindingDigest, ExecutionControl, ExecutionLimits};
 
 const PROFILE_ROOT_PROJECT_KEY: &str = "user";
 
@@ -108,7 +109,7 @@ impl TemporalAuthorizedRoot {
     }
 }
 
-pub(super) fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortError> {
+pub(crate) fn validate_label(field: &'static str, value: &str) -> Result<(), TemporalPortError> {
     if value.is_empty()
         || value.trim() != value
         || value.len() > 512

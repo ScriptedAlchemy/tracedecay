@@ -401,7 +401,7 @@ mod tests {
             "codex-goal-context",
         )
         .unwrap();
-        let anchor = tracedecay_store::build_observation_retrieval_anchor_v2(
+        let anchor = tracedecay_store::build_observation_retrieval_anchor(
             write.observation(),
             generation.clone(),
             UtcMicros(1),
@@ -690,8 +690,7 @@ mod tests {
         let updated = transaction
             .execute(
                 "UPDATE lcm_raw_messages
-                 SET content = 'stale raw body', content_hash = 'stale',
-                     snippet_text = 'stale raw body', index_text = 'stale raw body'
+                 SET content = 'stale raw body', content_hash = 'stale'
                  WHERE provider = 'codex' AND message_id = ?1",
                 tracedecay_runtime_core::params![RECORD_ID],
             )
@@ -715,7 +714,7 @@ mod tests {
         assert_eq!(stored_output(&snapshot, RECORD_ID).await, current);
     }
 
-    /// A twin whose content survived but whose derived columns did not still
+    /// A twin whose content survived but whose content hash did not still
     /// fails hydration with `PayloadIntegrityMismatch`. Content equality alone
     /// is not the twin a fresh projection write stores.
     #[tokio::test]
@@ -740,7 +739,7 @@ mod tests {
         let updated = transaction
             .execute(
                 "UPDATE lcm_raw_messages
-                 SET content_hash = 'stale', index_text = 'stale index'
+                 SET content_hash = 'stale'
                  WHERE provider = 'codex' AND message_id = ?1",
                 tracedecay_runtime_core::params![RECORD_ID],
             )

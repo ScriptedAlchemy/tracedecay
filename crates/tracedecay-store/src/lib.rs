@@ -9,7 +9,6 @@ mod codex_goal_context;
 pub mod configuration;
 pub mod cursor_dispatch;
 pub mod diagnostics;
-pub mod evidence_assembly;
 pub mod external_source;
 // The crash harness has to hold a live daemon inside a persistence boundary, so
 // it needs the filesystem and thread authority that these contracts refuse.
@@ -33,8 +32,8 @@ pub mod session;
 pub mod transcript;
 
 pub use canonical_projection::{
-    canonical_fact_text, derive_canonical_projection, stored_message_is_shipped_release_rendering,
-    workflow_semantic_kind,
+    canonical_fact_text, derive_canonical_projection, message_metadata_with_envelope,
+    stored_message_is_shipped_release_rendering, workflow_semantic_kind,
 };
 pub use codex_goal_context::{
     CodexGoalContext, CodexGoalContextCorrelation, CodexGoalContextSource,
@@ -45,33 +44,12 @@ pub use configuration::{
     ConfigurationRevisionStore, ConfigurationStoreError, ConfigurationStoreResult,
 };
 pub use diagnostics::{
-    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DIAGNOSTIC_STATE_SUPERSEDED,
-    DiagnosticGenerationSupersessionV1, DiagnosticPublicationDispositionV1,
-    DiagnosticPublicationReceiptV1, DiagnosticRecordStateKindV1, DiagnosticStore,
-    DiagnosticStoreError, DiagnosticStoreResult, SanitizedCleanDiagnosticSnapshotV1,
-    diagnostic_evidence_class_name, diagnostic_producer_kind_name, diagnostic_severity_name,
-    diagnostic_snapshot_observation_eq, diagnostic_state_columns, parse_diagnostic_evidence_class,
-    parse_diagnostic_producer_kind, parse_diagnostic_severity,
-};
-pub use evidence_assembly::{
-    CanonicalSourceOccurrenceSetIdentityProjectionV1, CanonicalSourceOccurrenceSetRecordV1,
-    EvidenceAssemblyDrilldownPageV1, EvidenceAssemblyIdempotencyKeyV1, EvidenceAssemblyOwnerV1,
-    EvidenceAssemblyPublicationIdentityProjectionV1, EvidenceAssemblyPublicationReceiptV1,
-    EvidenceAssemblyReadOperationV1, EvidenceAssemblyReadResultV1, EvidenceAssemblyStoreError,
-    EvidenceAssemblyStoreResult, EvidenceAssemblyWriteV1, EvidenceSourceOccurrenceRecordV1,
-    EvidenceSourceTimelineV1, EvidenceSpanCatalogBindingV1, EvidenceSpanHorizonV1,
-    EvidenceSpanIdentityProjectionV1, EvidenceSpanMemberReceiptBindingV1,
-    EvidenceSpanProjectionReceiptIdentityProjectionV1, EvidenceSpanProjectionReceiptV1,
-    EvidenceSpanRecordV1, EvidenceSpanRunV1, MAX_EVIDENCE_ASSEMBLY_MEMBERS_V1,
-    PrivacyBoundRequestDigestV1, PrivacyBoundRequestEnvelopeV1,
-    RetrieverContributionIdentityProjectionV1, RetrieverContributionRecordV1, RetrieverIdentityV1,
-    RetrieverWatermarkBindingV1, SanitizedObservationByteRangeV1, SourceCapabilityCatalogBindingV1,
-    SourceOccurrenceCoordinateV1, SourceOccurrenceIdentityProjectionV1, SourceOccurrenceKindV1,
-    SourceOccurrenceRelationV1, SourceOccurrenceSanitizationV1, SourceTimelineKeyV1,
-    VerifiedSourceOrderingProofV1, derive_canonical_source_occurrence_set_id_v1,
-    derive_evidence_assembly_publication_receipt_id_v1, derive_evidence_span_id_v1,
-    derive_evidence_span_projection_receipt_id_v1, derive_retriever_contribution_id_v1,
-    derive_source_occurrence_id_v1,
+    DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticRecordStateKindV1,
+    DiagnosticStore, DiagnosticStoreError, DiagnosticStoreResult,
+    SanitizedCleanDiagnosticSnapshotV1, diagnostic_evidence_class_name,
+    diagnostic_producer_kind_name, diagnostic_severity_name, diagnostic_snapshot_observation_eq,
+    diagnostic_state_columns, parse_diagnostic_evidence_class, parse_diagnostic_producer_kind,
+    parse_diagnostic_severity,
 };
 pub use external_source::{
     MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, MAX_SOURCE_ACQUISITION_RECEIPTS_V1,
@@ -79,13 +57,14 @@ pub use external_source::{
     SourceAcquisitionQueueContractErrorV1, SourceAcquisitionQueueResultV1,
     SourceAcquisitionQueueStateV1, SourceAcquisitionRequestV1,
     SourceAuthorityPublicationApplyOutcomeV1, SourceAuthorityPublicationReceiptV1,
-    SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
-    SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1,
-    SourceProjectionCommitV1, SourceProjectionEffectV1, SourceScheduledRefetchV1,
-    SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_authority_publication,
-    apply_source_authority_publication_owned, apply_source_commit, apply_source_commit_owned,
-    apply_source_projection, apply_source_projection_owned, build_source_projection,
+    SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1,
+    SourceCommitReceiptV1, SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1,
+    SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
+    SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceProjectionEffectV1,
+    SourceScheduledRefetchV1, SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1,
+    apply_source_authority_publication, apply_source_authority_publication_owned,
+    apply_source_commit, apply_source_commit_owned, apply_source_projection,
+    apply_source_projection_owned, build_source_projection,
 };
 pub use git_index_transactions::{
     GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
@@ -157,18 +136,17 @@ pub use observation::{
     AnchoredObservationWrite, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
     CursorAdvanceLedgerOpaqueValueHashV1, CursorAdvanceLedgerReasonV1,
     CursorAdvanceLedgerReceiptIdV1, CursorAdvanceOutcome, OBSERVATION_CAPTURE_AUTHORITY_V1,
-    ObservationAdmissionPort, ObservationBatchFallbackCause, ObservationBatchPersistOutcome,
+    ObservationAdmissionPort, ObservationBatchPersistOutcome,
     ObservationCaptureSink, ObservationCommitReceipt, ObservationCoverageReason,
     ObservationCoverageV1, ObservationCursorAdvance, ObservationCursorPort,
     ObservationPersistOutcome, ObservationProjectionStatus, ObservationReplayRequest,
     ObservationStore, ObservationStoreError, ObservationStoreResult, ObservationWrite,
     ObservedEvidenceAnchorResolution, RepositoryProvenanceAttachmentV1, StoredObservation,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
     build_scope_resolution_authorization_v1, observation_capture_access_policy_digest_v1,
 };
 pub use projection::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
-    ClaudeSessionMessageProjection, ObservationProjection, ObservationProjectionStore,
+    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationProjection, ObservationProjectionStore,
     PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionBatchItem,
     ProjectionCheckpoint, ProjectionDrainBatch, ProjectionPersistOutcome,
     ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
@@ -184,8 +162,8 @@ pub use remote::{RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1};
 pub use retrieval_anchor::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,
     AnchorDispositionStateV1, RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1, RetrievalAnchorStoreError,
-    RetrievalAnchorStoreResult, RetrievalAnchorTombstoneV1, StoredRetrievalAnchorRecordV1,
+    RetrievalAnchorDispositionStore, RetrievalAnchorStoreError, RetrievalAnchorStoreResult,
+    RetrievalAnchorTombstoneV1,
 };
 pub use runtime::{
     AdmissionConfigV1, AuthorityEpoch, BACKGROUND_BATCH_MAX_BYTES, BACKGROUND_BATCH_MAX_OPERATIONS,
@@ -232,8 +210,7 @@ pub use runtime::{
     RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
     RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1, SaturationScopeV1,
     ScopeSetCasOutcomeV1, ShardWatermarkV1, SnapshotLeaseIdV1, SnapshotLeaseV1,
-    StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, StorageRuntimePortErrorV1,
-    StorageRuntimePortFutureV1, StorageRuntimeReadPort, StoreAuthorityEpochV1, StoreClientIdV1,
+    StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, StoreAuthorityEpochV1, StoreClientIdV1,
     StoreCommitReceiptV1, StoreEffectIdV1, StoreEffectOrderingKeyV1, StoreIdempotencyKeyV1,
     StoreIncarnationV1, StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
     StoreRuntimeRegistryPublicationV1, StoreShardIdV1, StoreShardScopeV1, StoreSnapshotIdV1,

@@ -1658,7 +1658,6 @@ fn compression_response_with_attempt_state(
         replay_token_estimate,
         replay_over_budget: replay_exceeds_budget(replay_token_estimate, max_assembly_tokens),
         compression_attempts,
-        fallback_used: false,
         context_recovery_hint,
         retry_status: retry_status.map(str::to_string),
         relation_projection_status,
@@ -2513,7 +2512,7 @@ async fn load_raw_messages_for_session(
                 .query(
                     "SELECT provider, message_id, session_id, store_id, role, ordinal,
                             timestamp, content, content_hash, storage_kind, payload_ref,
-                            snippet_text, legacy_source, legacy_truncated, metadata_json
+                            snippet_text, metadata_json
                      FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2
                      ORDER BY store_id",
@@ -2557,7 +2556,7 @@ async fn load_raw_messages_for_session_page(
         .query(
             "SELECT provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
-                    snippet_text, legacy_source, legacy_truncated, metadata_json,
+                    snippet_text, metadata_json,
                     length(CAST(COALESCE(content, '') AS BLOB))
                       + length(CAST(snippet_text AS BLOB))
                       + length(CAST(index_text AS BLOB))
@@ -2573,7 +2572,7 @@ async fn load_raw_messages_for_session_page(
     let mut bytes_scanned = 0_u64;
     let mut byte_limited = false;
     while let Some(row) = rows.next().await? {
-        let row_bytes = u64::try_from(row.get::<i64>(15)?).map_err(|error| {
+        let row_bytes = u64::try_from(row.get::<i64>(13)?).map_err(|error| {
             LcmError::Db(format!("invalid retained compression byte count: {error}"))
         })?;
         if bytes_scanned.saturating_add(row_bytes) > limit.byte_limit {

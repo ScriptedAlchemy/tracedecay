@@ -8,8 +8,8 @@ use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationIdV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
-    CanonicalWorkflowSemanticKindV1, ClineTranscriptStream, ComponentVersion,
-    DurableClaudeObservationV1, MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
+    CanonicalWorkflowSemanticKindV1, ClineTranscriptStream, ComponentVersion, DurableObservationV1,
+    MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
     MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
     ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1,
@@ -61,8 +61,8 @@ fn accepted_receipt(payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
-fn durable(material: ObservationIdentityMaterialV1, payload: Value) -> DurableClaudeObservationV1 {
-    DurableClaudeObservationV1::new(
+fn durable(material: ObservationIdentityMaterialV1, payload: Value) -> DurableObservationV1 {
+    DurableObservationV1::new(
         material,
         accepted_receipt(&payload),
         RetentionClass::new("transcript.fixture").unwrap(),
@@ -639,12 +639,12 @@ fn idempotency_wire_field_is_a_canonical_identity_alias() {
     legacy_wire["idempotency_key"] = Value::String(
         "sha256:13b3a18339fe0dbf5a1ccc894e24cf1626ca88babef32869bf7dc85f6a626abb".to_owned(),
     );
-    let decoded: DurableClaudeObservationV1 = serde_json::from_value(legacy_wire).unwrap();
+    let decoded: DurableObservationV1 = serde_json::from_value(legacy_wire).unwrap();
     assert_eq!(decoded.idempotency_key(), decoded.observation_id());
 
     let mut invalid_wire = wire;
     invalid_wire["idempotency_key"] = Value::String(format!("sha256:{}", "0".repeat(64)));
-    assert!(serde_json::from_value::<DurableClaudeObservationV1>(invalid_wire).is_err());
+    assert!(serde_json::from_value::<DurableObservationV1>(invalid_wire).is_err());
 }
 
 #[test]
@@ -677,7 +677,14 @@ fn scope_participates_in_identity_and_invalid_positions_are_rejected() {
 fn source_cursors_enforce_their_comparison_domain() {
     let generation = ObservationSourceGenerationV1::new(2).unwrap();
     let byte_cursor = |session: &str, scope, generation, offset| {
-        ObservationSourceCursorV1::new(source(session), scope, generation, offset).unwrap()
+        ObservationSourceCursorV1::for_ordering(
+            source(session),
+            scope,
+            generation,
+            ObservationOrderingDomainV1::FileBytes,
+            offset,
+        )
+        .unwrap()
     };
     let first = byte_cursor(
         "session.fixture",
@@ -741,10 +748,11 @@ fn source_cursors_enforce_their_comparison_domain() {
 
 #[test]
 fn source_cursor_resume_checkpoints_round_trip_without_breaking_legacy_json() {
-    let legacy = ObservationSourceCursorV1::new(
+    let legacy = ObservationSourceCursorV1::for_ordering(
         source("session.fixture"),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(2).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
         20,
     )
     .unwrap();
@@ -805,7 +813,7 @@ fn receipts_and_durable_observations_enforce_sanitization_binding() {
             SanitizationReceiptV1::new(receipt_ref(), disposition, SensitivityV1::Sensitive, None)
                 .unwrap();
         assert!(
-            DurableClaudeObservationV1::new(
+            DurableObservationV1::new(
                 profile_material(),
                 receipt,
                 RetentionClass::new("transcript.fixture").unwrap(),
@@ -820,7 +828,7 @@ fn receipts_and_durable_observations_enforce_sanitization_binding() {
         json!({"message": "longer value"}),
     ] {
         assert!(
-            DurableClaudeObservationV1::new(
+            DurableObservationV1::new(
                 profile_material(),
                 accepted_receipt(&payload),
                 RetentionClass::new("transcript.fixture").unwrap(),
@@ -845,7 +853,7 @@ fn durable_round_trip_preserves_unknown_provider_evidence_and_canonical_bytes() 
     let observation = durable(profile_material(), payload.clone());
     let canonical = observation.canonical_payload_bytes().unwrap();
     let encoded = serde_json::to_vec(&observation).unwrap();
-    let decoded: DurableClaudeObservationV1 = serde_json::from_slice(&encoded).unwrap();
+    let decoded: DurableObservationV1 = serde_json::from_slice(&encoded).unwrap();
 
     assert_eq!(decoded.identity(), observation.identity());
     assert_eq!(decoded.receipt(), observation.receipt());
@@ -939,7 +947,7 @@ fn durable_observations_written_before_native_identity_still_decode() {
     wire["observation_id"] = json!(legacy_observation_id);
     wire["idempotency_key"] = json!(legacy_observation_id);
 
-    let decoded: DurableClaudeObservationV1 =
+    let decoded: DurableObservationV1 =
         serde_json::from_value(wire.clone()).expect("a pre-change row must still decode");
     assert_eq!(decoded.identity(), observation.identity());
     assert_eq!(decoded.payload(), &payload);
@@ -950,7 +958,7 @@ fn durable_observations_written_before_native_identity_still_decode() {
         let mut forged = wire.clone();
         forged[field] = arbitrary.clone();
         assert!(
-            serde_json::from_value::<DurableClaudeObservationV1>(forged).is_err(),
+            serde_json::from_value::<DurableObservationV1>(forged).is_err(),
             "an id matching no derivation must still be rejected in {field}"
         );
     }
@@ -982,7 +990,7 @@ fn durable_observations_decode_under_every_historical_derivation() {
         let mut row = wire.clone();
         row["observation_id"] = json!(id);
         row["idempotency_key"] = json!(id);
-        let decoded: DurableClaudeObservationV1 = serde_json::from_value(row)
+        let decoded: DurableObservationV1 = serde_json::from_value(row)
             .unwrap_or_else(|error| panic!("a row derived as {id} must decode: {error}"));
         assert_eq!(decoded.identity(), observation.identity());
     }
@@ -1046,7 +1054,7 @@ fn decoded_observations_report_the_identity_they_are_stored_under() {
         let mut row = wire.clone();
         row["observation_id"] = json!(stored_id);
         row["idempotency_key"] = json!(stored_id);
-        let decoded: DurableClaudeObservationV1 =
+        let decoded: DurableObservationV1 =
             serde_json::from_value(row).expect("a row under any accepted derivation must decode");
 
         assert_eq!(
@@ -1084,7 +1092,7 @@ fn cline_transition_observation(
     stream: ClineTranscriptStream,
     native_source: bool,
     range: ObservationSourceRangeV1,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     let source = if native_source {
         stream
             .source_identity(
@@ -1161,10 +1169,10 @@ fn cline_transition_observation(
 }
 
 fn cline_payload_change(
-    observation: &DurableClaudeObservationV1,
+    observation: &DurableObservationV1,
     pointer: &str,
     replacement: Value,
-) -> DurableClaudeObservationV1 {
+) -> DurableObservationV1 {
     let mut payload = observation.payload().clone();
     *payload.pointer_mut(pointer).unwrap() = replacement;
     durable(observation.identity().clone(), payload)
@@ -1399,7 +1407,7 @@ fn cline_native_transition_preserves_sanitization_authority() {
             Some(new.payload_reference().clone()),
         )
         .unwrap();
-        let changed = DurableClaudeObservationV1::new(
+        let changed = DurableObservationV1::new(
             new.identity().clone(),
             receipt,
             new.retention_class().clone(),

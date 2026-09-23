@@ -5,9 +5,7 @@
 
 mod publisher;
 
-pub use publisher::{
-    CommitWatermarkPublicationError, CommitWatermarkSubscription, CommittedWatermarkPublisher,
-};
+pub use publisher::{CommitWatermarkPublicationError, CommittedWatermarkPublisher};
 
 #[cfg(test)]
 mod tests;

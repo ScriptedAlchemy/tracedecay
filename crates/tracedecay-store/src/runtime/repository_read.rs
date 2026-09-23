@@ -13,22 +13,20 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CanonicalObservationIdV1, CodeGenerationId, ConfigurationRevisionId, DurableObservationV1,
-    FactLineageEventV1, FileOccurrenceId, GenerationDiagnosticV1, GitIndexIdempotencyKey,
-    GitIndexPreviewId, GitIndexPreviewV1, NativeAliasV2, ObservationScopeV1,
+    FactLineageEventV1, FactOwnerV1, FileOccurrenceId, GenerationDiagnosticV1,
+    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1, NativeAlias, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId, RepositoryId,
-    RetrievalAnchorId, RetrievalAnchorRecordV2, SourceBindingIdentityV1, SourceBindingOwnerV1,
+    RetrievalAnchorId, RetrievalAnchorRecord, SourceBindingIdentityV1, SourceBindingOwnerV1,
     UtcMicros,
 };
 
 use crate::{
-    ConfigurationRevisionRecordV1, EvidenceAssemblyReadOperationV1, EvidenceAssemblyReadResultV1,
-    FactCurrentQuery, FactLineageQuery, GitIndexTransactionRecordV1,
+    ConfigurationRevisionRecordV1, FactCurrentQuery, FactLineageQuery, GitIndexTransactionRecordV1,
     RepositoryProvenanceAttachmentV1, RetrievalAnchorDerivativeV1,
-    RetrievalAnchorDispositionRecordV1, RetrievalAnchorOwnerV1, RetrievalAnchorTombstoneV1,
-    SourceAcquisitionQueueStateV1, SourceCommitReceiptV1, SourcePendingProjectionV1,
-    SourceStoreStateV1, StorageRuntimeContractErrorV1, StoreEffectIdV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, StoreShardScopeV1, StoredFactV1, StoredRetrievalAnchorRecordV1,
-    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    RetrievalAnchorDispositionRecordV1, RetrievalAnchorTombstoneV1, SourceAcquisitionQueueStateV1,
+    SourceCommitReceiptSummaryV1, SourcePendingProjectionV1, SourceStoreStateV1,
+    StorageRuntimeContractErrorV1, StoreEffectIdV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    StoreShardScopeV1, StoredFactV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 /// One repository read operation, dispatched across the profile, project,
@@ -65,9 +63,6 @@ impl RepositoryReadOperationV1 {
             }
             Self::Project(ProjectReadOperationV1::Diagnostics(_)) => {
                 matches!(&binding.shard_id.scope, StoreShardScopeV1::Project { .. })
-            }
-            Self::Project(ProjectReadOperationV1::EvidenceAssembly(operation)) => {
-                evidence_owner_matches_shard(evidence_read_owner(operation), &binding.shard_id)
             }
             Self::ExternalSource(operation) => {
                 external_source_read_matches_shard(operation, &binding.shard_id)
@@ -142,35 +137,6 @@ fn observation_read_matches_shard(
     }
 }
 
-fn evidence_read_owner(
-    operation: &EvidenceAssemblyReadOperationV1,
-) -> &crate::EvidenceAssemblyOwnerV1 {
-    match operation {
-        EvidenceAssemblyReadOperationV1::PublicationByIdempotency { owner, .. }
-        | EvidenceAssemblyReadOperationV1::ContributionPage { owner, .. } => owner,
-    }
-}
-
-fn evidence_owner_matches_shard(
-    owner: &crate::EvidenceAssemblyOwnerV1,
-    shard: &StoreShardIdV1,
-) -> bool {
-    owner.owner.profile_id() == &shard.profile_id
-        && match (&shard.scope, owner.owner.project_id()) {
-            (
-                StoreShardScopeV1::Project {
-                    project_id: shard_project,
-                }
-                | StoreShardScopeV1::ProjectSessions {
-                    project_id: shard_project,
-                },
-                Some(project_id),
-            ) => shard_project == project_id,
-            (StoreShardScopeV1::ProfileSessions, None) => true,
-            _ => false,
-        }
-}
-
 fn external_source_read_matches_shard(
     operation: &ExternalSourceReadOperationV1,
     shard: &StoreShardIdV1,
@@ -205,7 +171,7 @@ fn external_source_read_matches_shard(
         }
 }
 
-fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &RetrievalAnchorOwnerV1 {
+fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &FactOwnerV1 {
     match operation {
         RetrievalAnchorReadOperationV1::AnchorById { owner, .. }
         | RetrievalAnchorReadOperationV1::CurrentDisposition { owner, .. }
@@ -214,25 +180,9 @@ fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &Retrieva
     }
 }
 
-fn retrieval_owner_matches_shard(owner: &RetrievalAnchorOwnerV1, shard: &StoreShardIdV1) -> bool {
+fn retrieval_owner_matches_shard(owner: &FactOwnerV1, shard: &StoreShardIdV1) -> bool {
     match owner {
-        RetrievalAnchorOwnerV1::V3(owner) => {
-            owner.profile_id() == &shard.profile_id
-                && match (&shard.scope, owner.project_id()) {
-                    (
-                        StoreShardScopeV1::Project {
-                            project_id: shard_project,
-                        }
-                        | StoreShardScopeV1::ProjectSessions {
-                            project_id: shard_project,
-                        },
-                        Some(project_id),
-                    ) => shard_project == project_id,
-                    (StoreShardScopeV1::ProfileSessions, None) => true,
-                    _ => false,
-                }
-        }
-        RetrievalAnchorOwnerV1::V2(tracedecay_domain::FactOwnerV1::Project { project_id }) => {
+        FactOwnerV1::Project { project_id } => {
             matches!(
                 &shard.scope,
                 StoreShardScopeV1::Project {
@@ -242,9 +192,7 @@ fn retrieval_owner_matches_shard(owner: &RetrievalAnchorOwnerV1, shard: &StoreSh
                 } if shard_project == project_id
             )
         }
-        RetrievalAnchorOwnerV1::V2(tracedecay_domain::FactOwnerV1::Profile) => {
-            matches!(&shard.scope, StoreShardScopeV1::ProfileSessions)
-        }
+        FactOwnerV1::Profile => matches!(&shard.scope, StoreShardScopeV1::ProfileSessions),
     }
 }
 
@@ -314,7 +262,6 @@ pub enum ProjectReadOperationV1 {
     Fact(FactReadOperationV1),
     Observation(ObservationReadOperationV1),
     Diagnostics(DiagnosticReadOperationV1),
-    EvidenceAssembly(EvidenceAssemblyReadOperationV1),
     RetrievalAnchor(RetrievalAnchorReadOperationV1),
 }
 
@@ -328,7 +275,6 @@ pub enum ProjectReadResultV1 {
     Fact(FactReadResultV1),
     Observation(ObservationReadResultV1),
     Diagnostics(DiagnosticReadResultV1),
-    EvidenceAssembly(EvidenceAssemblyReadResultV1),
     RetrievalAnchor(RetrievalAnchorReadResultV1),
 }
 
@@ -360,7 +306,7 @@ pub enum ExternalSourceReadOperationV1 {
 #[serde(rename_all = "snake_case")]
 pub enum ExternalSourceReadResultV1 {
     State(Option<Box<SourceStoreStateV1>>),
-    CommitReceipt(Option<Box<SourceCommitReceiptV1>>),
+    CommitReceipt(Option<Box<SourceCommitReceiptSummaryV1>>),
     PendingProjection(Option<Box<SourcePendingProjectionV1>>),
     AcquisitionState(Option<Box<SourceAcquisitionQueueStateV1>>),
     AcquisitionPendingCount(u64),
@@ -373,19 +319,19 @@ pub enum ExternalSourceReadResultV1 {
 pub enum RetrievalAnchorReadOperationV1 {
     AnchorById {
         anchor_id: RetrievalAnchorId,
-        owner: RetrievalAnchorOwnerV1,
+        owner: FactOwnerV1,
     },
     CurrentDisposition {
         anchor_id: RetrievalAnchorId,
-        owner: RetrievalAnchorOwnerV1,
+        owner: FactOwnerV1,
     },
     Derivatives {
         anchor_id: RetrievalAnchorId,
-        owner: RetrievalAnchorOwnerV1,
+        owner: FactOwnerV1,
     },
     Tombstone {
         anchor_id: RetrievalAnchorId,
-        owner: RetrievalAnchorOwnerV1,
+        owner: FactOwnerV1,
     },
 }
 
@@ -395,7 +341,7 @@ pub enum RetrievalAnchorReadOperationV1 {
 // store-protocol API and ripple through construction/match sites.
 #[allow(clippy::large_enum_variant)]
 pub enum RetrievalAnchorReadResultV1 {
-    Anchor(Option<StoredRetrievalAnchorRecordV1>),
+    Anchor(Option<RetrievalAnchorRecord>),
     CurrentDisposition(Option<RetrievalAnchorDispositionRecordV1>),
     Derivatives(Vec<RetrievalAnchorDerivativeV1>),
     Tombstone(Option<RetrievalAnchorTombstoneV1>),
@@ -430,7 +376,7 @@ pub enum ObservationReadOperationV1 {
     },
     RetrievalAnchorByAlias {
         scope: ObservationScopeV1,
-        alias: NativeAliasV2,
+        alias: NativeAlias,
     },
     Replay {
         after_sequence: u64,
@@ -449,7 +395,7 @@ pub struct StoredObservationRowV1 {
     pub sequence: u64,
     pub observation: DurableObservationV1,
     pub committed_cursor: ObservationSourceCursorV1,
-    pub retrieval_anchor: RetrievalAnchorRecordV2,
+    pub retrieval_anchor: RetrievalAnchorRecord,
     pub projection_generation: ProjectionGenerationId,
     pub repository_provenance: RepositoryProvenanceAttachmentV1,
     pub projection_queued: bool,
@@ -489,13 +435,6 @@ pub enum ObservationReadResultV1 {
 }
 
 /// Diagnostic-family read operations.
-///
-/// The variant set covers the whole read surface of
-/// [`DiagnosticStore`](crate::DiagnosticStore) so a storage cutover cannot
-/// silently drop a lane: `Stale` answers `stale_diagnostics` and
-/// `SupersessionChain` answers `diagnostic_supersession_chain`. Both are
-/// history lanes, they read records that active publication excludes, and
-/// neither may re-admit a stale record into the current set.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticReadOperationV1 {
@@ -510,10 +449,6 @@ pub enum DiagnosticReadOperationV1 {
         file_occurrence_id: FileOccurrenceId,
     },
     ByAnchor(RetrievalAnchorId),
-    /// Superseded and cleared records bound to one generation.
-    Stale(CodeGenerationId),
-    /// The logical finding chain rooted at one diagnostic anchor, oldest first.
-    SupersessionChain(RetrievalAnchorId),
 }
 
 /// Diagnostic-family read results.
@@ -656,15 +591,12 @@ pub enum EffectsReadResultV1 {
 #[cfg(test)]
 mod tests {
     use tracedecay_domain::{
-        AnchorOwnerBindingV1, BrainId, FactOwnerV1, ManifestDigest, PrivacyDomainId, ProjectId,
-        RepositoryId, RetrievalAnchorId, SessionId, UserProfileId, WorktreeId,
+        BrainId, FactOwnerV1, ProjectId, RepositoryId, RetrievalAnchorId, SessionId, UserProfileId,
+        WorktreeId,
     };
 
     use super::*;
-    use crate::{
-        CodeShardScopeV1, EvidenceAssemblyIdempotencyKeyV1, EvidenceAssemblyOwnerV1,
-        StoreAuthorityEpochV1, StoreIncarnationV1,
-    };
+    use crate::{CodeShardScopeV1, StoreAuthorityEpochV1, StoreIncarnationV1};
 
     fn binding(profile: &str, scope: StoreShardScopeV1) -> StoreRuntimeBindingV1 {
         StoreRuntimeBindingV1::new(
@@ -680,21 +612,6 @@ mod tests {
 
     fn project(value: &str) -> ProjectId {
         ProjectId::new(value).unwrap()
-    }
-
-    fn evidence_owner(profile: &str, project_id: Option<ProjectId>) -> EvidenceAssemblyOwnerV1 {
-        let profile_id = UserProfileId::new(profile).unwrap();
-        let privacy = PrivacyDomainId::new("privacy.fixture").unwrap();
-        EvidenceAssemblyOwnerV1 {
-            owner: match project_id {
-                Some(project_id) => {
-                    AnchorOwnerBindingV1::for_project(profile_id, project_id, privacy).unwrap()
-                }
-                None => AnchorOwnerBindingV1::for_profile(profile_id, privacy).unwrap(),
-            },
-            scope_digest: ManifestDigest::new(format!("sha256:{}", "aa".repeat(32))).unwrap(),
-            key_epoch: 1,
-        }
     }
 
     #[test]
@@ -720,7 +637,6 @@ mod tests {
             },
         );
         let profile_sessions_a = binding("profile.a", StoreShardScopeV1::ProfileSessions);
-        let profile_sessions_b = binding("profile.b", StoreShardScopeV1::ProfileSessions);
         let profile_memory_a = binding("profile.a", StoreShardScopeV1::ProfileMemory);
 
         let source_cursor = RepositoryReadOperationV1::Project(
@@ -750,48 +666,12 @@ mod tests {
                 .is_err()
         );
 
-        let evidence =
-            RepositoryReadOperationV1::Project(ProjectReadOperationV1::EvidenceAssembly(
-                EvidenceAssemblyReadOperationV1::PublicationByIdempotency {
-                    owner: evidence_owner("profile.a", Some(project_a.clone())),
-                    idempotency_key: EvidenceAssemblyIdempotencyKeyV1::new(
-                        ManifestDigest::new(format!("sha256:{}", "bb".repeat(32))).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            ));
-        assert!(evidence.validate_for_binding(&project_sessions_a).is_ok());
-        assert!(evidence.validate_for_binding(&project_sessions_b).is_err());
-        assert!(evidence.validate_for_binding(&profile_sessions_a).is_err());
-
-        let profile_evidence =
-            RepositoryReadOperationV1::Project(ProjectReadOperationV1::EvidenceAssembly(
-                EvidenceAssemblyReadOperationV1::PublicationByIdempotency {
-                    owner: evidence_owner("profile.a", None),
-                    idempotency_key: EvidenceAssemblyIdempotencyKeyV1::new(
-                        ManifestDigest::new(format!("sha256:{}", "cc".repeat(32))).unwrap(),
-                    )
-                    .unwrap(),
-                },
-            ));
-        assert!(
-            profile_evidence
-                .validate_for_binding(&profile_sessions_a)
-                .is_ok()
-        );
-        assert!(
-            profile_evidence
-                .validate_for_binding(&profile_sessions_b)
-                .is_err()
-        );
-
         let retrieval = RepositoryReadOperationV1::Project(
             ProjectReadOperationV1::RetrievalAnchor(RetrievalAnchorReadOperationV1::AnchorById {
                 anchor_id: RetrievalAnchorId::new("retrieval.fixture").unwrap(),
                 owner: FactOwnerV1::Project {
                     project_id: project_a.clone(),
-                }
-                .into(),
+                },
             }),
         );
         assert!(retrieval.validate_for_binding(&project_a_binding).is_ok());

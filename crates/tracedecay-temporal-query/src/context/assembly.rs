@@ -6,8 +6,8 @@ use tracedecay_domain::{
     CompactContextOmissionV1, ContextOmissionReasonV1, RetrievalAnchorId, RetrievalGrainV1,
 };
 
+use super::super::execution::ExecutionControl;
 use super::super::hydration::HydrationBatch;
-use super::super::ports::ExecutionControl;
 use super::super::resolution::summary::{SummaryLineageRejection, SummaryOmission};
 use super::admission::{
     choose_admission, materialize_admission, measure_context, prepare_admission, render_exact,

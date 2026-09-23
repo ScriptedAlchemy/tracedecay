@@ -47,7 +47,7 @@ pub use discovery_queue::HostDiscoveryQueueEntry;
 pub use git_correlation_adapter::{
     GitEvidenceConvergenceOutcome, GitEvidenceConvergenceStats, GlobalDbGitCorrelationStore,
 };
-pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthorityV2;
+pub use git_topology_anchor::RegisteredGitTopologyAnchorAuthority;
 pub use observability_rollup::{
     ObservabilityRollupCompactionCandidateV1, ObservabilityRollupCompactionReceiptV1,
     ObservabilityRollupCompactionV1, ObservabilityRollupDirtyDayClaimV1,
@@ -168,9 +168,6 @@ use support::{
     global_db_operation_error, global_db_operation_message, like_pattern, normalize_git_remote_url,
     push_optional_analytics_filter, repo_identity_aliases, row_to_analytics_event,
 };
-/// Compatibility re-export: workflow search filters now live beside the
-/// workflow-index contracts in [`tracedecay_sessions::runtime::workflow_index`].
-pub use tracedecay_sessions::runtime::workflow_index::WorkflowScopeFilter;
 #[cfg(all(test, not(windows)))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod checkpoint_tests;

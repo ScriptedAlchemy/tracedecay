@@ -6,11 +6,9 @@ use std::sync::{Arc, RwLock};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
-use tracedecay_code_index::production::{
-    CodeIndexProductionErrorV1, UninterruptibleCodeIndexControlV1,
-};
+use tracedecay_code_index::production::CodeIndexProductionErrorV1;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationStoreLockV1, GRAPH_REPLAY_POOL_ACQUIRE_POLL,
+    CodeGenerationStoreLockV1, GRAPH_REPLAY_POOL_ACQUIRE_POLL, code_generation_segments_root,
     try_acquire_code_generation_store_lock,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
@@ -435,26 +433,14 @@ fn decode_verified_seal_with_bundle_barrier(
             }
         })?;
     (check)()?;
-    let decoded = tracedecay_code_index::production::CodeIndexPublishedGenerationV1::decode_sealed_seek_reader(
-        &mut file,
-        admitted_len,
-        Some(&expected_digest),
-        &UninterruptibleCodeIndexControlV1,
-    );
     #[cfg(feature = "hotpath")]
     hotpath::gauge!("session_registry.seal.decode.bytes_total").inc(admitted_len);
-    let monolithic = decoded
-        .map_err(|error| classify_sealed_generation_decode_error(error, &expected_digest))?;
     let mut lifetime_lock = Some(lifetime_lock);
-    let generation = if let Some(generation) = monolithic {
-        generation
-    } else {
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| GraphDbError::Corrupt {
-                message: format!("sealed generation manifest seek failed: {error}"),
-            })?;
+    let generation = {
         let mut manifest = Vec::new();
-        file.read_to_end(&mut manifest)
+        file.by_ref()
+            .take(admitted_len)
+            .read_to_end(&mut manifest)
             .map_err(|error| GraphDbError::Corrupt {
                 message: format!("sealed generation manifest read failed: {error}"),
             })?;
@@ -522,9 +508,6 @@ fn decode_verified_seal_with_bundle_barrier(
         }
         decoded
             .map_err(|error| classify_sealed_generation_decode_error(error, &expected_digest))?
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "sealed code generation format revision is incompatible".to_owned(),
-            })?
     };
     (check)()?;
     let final_file_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
@@ -893,10 +876,11 @@ pub(super) fn verify_sealed_generation_source_from_roots(
     let digest = sha256_hex_suffix(sealed_state_digest.as_str())
         .ok_or_else(|| GraphDbError::invalid("sealed state digest is not sha256"))?;
     let seal_file = format!("generation-{digest}.json");
-    let segments_root = generations_root
-        .parent()
-        .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?
-        .join("code-generation-segments-v1");
+    let segments_root = code_generation_segments_root(
+        generations_root
+            .parent()
+            .ok_or_else(|| GraphDbError::invalid("generation root has no store parent"))?,
+    );
     with_verified_seal_from_roots(
         &generations_root.join(&seal_file),
         &replay_root.join(&seal_file),
@@ -1476,7 +1460,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                         route
                             .generations_root
                             .parent()
-                            .map(|root| root.join("code-generation-segments-v1"))
+                            .map(code_generation_segments_root)
                             .ok_or_else(|| {
                                 GraphDbError::invalid(
                                     "canonical generation root has no store parent",
@@ -1508,7 +1492,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
                     }
                     match decode_verified_seal(
                         &canonical,
-                        &store_root.join("code-generation-segments-v1"),
+                        &code_generation_segments_root(store_root),
                         digest,
                         check,
                         lock,
@@ -1612,6 +1596,7 @@ fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> Gr
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fmt::Write as _;
     use std::io::{Seek, SeekFrom, Write};
     use std::path::Path;
     use std::process::Command;
@@ -1622,7 +1607,8 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_code_index_retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DurablePublicationPointerV1,
-        acquire_code_generation_store_lock, run_code_generation_retention,
+        acquire_code_generation_store_lock, code_generation_segments_root,
+        run_code_generation_retention,
     };
     use tracedecay_domain::{
         CodeGenerationId, ProjectId, RepositoryId, UtcMicros, sha256_hex_suffix,
@@ -1966,6 +1952,7 @@ mod tests {
     struct PartitionedSealFixture {
         _temporary: TempDir,
         pool_manifest: std::path::PathBuf,
+        scope_root: std::path::PathBuf,
         segments_root: std::path::PathBuf,
         digest: String,
         project: ProjectId,
@@ -1973,9 +1960,40 @@ mod tests {
         generation: CodeGenerationId,
     }
 
-    fn partitioned_seal_fixture(label: &str) -> PartitionedSealFixture {
-        use std::fmt::Write as _;
+    /// 1,600 functions named `{prefix}_{index}` whose bodies apply
+    /// `operator`. A clean generation's evidence is implied by its own
+    /// symbols and chunks and fits one page; a successor that changes every
+    /// body keeps one whole lineage row per function, which spans several.
+    fn multi_page_evidence_source(prefix: &str, operator: char) -> String {
+        let mut source = String::new();
+        for index in 0..1_600 {
+            writeln!(
+                source,
+                "pub fn {prefix}_{index}(value: usize) -> usize {{ value {operator} {index} }}"
+            )
+            .unwrap();
+        }
+        source
+    }
 
+    /// Publish a successor of the fixture's clean generation that changes
+    /// every function body, so the active generation's evidence spans pages.
+    fn publish_multi_page_evidence(
+        project_root: &Path,
+        prefix: &str,
+        scheduler: &mut CodeIndexWorktreeSchedulerV1,
+    ) {
+        scheduler.reconcile_now().unwrap();
+        std::fs::write(
+            project_root.join("src/lib.rs"),
+            multi_page_evidence_source(prefix, '*'),
+        )
+        .unwrap();
+        git(project_root, &["commit", "-qam", "change every body"]);
+        scheduler.reconcile_now().unwrap();
+    }
+
+    fn partitioned_seal_fixture(label: &str) -> PartitionedSealFixture {
         let temporary = TempDir::new().unwrap();
         let root = temporary.path().canonicalize().unwrap();
         let project_root = root.join("project");
@@ -1986,15 +2004,11 @@ mod tests {
             &project_root,
             &["config", "user.email", "tracedecay@example.invalid"],
         );
-        let mut source = String::new();
-        for index in 0..1_600 {
-            writeln!(
-                source,
-                "pub fn partitioned_fixture_{index}(value: usize) -> usize {{ value + {index} }}"
-            )
-            .unwrap();
-        }
-        std::fs::write(project_root.join("src/lib.rs"), source).unwrap();
+        std::fs::write(
+            project_root.join("src/lib.rs"),
+            multi_page_evidence_source("partitioned_fixture", '+'),
+        )
+        .unwrap();
         git(&project_root, &["add", "."]);
         git(&project_root, &["commit", "-qm", "partitioned fixture"]);
         let project_id = ProjectId::new(format!("project.manifest-{label}")).unwrap();
@@ -2013,7 +2027,7 @@ mod tests {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .unwrap();
-        scheduler.reconcile_now().unwrap();
+        publish_multi_page_evidence(&project_root, "partitioned_fixture", &mut scheduler);
         let latest = scheduler.latest_complete().unwrap();
         let repository = latest.generation().snapshot().repository.clone();
         let generation = latest.generation().manifest().generation_id.clone();
@@ -2026,7 +2040,7 @@ mod tests {
         let canonical_manifest = scoped_store
             .join("code-generations-v1")
             .join(pointer.generation_file);
-        let segments_root = scoped_store.join("code-generation-segments-v1");
+        let segments_root = code_generation_segments_root(&scoped_store);
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&canonical_manifest).unwrap()).unwrap();
         assert!(
@@ -2048,6 +2062,7 @@ mod tests {
         PartitionedSealFixture {
             _temporary: temporary,
             pool_manifest,
+            scope_root: scoped_store,
             segments_root,
             digest,
             project: project_id,
@@ -2083,7 +2098,7 @@ mod tests {
                 replay_root.clone(),
             )
             .unwrap();
-        let store = fixture.segments_root.parent().unwrap();
+        let store = fixture.scope_root.as_path();
         assert!(absent_store.as_path() < store);
         let route = provider
             .bind(
@@ -2296,8 +2311,6 @@ mod tests {
 
     #[test]
     fn partitioned_replay_decode_pins_evidence_across_manifest_retirement() {
-        use std::fmt::Write as _;
-
         let temporary = TempDir::new().unwrap();
         let root = temporary.path().canonicalize().unwrap();
         let project_root = root.join("project");
@@ -2308,15 +2321,11 @@ mod tests {
             &project_root,
             &["config", "user.email", "tracedecay@example.invalid"],
         );
-        let mut source = String::new();
-        for index in 0..1_600 {
-            writeln!(
-                source,
-                "pub fn pinned_evidence_{index}(value: usize) -> usize {{ value + {index} }}"
-            )
-            .unwrap();
-        }
-        std::fs::write(project_root.join("src/lib.rs"), source).unwrap();
+        std::fs::write(
+            project_root.join("src/lib.rs"),
+            multi_page_evidence_source("pinned_evidence", '+'),
+        )
+        .unwrap();
         git(&project_root, &["add", "."]);
         git(&project_root, &["commit", "-qm", "pinned evidence fixture"]);
         let project_id = ProjectId::new("project.manifest-pinned-evidence").unwrap();
@@ -2335,7 +2344,7 @@ mod tests {
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         )
         .unwrap();
-        scheduler.reconcile_now().unwrap();
+        publish_multi_page_evidence(&project_root, "pinned_evidence", &mut scheduler);
         drop(scheduler);
 
         let pointer_path = scoped_store.join("active-code-generation-v1.json");
@@ -2353,12 +2362,15 @@ mod tests {
                 .len()
                 > 1
         );
+        let clean_parent = manifest["generation"]["manifest"]["parent_generation"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let evidence_digest = manifest["generation"]["generation_evidence"]["segment_digest"]
             .as_str()
             .unwrap();
         let evidence_digest = sha256_hex_suffix(evidence_digest).unwrap();
-        let evidence_path = scoped_store
-            .join("code-generation-segments-v1")
+        let evidence_path = code_generation_segments_root(&scoped_store)
             .join(format!("segment-{evidence_digest}.json"));
 
         let replay_root = root.join("replay-pool");
@@ -2370,7 +2382,7 @@ mod tests {
         }
         std::fs::remove_file(pointer_path).unwrap();
 
-        let segments_root = scoped_store.join("code-generation-segments-v1");
+        let segments_root = code_generation_segments_root(&scoped_store);
         let decoded = decode_verified_seal_with_bundle_barrier(
             &staged_manifest,
             std::slice::from_ref(&segments_root),
@@ -2387,7 +2399,13 @@ mod tests {
                     Some(&replay_root),
                 )
                 .unwrap();
-                assert!(report.deleted_generations.is_empty());
+                assert!(
+                    report
+                        .deleted_generations
+                        .iter()
+                        .all(|deleted| deleted.generation_id.as_str() == clean_parent),
+                    "retention may retire only the fixture's clean parent generation"
+                );
                 assert!(
                     !evidence_path.exists(),
                     "retention must remove the pack pathname while decode owns its lifetime"

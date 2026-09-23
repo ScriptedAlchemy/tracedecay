@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::{LcmSourceRef, dag, schema};
 use tracedecay_domain::HydrationStateV1;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, IntoParams, QueryExecutor, TestConnection, params,
@@ -106,7 +107,7 @@ async fn insert_message(
     let sanitization =
         sanitize_lcm_payload_text(content).map_err(|err| format!("sanitize: {err}"))?;
     let content = sanitization.sanitized_text();
-    let hash = crate::util::sha256_hex(content.as_bytes());
+    let hash = sha256_hex(content.as_bytes());
     let metadata = serde_json::json!({
         "ingest_protection": { "sanitization_receipt": sanitization.receipt() }
     })
@@ -114,10 +115,9 @@ async fn insert_message(
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
-            content, content_hash, storage_kind, payload_ref, snippet_text,
-            index_text, metadata_json
+            content, content_hash, storage_kind, payload_ref, metadata_json
          )
-         VALUES (?1, ?2, ?3, 'assistant', ?4, ?5, ?6, ?7, 'inline', NULL, ?6, ?6, ?8)",
+         VALUES (?1, ?2, ?3, 'assistant', ?4, ?5, ?6, ?7, 'inline', NULL, ?8)",
         params![
             PROVIDER,
             message_id.as_str(),
@@ -643,13 +643,12 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
         content: original,
     };
     let revived = "revived content";
-    let revived_hash = crate::util::sha256_hex(revived.as_bytes());
+    let revived_hash = sha256_hex(revived.as_bytes());
     store
         .conn
         .execute(
             "UPDATE lcm_raw_messages
-             SET timestamp = ?2, content = ?3, content_hash = ?4,
-                 snippet_text = ?3, index_text = ?3
+             SET timestamp = ?2, content = ?3, content_hash = ?4
              WHERE store_id = ?1",
             params![store_id, NOW, revived, revived_hash.as_str()],
         )

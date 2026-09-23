@@ -157,8 +157,8 @@ impl ComposerIngestContext<'_, '_> {
 
 async fn drain_composer_projection_queue(
     context: &ComposerIngestContext<'_, '_>,
-) -> TranscriptIngestResult<crate::runtime::cursor::projection::CursorProjectionDrainStats> {
-    crate::runtime::cursor::projection::drain_cursor_observation_projections_with_sessions(
+) -> TranscriptIngestResult<crate::runtime::hosts::cursor::projection::CursorProjectionDrainStats> {
+    crate::runtime::hosts::cursor::projection::drain_cursor_observation_projections_with_sessions(
         context.facade,
         &context.scope,
         context.cancellation,
