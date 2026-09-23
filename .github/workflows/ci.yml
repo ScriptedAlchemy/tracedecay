@@ -752,17 +752,13 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      # The full nextest selection includes CLI and evaluator journeys that
-      # spawn these executables. Build them in the same perf resolution so a
-      # missing binary cannot masquerade as an isolation failure.
-      - name: Build support executables
-        run: |
-          cargo_selection="$(python3 scripts/linux-test-partitions.py build-args root-journeys)"
-          read -ra cargo_args <<< "$cargo_selection"
-          cargo build --locked --profile perf "${cargo_args[@]}"
+      # Build the test targets and the executables they spawn with the same
+      # feature set and perf resolution that nextest runs below.
+      - name: Build full workspace tests and support executables
+        run: cargo build --workspace --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval,tracedecay/test-transport,tracedecay-cli/test-transport
 
       - name: Run full workspace tests
-        run: cargo test-ci --locked --no-tests=fail
+        run: cargo test-ci --locked --features tracedecay/test-transport,tracedecay-cli/test-transport --no-tests=fail
 
       - name: Upload full-workspace nextest report
         if: always()
