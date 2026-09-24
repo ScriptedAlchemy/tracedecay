@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -43,6 +44,57 @@ def dashboard_command(mode: str, port: int, *extra: str) -> list[str]:
 
 
 class ProcessGroupCountTests(unittest.TestCase):
+    def test_late_census_failure_cleans_up_host_and_descendants(self) -> None:
+        real_popen = subprocess.Popen
+        for phase in ("timeout", "normal_exit"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                spawned = []
+
+                def capture(*args, **kwargs):
+                    process = real_popen(*args, **kwargs)
+                    spawned.append(process)
+                    return process
+
+                script = "import time; time.sleep(60)"
+                if phase == "normal_exit":
+                    script = (
+                        "import subprocess, sys; "
+                        "subprocess.Popen([sys.executable, '-c', "
+                        "'import time; time.sleep(60)'])"
+                    )
+                try:
+                    with (
+                        mock.patch.object(lifecycle.subprocess, "Popen", side_effect=capture),
+                        mock.patch.object(
+                            lifecycle,
+                            "process_group_process_count",
+                            side_effect=[1, lifecycle.LifecycleError("late census failed")],
+                        ),
+                        self.assertRaisesRegex(lifecycle.LifecycleError, "late census failed"),
+                    ):
+                        lifecycle.run_host(
+                            [sys.executable, "-c", script],
+                            env=os.environ,
+                            log_dir=Path(directory),
+                            timeout=0.2 if phase == "timeout" else 5,
+                            termination_grace=0.05,
+                        )
+                    self.assertEqual(len(spawned), 1)
+                    self.assertIsNotNone(spawned[0].poll())
+                    deadline = time.monotonic() + 1
+                    while lifecycle.process_group_process_count(spawned[0].pid):
+                        self.assertLess(time.monotonic(), deadline, "host descendants survived")
+                        time.sleep(0.01)
+                    for stream in (spawned[0].stdin, spawned[0].stdout, spawned[0].stderr):
+                        self.assertTrue(stream.closed)
+                finally:
+                    for process in spawned:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=5)
+
     def test_ps_counts_only_live_members_of_the_requested_group(self) -> None:
         listing = " 42 S\n42 R+\n42 Z\n42 Z+\n142 S\n"
         with (

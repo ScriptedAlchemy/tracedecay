@@ -377,50 +377,37 @@ def run_host(
             start_new_session=True,
         )
         process_group_id = os.getpgid(process.pid)
+        threads = []
         try:
             evidence.process_count = max(
                 1, process_group_process_count(process_group_id)
             )
-        except BaseException:
-            _kill_process_group_without_census(process, process_group_id, evidence)
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
-            raise
-        threads = [
-            _start_drain(process.stdout, stdout_handle, stdout_buffer),
-            _start_drain(process.stderr, stderr_handle, stderr_buffer),
-        ]
-        if process.stdin is not None:
+            threads = [
+                _start_drain(process.stdout, stdout_handle, stdout_buffer),
+                _start_drain(process.stderr, stderr_handle, stderr_buffer),
+            ]
+            if process.stdin is not None:
+                try:
+                    process.stdin.write(input_payload)
+                    process.stdin.flush()
+                except BrokenPipeError:
+                    pass
+                finally:
+                    process.stdin.close()
+            timed_out = False
             try:
-                process.stdin.write(input_payload)
-                process.stdin.flush()
-            except BrokenPipeError:
-                pass
-            finally:
-                process.stdin.close()
-        timed_out = False
-        try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            evidence.process_count = max(
-                evidence.process_count,
-                process_group_process_count(process_group_id),
-            )
-            evidence.timeout_phase = (
-                "child_io" if evidence.process_count > 1 else "host_wait"
-            )
-            evidence.availability_state = "failed"
-            evidence.availability_detail = "host process timed out"
-            terminate_process_group(
-                process,
-                process_group_id,
-                termination_grace,
-                evidence,
-            )
-        else:
-            if process_group_process_count(process_group_id):
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                evidence.process_count = max(
+                    evidence.process_count,
+                    process_group_process_count(process_group_id),
+                )
+                evidence.timeout_phase = (
+                    "child_io" if evidence.process_count > 1 else "host_wait"
+                )
+                evidence.availability_state = "failed"
+                evidence.availability_detail = "host process timed out"
                 terminate_process_group(
                     process,
                     process_group_id,
@@ -428,9 +415,24 @@ def run_host(
                     evidence,
                 )
             else:
-                _reap_process_group(process_group_id)
-        for thread in threads:
-            thread.join(timeout=1.0)
+                if process_group_process_count(process_group_id):
+                    terminate_process_group(
+                        process,
+                        process_group_id,
+                        termination_grace,
+                        evidence,
+                    )
+                else:
+                    _reap_process_group(process_group_id)
+        except BaseException:
+            _kill_process_group_without_census(process, process_group_id, evidence)
+            raise
+        finally:
+            for thread in threads:
+                thread.join(timeout=1.0)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
     elapsed = time.monotonic() - started
     stdout = bytes(stdout_buffer)
