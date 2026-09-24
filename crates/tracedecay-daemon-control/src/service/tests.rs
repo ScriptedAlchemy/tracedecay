@@ -864,6 +864,7 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
     assert!(message.contains("Failed to connect to bus"), "{message}");
 }
 
+#[cfg(unix)]
 #[test]
 fn running_service_snapshot_uses_one_authenticated_connection() {
     let _env_lock = lock_user_data_dir_test_env();
