@@ -403,6 +403,17 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   const laneIndex = new Map(ordered.map((lane, index) => [lane.id, index] as const));
 
   for (const lane of ordered) {
+    // The edited-file rollup carries paths and hunks but no edit time, so an
+    // edit has no honest x; the lane says it has edits it cannot place.
+    if (lane.editedFileCount > 0) {
+      gaps.push({
+        id: `gap:edit_time_unrecorded:${lane.id}`,
+        laneId: lane.id,
+        kind: 'edit_time_unrecorded',
+        grade: 'unavailable',
+        detail: `${lane.editedFileCount} edited ${lane.editedFileCount === 1 ? 'file' : 'files'} recorded · no edit time in this read`,
+      });
+    }
     if (lane.end === null) {
       gaps.push({
         id: `gap:extent_unknown:${lane.id}`,

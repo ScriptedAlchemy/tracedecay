@@ -1,13 +1,11 @@
 /**
- * Host for a laid-out `TemporalSceneModel`.
+ * Renderer for a laid-out `TemporalSceneModel`.
  *
- * Two layers over one coordinate space. A Canvas2D substrate, painted once per
- * model, density or palette change by the selected renderer; nothing there
- * animates. A crisp SVG overlay carries every selectable mark, every label and
- * every title, so the surface stays complete when the canvas is missing and
- * every pointer action has a keyboard path. The overlay's roles, labels and
- * data attributes are the same for every renderer; a renderer only supplies
- * the paint inside them.
+ * Two layers over one coordinate space. A Canvas2D substrate (`scene/paint`),
+ * painted once per model, density or palette change; nothing there animates.
+ * A crisp SVG overlay carries every selectable mark, every label and every
+ * title, so the surface stays complete when the canvas is missing and every
+ * pointer action has a keyboard path.
  *
  * This component draws. It never lays out, never grades, and never invents a
  * quantity: every coordinate comes from the model. Hover only inspects.
@@ -18,9 +16,9 @@ import { formatMoment } from '../../workspaces/loom/tracks.ts';
 import type { SceneDensity } from './density.ts';
 import { glyphLabel, TemporalLegend } from './glyphs.tsx';
 import { resolveTemporalPalette, type TemporalPalette } from './palette.ts';
-import type { SceneFrame, SceneRenderer } from './renderers/contract.ts';
-import { currentRenderer } from './renderers/current.tsx';
-import { focusAlpha } from './renderers/paint.ts';
+import { focusAlpha, type SceneFrame } from './scene/frame.ts';
+import { ClusterMark, FieldOverlay, LegendEncodings, laneDetail, NODE_CLASS, NodeMark } from './scene/marks.tsx';
+import { paintScene } from './scene/paint.ts';
 import type {
   SceneCluster,
   SceneGap,
@@ -41,16 +39,12 @@ export interface TemporalSceneProps {
   onWindowChange: (window: SceneWindow) => void;
   /** Pixel width the caller should lay out for; reported when the host resizes. */
   onMeasure?: (width: number) => void;
-  /** Newest loaded record label for the right marker, e.g. 'LOADED END' or 'NOW'. */
-  tailLabel: string;
   reducedMotion: boolean;
   onInspect?: (node: SceneNode | null) => void;
   className?: string;
   /** The whole projection extent, so Fit has somewhere to return to. */
   fullWindow?: SceneWindow;
-  /** Paint for the substrate and marks; the shipped weave when omitted. */
-  renderer?: SceneRenderer;
-  /** Per-lane density over the same window, for renderers that aggregate. */
+  /** Per-lane density over the same window: summaries, totals, recency, NOW. */
   density?: SceneDensity | null;
 }
 
@@ -119,12 +113,10 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     onSelectEncounter,
     onWindowChange,
     onMeasure,
-    tailLabel,
     reducedMotion,
     onInspect,
     className,
     fullWindow,
-    renderer = currentRenderer,
     density = null,
   } = props;
   const clipId = useId();
@@ -144,10 +136,9 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const fieldX1 = width - viewport.right;
   const fieldWidth = Math.max(1, fieldX1 - fieldX0);
   const frame: SceneFrame = useMemo(
-    () => ({ model, density, fieldX0, fieldX1, top: RULER, height, tailLabel }),
-    [model, density, fieldX0, fieldX1, height, tailLabel],
+    () => ({ model, density, fieldX0, fieldX1, top: RULER, height }),
+    [model, density, fieldX0, fieldX1, height],
   );
-  const { NodeMark, ClusterMark, FieldOverlay, GradeSwatch, LegendEncodings } = renderer;
 
   const lanes = useMemo(() => [...model.lanes].sort((a, b) => a.row - b.row), [model.lanes]);
   const clusterByLane = useMemo(
@@ -233,8 +224,8 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     setLayer('canvas');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
-    renderer.paint(ctx, frame, palette);
-  }, [renderer, frame, palette, width, height]);
+    paintScene(ctx, frame, palette);
+  }, [frame, palette, width, height]);
 
   /* ---- window arithmetic ---- */
 
@@ -498,7 +489,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
       >
         <title>{label}</title>
         <rect x={cluster.x0} y={Math.min(top, cluster.y - 22)} width={x1 - cluster.x0} height={Math.max(cluster.height, 44)} fill="transparent" />
-        <ClusterMark cluster={cluster} lane={lane} frame={frame} />
+        <ClusterMark cluster={cluster} />
       </g>
     );
   };
@@ -520,7 +511,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         data-x-basis={node.xBasis}
         aria-label={`Select ${glyphLabel(node.kind)} ${node.label}`}
         aria-pressed={node.selected}
-        className={renderer.nodeClassName}
+        className={NODE_CLASS}
         opacity={focusAlpha(node.focus)}
         onClick={select}
         onKeyDown={(event) => {
@@ -549,7 +540,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     const toggle = branchToggleFor(lane);
     const bundleCount = clusterByLane.get(lane.id)?.counts.sessions ?? lane.collapsedDescendants;
     const detailLine =
-      renderer.laneDetail?.(lane, frame) ??
+      laneDetail(lane, frame) ??
       (lane.kind === 'bundle' ? `${lane.provider} · bundle · ${bundleCount} sessions` : lane.provider);
     // Lane rows and toggles are pointer affordances for the same actions the
     // branch navigator table offers as 44px DOM controls; they stay out of the
@@ -621,7 +612,6 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     <section
       ref={hostRef}
       aria-label={ariaLabel}
-      data-scene-renderer={renderer.id}
       className={`td-optic relative min-w-0 ${className ?? ''}`.trim()}
     >
       <div role="toolbar" aria-label="Time window" className="relative z-10 flex min-h-10 flex-wrap items-center gap-1 border-b border-edge-subtle px-1 text-xs">
@@ -772,8 +762,8 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
           strokeWidth={1}
         />
       </svg>
-      <TemporalLegend gaps={model.gaps} {...(GradeSwatch ? { Swatch: GradeSwatch } : {})}>
-        {LegendEncodings && <LegendEncodings frame={frame} />}
+      <TemporalLegend gaps={model.gaps}>
+        <LegendEncodings />
       </TemporalLegend>
     </section>
   );

@@ -130,12 +130,10 @@ function LineSwatch({ grade }: { grade: EvidenceGrade }): JSX.Element {
 
 export function TemporalLegend({
   gaps,
-  Swatch = LineSwatch,
   children,
 }: {
   gaps: readonly SceneGap[];
-  Swatch?: (props: { grade: EvidenceGrade }) => JSX.Element;
-  /** Renderer-specific encodings, printed beside the grade ladder. */
+  /** The field's own encodings, printed beside the grade ladder. */
   children?: ReactNode;
 }): JSX.Element {
   const pageWide = gaps.filter((gap) => gap.laneId === null);
@@ -145,7 +143,7 @@ export function TemporalLegend({
         <span className="td-legend">Legend</span>
         {GRADES.map((grade) => (
           <span key={grade} className="flex items-center gap-1.5">
-            <Swatch grade={grade} />
+            <LineSwatch grade={grade} />
             <span className="td-legend">{grade.toUpperCase()}</span>
           </span>
         ))}

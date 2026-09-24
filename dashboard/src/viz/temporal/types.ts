@@ -136,6 +136,7 @@ export type JourneyGapKind =
   | 'parentage_unavailable'
   | 'extent_unknown'
   | 'undated_events'
+  | 'edit_time_unrecorded'
   | 'handoff_unavailable';
 
 /** Something Loom cannot prove, kept spatially visible and selectable. */

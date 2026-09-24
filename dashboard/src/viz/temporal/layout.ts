@@ -644,6 +644,8 @@ export function layoutTemporalScene(
       case 'parentage_unavailable':
       case 'handoff_unavailable':
         return { ...base, x: sceneLane.x0, y: sceneLane.y };
+      case 'edit_time_unrecorded':
+        return { ...base, x: (sceneLane.x0 + sceneLane.x1) / 2, y: sceneLane.y + Math.min(10, sceneLane.height * 0.3) };
       case 'undated_events':
         return {
           ...base,

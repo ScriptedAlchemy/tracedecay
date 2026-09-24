@@ -3361,8 +3361,34 @@ function lcmOverviewPayload(): Record<string, unknown> {
  * distribution as the savings fixture so the weave has real structure.
  * ========================================================================== */
 
+/**
+ * The delegation tree's own sessions, placed on the Loom page three hours
+ * before now with the tree's recorded offsets kept, so the page holds the
+ * parents and children the subagent tree names and the field draws their
+ * spawns, the missing parent and the lone root from the same fixture.
+ */
+function loomDelegationRows(): Record<string, unknown>[] {
+  const nodes = analyticsSubagentTreePayload()['nodes'] as Record<string, unknown>[];
+  const origin = Math.min(...nodes.map((node) => node['started_at'] as number));
+  const base = nowSecs - 3 * 3600;
+  return nodes.map((node, i) => {
+    const start = base + ((node['started_at'] as number) - origin);
+    const ended = node['ended_at'] as number | null;
+    return {
+      session_id: node['session_id'],
+      provider: node['provider'],
+      title: node['title'],
+      started_at: start,
+      last_message_at: ended === null ? null : base + (ended - origin),
+      messages: 12 + i * 9,
+      is_subagent: node['is_subagent'],
+    };
+  });
+}
+
 function loomTemporalPayload(): Record<string, unknown> {
-  const rows = loomSessionRows();
+  // Past the dense-page threshold, so the page opens with its branches bundled.
+  const rows = [...loomSessionRows(45), ...loomDelegationRows()];
   const sessions = rows.map((row, i) => ({
     session_id: row['session_id'],
     provider: row['provider'],
@@ -3872,11 +3898,11 @@ const LOOM_CHAIN_TOOLS = [
   null,
 ] as const;
 
-/** One session's transcript. `timestamp` is null on every message, exactly as
- * the daemon serves it. The chain rail reads that and prints "ordinal order",
- * so a fixture with timestamps would hide the behaviour under audit. */
-function loomChainPayload(): Record<string, unknown> {
-  const sessionId = loomSessionId(0);
+/** One session's transcript, served for whichever session is asked for.
+ * `timestamp` is null on every message, exactly as the daemon serves it. The
+ * chain rail reads that and prints "ordinal order", so a fixture with
+ * timestamps would hide the behaviour under audit. */
+function loomChainPayload(sessionId: string): Record<string, unknown> {
   const messages = Array.from({ length: 46 }, (_, i) => {
     const tool = i === 0 ? null : LOOM_CHAIN_TOOLS[i % LOOM_CHAIN_TOOLS.length];
     return {
@@ -3890,9 +3916,11 @@ function loomChainPayload(): Record<string, unknown> {
             ? `Invoking ${tool} against the workspace to confirm the reconciliation path.`
             : 'Summarising the reconciliation result and the remaining gap.',
       ordinal: i,
+      snippet: null,
       timestamp: null,
       tool_name: tool,
-      token_estimate: 18 + (i % 9) * 7,
+      token_count: 18 + (i % 9) * 7,
+      token_count_provenance: 'o200k_approximate',
       // `lcm_queries` selects a literal `0 AS pinned`: pinning is not tracked
       // yet, and the column is an integer, not a boolean.
       pinned: 0,
@@ -3914,15 +3942,15 @@ function loomChainPayload(): Record<string, unknown> {
     has_more: false,
     has_more_messages: false,
     has_more_summary_nodes: false,
+    next_cursor: null,
     counts: {
       message_count: 998,
       source_token_count: 18_400,
       summary_node_count: LOOM_CHAIN_SUMMARY_NODES.length,
       summary_token_count: 1_020,
-      token_estimate_total: 21_460,
     },
     messages,
-    summary_nodes: LOOM_CHAIN_SUMMARY_NODES.map((node) => ({ ...node, session_id: sessionId })),
+    summary_nodes: LOOM_CHAIN_SUMMARY_NODES.map((node) => ({ recency: null, snippet: null, ...node, session_id: sessionId })),
   };
 }
 
@@ -4365,11 +4393,6 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   // the panel as `unsupported_schema` and be audited as a broken surface.
   ['/api/plugins/graph/path', FIXTURES['/api/plugins/graph/path']],
   ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
-  // Dynamic: `/session/{session_id}`. The Loom thread chain. One transcript
-  // answers for every id, which is what a fixture can honestly be.
-  ['/api/plugins/hermes-lcm/session/', unavailableEnvelope(
-    'lcm_temporal_retrieval_not_mounted',
-  )],
   ['/api/plugins/holographic', envelope(memoryPayload())],
   ['/api/plugins/graph', envelope(graphOverviewPayload())],
   ['/api/plugins/savings', envelope(savingsPayload())],
@@ -5394,6 +5417,10 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   const contextMatch = /^\/api\/projects\/([^/]+)$/.exec(pathname);
   if (contextMatch) return projectContextPayload(contextMatch[1]!);
 
+  // `/session/{session_id}`, the Loom thread chain: one transcript answers
+  // for every id, which is what a fixture can honestly be.
+  const lcmSession = /^\/api\/plugins\/hermes-lcm\/session\/([^/]+)$/.exec(pathname);
+  if (lcmSession) return envelope(loomChainPayload(decodeURIComponent(lcmSession[1]!)));
   if (pathname === '/api/plugins/graph/subgraph') {
     const nodeId = new URLSearchParams(search).get('node_id');
     return envelope(subgraphPayload(nodeId));

@@ -319,6 +319,16 @@ describe('projectJourney lanes', () => {
       editedFileCount: 2,
       agent: 'lead',
     });
+    // The rollup carries no edit time, so the edits are a typed absence, not marks.
+    expect(projection.gaps.filter((gap) => gap.kind === 'edit_time_unrecorded')).toEqual([
+      {
+        id: `gap:edit_time_unrecorded:${ROOT}`,
+        laneId: ROOT,
+        kind: 'edit_time_unrecorded',
+        grade: 'unavailable',
+        detail: '2 edited files recorded · no edit time in this read',
+      },
+    ]);
   });
 
   it('projects identically regardless of wire order', () => {
