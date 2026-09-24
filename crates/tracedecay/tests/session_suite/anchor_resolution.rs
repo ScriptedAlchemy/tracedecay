@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_domain::{
     AnchorResolutionStateV2, ComponentVersion, DurableObservationV1, FactLineageEventV1,
@@ -34,6 +33,8 @@ use tracedecay_store::{
     build_observation_retrieval_anchor,
 };
 
+use crate::claude_records;
+
 const GENERATION: u64 = 7;
 const PROJECTION_SHARD: &str = "observation.projection";
 
@@ -46,10 +47,12 @@ fn scope() -> ObservationScopeV1 {
 }
 
 fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableObservationV1 {
-    let payload = json!({
-        "kind": "assistant_message",
-        "body": body,
-    });
+    let payload = claude_records::canonical_envelope(
+        &claude_records::assistant_record(body),
+        source().session_id().as_str(),
+        start,
+        end,
+    );
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(

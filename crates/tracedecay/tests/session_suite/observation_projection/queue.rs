@@ -243,19 +243,17 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     );
     let hits = search_session_messages(&tmp, "atomic searchable", 10).await;
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].message.message_id, "message-atomic");
+    // The row `uuid` names the output; the API `message.id` does not.
+    assert_eq!(hits[0].message.message_id, "record-message-atomic");
     assert_eq!(hits[0].message.role, "assistant");
     assert_eq!(hits[0].message.timestamp, Some(1_750_000_123));
     assert_eq!(hits[0].message.ordinal, 0);
+    assert_eq!(hits[0].message.text, "atomic searchable canary");
     assert_eq!(hits[0].message.kind.as_deref(), Some("message"));
     assert_eq!(hits[0].message.model.as_deref(), Some("claude-sonnet-4"));
     assert_eq!(hits[0].message.tool_names.as_deref(), Some("Read"));
-    assert_eq!(
-        hits[0].message.source_path.as_deref(),
-        Some("claude:session-atomic")
-    );
+    assert_eq!(hits[0].message.source_path, None);
     assert_eq!(hits[0].message.source_offset, Some(0));
-    assert!(!hits[0].message.text.contains("private-reasoning-canary"));
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
     let provenance = projection_provenance_rows(&tmp).await;
     assert_eq!(provenance.len(), 1);
@@ -269,7 +267,7 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     );
     assert_eq!(provenance[0].3, "receipt.atomic-projection");
     assert_eq!(provenance[0].4, "claude");
-    assert_eq!(provenance[0].5, "message-atomic");
+    assert_eq!(provenance[0].5, "record-message-atomic");
     assert!(PayloadDigestV1::new(provenance[0].6.clone()).is_ok());
 
     let raw_conn = rusqlite::Connection::open(&database_path).unwrap();

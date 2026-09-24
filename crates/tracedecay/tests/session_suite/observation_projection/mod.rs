@@ -23,6 +23,7 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
+use crate::claude_records;
 use crate::common::isolated_lcm_db_path;
 
 const GENERATION: u64 = 11;
@@ -70,14 +71,19 @@ fn receipt(receipt_id: &str, payload: &Value) -> SanitizationReceiptV1 {
     .unwrap()
 }
 
+/// A Claude transcript record read at `start..end`, persisted as the canonical
+/// envelope the host builds from it. Identity stays positional (file bytes in
+/// one source generation) so re-observing the same record in a later
+/// generation is a distinct observation whose output the projector must
+/// reconcile, which is what these suites exercise.
 fn observation(
     session_id: &str,
     start: u64,
     end: u64,
     receipt_id: &str,
-    payload: Value,
+    native: Value,
 ) -> DurableObservationV1 {
-    observation_in_generation(session_id, GENERATION, start, end, receipt_id, payload)
+    observation_in_generation(session_id, GENERATION, start, end, receipt_id, native)
 }
 
 fn observation_in_generation(
@@ -86,8 +92,9 @@ fn observation_in_generation(
     start: u64,
     end: u64,
     receipt_id: &str,
-    payload: Value,
+    native: Value,
 ) -> DurableObservationV1 {
+    let payload = claude_records::canonical_envelope(&native, session_id, start, end);
     DurableObservationV1::new(
         ObservationIdentityMaterialV1::new(
             source(session_id),
@@ -308,18 +315,14 @@ async fn rebuild_projection_to_completion(
     panic!("projection rebuild did not complete within the bounded test budget");
 }
 
+/// One assistant transcript row. Claude projects a row under its `uuid`, so
+/// `message_id` is the projected message id; `message.id` is the API message
+/// id shared by every row of one response and does not name the output.
 fn conversational_payload(message_id: &str, text: &str) -> Value {
-    json!({
-        "type": "assistant",
-        "uuid": format!("record-{message_id}"),
-        "timestamp": "2025-06-15T15:06:40Z",
-        "message": {
-            "id": message_id,
-            "role": "assistant",
-            "content": [{"type": "text", "text": text}],
-            "model": "claude-sonnet-4"
-        }
-    })
+    let mut record = claude_records::assistant_record(text);
+    record["uuid"] = Value::from(message_id);
+    record["message"]["id"] = Value::from(format!("api-{message_id}"));
+    record
 }
 
 async fn table_count(tmp: &TempDir, table: &str) -> i64 {

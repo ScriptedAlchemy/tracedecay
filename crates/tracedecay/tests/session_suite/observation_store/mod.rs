@@ -33,6 +33,8 @@ use tracedecay_store::{
     build_observation_retrieval_anchor,
 };
 
+use crate::claude_records;
+
 const GENERATION: u64 = 7;
 
 async fn profile_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
@@ -86,10 +88,12 @@ fn observation_in_scope(
     body: &str,
     scope: ObservationScopeV1,
 ) -> DurableObservationV1 {
-    let payload = json!({
-        "kind": "assistant_message",
-        "body": body,
-    });
+    let payload = claude_records::canonical_envelope(
+        &claude_records::assistant_record(body),
+        source().session_id().as_str(),
+        start,
+        end,
+    );
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
@@ -855,11 +859,12 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     assert_eq!(deltas.get("observation_repository_provenance"), Some(&1));
 }
 
-/// The `idempotency_key` observation shape never shipped in a published
-/// release, so admission must refuse it with the typed `ResetRequired` state
-/// naming the observation authority, never migrate it in place.
+/// An `observations` table that drifted from the authority schema contract
+/// (here the pre-release `idempotency_key` shape) refuses admission with the
+/// typed `ResetRequired` state naming the drifted table, never migrates in
+/// place, and leaves the refused rows for recovery.
 #[tokio::test]
-async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_required() {
+async fn drifted_observation_shape_refuses_admission_with_reset_required() {
     let tmp = TempDir::new().unwrap();
     let bootstrap = profile_runtime(&tmp).await;
     let db_path = bootstrap
@@ -899,10 +904,10 @@ async fn pre_release_idempotency_observation_shape_refuses_admission_with_reset_
     let (authority, reason) = error
         .reset_required_context()
         .unwrap_or_else(|| panic!("expected the typed ResetRequired state, got: {error}"));
-    assert_eq!(authority, "observations");
+    assert_eq!(authority, "authority schema");
     assert!(
-        reason.contains("no sanctioned migration"),
-        "the refusal must explain that the shape never shipped: {reason}"
+        reason.contains("table 'observations' has an incompatible number of columns"),
+        "the refusal must name the drifted table: {reason}"
     );
 
     let verify_conn = rusqlite::Connection::open(&db_path).unwrap();

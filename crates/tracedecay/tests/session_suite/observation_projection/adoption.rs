@@ -58,12 +58,6 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
         rusqlite::params!["claude", "session-v1"],
     )
     .unwrap();
-    let metadata_json = serde_json::to_string(&json!({
-        "source": "claude_transcript",
-        "raw_type": "assistant",
-        "source_generation": GENERATION,
-    }))
-    .unwrap();
     insert_stored_message(
         &conn,
         SessionMessageRecord {
@@ -73,13 +67,13 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
             role: "assistant".to_owned(),
             timestamp: Some(1_750_000_000),
             ordinal: 0,
-            text: serde_json::to_string(&json!([{"type": "text", "text": "v1 parity canary"}])).unwrap(),
+            text: "v1 parity canary".to_owned(),
             kind: Some("message".to_owned()),
             model: Some("claude-sonnet-4".to_owned()),
             tool_names: None,
-            source_path: Some("claude:session-v1".to_owned()),
+            source_path: None,
             source_offset: Some(0),
-            metadata_json: Some(metadata_json),
+            metadata_json: None,
         },
     );
     drop(conn);
@@ -166,12 +160,6 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
         (),
     )
     .unwrap();
-    let metadata_json = serde_json::to_string(&json!({
-        "source": "claude_transcript",
-        "raw_type": "assistant",
-        "source_generation": GENERATION,
-    }))
-    .unwrap();
     insert_stored_message(
         &conn,
         SessionMessageRecord {
@@ -181,14 +169,13 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
             role: "assistant".to_owned(),
             timestamp: Some(1_750_000_000),
             ordinal: 0,
-            text: serde_json::to_string(&json!([{"type": "text", "text": "adopted original canary"}]))
-                .unwrap(),
+            text: "adopted original canary".to_owned(),
             kind: Some("message".to_owned()),
             model: Some("claude-sonnet-4".to_owned()),
             tool_names: None,
-            source_path: Some("claude:session-adopted-rollover".to_owned()),
+            source_path: None,
             source_offset: Some(0),
-            metadata_json: Some(metadata_json),
+            metadata_json: None,
         },
     );
     drop(conn);

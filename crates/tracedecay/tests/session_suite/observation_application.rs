@@ -1,5 +1,6 @@
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
+use tracedecay_capture::claude::normalize as claude_normalize;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
@@ -26,6 +27,8 @@ use tracedecay_store::{
     ObservationStore, ProjectionPersistOutcome,
 };
 
+use crate::claude_records;
+
 const GENERATION: u64 = 17;
 const OBSERVATION_TABLES: &[&str] = &[
     "sanitization_receipts",
@@ -44,6 +47,9 @@ fn source(session_id: &str) -> ObservationSourceIdentityV1 {
     ObservationSourceIdentityV1::new(SessionId::new(session_id).unwrap()).unwrap()
 }
 
+/// The capture request the Claude host builds for one transcript record: the
+/// frame is normalized into its canonical envelope while it is parsed, and the
+/// identity carries the host's stable record id.
 fn request(
     session_id: &str,
     record: Value,
@@ -51,19 +57,24 @@ fn request(
 ) -> CaptureClaudeObservationRequest {
     let encoded_frame = serde_json::to_vec(&record).unwrap();
     let frame_end = u64::try_from(encoded_frame.len()).unwrap();
-    let parsed_record = parse_observation_record_v1(
+    let range = ObservationSourceRangeV1::new(0, frame_end).unwrap();
+    let record_id = claude_records::record_id(&record, session_id, 0);
+    let parsed_record = parse_normalized_observation_record_v1(
         &encoded_frame,
-        ObservationSourceRangeV1::new(0, frame_end).unwrap(),
+        range,
         ObservationOrderingDomainV1::FileBytes,
+        |native| claude_normalize(&native, session_id, record_id.clone(), range),
     )
     .unwrap();
     CaptureClaudeObservationRequest::new(
         parsed_record,
-        ObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
             source(session_id),
             ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(GENERATION).unwrap(),
-            ObservationSourceRangeV1::new(0, frame_end).unwrap(),
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            record_id,
         )
         .unwrap(),
         expected_cursor,
