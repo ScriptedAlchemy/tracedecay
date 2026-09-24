@@ -48,7 +48,7 @@ const CURSOR_CONFIGS: &[(&str, &[u8])] = &[(
 )];
 const CODEX_CONFIGS: &[(&str, &[u8])] = &[(
     ".codex/config.toml",
-    b"# operator comment\nmodel = \"o4-mini\" # keep inline\napproval_policy = \"on-failure\"\n\n[mcp_servers.foreign]\ncommand = \"foreign-bin\"\nargs = [\"--stdio\"]\n",
+    b"# operator comment\nmodel = \"o4-mini\" # keep inline\napproval_policy   =   'on-failure'\nsandbox = { mode = \"workspace-write\", network = false }\n\n[mcp_servers.foreign]\nargs = [ \"--stdio\" ]\ncommand = \"foreign-bin\"\n",
 )];
 const DEVIN_CONFIGS: &[(&str, &[u8])] = &[(
     ".config/devin/mcp_config.json",
@@ -1123,6 +1123,15 @@ fn codex_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
         cli.run(&["install", "--agent", case.id]),
     );
     assert_receipt_digests(&cli, &latest_receipt(&cli, case.host));
+    // The stock CLI appends its activation record and TraceDecay appends only
+    // its hook-trust tables: every operator byte stays in place.
+    let config_path = home.join(".codex/config.toml");
+    let installed_config = fs::read(&config_path).unwrap();
+    assert!(
+        installed_config.starts_with(&originals[&PathBuf::from(".codex/config.toml")]),
+        "install rewrote operator bytes in config.toml:\n{}",
+        String::from_utf8_lossy(&installed_config)
+    );
     let source_manifest = home.join(".codex/plugins/tracedecay/.codex-plugin/plugin.json");
     let cache_manifest = home
         .join(".codex/plugins/cache/personal/tracedecay")
@@ -1146,6 +1155,11 @@ fn codex_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
     assert_eq!(
         fs::read(&cache_manifest).unwrap(),
         fs::read(&source_manifest).unwrap()
+    );
+    assert_eq!(
+        fs::read(&config_path).unwrap(),
+        installed_config,
+        "re-driving the converged Codex activation rewrote config.toml"
     );
 }
 

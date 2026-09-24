@@ -183,16 +183,42 @@ pub(crate) fn update_json_config_transactionally<T>(
 }
 
 /// TOML sibling of [`update_json_config_transactionally`]. The transform
-/// returns the serialized replacement text itself because TOML publication
-/// may need post-serialization shaping (Codex's explicit `[hooks.state]`
-/// parent table).
+/// edits the document parsed from the exact bytes the write lock observed;
+/// every table, key, comment and blank line it leaves alone publishes
+/// byte-for-byte, so removing what an install added restores the original
+/// file. A document edited down to nothing removes the file.
 pub(crate) fn update_toml_config_transactionally<T>(
     path: &Path,
-    update: impl FnOnce(toml::Value) -> Result<(T, TextFileMutation)>,
+    update: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<T>,
 ) -> Result<T> {
     update_text_file_transactionally(path, |existing| {
-        let value = parse_toml_config(path, existing)?;
-        update(value)
+        let mut document =
+            existing
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| TraceDecayError::Config {
+                    message: format!(
+                        "failed to parse {} as TOML: {e}. Refusing to overwrite, fix the file or remove it manually.",
+                        path.display()
+                    ),
+                })?;
+        let output = update(&mut document)?;
+        let mut rendered = document.to_string();
+        // Rendering terminates the last line; keep a file that had no final
+        // newline without one.
+        if !existing.is_empty() && !existing.ends_with('\n') && rendered.ends_with('\n') {
+            rendered.pop();
+            if rendered.ends_with('\r') {
+                rendered.pop();
+            }
+        }
+        let mutation = if rendered == existing {
+            TextFileMutation::Unchanged
+        } else if rendered.trim().is_empty() {
+            TextFileMutation::Remove
+        } else {
+            TextFileMutation::Write(rendered)
+        };
+        Ok((output, mutation))
     })
 }
 

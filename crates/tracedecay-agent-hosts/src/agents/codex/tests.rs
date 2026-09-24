@@ -988,10 +988,9 @@ trusted_hash = "sha256:foreign"
     CodexIntegration
         .deactivate_deployed_host_registration(&install_ctx(home.path()))
         .unwrap();
-    let cleaned = load_toml_file(&config_path).unwrap();
-    assert_eq!(cleaned["model"].as_str().unwrap(), "gpt-5");
-    assert!(
-        cleaned.get("hooks").is_none(),
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "model = \"gpt-5\"\n",
         "an emptied [hooks] tree is dropped rather than left hollow"
     );
 
@@ -1030,4 +1029,66 @@ fn deactivation_fails_on_corrupt_plugins_table() {
         std::fs::read_to_string(&config_path).unwrap(),
         "plugins = \"corrupt\"\n"
     );
+}
+
+/// Hook trust edits only TraceDecay's `[hooks.state]` records: the operator's
+/// comments, spacing, key order and inline tables survive install, a repeat
+/// sync is byte-stable, and deactivation restores the original bytes.
+#[test]
+fn hook_trust_install_and_uninstall_restore_operator_config_bytes() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let original = "# operator header\n\
+zeta   =   \"last-alphabetically\"   # inline note\n\
+model = 'o4-mini'\n\
+sandbox = { mode = \"workspace-write\",   network = false }\n\
+\n\
+[hooks.state]\n\
+[hooks.state.\"other@plugin:hooks/hooks.json:session_start:0:0\"]\n\
+trusted_hash = \"sha256:foreign\"\n\
+\n\
+# servers below\n\
+[mcp_servers.foreign]\n\
+args = [ \"--stdio\" ]\n\
+command = \"foreign-bin\"";
+    std::fs::write(&config_path, original).unwrap();
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    let installed = std::fs::read_to_string(&config_path).unwrap();
+    let config = load_toml_file(&config_path).unwrap();
+    assert_eq!(
+        codex_plugin_hook_trust_state(&config, &managed_entries(TEST_BIN)),
+        CodexHookTrustState::Trusted
+    );
+    for line in original.lines() {
+        assert!(
+            installed.lines().any(|installed| installed == line),
+            "install rewrote operator line {line:?}:\n{installed}"
+        );
+    }
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), installed);
+
+    CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+}
+
+/// A config TraceDecay created only to hold hook trust is removed again.
+#[test]
+fn hook_trust_uninstall_removes_a_config_it_created() {
+    let home = tempfile::tempdir().unwrap();
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let config_path = codex_config_path(home.path());
+
+    sync_codex_hook_trust(home.path(), TEST_BIN).unwrap();
+    assert!(config_path.exists());
+    CodexIntegration
+        .deactivate_deployed_host_registration(&install_ctx(home.path()))
+        .unwrap();
+    assert!(!config_path.exists());
 }

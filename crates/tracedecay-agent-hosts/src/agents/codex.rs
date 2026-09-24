@@ -39,9 +39,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, InstallScope,
-    JsonConfigDialect, JsonConfigMutation, TextFileMutation, load_json_file, load_json_file_strict,
-    load_toml_file, safe_write_text_file, update_json_config_transactionally,
-    update_toml_config_transactionally,
+    JsonConfigDialect, JsonConfigMutation, load_json_file, load_json_file_strict, load_toml_file,
+    safe_write_text_file, update_json_config_transactionally, update_toml_config_transactionally,
 };
 
 /// The prefix every Codex activation key for this plugin starts with.
@@ -1186,101 +1185,98 @@ struct CodexHookTrustSyncOutcome {
 fn sync_codex_hook_trust(home: &Path, tracedecay_bin: &str) -> Result<CodexHookTrustSyncOutcome> {
     let (marketplace_name, entries) = codex_installed_hook_trust_entries(home)?;
     let config_path = codex_config_path(home);
-    let outcome = update_toml_config_transactionally(&config_path, |mut config| {
-        let table = config
-            .as_table_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("{} is not a TOML table", config_path.display()),
-            })?;
-        let hooks = table
-            .entry("hooks")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        let hooks = hooks
-            .as_table_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("[hooks] in {} is not a table", config_path.display()),
-            })?;
-        let state = hooks
-            .entry("state")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        let state = state
-            .as_table_mut()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!("[hooks.state] in {} is not a table", config_path.display()),
-            })?;
+    let outcome = update_toml_config_transactionally(&config_path, |config| {
+        let state = codex_hook_trust_state(config, &config_path)?;
 
-        // Drop trust for the active marketplace before adding the exact
-        // installed payload. Foreign plugin and repo-local marketplace records
-        // remain untouched.
+        // Drop trust for the active marketplace that the installed payload no
+        // longer carries, and rewrite only records whose hash moved. Foreign
+        // plugin and repo-local marketplace records remain untouched.
         let current_prefix = codex_plugin_hook_trust_prefix(&marketplace_name);
-        state.retain(|key, _| !key.starts_with(&current_prefix));
-
-        let mut trusted = 0usize;
-        let mut skipped = Vec::new();
-        for entry in &entries {
-            if !codex_hook_command_invokes_tracedecay(&entry.command, tracedecay_bin) {
-                skipped.push(entry.event_label.clone());
+        let (trusted_entries, skipped_entries): (Vec<_>, Vec<_>) =
+            entries.iter().partition(|entry| {
+                codex_hook_command_invokes_tracedecay(&entry.command, tracedecay_bin)
+            });
+        state.retain(|key, _| {
+            !key.starts_with(&current_prefix)
+                || trusted_entries.iter().any(|entry| entry.trust_key == key)
+        });
+        for entry in &trusted_entries {
+            let recorded = state
+                .get(&entry.trust_key)
+                .and_then(|record| record.get("trusted_hash"))
+                .and_then(toml_edit::Item::as_str);
+            if recorded == Some(entry.hash.as_str()) {
                 continue;
             }
-            let mut record = toml::value::Table::new();
-            record.insert(
-                "trusted_hash".to_string(),
-                toml::Value::String(entry.hash.clone()),
-            );
-            state.insert(entry.trust_key.clone(), toml::Value::Table(record));
-            trusted += 1;
+            let mut record = toml_edit::Table::new();
+            record.insert("trusted_hash", toml_edit::value(entry.hash.clone()));
+            state.insert(&entry.trust_key, toml_edit::Item::Table(record));
         }
-
-        let outcome = CodexHookTrustSyncOutcome { trusted, skipped };
-        // A truthful all-skip (or empty hook payload) leaves no trust records.
-        // That is not a serializer failure, announce treats it as Ok + guidance.
-        // Drop hollow `[hooks.state]`/`[hooks]` tables the same way prune does.
-        if state.is_empty() {
-            if let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut) {
-                hooks.remove("state");
-                if hooks.is_empty() {
-                    table.remove("hooks");
-                }
-            }
-            let contents = render_codex_config(&config_path, &config)?;
-            return Ok((outcome, TextFileMutation::Write(contents)));
-        }
-
-        let contents = render_codex_config(&config_path, &config)?;
-        // Child trust records exist: Codex requires an explicit `[hooks.state]`
-        // parent. Missing child headers here means the serializer dropped
-        // entries we just inserted, a real contract breach.
-        let Some(updated) = with_explicit_hooks_state_parent(&contents) else {
-            return Err(TraceDecayError::Config {
-                message: "Codex hook trust state serialized without hook entries".to_string(),
-            });
+        let outcome = CodexHookTrustSyncOutcome {
+            trusted: trusted_entries.len(),
+            skipped: skipped_entries
+                .iter()
+                .map(|entry| entry.event_label.clone())
+                .collect(),
         };
-        Ok((outcome, TextFileMutation::Write(updated)))
+        // A truthful all-skip (or empty hook payload) leaves no trust records,
+        // and no hollow `[hooks.state]`/`[hooks]` tables, the same as prune.
+        drop_hollow_codex_hook_tables(config);
+        Ok(outcome)
     })?;
     eprintln!("\x1b[32m✔\x1b[0m Wrote {}", config_path.display());
     Ok(outcome)
 }
 
-fn render_codex_config(config_path: &Path, config: &toml::Value) -> Result<String> {
-    toml::to_string_pretty(config).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to serialize {}: {error}", config_path.display()),
-    })
+/// The `[hooks.state]` table, created when absent. Codex's hook loader
+/// requires that parent header explicitly on disk, while `[hooks]` itself
+/// stays implicit unless the operator wrote it.
+fn codex_hook_trust_state<'a>(
+    config: &'a mut toml_edit::DocumentMut,
+    config_path: &Path,
+) -> Result<&'a mut toml_edit::Table> {
+    let not_a_table = |name: &str| TraceDecayError::Config {
+        message: format!("[{name}] in {} is not a table", config_path.display()),
+    };
+    let hooks = config
+        .as_table_mut()
+        .entry("hooks")
+        .or_insert_with(|| {
+            let mut hooks = toml_edit::Table::new();
+            hooks.set_implicit(true);
+            toml_edit::Item::Table(hooks)
+        })
+        .as_table_mut()
+        .ok_or_else(|| not_a_table("hooks"))?;
+    let state = hooks
+        .entry("state")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| not_a_table("hooks.state"))?;
+    state.set_implicit(false);
+    Ok(state)
 }
 
-/// Codex's hook loader requires the parent table to be explicit on disk. The
-/// `toml` serializer otherwise emits only `[hooks.state."..."]` child tables,
-/// which parses equivalently but still triggers Codex's hook-review prompt.
-/// Returns `None` when no hook trust child tables are present, callers that
-/// just inserted records treat that as a serializer contract breach; callers
-/// that intentionally cleared state (prune / all-skip) fall back to the
-/// unshaped document.
-fn with_explicit_hooks_state_parent(contents: &str) -> Option<String> {
-    let child_offset = contents.find("[hooks.state.\"")?;
-    let mut updated = String::with_capacity(contents.len() + "[hooks.state]\n\n".len());
-    updated.push_str(&contents[..child_offset]);
-    updated.push_str("[hooks.state]\n\n");
-    updated.push_str(&contents[child_offset..]);
-    Some(updated)
+/// Remove an emptied `[hooks.state]`, then a `[hooks]` left holding nothing
+/// that the operator never wrote a header for.
+fn drop_hollow_codex_hook_tables(config: &mut toml_edit::DocumentMut) {
+    let root = config.as_table_mut();
+    let Some(hooks) = root
+        .get_mut("hooks")
+        .and_then(toml_edit::Item::as_table_mut)
+    else {
+        return;
+    };
+    if hooks
+        .get("state")
+        .and_then(toml_edit::Item::as_table)
+        .is_some_and(toml_edit::Table::is_empty)
+    {
+        hooks.remove("state");
+    }
+    if hooks.is_empty() && hooks.is_implicit() {
+        root.remove("hooks");
+    }
 }
 
 /// Remove every TraceDecay-managed `[hooks.state]` trust record from
@@ -1296,39 +1292,21 @@ fn prune_codex_hook_trust_records(home: &Path) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
-    let pruned = update_toml_config_transactionally(&config_path, |mut config| {
-        let Some(table) = config.as_table_mut() else {
-            return Err(TraceDecayError::Config {
-                message: format!("{} is not a TOML table", config_path.display()),
-            });
-        };
-        let Some(state) = table
+    let pruned = update_toml_config_transactionally(&config_path, |config| {
+        let Some(state) = config
             .get_mut("hooks")
-            .and_then(toml::Value::as_table_mut)
             .and_then(|hooks| hooks.get_mut("state"))
-            .and_then(toml::Value::as_table_mut)
+            .and_then(toml_edit::Item::as_table_mut)
         else {
-            return Ok((false, TextFileMutation::Unchanged));
+            return Ok(false);
         };
         let before = state.len();
         state.retain(|key, _| !key.starts_with(CODEX_PLUGIN_ACTIVATION_KEY_PREFIX));
         if state.len() == before {
-            return Ok((false, TextFileMutation::Unchanged));
+            return Ok(false);
         }
-        let state_empty = state.is_empty();
-        if state_empty
-            && let Some(hooks) = table.get_mut("hooks").and_then(toml::Value::as_table_mut)
-        {
-            hooks.remove("state");
-            if hooks.is_empty() {
-                table.remove("hooks");
-            }
-        }
-        let contents = render_codex_config(&config_path, &config)?;
-        // Foreign trust records that remain still need the explicit parent
-        // table Codex's hook loader requires.
-        let updated = with_explicit_hooks_state_parent(&contents).unwrap_or(contents);
-        Ok((true, TextFileMutation::Write(updated)))
+        drop_hollow_codex_hook_tables(config);
+        Ok(true)
     })?;
     if pruned {
         eprintln!(
