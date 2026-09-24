@@ -1,6 +1,6 @@
 //! Canonical SQLite projection for owner-bound external source state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{SourceBindingIdentityV1, SourceBindingOwnerV1, SourceDeletionSemanticsV1};
@@ -94,6 +94,10 @@ CREATE TABLE IF NOT EXISTS external_source_retained_receipts_v1 (
     receipt_json TEXT NOT NULL,
     PRIMARY KEY (binding_id, receipt_digest)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_external_source_retained_receipts_predecessor_v1
+    ON external_source_retained_receipts_v1(binding_id, predecessor_frontier_digest);
+CREATE INDEX IF NOT EXISTS idx_external_source_retained_receipts_successor_v1
+    ON external_source_retained_receipts_v1(binding_id, successor_frontier_digest);
 CREATE TABLE IF NOT EXISTS external_source_mutations_v1 (
     binding_id TEXT NOT NULL,
     mutation_digest TEXT NOT NULL,
@@ -138,6 +142,8 @@ CREATE TABLE IF NOT EXISTS external_source_projection_publications_v2 (
     UNIQUE (binding_id, source_receipt_digest),
     UNIQUE (binding_id, successor_frontier_digest)
 );
+CREATE INDEX IF NOT EXISTS idx_external_source_projection_publications_predecessor_v1
+    ON external_source_projection_publications_v2(binding_id, predecessor_frontier_digest);
 CREATE TABLE IF NOT EXISTS external_source_projection_effects_v2 (
     binding_id TEXT NOT NULL,
     projection_digest TEXT NOT NULL,
@@ -844,64 +850,110 @@ fn persist_source_commit(
             return Err(invalid("external source pending projection fork collision"));
         }
     }
+    let displaced_receipt: Option<String> = savepoint
+        .query_row(
+            "SELECT latest_source_receipt_digest FROM external_source_states_v1
+             WHERE binding_id = ?1",
+            [binding.binding_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
     upsert_current_state(savepoint, state)?;
-    retire_superseded_history(savepoint, binding.binding_id.as_str())
+    retire_superseded_history(
+        savepoint,
+        binding.binding_id.as_str(),
+        displaced_receipt.as_deref().as_slice(),
+        &[],
+    )
 }
 
-/// Deletes every document the binding no longer needs to hydrate current
-/// state or a pending projection. Replay keeps working from the insert-only
-/// receipt summaries; the deleted receipts, frontiers, publications, effects,
-/// and projection lineage are named by nothing that remains.
+/// Deletes the documents one commit stopped needing. Replay keeps working
+/// from the insert-only receipt summaries; the deleted receipts, frontiers,
+/// publications, effects, and projection lineage are named by nothing that
+/// remains.
+///
+/// Only the commit's own candidates are examined: `receipts` are the source
+/// receipts it displaced as latest or whose pending projection it consumed,
+/// `projections` the projection it displaced. A receipt is retired once it is
+/// neither the latest nor awaiting projection; a frontier once no remaining
+/// retained receipt or publication names it. Every check is an indexed point
+/// lookup, so a commit's cost does not grow with the pending backlog: the
+/// receipts a backlog still needs were examined when they became eligible and
+/// need no rescan now.
 #[hotpath::measure(label = "rusqlite.external_source.retire_superseded_history")]
-fn retire_superseded_history(savepoint: &Savepoint<'_>, binding_id: &str) -> rusqlite::Result<()> {
-    savepoint.execute(
-        "DELETE FROM external_source_retained_receipts_v1
-         WHERE binding_id = ?1
-           AND receipt_digest <> (
-               SELECT latest_source_receipt_digest FROM external_source_states_v1
-               WHERE binding_id = ?1
-           )
-           AND receipt_digest NOT IN (
-               SELECT source_receipt_digest FROM external_source_pending_projections_v1
-               WHERE binding_id = ?1
-           )",
-        params![binding_id],
-    )?;
-    for table in [
-        "external_source_projection_effects_v2",
-        "external_source_projection_lineage_v1",
-        "external_source_projection_publications_v2",
-    ] {
+fn retire_superseded_history(
+    savepoint: &Savepoint<'_>,
+    binding_id: &str,
+    receipts: &[&str],
+    projections: &[&str],
+) -> rusqlite::Result<()> {
+    let mut frontiers = BTreeSet::new();
+    let mut collect_frontiers = |rows: rusqlite::Rows<'_>| -> rusqlite::Result<()> {
+        for row in rows.mapped(|row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+            let (predecessor, successor) = row?;
+            frontiers.insert(predecessor);
+            frontiers.insert(successor);
+        }
+        Ok(())
+    };
+    for receipt in receipts {
+        let mut retire = savepoint.prepare_cached(
+            "DELETE FROM external_source_retained_receipts_v1
+             WHERE binding_id = ?1
+               AND receipt_digest = ?2
+               AND receipt_digest <> (
+                   SELECT latest_source_receipt_digest FROM external_source_states_v1
+                   WHERE binding_id = ?1
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM external_source_pending_projections_v1
+                   WHERE binding_id = ?1 AND source_receipt_digest = ?2
+               )
+             RETURNING predecessor_frontier_digest, successor_frontier_digest",
+        )?;
+        collect_frontiers(retire.query(params![binding_id, receipt])?)?;
+    }
+    for projection in projections {
+        for table in [
+            "external_source_projection_effects_v2",
+            "external_source_projection_lineage_v1",
+        ] {
+            savepoint.execute(
+                &format!("DELETE FROM {table} WHERE binding_id = ?1 AND projection_digest = ?2"),
+                params![binding_id, projection],
+            )?;
+        }
+        let mut retire = savepoint.prepare_cached(
+            "DELETE FROM external_source_projection_publications_v2
+             WHERE binding_id = ?1 AND projection_digest = ?2
+             RETURNING predecessor_frontier_digest, successor_frontier_digest",
+        )?;
+        collect_frontiers(retire.query(params![binding_id, projection])?)?;
+    }
+    for frontier in &frontiers {
         savepoint.execute(
-            &format!(
-                "DELETE FROM {table}
-                 WHERE binding_id = ?1
-                   AND projection_digest IS NOT (
-                       SELECT latest_projection_receipt_digest FROM external_source_states_v1
-                       WHERE binding_id = ?1
-                   )"
-            ),
-            params![binding_id],
+            "DELETE FROM external_source_frontiers_v1
+             WHERE binding_id = ?1
+               AND frontier_digest = ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM external_source_retained_receipts_v1
+                   WHERE binding_id = ?1 AND predecessor_frontier_digest = ?2
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM external_source_retained_receipts_v1
+                   WHERE binding_id = ?1 AND successor_frontier_digest = ?2
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM external_source_projection_publications_v2
+                   WHERE binding_id = ?1 AND predecessor_frontier_digest = ?2
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM external_source_projection_publications_v2
+                   WHERE binding_id = ?1 AND successor_frontier_digest = ?2
+               )",
+            params![binding_id, frontier],
         )?;
     }
-    savepoint.execute(
-        "DELETE FROM external_source_frontiers_v1
-         WHERE binding_id = ?1
-           AND frontier_digest NOT IN (
-               SELECT predecessor_frontier_digest FROM external_source_retained_receipts_v1
-               WHERE binding_id = ?1
-               UNION ALL
-               SELECT successor_frontier_digest FROM external_source_retained_receipts_v1
-               WHERE binding_id = ?1
-               UNION ALL
-               SELECT predecessor_frontier_digest FROM external_source_projection_publications_v2
-               WHERE binding_id = ?1
-               UNION ALL
-               SELECT successor_frontier_digest FROM external_source_projection_publications_v2
-               WHERE binding_id = ?1
-           )",
-        params![binding_id],
-    )?;
     Ok(())
 }
 
@@ -1033,6 +1085,15 @@ fn persist_projection(
             "external source pending projection compare-and-set failed",
         ));
     }
+    let displaced_projection: Option<String> = savepoint
+        .query_row(
+            "SELECT latest_projection_receipt_digest FROM external_source_states_v1
+             WHERE binding_id = ?1",
+            [binding.binding_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
     savepoint.execute(
         "UPDATE external_source_states_v1
          SET projection_frontier_digest = ?1,
@@ -1044,7 +1105,14 @@ fn persist_projection(
             binding.binding_id.as_str(),
         ],
     )?;
-    retire_superseded_history(savepoint, binding.binding_id.as_str())
+    let displaced_projection =
+        displaced_projection.filter(|displaced| displaced != projection.receipt_digest().as_str());
+    retire_superseded_history(
+        savepoint,
+        binding.binding_id.as_str(),
+        &[source_receipt.receipt_digest().as_str()],
+        displaced_projection.as_deref().as_slice(),
+    )
 }
 
 #[hotpath::measure(label = "rusqlite.external_source.persist_authority")]
