@@ -770,10 +770,13 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
         let name = operation.as_str();
         for (surface, present) in [
             (BindingSurface::Http, catalog_http_operations.contains(name)),
-            (BindingSurface::Cli, cli_tools.contains(name)),
+            (
+                BindingSurface::Cli,
+                cli_tools.contains(operation.name_for_surface(BindingSurface::Cli)),
+            ),
             (
                 BindingSurface::Mcp,
-                mcp_tools.contains(&format!("tracedecay_{name}")),
+                mcp_tools.contains(operation.mcp_tool_name()),
             ),
         ] {
             graded += 1;
