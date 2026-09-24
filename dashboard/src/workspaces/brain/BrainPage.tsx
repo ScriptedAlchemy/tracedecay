@@ -1,11 +1,11 @@
-import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Legend } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { freshnessTier, relativeAge } from '../../ui/time.ts';
-import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import type { ProjectsPayloadV1 } from '../../contracts/generated.ts';
@@ -22,7 +22,7 @@ import {
 import { ScopedBrain } from './ScopedBrain.tsx';
 import { ProjectInspector } from './ProjectInspector.tsx';
 import { BrainField, FieldLegend } from './BrainField.tsx';
-import { buildRegistryScene, fieldVariantFromLocation, type FieldVariant } from './fieldVariant.ts';
+import { buildRegistryScene } from './registryScene.ts';
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
@@ -40,7 +40,6 @@ export function BrainPage() {
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [registryFilter, setRegistryFilter] = useState('');
   const [repositoryView, setRepositoryView] = useState<string | null>(null);
-  const fieldVariant = fieldVariantFromLocation();
   const scope = useScope((s) => s.scope);
   const projects = useProjectRegistry();
   const registryRead = envelopeReadState(projects.isPending, toEnvelopeResult(projects.data), {
@@ -140,93 +139,39 @@ export function BrainPage() {
               <button type="button" className="td-hit underline" onClick={() => setRepositoryView(null)}>Registry overview</button>
               <span aria-hidden> / </span><span>{viewedRepository.label} repository · {viewedRepository.projects.length} registered {viewedRepository.projects.length === 1 ? 'project' : 'projects'}</span>
             </nav> : null}
-            <div className={fieldVariant ? 'grid gap-2' : 'grid gap-2 md:grid-cols-2 xl:grid-cols-3'}>
-              {(viewedRepository ? [viewedRepository] : matchingGroups).map((group, index) => (
-                <RepoGroupCard
-                  key={`${group.git_common_dir ?? group.label}#${index}`}
-                  group={group}
-                  holdings={holdings}
-                  onInspect={setInspectedId}
-                />
-              ))}
-            </div>
+            <RegistryList groups={viewedRepository ? [viewedRepository] : matchingGroups} holdings={holdings} onInspect={setInspectedId} />
           </>
         );
         const inspection = inspectedProject && inspectedGroup ? <ProjectInspector project={inspectedProject} group={inspectedGroup} onClose={() => setInspectedId(null)} onRepository={() => setRepositoryView(inspectedGroup.git_common_dir)} /> : <p className="text-2xs text-text-muted">Hover or focus a project to inspect its registry evidence. Click or Enter selects project scope. Escape dismisses inspection.</p>;
-        if (fieldVariant) {
-          return (
-            <div className="flex h-full min-h-0 flex-col" onKeyDown={(event) => {
-              if (event.key === 'Escape') setInspectedId(null);
-            }}>
-              <EnvelopeTruth envelope={envelope} refreshing={projects.isFetching} onRefresh={() => void projects.refetch()} />
-              <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
-                <h1 className="text-sm font-semibold tracking-tight">Brain</h1>
-                <span className="text-2xs text-text-muted">
-                  {summary.repo_count} repositories · {summary.project_count} projects
-                  {summary.truncated ? ' · truncated' : ''}
-                </span>
-                {viewedRepository ? <button type="button" className="td-hit ml-auto text-2xs underline" onClick={() => setRepositoryView(null)}>Registry overview</button> : null}
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-                <section aria-label="Registry field" className="flex min-h-[70vw] flex-1 flex-col p-3 md:min-h-[60vh] lg:min-h-0">
-                  <RegistryFieldCanvas variant={fieldVariant} groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
-                </section>
-                <aside aria-label="Registry readouts" className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-96 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0">
-                  <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
-                  {inspection}
-                  <section aria-label="Project registry" className="flex flex-col gap-3">{registryList}</section>
-                </aside>
-              </div>
-            </div>
-          );
-        }
         return (
           <div className="flex h-full min-h-0 flex-col" onKeyDown={(event) => {
             if (event.key === 'Escape') setInspectedId(null);
           }}>
-            <EnvelopeTruth
-              envelope={envelope}
-              refreshing={projects.isFetching}
-              onRefresh={() => void projects.refetch()}
-            />
+            <EnvelopeTruth envelope={envelope} refreshing={projects.isFetching} onRefresh={() => void projects.refetch()} />
             <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
               <h1 className="text-sm font-semibold tracking-tight">Brain</h1>
               <span className="text-2xs text-text-muted">
                 {summary.repo_count} repositories · {summary.project_count} projects
                 {summary.truncated ? ' · truncated' : ''}
               </span>
+              {viewedRepository ? <button type="button" className="td-hit ml-auto text-2xs underline" onClick={() => setRepositoryView(null)}>Registry overview</button> : null}
             </div>
-            {/* The registry is the page. Readouts and the inspector sit in a
-             * rail beside it so no row is hidden behind chrome. */}
+            {/* The field is the page; readouts, the inspector and the exact
+              * registry list sit in the rail beside it. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-              <RegistryPane>{registryList}</RegistryPane>
+              <section aria-label="Registry field" className="flex min-h-[70vw] flex-1 flex-col p-3 md:min-h-[60vh] lg:min-h-0">
+                <RegistryFieldCanvas groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
+              </section>
               <aside aria-label="Registry readouts" className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-96 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0">
                 <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
                 {inspection}
+                <section aria-label="Project registry" className="flex flex-col gap-3">{registryList}</section>
               </aside>
             </div>
           </div>
         );
       }}
     </ReadSection>
-  );
-}
-
-/** The registry pane is a scroll container from `lg` and an ordinary block
- * below it, so its tab stop is measured from the rendered box (see
- * `useScrollTabStop`) instead of hard-coded. */
-function RegistryPane({ children }: { children: ReactNode }) {
-  const paneRef = useRef<HTMLElement>(null);
-  const tabStop = useScrollTabStop(paneRef);
-  return (
-    <section
-      ref={paneRef}
-      aria-label="Project registry"
-      tabIndex={tabStop}
-      className="flex min-h-0 flex-1 flex-col gap-3 p-3 lg:overflow-auto"
-    >
-      {children}
-    </section>
   );
 }
 
@@ -298,16 +243,14 @@ function RegistryFieldView({
   );
 }
 
-/** The measured registry field in the selected renderer variant. Rebuilt only
+/** The measured registry field. Rebuilt only
  * when the registry's measurements change, never per live pulse. */
 function RegistryFieldCanvas({
-  variant,
   groups,
   repository,
   inspectedId,
   onInspect,
 }: {
-  variant: FieldVariant;
   groups: ProjectRepoGroup[];
   repository?: ProjectRepoGroup;
   inspectedId: string | null;
@@ -334,7 +277,6 @@ function RegistryFieldCanvas({
   const projectCount = scene.bodies.filter((body) => body.role === 'body').length;
   return (
     <BrainField
-      variant={variant}
       scene={scene}
       inspectedId={inspectedId}
       onInspect={onInspect}
@@ -347,7 +289,7 @@ function RegistryFieldCanvas({
       ariaLabel={repository
         ? `${repository.label} repository in camera focus: ${repository.projects.length} registered projects; other projects recede. The project registry beside it is the exact equivalent.`
         : `Registry field: ${projectCount} projects across recency columns. The project registry beside it is the exact equivalent.`}
-      legend={<FieldLegend variant={variant} scene={scene} />}
+      legend={<FieldLegend scene={scene} />}
     />
   );
 }
@@ -415,6 +357,115 @@ export function InstrumentReadout({
   );
 }
 
+/** Above this many rows the exact list is windowed; below it the DOM is the
+ * plain card list, so small registries keep their exact markup. */
+const LIST_VIRTUALIZE_AT = 200;
+const GROUP_ROW_ESTIMATE = 37;
+const PROJECT_ROW_ESTIMATE = 76;
+
+type RegistryRow =
+  | { kind: 'group'; group: ProjectRepoGroup }
+  | { kind: 'project'; group: ProjectRepoGroup; project: ProjectRegistryEntry };
+
+/** The exact registry list: every project, searchable, with the same inspect
+ * and select routes as the field. Windowed with @tanstack/react-virtual once
+ * the registry is large, so a registry of thousands mounts a screenful of
+ * rows instead of thousands of cards. */
+function RegistryList({
+  groups,
+  holdings,
+  onInspect,
+}: {
+  groups: ProjectRepoGroup[];
+  holdings: HoldingsSummary | null;
+  onInspect: (id: string | null) => void;
+}) {
+  const rows: RegistryRow[] = groups.flatMap((group) => [
+    { kind: 'group' as const, group },
+    ...group.projects.map((project) => ({ kind: 'project' as const, group, project })),
+  ]);
+  if (rows.length <= LIST_VIRTUALIZE_AT) {
+    return (
+      <div className="grid gap-2">
+        {groups.map((group, index) => (
+          <RepoGroupCard key={`${group.git_common_dir ?? group.label}#${index}`} group={group} holdings={holdings} onInspect={onInspect} />
+        ))}
+      </div>
+    );
+  }
+  return <VirtualRegistryRows rows={rows} holdings={holdings} onInspect={onInspect} />;
+}
+
+function VirtualRegistryRows({
+  rows,
+  holdings,
+  onInspect,
+}: {
+  rows: RegistryRow[];
+  holdings: HoldingsSummary | null;
+  onInspect: (id: string | null) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (index) => (rows[index]?.kind === 'group' ? GROUP_ROW_ESTIMATE : PROJECT_ROW_ESTIMATE),
+    overscan: 8,
+    getItemKey: (index) => {
+      const row = rows[index];
+      if (!row) return index;
+      return row.kind === 'group' ? `group:${row.group.git_common_dir ?? row.group.label}:${index}` : `project:${row.project.project_id}:${row.project.canonical_root}`;
+    },
+  });
+  return (
+    <div
+      ref={scrollRef}
+      tabIndex={0}
+      aria-label={`${rows.filter((row) => row.kind === 'project').length.toLocaleString()} registered projects`}
+      className="relative max-h-[70vh] overflow-auto border border-edge-subtle bg-surface-1"
+    >
+      <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const row = rows[item.index];
+          if (!row) return null;
+          return (
+            <div
+              key={item.key}
+              data-index={item.index}
+              ref={virtualizer.measureElement}
+              style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${item.start}px)` }}
+            >
+              {row.kind === 'group' ? (
+                <RepoGroupHeader group={row.group} />
+              ) : (
+                <ProjectRow project={row.project} holdings={holdings} onInspect={onInspect} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RepoGroupHeader({ group }: { group: ProjectRepoGroup }) {
+  return (
+    <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
+      <FolderGit2 aria-hidden size={14} className="text-text-muted" />
+      <h2 className="min-w-0 truncate text-xs font-semibold">{group.label}</h2>
+      {/* Count and noun from the one array this header heads. `project_count`
+        * is set from `projects.len()` in `project_registry.rs`, so preferring
+        * it while pluralising from the array could only ever disagree by
+        * printing "3 project" over one row, a contract drift rendered as a
+        * typo. */}
+      <span className="text-2xs text-text-muted">
+        {group.projects.length} {group.projects.length === 1 ? 'project' : 'projects'}
+      </span>
+      <RecencyDot lastSeenAt={latestSeen(group)} className="ml-auto" />
+    </header>
+  );
+}
+
 function RepoGroupCard({
   group,
   holdings,
@@ -426,19 +477,7 @@ function RepoGroupCard({
 }) {
   return (
     <section className="rounded-[var(--radius-card)] border border-edge-subtle bg-surface-1">
-      <header className="flex items-center gap-2 border-b border-edge-subtle px-3 py-2">
-        <FolderGit2 aria-hidden size={14} className="text-text-muted" />
-        <h2 className="min-w-0 truncate text-xs font-semibold">{group.label}</h2>
-        {/* Count and noun from the one array this header heads. `project_count`
-          * is set from `projects.len()` in `project_registry.rs`, so preferring
-          * it while pluralising from the array could only ever disagree by
-          * printing "3 project" over one row, a contract drift rendered as a
-          * typo. */}
-        <span className="text-2xs text-text-muted">
-          {group.projects.length} {group.projects.length === 1 ? 'project' : 'projects'}
-        </span>
-        <RecencyDot lastSeenAt={latestSeen(group)} className="ml-auto" />
-      </header>
+      <RepoGroupHeader group={group} />
       <div>
         {group.projects.map((project) => (
           <ProjectRow

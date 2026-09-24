@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectRegistryEntry, ProjectRepoGroup } from '../../contracts/generated.ts';
 import { BrainField, FieldLegend } from './BrainField.tsx';
 import { composeRegistryField } from './field.ts';
-import { buildRegistryScene, fieldVariantFromLocation } from './fieldVariant.ts';
+import { buildRegistryScene } from './registryScene.ts';
 
 const NOW = Date.now() / 1000;
 
@@ -53,10 +53,9 @@ function stubCanvas(): void {
   vi.stubGlobal('cancelAnimationFrame', () => {});
 }
 
-function renderField(variant: 'points' | 'atlas' | 'sigma', onInspect = vi.fn(), onSelect = vi.fn(), inspectedId: string | null = null) {
+function renderField(onInspect = vi.fn(), onSelect = vi.fn(), inspectedId: string | null = null) {
   return render(
     <BrainField
-      variant={variant}
       scene={SCENE}
       inspectedId={inspectedId}
       onInspect={onInspect}
@@ -64,7 +63,7 @@ function renderField(variant: 'points' | 'atlas' | 'sigma', onInspect = vi.fn(),
       focus={null}
       activity
       ariaLabel="Registry field: 3 projects"
-      legend={<FieldLegend variant={variant} scene={SCENE} />}
+      legend={<FieldLegend scene={SCENE} />}
     />,
   );
 }
@@ -77,29 +76,22 @@ describe('BrainField', () => {
 
   it('states a renderer that cannot start instead of drawing an empty field', () => {
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
-    renderField('points');
-    expect(screen.getByRole('status').textContent).toContain(
-      'the points field could not draw (This browser has no 2D canvas context.)',
-    );
+    renderField();
+    expect(screen.getByText('The registry field could not draw')).toBeTruthy();
+    expect(screen.getByText(/This browser has no 2D canvas context\. The project registry beside it lists the same projects\./)).toBeTruthy();
     expect(screen.queryByRole('group', { name: 'Registry field: 3 projects' })).toBeNull();
-  });
-
-  it('refuses the Sigma variant without WebGL rather than falling back silently', () => {
-    stubCanvas();
-    renderField('sigma');
-    expect(screen.getByRole('status').textContent).toContain('This browser has no WebGL context.');
   });
 
   it('walks projects with arrow keys, speaks the reading, and selects with Enter', () => {
     stubCanvas();
     const onInspect = vi.fn();
     const onSelect = vi.fn();
-    const view = renderField('points', onInspect, onSelect);
+    const view = renderField(onInspect, onSelect);
     const field = screen.getByRole('group', { name: 'Registry field: 3 projects' });
     fireEvent.keyDown(field, { key: 'ArrowRight' });
     expect(onInspect).toHaveBeenLastCalledWith('core');
     view.rerender(
-      <BrainField variant="points" scene={SCENE} inspectedId="core" onInspect={onInspect} onSelect={onSelect} focus={null} activity ariaLabel="Registry field: 3 projects" legend={null} />,
+      <BrainField scene={SCENE} inspectedId="core" onInspect={onInspect} onSelect={onSelect} focus={null} activity ariaLabel="Registry field: 3 projects" legend={null} />,
     );
     expect(screen.getByText(/^core: stores 1, artifacts 9, mass 10/)).toBeTruthy();
     fireEvent.keyDown(field, { key: 'ArrowRight' });
@@ -110,20 +102,12 @@ describe('BrainField', () => {
     expect(onInspect).toHaveBeenLastCalledWith(null);
   });
 
-  it('keeps the list-only Brain unless the URL names a field variant', () => {
-    window.history.replaceState({}, '', '/brain');
-    expect(fieldVariantFromLocation()).toBeNull();
-    window.history.replaceState({}, '', '/brain?scope=core&field=atlas');
-    expect(fieldVariantFromLocation()).toBe('atlas');
-    window.history.replaceState({}, '', '/brain?field=webgpu');
-    expect(fieldVariantFromLocation()).toBeNull();
-    window.history.replaceState({}, '', '/');
-  });
-
-  it('names amber as admitted activity and cyan as inspection in every variant', () => {
-    render(<FieldLegend variant="atlas" scene={SCENE} />);
+  it('names amber as admitted activity and cyan as inspection', () => {
+    render(<FieldLegend scene={SCENE} />);
     expect(screen.getByText('admitted activity on the exact touched project and one drawn hop, 4.2 s half-life')).toBeTruthy();
     expect(screen.getByText('inspection and focus, never activity')).toBeTruthy();
-    expect(screen.getByText('one project, ordered by canonical id inside its recency column')).toBeTruthy();
+    expect(screen.getByText('one indexed unit; stores ice at the core, artifacts by kind')).toBeTruthy();
+    // No crowded cell here, so no cluster frame is claimed.
+    expect(screen.queryByText(/crowded recency × mass cell/)).toBeNull();
   });
 });

@@ -2,13 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProjectRegistryEntry, ProjectRepoGroup } from '../../contracts/generated.ts';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 import { composeRegistryField } from './field.ts';
-import {
-  buildGraphScene,
-  buildRegistryScene,
-  parseFieldVariant,
-  strikeFor,
-  traversalOrder,
-} from './fieldVariant.ts';
+import { buildGraphScene, buildRegistryScene, strikeFor, traversalOrder } from './registryScene.ts';
 
 const NOW = 1_800_000_000;
 const DAY = 86_400;
@@ -48,16 +42,6 @@ function pulse(projectId: string | null, family = 'tool_call_activity'): LiveAct
   return { eventId: 'e1', observationTime: '1', projectId, family, streamId: 'tool_call', at: 0 };
 }
 
-describe('parseFieldVariant', () => {
-  it('accepts only the three explored renderers', () => {
-    expect(parseFieldVariant('points')).toBe('points');
-    expect(parseFieldVariant('atlas')).toBe('atlas');
-    expect(parseFieldVariant('sigma')).toBe('sigma');
-    expect(parseFieldVariant('three')).toBeNull();
-    expect(parseFieldVariant(null)).toBeNull();
-  });
-});
-
 describe('buildRegistryScene', () => {
   it('draws one body per project and one massless hub per shared repository', () => {
     const built = scene();
@@ -72,6 +56,23 @@ describe('buildRegistryScene', () => {
       { source: 'repo:/repos/core/.git', target: 'core', relation: 'checkout', grade: 'EXACT' },
       { source: 'repo:/repos/core/.git', target: 'core-wt', relation: 'checkout', grade: 'EXACT' },
     ]);
+  });
+
+  it('turns a crowded cell into a counted cluster that resolves at a stated zoom', () => {
+    const crowd: ProjectRepoGroup[] = [
+      {
+        label: 'crowd',
+        git_common_dir: '/repos/crowd/.git',
+        project_count: 12,
+        branches: ['main'],
+        projects: Array.from({ length: 12 }, (_, index) => project(`c${String(index).padStart(2, '0')}`, 0.2, 1, 1)),
+      },
+    ];
+    const built = buildRegistryScene(composeRegistryField(crowd, NOW), crowd, NOW);
+    expect(built.clusters.map((cluster) => [cluster.id, cluster.members.length, cluster.mass, Number(cluster.resolveZoom.toFixed(2))])).toEqual([
+      ['cell:0:0', 12, 24, 6.72],
+    ]);
+    expect(built.bodies.filter((body) => body.cluster === 'cell:0:0')).toHaveLength(12);
   });
 
   it('prints absent readings instead of blanking them', () => {

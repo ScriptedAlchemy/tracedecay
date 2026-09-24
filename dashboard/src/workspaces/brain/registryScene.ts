@@ -1,27 +1,20 @@
 import type { ProjectRepoGroup } from '../../contracts/generated.ts';
 import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 import { relativeAge } from '../../ui/time.ts';
-import type { FieldScene, SceneBody, ScenePath } from '../../viz/graph/fieldRenderers/scene.ts';
+import {
+  resolveZoom,
+  type FieldScene,
+  type SceneBody,
+  type SceneCluster,
+  type ScenePath,
+} from '../../viz/graph/fieldRenderers/scene.ts';
 import { bodyRadius, type RegistryField } from './field.ts';
 
 /**
- * The Brain field renderer exploration: three candidate renderers over one
- * renderer-neutral scene, selected with `?field=`. Without the parameter the
- * Brain keeps its list-only surface, so the choice is reversible by deleting
- * the losing renderer files and their entry here.
+ * The Brain registry as a renderer-neutral scene: measured bodies, massless
+ * repository hubs, exact relations, packed cells, and the activity rule that
+ * decides which drawn identity an admitted pulse may light.
  */
-export const FIELD_VARIANTS = ['sigma', 'points', 'atlas'] as const;
-export type FieldVariant = (typeof FIELD_VARIANTS)[number];
-
-export function parseFieldVariant(value: string | null): FieldVariant | null {
-  return FIELD_VARIANTS.find((variant) => variant === value) ?? null;
-}
-
-/** The variant named in the page URL. Read from `location` rather than router
- * state: scope changes preserve the parameter and nothing in the app writes it. */
-export function fieldVariantFromLocation(): FieldVariant | null {
-  return parseFieldVariant(new URLSearchParams(globalThis.location?.search ?? '').get('field'));
-}
 
 /** Heat half-life for admitted activity on every Brain field. */
 export const FIELD_HALF_LIFE_MS = 4200;
@@ -59,6 +52,7 @@ export function buildRegistryScene(
           repository?.git_common_dir ?? 'git directory absent',
         ],
         group: repository?.git_common_dir ?? null,
+        cluster: null,
       };
     }
     const { project, group } = entry;
@@ -82,6 +76,7 @@ export function buildRegistryScene(
         group.git_common_dir ? `repo ${group.label}` : 'repository absent',
       ],
       group: group.git_common_dir,
+      cluster: node.cell,
     };
   });
   const paths: ScenePath[] = field.edges.map((edge) => ({
@@ -90,9 +85,21 @@ export function buildRegistryScene(
     relation: edge.kind,
     grade: 'EXACT',
   }));
+  const clusters: SceneCluster[] = field.cells.map((cell) => ({
+    id: cell.id,
+    members: cell.members,
+    x: cell.x,
+    y: cell.y,
+    width: cell.width,
+    height: cell.height,
+    resolveZoom: resolveZoom(cell.maxRadius, cell.spacing),
+    mass: cell.mass,
+    spacing: cell.spacing,
+  }));
   return {
     bodies,
     paths,
+    clusters,
     extent: field.extent,
     columns: field.columns.map((column) => ({ label: column.label, bound: column.bound, count: column.count })),
     neighbors: adjacency(paths),
@@ -141,6 +148,7 @@ export function buildGraphScene(
     vitality: null,
     detail: [node.kind, node.degree == null ? 'connectedness absent' : `connectedness ${node.degree}`],
     group: null,
+    cluster: null,
   }));
   const paths: ScenePath[] = edges
     .filter((edge) => ids.has(edge.source) && ids.has(edge.target))
@@ -154,6 +162,7 @@ export function buildGraphScene(
   return {
     bodies,
     paths,
+    clusters: [],
     extent: { x: [minX - pad, maxX + pad], y: [minY - pad, maxY + pad] },
     columns: null,
     neighbors: adjacency(paths),

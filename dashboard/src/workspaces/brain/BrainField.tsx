@@ -1,41 +1,22 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { useLiveActivity } from '../../data/sse/useEvents.tsx';
-import { GraphUnavailable, type GraphCanvasEdge, type GraphCanvasNode } from '../../viz/graph/GraphCanvas.tsx';
+import { CenteredState } from '../../ui/ReadSection.tsx';
 import { useEmergentPositions } from '../../viz/graph/fieldRenderers/emergentPositions.ts';
+import { createPointField, unitsPerPoint } from '../../viz/graph/fieldRenderers/pointField.ts';
+import { sampleFieldPalette, type FieldRenderer, type FieldScene } from '../../viz/graph/fieldRenderers/scene.ts';
+import type { GraphCanvasEdge, GraphCanvasNode } from '../../viz/graph/types.ts';
 import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
-import { createAtlasField } from '../../viz/graph/fieldRenderers/atlas.ts';
-import { createPointField, unitsPerPoint } from '../../viz/graph/fieldRenderers/pointField.ts';
-import { createSigmaField } from '../../viz/graph/fieldRenderers/sigmaRefined.ts';
-import {
-  sampleFieldPalette,
-  type FieldRenderer,
-  type FieldRendererFactory,
-  type FieldScene,
-} from '../../viz/graph/fieldRenderers/scene.ts';
-import {
-  FIELD_HALF_LIFE_MS,
-  buildGraphScene,
-  strikeFor,
-  traversalOrder,
-  type FieldVariant,
-} from './fieldVariant.ts';
-
-const FACTORIES: Record<FieldVariant, FieldRendererFactory> = {
-  sigma: createSigmaField,
-  points: createPointField,
-  atlas: createAtlasField,
-};
+import { FIELD_HALF_LIFE_MS, buildGraphScene, strikeFor, traversalOrder } from './registryScene.ts';
 
 /**
- * The host every Brain field variant shares: renderer lifetime, the reader's
+ * The Brain's measured point field and its host: renderer lifetime, the reader's
  * inspection and camera focus, keyboard traversal with a spoken reading, and
  * admitted activity. Hover and keyboard focus inspect; Enter selects through
  * the caller's production route; nothing here fires activity except an
  * admitted pulse naming a drawn body.
  */
 export function BrainField({
-  variant,
   scene,
   inspectedId,
   onInspect,
@@ -46,7 +27,6 @@ export function BrainField({
   activity,
   className,
 }: {
-  variant: FieldVariant;
   scene: FieldScene;
   inspectedId: string | null;
   onInspect: (id: string | null) => void;
@@ -77,7 +57,7 @@ export function BrainField({
     if (!container) return;
     let renderer: FieldRenderer;
     try {
-      renderer = FACTORIES[variant]({
+      renderer = createPointField({
         container,
         scene,
         field: activation,
@@ -110,7 +90,7 @@ export function BrainField({
       renderer.destroy();
       if (rendererRef.current === renderer) rendererRef.current = null;
     };
-  }, [variant, scene, activation]);
+  }, [scene, activation]);
 
   useEffect(() => {
     rendererRef.current?.setView({ inspected: inspectedId, focus });
@@ -190,10 +170,11 @@ export function BrainField({
 
   if (failure) {
     return (
-      <GraphUnavailable>
-        the {variant} field could not draw ({failure}); the project registry beside it lists the same
-        projects
-      </GraphUnavailable>
+      <CenteredState
+        title="The registry field could not draw"
+        kind="unavailable"
+        detail={`${failure} The project registry beside it lists the same projects.`}
+      />
     );
   }
   return (
@@ -201,7 +182,7 @@ export function BrainField({
       <div className="relative min-h-0 flex-1">
         <div
           ref={containerRef}
-          data-brain-field={variant}
+          data-brain-field
           tabIndex={0}
           role="group"
           aria-roledescription="field"
@@ -232,49 +213,29 @@ export function BrainField({
   );
 }
 
-/** The encoding each variant draws, stated beside it. Amber is named as
+/** The encoding the field draws, stated beside it. Amber is named as
  * admitted activity only; cyan as inspection only. */
-export function FieldLegend({ variant, scene }: { variant: FieldVariant; scene: FieldScene }) {
-  const ratio = variant === 'points' ? unitsPerPoint(scene) : 1;
+export function FieldLegend({ scene }: { scene: FieldScene }) {
+  const ratio = unitsPerPoint(scene);
   const registry = scene.columns != null;
-  const encoding: Record<FieldVariant, ReadonlyArray<[string, string]>> = registry
-    ? {
-        sigma: [
-          ['body', 'one project; area = indexed mass (stores + artifacts)'],
-          ['core', 'project kind; brightness = recency'],
-          ['line', 'exact shared git directory'],
-        ],
-        points: [
-          ['point', ratio === 1 ? 'one indexed unit; stores ice at the core, artifacts by kind' : `${ratio} indexed units`],
-          ['disc', 'area = indexed mass; brightness = recency'],
-          ['line', 'exact shared git directory'],
-        ],
-        atlas: [
-          ['plate', 'one project, ordered by canonical id inside its recency column'],
-          ['bar', 'indexed mass against the heaviest project'],
-          ['wire', 'exact shared git directory'],
-        ],
-      }
-    : {
-        sigma: [
-          ['body', 'one returned symbol; area = connectedness'],
-          ['core', 'symbol kind'],
-          ['line', 'returned relation; curvature by relation kind'],
-        ],
-        points: [
-          ['point', 'one returned symbol; size = connectedness, hue = kind'],
-          ['line', 'returned relation'],
-        ],
-        atlas: [
-          ['plate', 'one symbol kind; symbols printed by connectedness'],
-          ['wire', 'returned relations between two kinds, counted'],
-        ],
-      };
+  const encoding: ReadonlyArray<[string, string]> = registry
+    ? [
+        ['across', 'recency column (registry last seen)'],
+        ['up', 'indexed mass, log'],
+        ['point', ratio === 1 ? 'one indexed unit; stores ice at the core, artifacts by kind' : `${ratio} indexed units`],
+        ['disc', 'area = indexed mass; brightness = recency'],
+        ['line', 'exact shared git directory'],
+        ...(scene.clusters.length > 0
+          ? [['frame', 'a crowded recency × mass cell with its exact count; zoom or click to resolve'] as [string, string]]
+          : []),
+      ]
+    : [
+        ['point', 'one returned symbol; size = connectedness, hue = kind'],
+        ['line', 'returned relation'],
+      ];
   return (
     <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
-      {registry ? <LegendItem label="across" value="recency column (registry last seen)" /> : null}
-      {registry && variant !== 'atlas' ? <LegendItem label="up" value="indexed mass, log" /> : null}
-      {encoding[variant].map(([label, value]) => <LegendItem key={label} label={label} value={value} />)}
+      {encoding.map(([label, value]) => <LegendItem key={label} label={label} value={value} />)}
       <span className="inline-flex items-center gap-1.5">
         <span aria-hidden className="h-2 w-3 bg-alert" />
         <span className="td-legend">amber</span>
@@ -293,26 +254,26 @@ export function FieldLegend({ variant, scene }: { variant: FieldVariant; scene: 
   );
 }
 
-/** A project's returned symbol graph in the selected variant. Symbols carry
- * no admitted activity, so this field never blooms. */
+/** A project's returned symbol graph on the same field. Symbols carry no
+ * admitted activity, so this field never blooms. */
 export function ScopedField({
-  variant,
   nodes,
   edges,
   inspectedId,
   onInspect,
   label,
+  caption,
 }: {
-  variant: FieldVariant;
   nodes: readonly GraphCanvasNode[];
   edges: readonly GraphCanvasEdge[];
   inspectedId: string | null;
   onInspect: (id: string | null) => void;
   label: string;
+  /** What the returned slice is, including any daemon cap. */
+  caption: ReactNode;
 }) {
-  const layout = useEmergentPositions(variant === 'atlas' ? null : nodes, edges);
+  const layout = useEmergentPositions(nodes, edges);
   const scene = useMemo(() => {
-    if (variant === 'atlas') return buildGraphScene(nodes.map((node) => ({ ...node, x: 0, y: 0 })), edges);
     if (layout.state !== 'ready') return null;
     return buildGraphScene(
       nodes.map((node) => {
@@ -321,16 +282,21 @@ export function ScopedField({
       }),
       edges,
     );
-  }, [variant, nodes, edges, layout]);
-  if (layout.state === 'failed' && variant !== 'atlas') {
-    return <GraphUnavailable>the force layout could not be completed ({layout.reason}); the returned symbol list remains available</GraphUnavailable>;
+  }, [nodes, edges, layout]);
+  if (layout.state === 'failed') {
+    return (
+      <CenteredState
+        title="The force layout could not be completed"
+        kind="unavailable"
+        detail={`${layout.reason}. The returned symbol list remains available.`}
+      />
+    );
   }
   if (!scene) {
     return <p role="status" data-state="loading" className="p-3 text-2xs text-text-secondary">Calculating graph positions. The symbol list remains available.</p>;
   }
   return (
     <BrainField
-      variant={variant}
       scene={scene}
       inspectedId={inspectedId}
       onInspect={onInspect}
@@ -339,7 +305,12 @@ export function ScopedField({
       activity={false}
       className="flex h-full min-h-[58vh] flex-col gap-2 lg:min-h-0"
       ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The returned symbol list alongside is the exact equivalent.`}
-      legend={<FieldLegend variant={variant} scene={scene} />}
+      legend={
+        <span className="flex flex-col gap-1">
+          <FieldLegend scene={scene} />
+          <span>{caption}</span>
+        </span>
+      }
     />
   );
 }

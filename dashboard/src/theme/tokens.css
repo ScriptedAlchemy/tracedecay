@@ -152,6 +152,7 @@
    */
   --raw-graph-substrate: var(--night-substrate);
   --raw-graph-text: oklch(0.84 0.035 248);
+  --raw-graph-ice: oklch(0.9 0.045 222);
   --raw-graph-edge: oklch(0.43 0.075 245);
   --raw-graph-accent: var(--signal-cyan-hot);
   --raw-graph-alert: oklch(0.8 0.15 75);
@@ -336,6 +337,7 @@
   /* The light shell frames the same dark analytical field deliberately. */
   --raw-graph-substrate: oklch(0.105 0.018 268);
   --raw-graph-text: oklch(0.86 0.035 248);
+  --raw-graph-ice: oklch(0.9 0.045 222);
   --raw-graph-edge: oklch(0.47 0.075 245);
   --raw-graph-accent: oklch(0.84 0.16 205);
   --raw-graph-alert: oklch(0.8 0.15 75);

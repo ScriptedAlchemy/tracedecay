@@ -2,9 +2,9 @@ import { approach, cssColorToRgb, settled, type ActivationField } from '../activ
 import { palette, type GraphPalette } from '../palette.ts';
 
 /**
- * The renderer-neutral field every Brain field variant draws.
+ * The renderer-neutral field the Brain draws.
  *
- * A variant renderer receives positioned bodies and drawn relations whose
+ * A renderer receives positioned bodies and drawn relations whose
  * geometry was already decided by a measured or emergent layout, plus an
  * activation field it may only sample. It never decides what a position,
  * size or relation means; the scene builders do, and the host's legend
@@ -32,6 +32,25 @@ export interface SceneBody {
   detail: readonly string[];
   /** The repository identity this body belongs to, when recorded. */
   group: string | null;
+  /** The packed cell this body sits in, when it was crowded into one. */
+  cluster: string | null;
+}
+
+/** A packed cell of bodies. Drawn as one counted frame until the camera is
+ * close enough for its members to stop overlapping. */
+export interface SceneCluster {
+  id: string;
+  members: readonly string[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Zoom (camera scale over fit scale) at which members separate. */
+  resolveZoom: number;
+  /** Summed member holdings, printed on the frame with the exact count. */
+  mass: number;
+  /** Packed distance between neighbouring members, in field units. */
+  spacing: number;
 }
 
 export type RelationGrade = 'EXACT' | 'INFERRED';
@@ -52,6 +71,7 @@ export interface SceneColumn {
 export interface FieldScene {
   bodies: readonly SceneBody[];
   paths: readonly ScenePath[];
+  clusters: readonly SceneCluster[];
   /** Camera frame in field units, larger y is up. */
   extent: { x: [number, number]; y: [number, number] };
   /** Recency columns centred on x = 0..n-1, when the field is measured. */
@@ -60,7 +80,7 @@ export interface FieldScene {
   neighbors: ReadonlyMap<string, readonly string[]>;
 }
 
-/** Reader state shared by every variant. None of it is activity. */
+/** Reader state: inspection and camera focus. None of it is activity. */
 export interface FieldView {
   inspected: string | null;
   /** Camera focus (repository zoom or focused plate). Bodies outside recede. */
@@ -79,6 +99,8 @@ export interface Synapse {
 }
 
 export interface FieldPalette extends GraphPalette {
+  /** Stores and other identity-neutral holdings. */
+  ice: [number, number, number];
   grid: [number, number, number];
   gridMajor: [number, number, number];
   ink: [number, number, number];
@@ -94,6 +116,7 @@ export function sampleFieldPalette(element: HTMLElement): FieldPalette {
     cssColorToRgb(style.getPropertyValue(name).trim() || fallback);
   return {
     ...palette(element),
+    ice: token('--raw-graph-ice', '#d4ecf7'),
     grid: token('--raw-grid-minor', '#23262c'),
     gridMajor: token('--raw-grid', '#2c3036'),
     ink: token('--ink-primary', '#eef0f3'),
@@ -125,6 +148,55 @@ export interface FieldRenderer {
 }
 
 export type FieldRendererFactory = (options: FieldRendererOptions) => FieldRenderer;
+
+/**
+ * How a body's drawn radius grows with zoom: as zoom^0.25 rather than
+ * linearly, so zooming separates positions faster than bodies swell and a
+ * packed cell resolves into its members.
+ */
+export const BODY_ZOOM_GROWTH = 0.25;
+
+export function bodyScreenRadius(radius: number, scale: number, fitScale: number): number {
+  return radius * fitScale * (scale / fitScale) ** BODY_ZOOM_GROWTH;
+}
+
+/** The zoom at which bodies of `maxRadius` packed `spacing` apart stop
+ * overlapping under {@link bodyScreenRadius}. Never below 1. */
+export function resolveZoom(maxRadius: number, spacing: number): number {
+  return Math.max(1, ((2 * maxRadius) / Math.max(spacing, 1e-9)) ** (1 / (1 - BODY_ZOOM_GROWTH)));
+}
+
+/**
+ * A uniform grid over static world positions, so pointer picking touches the
+ * handful of bodies near the pointer instead of every body on the field.
+ */
+export function createSpatialIndex<T extends { x: number; y: number }>(items: readonly T[], cell: number) {
+  const buckets = new Map<string, T[]>();
+  const key = (cx: number, cy: number): string => `${cx}:${cy}`;
+  for (const item of items) {
+    const k = key(Math.floor(item.x / cell), Math.floor(item.y / cell));
+    const bucket = buckets.get(k);
+    if (bucket) bucket.push(item);
+    else buckets.set(k, [item]);
+  }
+  return {
+    /** Items whose position lies within `radius` of (x, y), plus bucket slack. */
+    near(x: number, y: number, radius: number): T[] {
+      const found: T[] = [];
+      const x0 = Math.floor((x - radius) / cell);
+      const x1 = Math.floor((x + radius) / cell);
+      const y0 = Math.floor((y - radius) / cell);
+      const y1 = Math.floor((y + radius) / cell);
+      for (let cx = x0; cx <= x1; cx += 1) {
+        for (let cy = y0; cy <= y1; cy += 1) {
+          const bucket = buckets.get(key(cx, cy));
+          if (bucket) found.push(...bucket);
+        }
+      }
+      return found;
+    },
+  };
+}
 
 /** How long a travelling synapse light takes to cross its one hop. */
 export const SYNAPSE_TRAVEL_MS = 700;
@@ -229,7 +301,7 @@ export class EasedCamera {
 }
 
 /**
- * The single paint scheduler for a canvas variant. Frames run only while
+ * The single paint scheduler for a field canvas. Frames run only while
  * something real is unresolved (warm heat, a travelling synapse, an easing
  * camera); an idle field schedules nothing. Under reduced motion heat is
  * repainted in one-second steps and nothing travels.
@@ -300,17 +372,19 @@ export function mountCanvas(container: HTMLElement): {
   return { canvas, context, size: () => ({ width, height }), fitToContainer };
 }
 
-/** Wheel zoom around the pointer and drag pan, shared by the 2D variants. */
+/** Wheel zoom around the pointer, bounded by `limit`, and drag pan. */
 export function attachCameraGestures(
   canvas: HTMLCanvasElement,
   camera: EasedCamera,
   changed: () => void,
+  limit: (scale: number) => number,
 ): () => void {
   let drag: { x: number; y: number; moved: boolean } | null = null;
   const wheel = (event: WheelEvent): void => {
     event.preventDefault();
     const rect = canvas.getBoundingClientRect();
-    const factor = Math.exp(-event.deltaY * 0.0015);
+    const t = camera.target;
+    const factor = limit(t.scale * Math.exp(-event.deltaY * 0.0015)) / t.scale;
     camera.set(zoomAt(camera.target, event.clientX - rect.left, event.clientY - rect.top, factor), true);
     changed();
   };
@@ -376,8 +450,8 @@ export function rgbaString([r, g, b]: [number, number, number], alpha: number): 
   return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, alpha)).toFixed(3)})`;
 }
 
-/** Recency columns and the mass axis, engraved on a 2D field canvas. Shared
- * by the measured variants so the three read the same axis. */
+/** The substrate with its 32 px minor and 128 px major graticule, anchored
+ * to the field origin so it pans with the camera. */
 export function drawGraticule(
   context: CanvasRenderingContext2D,
   width: number,
