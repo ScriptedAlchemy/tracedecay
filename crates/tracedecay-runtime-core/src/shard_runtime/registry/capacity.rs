@@ -138,39 +138,54 @@ impl StoreRuntimeRegistry {
         let Some(candidate) = candidate else {
             return Ok(CapacityReservation::Exhausted);
         };
+        Ok(Self::reserve_eviction(state, candidate)?
+            .map_or(CapacityReservation::Exhausted, CapacityReservation::Eviction))
+    }
+
+    /// Fences one exact `Ready` entry as `Evicting`; `None` when the entry is
+    /// no longer `Ready`.
+    pub(super) fn reserve_eviction(
+        state: &mut RegistryState,
+        key: StoreRuntimeKey,
+    ) -> Result<Option<EvictionReservation>, StoreRuntimeRegistryFailure> {
         let Some(attempt) = state.next_eviction_attempt.checked_add(1) else {
             return Err(StoreRuntimeRegistryFailure::EvictionAttemptExhausted);
         };
         state.next_eviction_attempt = attempt;
-        let Some(RegistryEntry::Ready(ready)) = state.entries.remove(&candidate) else {
-            return Ok(CapacityReservation::Exhausted);
+        let ready = match state.entries.remove(&key) {
+            Some(RegistryEntry::Ready(ready)) => ready,
+            Some(entry) => {
+                state.entries.insert(key, entry);
+                return Ok(None);
+            }
+            None => return Ok(None),
         };
         if let Err(error) = ready
             .owner
             .runtime()
             .transition(RuntimeMaintenanceStateV1::Draining)
         {
-            state.entries.insert(candidate, RegistryEntry::Ready(ready));
+            state.entries.insert(key, RegistryEntry::Ready(ready));
             return Err(StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
                 message: error.to_string(),
             });
         }
         let owner = ready.owner;
         state.entries.insert(
-            candidate.clone(),
+            key.clone(),
             RegistryEntry::Evicting(EvictingRuntime {
                 attempt,
                 owner: owner.clone(),
             }),
         );
-        Ok(CapacityReservation::Eviction(EvictionReservation {
-            key: candidate,
+        Ok(Some(EvictionReservation {
+            key,
             attempt,
             owner,
         }))
     }
 
-    pub(super) fn complete_project_code_eviction(
+    pub(super) fn complete_eviction(
         &self,
         reservation: EvictionReservation,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
@@ -213,6 +228,14 @@ impl StoreRuntimeRegistry {
                 }),
             );
             return outcome;
+        }
+        if reservation.key.is_profile()
+            && state
+                .profile_authorities
+                .get(reservation.key.shard_id())
+                .is_some_and(|binding| binding == reservation.owner.binding())
+        {
+            state.profile_authorities.remove(reservation.key.shard_id());
         }
         drop(state);
         drop(evicting);

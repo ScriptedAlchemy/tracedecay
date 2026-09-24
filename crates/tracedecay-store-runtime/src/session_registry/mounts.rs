@@ -1024,6 +1024,11 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// without a structural Conflict. Callers must have joined the
     /// reconciliation workers first; a graph client lease still held by a
     /// live consumer surfaces as a typed Conflict, not a hang.
+    ///
+    /// The dropped owners leave their `SQLite` runtimes mounted, so the
+    /// profile database owner and pin are released too and every store
+    /// runtime no longer held is then closed: its writer runs the shutdown
+    /// TRUNCATE checkpoint instead of leaving a retained WAL.
     #[hotpath::skip]
     pub async fn close_retained_graph_runtimes_for_shutdown(&self) -> Result<()> {
         let identities = self.drain_retained_graph_owners_for_shutdown()?;
@@ -1039,6 +1044,21 @@ impl DaemonSessionRuntimeRegistryV1 {
             {
                 first_error = Some(error);
             }
+        }
+        drop(
+            self.profile_database
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        drop(self.profile_pin.lock().await.take());
+        if let Err(failure) = self.registry.close_idle_for_shutdown().await
+            && first_error.is_none()
+        {
+            first_error = Some(session_registry_error(
+                "close idle store runtimes for shutdown",
+                format!("{failure:?}"),
+            ));
         }
         match first_error {
             Some(error) => Err(error),

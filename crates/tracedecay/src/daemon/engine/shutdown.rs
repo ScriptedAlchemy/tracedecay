@@ -49,6 +49,7 @@ impl DaemonEngine {
             self.store_administration
                 .session_temporal_refresh_schedulers(),
         );
+        let refresh_services = self.store_administration.clone();
         let automation_join = self.clone();
 
         let replay_join = self.store_administration.clone();
@@ -114,6 +115,9 @@ impl DaemonEngine {
                 ),
                 ShutdownOwner::new("session_temporal_refresh", || {}, async move {
                     session_refresh.shutdown().await;
+                    refresh_services
+                        .release_profile_session_refresh_services()
+                        .await;
                 }),
                 ShutdownOwner::new(
                     "host_admission_replay",

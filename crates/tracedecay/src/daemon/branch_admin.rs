@@ -1349,6 +1349,12 @@ impl StoreAdministration {
         service
     }
 
+    /// Drops the cached profile refresh services so their profile session
+    /// leases no longer keep the store runtime open at terminal close.
+    pub(super) async fn release_profile_session_refresh_services(&self) {
+        self.profile_session_refresh_services.lock().await.clear();
+    }
+
     pub(super) fn git_index_transaction_services(
         &self,
     ) -> &Arc<DaemonGitIndexTransactionServiceRegistry> {
