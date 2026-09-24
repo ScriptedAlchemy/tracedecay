@@ -14,6 +14,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{CodeGenerationId, UtcMicros};
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
 use tracedecay_graph_query::SourceReadContext;
@@ -43,7 +44,7 @@ impl SourceReadAdapter {
         code_graph: Arc<dyn tracedecay_graph_query::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
     ) -> Result<Self, ApplicationContractError> {
-        let admitted_project_root = source_runtime.project_root().to_path_buf();
+        let admitted_project_root = plain_host_path(source_runtime.project_root());
         Self::new_bound(source_runtime, code_graph, scope, &admitted_project_root)
     }
 
@@ -58,7 +59,10 @@ impl SourceReadAdapter {
             return Err(source_binding_error());
         }
         let project_root = source_runtime.project_root();
-        if project_root != admitted_project_root {
+        // The admitted root arrives through a file URL, which cannot carry the
+        // Windows `\\?\` verbatim prefix `canonicalize` gives the runtime root,
+        // so the runtime root is compared in the spelling a URL can publish.
+        if plain_host_path(project_root) != admitted_project_root {
             return Err(source_binding_error());
         }
         Ok(Self {
@@ -455,6 +459,7 @@ fn primitive_failure(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use tracedecay_contracts::{
@@ -544,6 +549,35 @@ mod tests {
                 Arc::clone(&projection),
                 scope.clone(),
                 &admitted_root,
+            )
+            .is_err()
+        );
+
+        // A Windows runtime root is spelled `\\?\D:\...` by `canonicalize`,
+        // while the root admitted through its file URL reads `D:\...`.
+        let verbatim_root = |root: &str| {
+            Arc::new(SourceReadContext::new(
+                PathBuf::from(format!(r"\\?\{root}")),
+                database.clone(),
+                true,
+                scope.project_id.as_str().to_owned(),
+            ))
+        };
+        assert!(
+            SourceReadAdapter::new_bound(
+                verbatim_root(r"D:\repo"),
+                Arc::clone(&projection),
+                scope.clone(),
+                Path::new(r"D:\repo"),
+            )
+            .is_ok()
+        );
+        assert!(
+            SourceReadAdapter::new_bound(
+                verbatim_root(r"D:\foreign"),
+                Arc::clone(&projection),
+                scope.clone(),
+                Path::new(r"D:\repo"),
             )
             .is_err()
         );

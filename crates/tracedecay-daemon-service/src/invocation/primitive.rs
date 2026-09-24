@@ -1176,7 +1176,7 @@ pub enum DaemonPrimitiveRuntimeRegistrationError {
     RegistryClosed,
     #[error("a concurrent primitive runtime build failed: {detail}")]
     ConcurrentBuildFailed { detail: String },
-    #[error("the application primitive runtime could not be opened")]
+    #[error("the application primitive runtime could not be opened: {0}")]
     Open(#[from] ApplicationContractError),
 }
 

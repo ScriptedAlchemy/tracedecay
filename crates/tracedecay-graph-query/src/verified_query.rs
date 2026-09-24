@@ -21,6 +21,7 @@ use tracedecay_domain::{
     SymbolOccurrenceId,
 };
 use tracedecay_graph_db::GraphCancellation;
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::queries::GraphQueryManager;
 use super::source_authority::{
@@ -288,7 +289,9 @@ impl VerifiedGraphQuery {
             Arc::clone(&self.cancellation),
             file,
         )?;
-        if !absolute.starts_with(source.project_root()) {
+        // The resolved file is always `canonicalize`d, `\\?\`-prefixed on
+        // Windows, while the admitted root may carry the plain identity.
+        if !plain_host_path(&absolute).starts_with(plain_host_path(source.project_root())) {
             return Err(graph_source_scope_mismatch());
         }
         Ok((absolute, display))

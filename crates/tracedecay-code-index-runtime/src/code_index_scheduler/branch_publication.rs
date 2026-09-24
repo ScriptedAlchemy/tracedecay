@@ -18,6 +18,7 @@ use tracedecay_runtime_core::branch_meta::{
     BranchGraphSourceRollbackOutcomeV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::path_safety::plain_host_path;
 
 use super::registry::{CodeIndexServingScopeV1, ServingGenerationInstallationV1};
 use super::{
@@ -643,7 +644,10 @@ impl BranchPublicationContextV1 {
                     ),
                     path: self.project_root.display().to_string(),
                 })?;
-        Ok(retained_root == canonical_root)
+        // One root, whichever spelling the caller resolved it through: Windows
+        // `canonicalize` answers `\\?\D:\...` where the root identity reads
+        // `D:\...`.
+        Ok(plain_host_path(&retained_root) == plain_host_path(canonical_root))
     }
 }
 
