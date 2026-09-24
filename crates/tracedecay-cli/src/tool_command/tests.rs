@@ -320,10 +320,12 @@ const REGISTRY_READ_TOOLS: [&str; 3] = [
     "tracedecay_project_context",
 ];
 
+/// An initialised root is one whose repository carries the `.git/`-side
+/// identity marker (or a path-local profile store); the repo-local
+/// `.tracedecay/tracedecay.db` layout no longer exists.
 fn mark_initialised_project(root: &Path) {
-    let store = root.join(".tracedecay");
-    std::fs::create_dir_all(&store).expect("create project store dir");
-    std::fs::write(store.join("tracedecay.db"), b"").expect("write project marker");
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(root, "proj_dispatch")
+        .expect("pin fixture repository identity");
 }
 
 #[test]

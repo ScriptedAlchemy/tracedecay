@@ -2338,9 +2338,12 @@ mod tests {
         assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
     }
 
+    /// The canonical Codex set (Core + ContextMcp) is the whole rendered
+    /// bundle Codex's activation probe compares against its cache; Core alone
+    /// omits `.mcp.json` and can never verify as `Current`.
     #[cfg(unix)]
     #[test]
-    fn codex_core_rollback_restores_generated_agent_exports_byte_for_byte() {
+    fn codex_canonical_rollback_restores_generated_agent_exports_byte_for_byte() {
         let _profile = pinned_host_profile();
         // Core `apply` drives Codex's own `codex plugin add`, which is a hard
         // requirement of that path. Supply the host CLI rather than depending
@@ -2375,14 +2378,10 @@ mod tests {
         std::fs::write(&user_path, user_bytes).unwrap();
         std::fs::write(&manifest_path, manifest_bytes.as_bytes()).unwrap();
 
-        let component_set = canonical_host_component_set_with_tracedecay_bin(
-            "codex",
-            Some(crate::cli::HostBundleComponentArg::Core),
-            0,
-            &tracedecay_bin,
-        )
-        .unwrap()
-        .unwrap();
+        let component_set =
+            canonical_host_component_set_with_tracedecay_bin("codex", None, 0, &tracedecay_bin)
+                .unwrap()
+                .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Repair, true, false)
                 .unwrap();
@@ -3094,8 +3093,13 @@ mod tests {
         );
     }
 
+    /// Kimi exposes plugin install only through its interactive `/plugins`
+    /// host API. Every lifecycle operation therefore commits the staged
+    /// source under a receipt and reports that remaining host action, while
+    /// Kimi's own registry and managed plugin root stay byte-for-byte
+    /// untouched.
     #[tokio::test]
-    async fn kimi_canonical_component_set_fails_before_direct_host_mutation() {
+    async fn kimi_canonical_component_set_defers_activation_without_touching_host_registry() {
         let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
@@ -3109,12 +3113,10 @@ mod tests {
             tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(empty_path.path());
         let installed_path = code_home.join("plugins/installed.json");
         std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &installed_path,
+        let original =
             br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
-"#,
-        )
-        .unwrap();
+"#;
+        std::fs::write(&installed_path, original).unwrap();
         let component_set = canonical_host_component_set("kimi", None, 0)
             .unwrap()
             .unwrap();
@@ -3124,6 +3126,9 @@ mod tests {
             yes: true,
             adopt: false,
         };
+        let staged = home
+            .path()
+            .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
 
         for operation in [
             HostBundleCliOperation::Install,
@@ -3141,39 +3146,36 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-            let expected = match operation {
-                HostBundleCliOperation::Install => "host capability is unsupported",
-                HostBundleCliOperation::Update | HostBundleCliOperation::Repair => "cache is stale",
-                HostBundleCliOperation::Uninstall => unreachable!("not exercised by this loop"),
-            };
-            assert!(error.contains(expected), "{operation:?}: {error}");
+            assert!(
+                error.contains(&format!("/plugins install {}", staged.display())),
+                "{operation:?}: {error}"
+            );
         }
 
-        assert_eq!(
-            std::fs::read(&installed_path).unwrap(),
-            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
-"#
-        );
+        assert_eq!(std::fs::read(&installed_path).unwrap(), original);
         assert!(
             !code_home.join("plugins/managed/tracedecay").exists(),
-            "preflight must fail before deploying managed plugin bytes"
+            "TraceDecay never writes Kimi's managed plugin root"
         );
         for artifact in &component_set.component_set.components[0].manifest.artifacts {
             assert!(
-                !home.path().join(&artifact.relative_path).exists(),
-                "failed Kimi preflight must not create artifact {}",
+                home.path().join(&artifact.relative_path).is_file(),
+                "the receipt-owned staged source must hold {}",
                 artifact.relative_path
             );
         }
     }
 
+    /// Without Kimi's native activation the registration preflight succeeds
+    /// with a deferred host action instead of refusing: the transaction goes
+    /// on to commit the staged source, and only Kimi's own registry stays
+    /// unwritten.
     #[tokio::test]
-    async fn kimi_registration_preflight_creates_no_backup_for_unavailable_api() {
+    async fn kimi_registration_preflight_defers_activation_for_unavailable_api() {
         use tracedecay_agent_hosts::agents::host_bundle::HostComponentSetRegistrationV1;
 
         let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
         let empty_path = tempfile::tempdir().unwrap();
         let code_home = home.path().join(".kimi-code");
         let _kimi_home = EnvVarGuard::set(
@@ -3202,17 +3204,21 @@ mod tests {
         .unwrap();
         assert_eq!(
             registration.preflight(&component_set.component_set, &request),
-            Err(
-                tracedecay_agent_hosts::agents::host_bundle::HostBundleError::UnsupportedCapability
-            )
+            Ok(())
+        );
+        let remediation = registration
+            .deferred_activation()
+            .expect("an inactive Kimi plugin defers activation to the host");
+        assert!(
+            remediation.contains(&format!(
+                "/plugins install {}",
+                home.path()
+                    .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
+                    .display()
+            )),
+            "{remediation}"
         );
         assert_eq!(std::fs::read(installed_path).unwrap(), original);
-        assert!(
-            !lifecycle
-                .path()
-                .join(".tracedecay-host-registration-v1")
-                .exists()
-        );
     }
 
     /// Kiro's supported route is its MCP registration alone. Core carries the
