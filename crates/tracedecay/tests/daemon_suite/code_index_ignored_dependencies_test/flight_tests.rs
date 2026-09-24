@@ -7,6 +7,7 @@ use tracedecay_code_index::production::{
 use tracedecay_code_index_retention::code_index_generations::try_acquire_code_generation_store_lock;
 
 use super::*;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 struct BlockingNthControl {
     checks: AtomicUsize,
@@ -320,7 +321,7 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
     let scoped_store =
         tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
             store.path(),
-            &fixture.path().canonicalize().expect("canonical fixture"),
+            &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
         );
     let pointer_path = scoped_store.join("active-code-generation-v1.json");
     // Writers rename a temporary over the active pointer while holding the

@@ -9,6 +9,7 @@ use super::{
 };
 use crate::code_index::production::DAEMON_CODE_INDEX_CHUNKER_REVISION;
 use crate::code_index_scheduler::scoped_code_index_store_root;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
@@ -19,7 +20,7 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let retained_generation = {
         let mut seed = scheduler(
@@ -114,7 +115,7 @@ async fn partitioned_restart_rebuilds_incompatible_retained_generation() {
         !current_status.rebuild_in_flight,
         "status must clear rebuild liveness after the replacement becomes current"
     );
-    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(

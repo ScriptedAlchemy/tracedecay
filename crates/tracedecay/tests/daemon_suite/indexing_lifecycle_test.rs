@@ -28,6 +28,7 @@ use crate::code_index_journey::{
     wait_for_terminal_generation,
 };
 use crate::common::{EnvVarGuard, IsolatedEnv, daemon_socket_path, spawn_tracedecay_daemon_with};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 fn initialize_repository(project: &Path) -> (String, String) {
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
@@ -302,7 +303,7 @@ fn assert_exact_ignored_dependency_roster(generation: &CodeIndexPublishedGenerat
 #[tokio::test]
 async fn ignored_dependency_admission_survives_physical_daemon_restart_without_widening() {
     let (environment, project) = IsolatedEnv::acquire().await;
-    let project = project.canonicalize().expect("canonical fixture project");
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let revision = initialize_ignored_dependency_repository(&project);
     let socket = daemon_socket_path(environment.home());
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
@@ -418,7 +419,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
 #[tokio::test]
 async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() {
     let (environment, project) = IsolatedEnv::acquire().await;
-    let project = project.canonicalize().expect("canonical fixture project");
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
     fs::create_dir_all(project.join("src")).expect("fixture source directory");
     fs::write(
         project.join("Cargo.toml"),
@@ -504,7 +505,7 @@ async fn one_line_append_publishes_fresh_generation_with_carried_clone_bodies() 
 #[tokio::test]
 async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_generations() {
     let (environment, project) = IsolatedEnv::acquire().await;
-    let project = project.canonicalize().expect("canonical fixture project");
+    let project = canonical_existing_identity(&project).expect("canonical fixture project");
     let (main_revision, feature_revision) = initialize_repository(&project);
     let socket = daemon_socket_path(environment.home());
     let log_path = environment

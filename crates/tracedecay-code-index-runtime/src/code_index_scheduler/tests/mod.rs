@@ -35,6 +35,7 @@ use crate::code_index_scheduler::{
     CodeIndexHintPolicyV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(feature = "hotpath-alloc")]
 #[global_allocator]
@@ -1239,7 +1240,7 @@ async fn wait_for_settled_owner(registry: &CodeIndexSchedulerRegistryV1, path: &
 /// admission, so a caller that then seats a crafted owner cannot lose to a
 /// worker tail that was still owed a pass.
 async fn drain_clone_backfill(registry: &CodeIndexSchedulerRegistryV1, path: &Path) {
-    let canonical = path.canonicalize().expect("canonical project");
+    let canonical = canonical_existing_identity(path).expect("canonical project");
     let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
     loop {
         assert!(
