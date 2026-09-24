@@ -19,6 +19,7 @@ use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookAgent, HookEventNotifyOutcomeV1};
 
 use crate::common::{DaemonProcess, tracedecay_command_with_home};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 pub const RECEIPT_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -192,7 +193,8 @@ pub fn initialize_tracedecay(home: &Path, project: &Path) -> String {
 }
 
 pub fn exact_identity(project: &Path, project_id: String) -> ExactIndexIdentity {
-    let canonical_project = project.canonicalize().expect("canonical fixture project");
+    let canonical_project =
+        canonical_existing_identity(project).expect("canonical fixture project");
     let common_dir = tracedecay_runtime_core::worktree::git_common_dir(&canonical_project)
         .expect("fixture Git common directory");
     ExactIndexIdentity {
@@ -411,7 +413,8 @@ pub fn assert_exact_identity(
     expected_reference: &str,
     expected_revision: Option<&str>,
 ) {
-    let canonical_project = project.canonicalize().expect("canonical project receipt");
+    let canonical_project =
+        canonical_existing_identity(project).expect("canonical project receipt");
     assert_eq!(
         status["project_root"].as_str(),
         canonical_project.to_str(),
@@ -460,7 +463,9 @@ pub async fn assert_project_identity(
     );
     assert_eq!(
         context["project"]["canonical_root"].as_str(),
-        project.canonicalize().expect("canonical project").to_str(),
+        canonical_existing_identity(project)
+            .expect("canonical project")
+            .to_str(),
         "terminal receipt crossed project root: {context}"
     );
 }

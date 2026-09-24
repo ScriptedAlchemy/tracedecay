@@ -60,6 +60,7 @@ use crate::{
         },
     },
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[test]
 fn one_file_increment_captures_only_edited_bytes_with_one_thousand_unchanged_files() {
@@ -635,7 +636,7 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         .expect("initial publication event");
     assert_eq!(
         initial.project_root,
-        fixture.path().canonicalize().expect("canonical fixture")
+        canonical_existing_identity(fixture.path()).expect("canonical fixture")
     );
     // Publication is not the seated dashboard identity. Wait for the seat
     // before asserting the projected generation id.
@@ -892,10 +893,7 @@ async fn restart_remount_seats_the_retained_generation_before_a_dirty_rebuild() 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
 
     let restarted = CodeIndexSchedulerRegistryV1::new(1);
-    let remount_root = fixture
-        .path()
-        .canonicalize()
-        .expect("canonical remount root");
+    let remount_root = canonical_existing_identity(fixture.path()).expect("canonical remount root");
     let (recovery_entered, release_successor) = restarted
         .pause_next_retained_graph_recovery_before_successor(remount_root.clone())
         .await;
@@ -1651,7 +1649,7 @@ async fn paused_cold_mount_rejects_a_root_retiring_before_final_commit() {
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(2);
-    let root = fixture.path().canonicalize().expect("canonical root");
+    let root = canonical_existing_identity(fixture.path()).expect("canonical root");
     let (cold_commit_entered, release_cold_commit) = registry
         .pause_next_cold_mount_before_final_commit(root.clone())
         .await;
@@ -2121,7 +2119,7 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
         .await
         .expect("mount graph-off retained generation");
 
-    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -2233,7 +2231,7 @@ async fn proven_seated_generation_serves_verified_reads_while_reconcile_owns_the
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -2346,7 +2344,7 @@ async fn busy_scheduler_still_refuses_a_seated_generation_without_a_currency_wit
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -2442,7 +2440,7 @@ async fn unchanged_pass_binds_its_source_proof_to_an_unproven_seat() {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .serving_generation,
         )
@@ -2642,7 +2640,7 @@ async fn long_text_projection_renews_source_before_seating_and_noop_follow_up_se
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
-    let canonical_root = fixture.path().canonicalize().expect("canonical fixture");
+    let canonical_root = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let (projection_started, release_projection) = registry
         .pause_next_published_text_projection(canonical_root)
         .await;
@@ -2843,7 +2841,7 @@ async fn background_worker_waits_for_global_admission_before_publication_gate() 
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .build_publication_lock,
         )
@@ -2915,7 +2913,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .build_publication_lock,
         )
@@ -3102,10 +3100,7 @@ async fn a_same_content_successor_pointer_keeps_the_seated_generation_serving() 
     advance_pointer_to_unseated_successor(
         &super::super::scoped_code_index_store_root(
             store.path(),
-            &fixture
-                .path()
-                .canonicalize()
-                .expect("canonical fixture root"),
+            &canonical_existing_identity(fixture.path()).expect("canonical fixture root"),
         ),
         false,
     );
@@ -3159,10 +3154,7 @@ async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
     advance_pointer_to_unseated_successor(
         &super::super::scoped_code_index_store_root(
             store.path(),
-            &fixture
-                .path()
-                .canonicalize()
-                .expect("canonical fixture root"),
+            &canonical_existing_identity(fixture.path()).expect("canonical fixture root"),
         ),
         true,
     );
@@ -3333,7 +3325,7 @@ async fn first_activation_conflict_retries_once_and_then_seats() {
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, worktree_id, sealed_generation_id) = {
         let mut scheduler = scheduler(
@@ -3722,10 +3714,8 @@ async fn dashboard_progress_does_not_wait_for_the_scheduler_mutex() {
     drain_clone_backfill(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    let canonical_root = fixture
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
+    let canonical_root =
+        canonical_existing_identity(fixture.path()).expect("canonical fixture root");
     let (scheduler, progress_slot, scope) = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical_root).expect("mounted worktree");
@@ -3815,10 +3805,8 @@ async fn busy_query_does_not_rearm_dashboard_verification() {
     drain_clone_backfill(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    let canonical_root = fixture
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
+    let canonical_root =
+        canonical_existing_identity(fixture.path()).expect("canonical fixture root");
     let scope = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical_root).expect("mounted worktree");
@@ -3947,10 +3935,8 @@ async fn replay_binding_does_not_wait_for_the_scheduler_mutex() {
         .await
         .expect("mount daemon-owned scheduler");
     let generation_id = wait_for_initial_generation(&registry, fixture.path()).await;
-    let canonical_root = fixture
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
+    let canonical_root =
+        canonical_existing_identity(fixture.path()).expect("canonical fixture root");
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
@@ -4020,7 +4006,7 @@ async fn unchanged_background_freshness_probe_posts_no_overflow_wake() {
     drain_clone_backfill(&registry, fixture.path()).await;
     wait_for_settled_owner(&registry, fixture.path()).await;
     wait_for_event_to_ready(&registry).await;
-    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    let canonical = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     {
         let mounted = registry.mounted.lock().await;
         let scheduler = &mounted.get(&canonical).expect("mounted worktree").scheduler;
@@ -4201,7 +4187,7 @@ async fn elapsed_freshness_window_alone_does_not_make_dashboard_state_stale() {
     drain_clone_backfill(&registry, fixture.path()).await;
     settled_owner_with_idle_admission(&registry, fixture.path()).await;
     let _quiet_owner = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
-    let canonical = fixture.path().canonicalize().expect("canonical fixture");
+    let canonical = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let scope = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
@@ -5355,7 +5341,7 @@ async fn project_retirement_retains_blocked_worker_owner_until_retry_joins_it() 
     })
     .await
     .expect("worker admits a reconcile pass before retirement");
-    let roots = [fixture.path().canonicalize().expect("canonical root")]
+    let roots = [canonical_existing_identity(fixture.path()).expect("canonical root")]
         .into_iter()
         .collect();
 
@@ -5449,7 +5435,7 @@ async fn concurrent_query_admissions_claim_one_pending_wake_before_worker_coales
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -5896,7 +5882,8 @@ async fn retirement_waits_for_and_fences_an_exact_cold_mount_open() {
     let mut cancelled = registry
         .subscribe_cold_mount_cancellation(fixture.path())
         .expect("cold mount reservation");
-    let roots = BTreeSet::from([fixture.path().canonicalize().expect("canonical root")]);
+    let roots =
+        BTreeSet::from([canonical_existing_identity(fixture.path()).expect("canonical root")]);
     let retirement = {
         let registry = registry.clone();
         tokio::spawn(async move {
@@ -7759,7 +7746,7 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let first_generation = {
         let mut scheduler = scheduler(&fixture, scoped_store, Arc::clone(&bytes));
@@ -7824,7 +7811,7 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     {
         let mut scheduler = scheduler(&fixture, scoped_store.clone(), Arc::clone(&bytes));
@@ -7903,7 +7890,7 @@ async fn witness_verified_mount_activates_without_rebuild() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let seeded = {
         let mut scheduler = scheduler(&fixture, scoped_store.clone(), Arc::clone(&bytes));
@@ -7946,7 +7933,7 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (generation, scope) = {
         let mut scheduler = scheduler(
@@ -8048,7 +8035,7 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let scope = {
         let mut scheduler = scheduler(&fixture, scoped_store, bytes);
@@ -8086,7 +8073,7 @@ async fn failed_retained_activation_never_installs_unverified_serving_state() {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -8197,7 +8184,7 @@ async fn resident_memory_graph_refusal_seats_text_serving_without_graph() {
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, worktree_id) = {
         let mut scheduler = scheduler(
@@ -8763,7 +8750,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, privacy_domain) = {
         let mut scheduler = scheduler(
@@ -8804,7 +8791,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -9167,7 +9154,7 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let scope = {
         let mut scheduler = scheduler(
@@ -9339,7 +9326,7 @@ async fn same_root_remount_updates_retained_graph_policy_before_worker_activatio
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let scope = {
         let mut scheduler = scheduler(
@@ -9430,7 +9417,7 @@ async fn graph_off_remount_preserves_an_unhinted_source_reconcile() {
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, generation_a) = {
         let mut scheduler = scheduler(
@@ -9554,7 +9541,7 @@ async fn retryable_graph_activation_does_not_block_changed_text_generation() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, sealed_worktree_id, sealed_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store.clone(), bytes);
@@ -9807,7 +9794,7 @@ fn dashboard_graph_readiness_follows_the_current_text_generation() {
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let mut scheduler = scheduler(
         &fixture,
@@ -9846,7 +9833,7 @@ async fn terminal_graph_activation_failure_is_typed_for_current_text_generation(
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, worktree_id) = {
         let mut scheduler = scheduler(
@@ -9946,7 +9933,7 @@ async fn graph_decode_does_not_block_text_freshness() {
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let scope = {
         let mut scheduler = scheduler(
@@ -10400,7 +10387,7 @@ async fn continuously_edited_tree_still_seats_the_sealed_graph_generation() {
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let scope = {
         let mut scheduler = scheduler(

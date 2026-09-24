@@ -505,6 +505,7 @@ fn print_lsp_servers_table(adapters: &[lsp_adapters::LspAdapterDefinition]) {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
     use super::{bridge_config_error, finish_stdio_bridge, initialize_binding};
 
@@ -554,10 +555,7 @@ mod tests {
         .to_string();
 
         let binding = initialize_binding(&frame).expect("initialize binding");
-        assert_eq!(
-            binding.project_root,
-            tracedecay_runtime_core::path_safety::canonical_root_identity(root.path())
-        );
+        assert_eq!(binding.project_root, canonical_root_identity(root.path()));
         let forwarded: Value =
             serde_json::from_str(&binding.frame).expect("forwarded initialize frame");
         assert_eq!(forwarded["params"]["rootUri"], binding.canonical_root_uri);
@@ -630,8 +628,7 @@ mod tests {
         assert!(binding.workspace_folders.is_sorted());
         assert_eq!(
             binding.project_root,
-            tracedecay_runtime_core::path_safety::canonical_root_identity(first.path())
-                .min(tracedecay_runtime_core::path_safety::canonical_root_identity(second.path()))
+            canonical_root_identity(first.path()).min(canonical_root_identity(second.path()))
         );
         let forwarded: Value = serde_json::from_str(&binding.frame).unwrap();
         assert_eq!(

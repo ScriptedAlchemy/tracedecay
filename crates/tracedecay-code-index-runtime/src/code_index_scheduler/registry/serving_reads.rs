@@ -23,6 +23,7 @@ use super::{
     dashboard_code_graph_serving, dashboard_freshness_identity, dashboard_terminal_status,
     dashboard_text_freshness_identity, unique_mounted_for_scope,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
     /// Return the mounted scheduler's canonical worktree-change generation.
@@ -34,7 +35,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// Until that ladder runs, callers intentionally receive the preceding
     /// generation and must not derive a parallel workspace fingerprint.
     pub async fn diagnostics_change_generation(&self, project_root: &Path) -> Option<u64> {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return None;
         };
         let (scheduler, source_freshness, hints, wake, pending_wake, reconcile_in_progress, epoch) = {
@@ -104,7 +105,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// runtime (generation retention) resolve through this read instead of
     /// re-deriving repository/worktree identity themselves.
     pub async fn serving_code_scope(&self, project_root: &Path) -> Option<CodeIndexServingScopeV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let (repository_id, worktree_id, shutting_down, serving) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
@@ -129,7 +130,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     pub async fn mounted_code_scope(&self, project_root: &Path) -> Option<CodeIndexMountedScopeV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root)?;
         Some(CodeIndexMountedScopeV1 {
@@ -151,7 +152,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         generation: &CodeGenerationId,
     ) -> Option<Result<super::super::CodeGraphReplayBindingV1, CodeIndexSchedulerErrorV1>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let historical = {
             let mounted = self.mounted.lock().await;
             mounted
@@ -179,7 +180,7 @@ impl CodeIndexSchedulerRegistryV1 {
         generation_id: &CodeGenerationId,
     ) -> Option<Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexSchedulerErrorV1>>
     {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let owner = {
             let mounted = self.mounted.lock().await;
             mounted
@@ -200,7 +201,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         // Read the O(1) serving slot instead of the scheduler mutex. This used
         // to take `scheduler.lock()`, a blocking std mutex held by any
         // in-flight reconcile, while still holding the `mounted` async mutex,
@@ -262,7 +263,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Option<tracedecay_contracts::code_index_freshness::CodeIndexWorktreeFreshnessV1>,
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1,
     > {
-        let canonical_root = match project_root.canonicalize() {
+        let canonical_root = match canonical_existing_identity(project_root) {
             Ok(root) => root,
             Err(_) => return Ok(None),
         };
@@ -513,7 +514,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<CodeIndexConvergenceParkedV1> {
-        let canonical_root = project_root.canonicalize().ok()?;
+        let canonical_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&canonical_root)?;
         worktree
@@ -531,7 +532,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         // Clone the per-worktree handle under a short map lock, then drop the
         // registry guard before checking the mounted route.
         let (
@@ -693,7 +694,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         admission: GenerationDecodeAdmissionV1,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let (
             source_freshness,
             serving_generation,
@@ -862,7 +863,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         // A synchronous census abstains under map contention; the verified
         // read path awaits the map instead (see
         // [`Self::latest_complete_ready_decoded_for_root_scope`]).
@@ -979,7 +980,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         // Await the map mutex rather than try-locking it: its critical
         // sections are brief map reads, while an abstention under contention
         // here falsely demotes a proven-current answer to the stale serving
@@ -1213,7 +1214,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         require_serving_ready: bool,
     ) -> Option<LatestCodeTextGenerationV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let text_generation = {
             let mounted = self.mounted.lock().await;
             Arc::clone(&mounted.get(&project_root)?.text_generation)
@@ -1356,7 +1357,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let serving_generation = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
@@ -1389,7 +1390,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         let mounted = self.mounted.lock().await;

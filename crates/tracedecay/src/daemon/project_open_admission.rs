@@ -1194,8 +1194,8 @@ impl ProjectRouteKey {
             global_db_path: authority::canonical_identity_path(
                 &handshake.client_identity.global_db_path,
             )?,
-            project_path: tracedecay_runtime_core::path_safety::plain_host_path(
-                &authority::canonical_identity_path(project_path)?,
+            project_path: tracedecay_runtime_core::path_safety::canonical_root_identity(
+                project_path,
             ),
             scope_prefix: handshake.scope_prefix.clone(),
         })

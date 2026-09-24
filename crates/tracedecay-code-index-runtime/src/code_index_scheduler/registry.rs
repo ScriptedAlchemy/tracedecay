@@ -42,6 +42,7 @@ use super::{
     LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
     newly_eligible_percentile, now_micros,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(test)]
 mod cold_read_wake_tests;
@@ -1912,7 +1913,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         expected: &Arc<CodeIndexPublishedGenerationV1>,
     ) -> ServingGenerationInstallationOutcomeV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return ServingGenerationInstallationOutcomeV1::NoMatch;
         };
         let (serving_generation, serving_epoch, installation_slot) = {
@@ -1985,7 +1986,7 @@ impl CodeIndexSchedulerRegistryV1 {
         installation: &ServingGenerationInstallationClaimV1,
         retire: bool,
     ) -> ServingGenerationRollbackOutcomeV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return ServingGenerationRollbackOutcomeV1::NoMatch;
         };
         let (
@@ -2619,7 +2620,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<tokio::sync::watch::Receiver<()>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         let worktree = mounted.get(&project_root)?;
         Some(worktree.serving_generation_changed.subscribe())
@@ -2629,7 +2630,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// notes a [`CodeIndexCadenceTriggerV1::QueryAdmission`] wake so the worker
     /// yields text-only work and seats a complete generation.
     pub async fn request_complete_generation(&self, project_root: &Path) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         let mounted = self.mounted.lock().await;
@@ -2777,7 +2778,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// `false` when the path cannot be canonicalized (a path Doctor could never
     /// have mounted under).
     pub async fn is_worktree_mounted(&self, project_root: &Path) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         self.mounted.lock().await.contains_key(&project_root)
@@ -2801,7 +2802,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         path: PathBuf,
     ) -> CodeIndexDemandAdmissionV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -2842,7 +2843,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         rel_paths: &[String],
     ) -> CodeIndexDemandAdmissionV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -2888,7 +2889,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<CodeIndexConvergenceParkedV1> {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return None;
         };
         let mounted = self.mounted.lock().await;
@@ -2906,7 +2907,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         reason: &str,
     ) -> bool {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return false;
         };
         let mounted = self.mounted.lock().await;
@@ -2934,7 +2935,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// bounded exact-path capacity. Overflow requests one authoritative scan for
     /// this exact mounted worktree; it never aliases a sibling worktree.
     pub async fn notify_hook_overflow(&self, project_root: &Path) -> CodeIndexDemandAdmissionV1 {
-        let Ok(project_root) = project_root.canonicalize() else {
+        let Ok(project_root) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -2978,7 +2979,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> CodeIndexDemandAdmissionV1 {
-        let Ok(canonical) = project_root.canonicalize() else {
+        let Ok(canonical) = canonical_existing_identity(project_root) else {
             return CodeIndexDemandAdmissionV1::Unavailable(
                 CodeIndexDemandUnavailableV1::SchedulerUnmounted,
             );
@@ -3014,7 +3015,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<Arc<Mutex<CodeIndexWorktreeSchedulerV1>>> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted = self.mounted.lock().await;
         mounted
             .get(&project_root)
@@ -3216,7 +3217,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         scope: &tracedecay_contracts::ResolvedScope,
     ) -> Option<LatestCodeTextGenerationV1> {
-        let project_root = project_root.canonicalize().ok()?;
+        let project_root = canonical_existing_identity(project_root).ok()?;
         let mounted_root = {
             let mounted = self.mounted.lock().await;
             let (mounted_root, _) = unique_mounted_for_scope(&mounted, scope).unique()?;
@@ -3248,7 +3249,7 @@ impl ScopedFeedbackDocumentIdentityV1 {
     ) -> Option<Self> {
         Some(Self {
             registry,
-            project_root: project_root.canonicalize().ok()?,
+            project_root: canonical_existing_identity(project_root).ok()?,
             scope,
         })
     }
@@ -3265,8 +3266,7 @@ impl tracedecay_application::feedback::cycle_production::ProductionFeedbackDocum
     {
         let owner = self.clone();
         Box::pin(async move {
-            let requested_root = project_root
-                .canonicalize()
+            let requested_root = canonical_existing_identity(&project_root)
                 .map_err(|_| LspRuntimeFailure::new("feedback-code-index-root-unavailable"))?;
             if requested_root != owner.project_root {
                 return Err(LspRuntimeFailure::new("feedback-code-index-root-mismatch"));
@@ -3351,7 +3351,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: Option<tracedecay_contracts::ResolvedScope>,
     ) -> Option<tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityV1>
     {
-        let root = project_root.canonicalize().ok()?;
+        let root = canonical_existing_identity(&project_root).ok()?;
         let root_generation = self.latest_text_serving_for_root(&root).await?;
         let scope = match scope {
             Some(scope) => scope,
@@ -3512,7 +3512,7 @@ fn canonical_relative_document_path(project_root: &Path, path: &Path) -> Option<
     let mut unresolved: Vec<&std::ffi::OsStr> = Vec::new();
     let mut candidate = path;
     loop {
-        if let Ok(canonical) = candidate.canonicalize() {
+        if let Ok(canonical) = canonical_existing_identity(candidate) {
             let mut relative = canonical.strip_prefix(project_root).ok()?.to_path_buf();
             for component in unresolved.iter().rev() {
                 relative.push(component);
@@ -3527,6 +3527,7 @@ fn canonical_relative_document_path(project_root: &Path, path: &Path) -> Option<
 #[cfg(all(test, unix))]
 mod feedback_document_path_tests {
     use super::feedback_document_logical_path;
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
     /// A symlinked root reproduces on Linux exactly what every macOS
     /// `/var/folders/...` temporary root does in production: the daemon holds
@@ -3541,7 +3542,7 @@ mod feedback_document_path_tests {
         let alias = base.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).expect("root alias");
 
-        let canonical_root = real.canonicalize().expect("canonical root");
+        let canonical_root = canonical_existing_identity(&real).expect("canonical root");
         let canonical_uri = url::Url::from_file_path(canonical_root.join("src/lib.rs"))
             .expect("canonical document uri");
         let alias_uri =
@@ -3568,7 +3569,7 @@ mod feedback_document_path_tests {
         std::fs::create_dir_all(real.join("src")).expect("real tree");
         let alias = base.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).expect("root alias");
-        let canonical_root = real.canonicalize().expect("canonical root");
+        let canonical_root = canonical_existing_identity(&real).expect("canonical root");
 
         let uri = url::Url::from_file_path(alias.join("src/unsaved.rs")).expect("document uri");
         assert_eq!(
@@ -3589,7 +3590,7 @@ mod feedback_document_path_tests {
         std::fs::create_dir_all(&outside).expect("outside tree");
         std::fs::write(outside.join("secret.rs"), b"pub fn secret() {}\n").expect("outside file");
         std::os::unix::fs::symlink(&outside, real.join("escape")).expect("escaping alias");
-        let canonical_root = real.canonicalize().expect("canonical root");
+        let canonical_root = canonical_existing_identity(&real).expect("canonical root");
 
         let escaping = url::Url::from_file_path(canonical_root.join("escape/secret.rs"))
             .expect("escaping document uri");

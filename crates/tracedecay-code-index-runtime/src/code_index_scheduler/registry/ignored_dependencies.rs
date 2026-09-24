@@ -19,6 +19,7 @@ use crate::code_index_scheduler::{
     CodeIndexSchedulerErrorV1, DaemonCodeIndexControlV1, LatestCompleteCodeIndexV1, PendingHintsV1,
     ReconcilePassGuard,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AdmissionFlightKeyV1 {
@@ -399,7 +400,7 @@ impl CodeIndexSchedulerRegistryV1 {
         request: CodeIndexIgnoredDependencyRequestV1,
         control: Arc<dyn CodeIndexExecutionControlV1 + Send + Sync + '_>,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
-        let project_root = project_root.canonicalize()?;
+        let project_root = canonical_existing_identity(project_root)?;
         let flight_key = AdmissionFlightKeyV1::for_request(&request)?;
         let (
             repository_id,

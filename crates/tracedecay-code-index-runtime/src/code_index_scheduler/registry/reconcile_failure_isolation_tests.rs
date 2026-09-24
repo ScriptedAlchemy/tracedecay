@@ -24,6 +24,7 @@ use super::super::{
     },
 };
 use super::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Wake rounds driven from outside the worker. Each stands for the ordinary
 /// wake traffic a live daemon produces (cadence ticks, queries, sibling
@@ -116,7 +117,7 @@ impl Fixture {
         faulting_passes: usize,
     ) -> Arc<ReconcileFaultInjectionV1> {
         let fault = Arc::new(ReconcileFaultInjectionV1::new(kind, faulting_passes));
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         worktree
@@ -131,7 +132,7 @@ impl Fixture {
     /// exactly as it does not when a cadence tick or query wakes the worker
     /// over bytes nobody touched.
     async fn wake_without_new_input(&self) {
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         worktree.wake.notify_one();
@@ -139,7 +140,7 @@ impl Fixture {
 
     /// One attributable wake with no epoch advance.
     async fn wake_with_pending_arrival(&self) {
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         CodeIndexSchedulerRegistryV1::note_wake(
@@ -150,7 +151,7 @@ impl Fixture {
     }
 
     async fn pending_wake_micros(&self) -> u64 {
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         let pending = worktree
@@ -162,7 +163,7 @@ impl Fixture {
     }
 
     async fn clear_build_progress(&self) {
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         *worktree
@@ -173,7 +174,7 @@ impl Fixture {
     }
 
     async fn clear_convergence_park_for_test(&self) {
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         *worktree
@@ -186,7 +187,7 @@ impl Fixture {
         use tracedecay_contracts::code_index_freshness::{
             CodeIndexBuildBlockedReasonV1, CodeIndexConvergenceParkedV1,
         };
-        let canonical = self.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         *worktree
@@ -727,7 +728,7 @@ async fn terminal_publication_park_stops_the_worker_without_a_local_latch() {
 async fn park_visible_before_progress_reason_returns_terminal_admission() {
     let fixture = Fixture::mount("project.reconcile-park-before-progress").await;
     let scope = {
-        let canonical = fixture.project.canonicalize().expect("canonical project");
+        let canonical = canonical_existing_identity(&fixture.project).expect("canonical project");
         let mounted = fixture.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
         ResolvedScope::new(
@@ -789,7 +790,7 @@ async fn cold_terminal_park_makes_the_freshness_probe_terminal() {
     let scope = {
         let mounted = fixture.registry.mounted.lock().await;
         let worktree = mounted
-            .get(&fixture.project.canonicalize().unwrap())
+            .get(&canonical_existing_identity(&fixture.project).unwrap())
             .unwrap();
         ResolvedScope::new(
             worktree.project_id.clone(),
@@ -827,7 +828,7 @@ async fn retire_and_remount_clears_terminal_publication_park_for_new_admission()
     ));
 
     let mut roots = std::collections::BTreeSet::new();
-    roots.insert(fixture.project.canonicalize().expect("canonical project"));
+    roots.insert(canonical_existing_identity(&fixture.project).expect("canonical project"));
     assert!(
         fixture.registry.retire_project_roots(&roots).await,
         "retire must drain the terminal owner"

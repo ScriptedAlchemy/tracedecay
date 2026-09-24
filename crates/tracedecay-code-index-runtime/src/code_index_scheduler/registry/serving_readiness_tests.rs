@@ -15,6 +15,7 @@ use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexSchedulerRegistryV1, dashboard_generation_is_ready,
     serving_seat_matches_advertised_generation,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// Failure bound on an owner pass finishing once the worker is parked. Nothing
 /// here passes because time elapsed; a pass that never ends fails loudly.
@@ -250,7 +251,7 @@ async fn serving_waiter_tracks_installation_freshness_and_retirement() {
             .iter()
             .any(|symbol| symbol.simple_name == "branch_probe")
     );
-    let canonical_project = project.canonicalize().expect("canonical project");
+    let canonical_project = canonical_existing_identity(&project).expect("canonical project");
     let freshness = {
         let mounted = registry.mounted.lock().await;
         mounted

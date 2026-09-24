@@ -36,6 +36,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_code_index_runtime::project_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const ALPHA_LIB_V1: &[(&str, &str)] = &[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")];
 
@@ -159,7 +160,7 @@ async fn failed_cold_mount_graph_replay_preserves_retained_text_generation() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, seeded_generation_id) = {
         let mut scheduler = scheduler(&fixture, scoped_store, bytes);
@@ -316,7 +317,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (latest, replay_binding, repository_id, worktree_id) = {
         let mut scheduler = scheduler(
@@ -438,7 +439,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (latest_a, replay_a, scope, hub) = {
         let mut scheduler = scheduler(
@@ -723,7 +724,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (
         scope,
@@ -889,7 +890,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         Some(
             registry
                 .pause_next_retained_graph_recovery_before_successor(
-                    fixture.path().canonicalize().expect("canonical fixture"),
+                    canonical_existing_identity(fixture.path()).expect("canonical fixture"),
                 )
                 .await,
         )
@@ -1245,7 +1246,7 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
     use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 
     let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let canonical_fixture = fixture.path().canonicalize().expect("canonical fixture");
+    let canonical_fixture = canonical_existing_identity(fixture.path()).expect("canonical fixture");
     let store = TempDir::new().expect("store root");
     let scoped_store = scoped_code_index_store_root(store.path(), &canonical_fixture);
     let (scope, seeded_generation_id, latest, replay_binding, repository_id, worktree_id) = {

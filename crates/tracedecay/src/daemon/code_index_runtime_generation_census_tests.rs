@@ -15,6 +15,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegis
 use tracedecay_code_index_runtime::project_reads::project_code_index_generation_census_reader;
 use tracedecay_code_index_runtime::resolved_scope_for_project;
 use tracedecay_runtime_core::config::PinnedUserDataDir;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
@@ -49,7 +50,8 @@ async fn runtime_mcp_refuses_counts_until_the_mounted_graph_can_serve_queries() 
         project_code_index_generation_census_reader(schedulers.clone(), project.clone(), scope);
 
     if schedulers.latest_generation_id(&project).await.is_none() {
-        let canonical_project = project.canonicalize().expect("canonical fixture root");
+        let canonical_project =
+            canonical_existing_identity(&project).expect("canonical fixture root");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let publication = publications.recv().await.expect("generation publication");

@@ -773,16 +773,15 @@ impl ProductionProjectCompositionHarnessV1 {
 
     pub fn server(&self, project_root: impl AsRef<Path>) -> Result<Arc<crate::mcp::McpServer>> {
         let canonical_project_path =
-            std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "failed to canonicalize production-composition project '{}': {error}",
-                        project_root.as_ref().display()
-                    ),
-                }
+            tracedecay_runtime_core::path_safety::canonical_existing_identity(
+                project_root.as_ref(),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to canonicalize production-composition project '{}': {error}",
+                    project_root.as_ref().display()
+                ),
             })?;
-        let canonical_project_path =
-            tracedecay_runtime_core::path_safety::plain_host_path(&canonical_project_path);
         self.resources
             .as_ref()
             .and_then(|resources| resources.servers.get(&canonical_project_path))

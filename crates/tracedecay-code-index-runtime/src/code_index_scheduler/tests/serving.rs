@@ -72,6 +72,7 @@ use crate::{
         CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, SharedCodeIndexBytePoolV1,
     },
 };
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[test]
 fn text_artifact_source_batches_scale_with_build_memory() {
@@ -1162,7 +1163,7 @@ async fn a_proven_seat_serves_v14_without_asking_for_the_pending_clone_successor
     {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted
-            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
             .expect("mounted worktree");
         // Generation identity binds the capture instant (`captured_at` is in
         // the intake digest), so the crafted owner and the registry's own
@@ -1272,7 +1273,7 @@ async fn expired_source_proof_reschedules_pending_clone_backfill() {
     {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted
-            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
             .expect("mounted worktree");
         // Seat the crafted owner alongside its text handle: the worker's
         // clone-backfill gate only drives a text owner that is the seated
@@ -4082,7 +4083,7 @@ async fn search_serves_the_last_complete_generation_while_the_scheduler_rebuilds
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -4200,7 +4201,7 @@ async fn search_never_awaits_an_in_flight_decode_while_a_generation_is_servable(
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -4282,7 +4283,7 @@ async fn search_refusal_with_nothing_servable_never_joins_the_decode() {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -4342,7 +4343,7 @@ async fn root_graph_ready_does_not_depend_on_the_publication_decode_cache() {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -4626,7 +4627,7 @@ async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
@@ -5408,7 +5409,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let warming_text = {
         let mounted = registry.mounted.lock().await;
         mounted
-            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
             .expect("mounted worktree")
             .historical_generation_owner
             .published_text_generation(&generation)
@@ -5431,7 +5432,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let scheduler = {
         let mounted = registry.mounted.lock().await;
         let worktree = mounted
-            .get(&fixture.path().canonicalize().expect("canonical root"))
+            .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
             .expect("mounted worktree");
         *worktree
             .serving_generation
@@ -5888,8 +5889,9 @@ async fn graph_cursor_holds_its_generation_until_the_cursor_expires() {
 async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
     let left = GitFixture::new(&[("src/lib.rs", "pub fn left_only() {}\n")]);
     let right = GitFixture::new(&[("src/lib.rs", "pub fn right_only() {}\n")]);
-    let (first, target, target_literal) = if left.path().canonicalize().expect("left root")
-        < right.path().canonicalize().expect("right root")
+    let (first, target, target_literal) = if canonical_existing_identity(left.path())
+        .expect("left root")
+        < canonical_existing_identity(right.path()).expect("right root")
     {
         (&left, &right, "right_only")
     } else {
@@ -6540,7 +6542,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
     let store = TempDir::new().expect("store root");
     let scoped_store = super::super::scoped_code_index_store_root(
         store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
+        &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
     );
     let (scope, privacy_domain) = {
         let mut scheduler = scheduler(
@@ -6588,7 +6590,7 @@ async fn graph_off_overflow_preserves_text_owner_progress_without_full_decode() 
         let mounted = registry.mounted.lock().await;
         Arc::clone(
             &mounted
-                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .get(&canonical_existing_identity(fixture.path()).expect("canonical root"))
                 .expect("mounted worktree")
                 .scheduler,
         )
