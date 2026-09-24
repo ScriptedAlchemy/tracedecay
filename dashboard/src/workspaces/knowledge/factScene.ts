@@ -111,6 +111,8 @@ export interface SceneCoverage {
   readonly factUniverse: number;
   readonly factCandidatesExamined: number;
   readonly unavailableFactCandidates: number;
+  /** Withheld facts the payload still drew as roots, identity only. */
+  readonly withheldDrawn: number;
   readonly relationCount: number;
   readonly relationLimit: number;
   readonly completeness: MemoryGraphPayloadV1['coverage']['completeness'];
@@ -240,6 +242,7 @@ export function composeFactScene(graph: MemoryGraphPayloadV1, rows: readonly Mem
       factUniverse: graph.fact_universe_count,
       factCandidatesExamined: graph.fact_candidates_examined,
       unavailableFactCandidates: graph.unavailable_fact_candidates,
+      withheldDrawn: facts.filter((fact) => fact.restricted).length,
       relationCount: graph.relation_count,
       relationLimit: graph.relation_limit,
       completeness: graph.coverage.completeness,

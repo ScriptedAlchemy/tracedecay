@@ -286,12 +286,10 @@ function Frame({ frame, layout, hatchId }: { frame: CameraFrame; layout: CameraL
       <path d={corners} fill="none" stroke="var(--raw-graph-accent)" strokeOpacity={0.7} strokeWidth={1.2} />
       <Label x={x + 10} y={y + 15} tier="legend" tone="var(--raw-text-secondary)">
         {title}
-      </Label>
-      {frame.rail ? (
-        <Aggregate frame={frame} rail={frame.rail} hatchId={hatchId} />
-      ) : (
-        <>
-          <Label x={x + 10 + titleW} y={y + 15} tier="legend" opacity={0.7}>
+        {/* One text run, so the browser spaces the cites after the real
+          * title width rather than after an estimate of it. */}
+        {frame.rail ? null : (
+          <tspan dx={12} fill="var(--raw-graph-text)" fillOpacity={0.75}>
             {elideToWidth(
               frame.cites.length > 0
                 ? `cites ${frame.cites.map((cite) => `${cite.label} ×${cite.count}`).join(' · ')}`
@@ -300,7 +298,13 @@ function Frame({ frame, layout, hatchId }: { frame: CameraFrame; layout: CameraL
               TIER_PX.legend,
               ADVANCE.legend,
             ).toUpperCase()}
-          </Label>
+          </tspan>
+        )}
+      </Label>
+      {frame.rail ? (
+        <Aggregate frame={frame} rail={frame.rail} hatchId={hatchId} />
+      ) : (
+        <>
           {firstRow ? (
             <>
               <Label x={firstRow.x + layout.rail.x} y={y + 15} tier="legend" opacity={0.6}>

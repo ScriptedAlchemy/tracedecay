@@ -156,6 +156,7 @@ describe('composeFactScene', () => {
       factUniverse: 40,
       factCandidatesExamined: 4,
       unavailableFactCandidates: 1,
+      withheldDrawn: 1,
       relationCount: 9,
       relationLimit: 100,
       completeness: 'partial',

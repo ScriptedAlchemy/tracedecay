@@ -498,7 +498,7 @@ function memoryEntities(): Record<string, unknown>[] {
  * the drawing must count rather than draw.
  */
 function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unknown> {
-  const factNodes = facts.map((fact) => ({
+  const factNodes: Record<string, unknown>[] = facts.map((fact) => ({
     id: `fact:${fact.fact_id}`,
     kind: 'fact',
     label: fact.content,
@@ -511,6 +511,23 @@ function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unkn
     retrieval_count: fact.retrieval_count,
     helpful_count: fact.helpful_count,
   }));
+  // One root whose payload is withheld, in the daemon's `Unavailable` shape
+  // (memory_service/graph.rs `fact_node`): its identity is the label and it
+  // carries no content, category or trust, so the drawing must show the gap.
+  const withheldId = `fact.${'a'.repeat(64)}.${'e'.repeat(64)}`;
+  factNodes.push({
+    id: `fact:${withheldId}`,
+    kind: 'fact',
+    label: withheldId,
+    fact_id: withheldId,
+    payload_access: 'redacted',
+    projected_as_of: nowMicros,
+    content: null,
+    category: null,
+    trust_score: null,
+    retrieval_count: null,
+    helpful_count: null,
+  });
   const entityNodes = ENTITY_NAMES.map(([name]) => ({
     id: `entity:${name}`,
     kind: 'entity',
@@ -529,6 +546,7 @@ function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unkn
       });
     }
   });
+  edges.push({ kind: 'mentions', source: `fact:fact.${'a'.repeat(64)}.${'e'.repeat(64)}`, target: `entity:${ENTITY_NAMES[2]![0]}` });
   edges.push({ kind: 'contradicts', source: `fact:${facts[6]!.fact_id}`, target: `fact:${facts[7]!.fact_id}` });
   edges.push({ kind: 'supersedes', source: `fact:${facts[1]!.fact_id}`, target: `fact:${facts[12]!.fact_id}` });
   edges.push({ kind: 'derived_from', source: `fact:${facts[4]!.fact_id}`, target: `fact:${facts[9]!.fact_id}` });
@@ -550,12 +568,12 @@ function memoryGraph(facts: ReturnType<typeof memoryFacts>): Record<string, unkn
       unknown: null,
       denominator: null,
       unit: null,
-      omission_reasons: ['fact_universe_bounded'],
+      omission_reasons: ['fact_universe_bounded', 'unavailable_fact_roots'],
     },
     fact_universe_count: 4128,
-    fact_candidates_examined: facts.length,
-    unavailable_fact_candidates: 0,
-    root_count: facts.length,
+    fact_candidates_examined: facts.length + 1,
+    unavailable_fact_candidates: 1,
+    root_count: facts.length + 1,
     relation_limit: 100,
     relation_count: edges.length,
   };

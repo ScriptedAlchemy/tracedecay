@@ -270,11 +270,12 @@ export function CoverageFooter({
       {coverage.relationLimit.toLocaleString()}
     </span>,
   ];
-  if (coverage.unavailableFactCandidates > 0) {
+  const undrawnUnavailable = Math.max(0, coverage.unavailableFactCandidates - coverage.withheldDrawn);
+  if (undrawnUnavailable > 0) {
     parts.push(
       <span key="unavailable" className="text-state-partial">
-        {coverage.unavailableFactCandidates.toLocaleString()} fact{' '}
-        {coverage.unavailableFactCandidates === 1 ? 'candidate' : 'candidates'} unavailable and not drawn
+        {undrawnUnavailable.toLocaleString()} fact{' '}
+        {undrawnUnavailable === 1 ? 'candidate' : 'candidates'} unavailable and not drawn
       </span>,
     );
   }
