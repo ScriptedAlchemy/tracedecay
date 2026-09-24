@@ -92,10 +92,16 @@ mod tests {
     #[test]
     fn configured_executable_requires_an_absolute_clean_path() {
         let absolute_base = std::env::temp_dir();
-        assert!(LcmSummarizerExecutableV1::configured(PathBuf::from("cursor-agent")).is_err());
-        assert!(
-            LcmSummarizerExecutableV1::configured(absolute_base.join("opt/../bin/cursor-agent"))
-                .is_err()
+        let non_canonical = Err(DomainError::NonCanonical {
+            field: "lcm summarizer executable path",
+        });
+        assert_eq!(
+            LcmSummarizerExecutableV1::configured(PathBuf::from("cursor-agent")),
+            non_canonical
+        );
+        assert_eq!(
+            LcmSummarizerExecutableV1::configured(absolute_base.join("opt/../bin/cursor-agent")),
+            non_canonical
         );
         let clean = absolute_base.join("bin").join("cursor-agent");
         let configured = LcmSummarizerExecutableV1::configured(clean.clone()).unwrap();
@@ -103,19 +109,22 @@ mod tests {
     }
 
     #[test]
-    fn default_is_unconfigured_for_every_provider() {
-        let executables = LcmSummarizerExecutablesV1::default();
-        assert_eq!(executables, LcmSummarizerExecutablesV1::unconfigured());
-        assert!(executables.cursor_agent.canonical_path().is_none());
-        assert!(executables.codex.canonical_path().is_none());
-        executables.validate().unwrap();
-    }
-
-    #[test]
-    fn unconfigured_round_trips_as_a_tagged_state() {
-        let json = serde_json::to_value(LcmSummarizerExecutablesV1::unconfigured()).unwrap();
-        assert_eq!(json["cursor_agent"]["state"], "unconfigured");
-        let decoded: LcmSummarizerExecutablesV1 = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded, LcmSummarizerExecutablesV1::unconfigured());
+    fn executables_decode_from_tagged_states_and_absent_providers_are_unconfigured() {
+        assert_eq!(
+            serde_json::to_value(LcmSummarizerExecutablesV1::unconfigured()).unwrap(),
+            serde_json::json!({
+                "cursor_agent": {"state": "unconfigured"},
+                "codex": {"state": "unconfigured"},
+            })
+        );
+        let decoded: LcmSummarizerExecutablesV1 = serde_json::from_value(serde_json::json!({
+            "cursor_agent": {"state": "configured", "canonical_path": "/opt/bin/cursor-agent"},
+        }))
+        .unwrap();
+        assert_eq!(
+            decoded.cursor_agent.canonical_path(),
+            Some(Path::new("/opt/bin/cursor-agent"))
+        );
+        assert_eq!(decoded.codex, LcmSummarizerExecutableV1::Unconfigured);
     }
 }

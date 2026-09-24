@@ -251,7 +251,10 @@ pub(super) fn intern_exact_terms(
 
 #[cfg(test)]
 mod tests {
-    use super::{CodeLexicalArtifactErrorV1, field_code, field_from_code, require_served_revision};
+    use super::{
+        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactErrorV1, field_code,
+        field_from_code, require_served_revision,
+    };
     use crate::retrieval::lexical::LexicalFieldV1;
     use rusqlite::Connection;
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
@@ -295,10 +298,13 @@ mod tests {
 
     #[test]
     fn superseded_revisions_are_rejected() {
+        require_served_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1)
+            .expect("the served revision opens");
         for revision in [16, 20, 22, 25, 27] {
             assert!(matches!(
                 require_served_revision(revision),
-                Err(CodeLexicalArtifactErrorV1::Incompatible(_))
+                Err(CodeLexicalArtifactErrorV1::Incompatible(message))
+                    if message == format!("format revision {revision} is unsupported")
             ));
         }
     }

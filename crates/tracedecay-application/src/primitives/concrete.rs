@@ -479,7 +479,7 @@ mod tests {
 
     use super::{
         AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshot,
-        SymbolGraphCursorSnapshotAuthority,
+        SymbolGraphCursorSnapshotAuthority, source_binding_error,
     };
     use crate::primitives::SymbolGraphCursorPort;
     use tracedecay_contracts::retrieval::PrimitiveFailureKind;
@@ -563,23 +563,23 @@ mod tests {
                 scope.project_id.as_str().to_owned(),
             ))
         };
-        assert!(
-            SourceReadAdapter::new_bound(
-                verbatim_root(r"D:\repo"),
-                Arc::clone(&projection),
-                scope.clone(),
-                Path::new(r"D:\repo"),
-            )
-            .is_ok()
-        );
-        assert!(
+        let verbatim = SourceReadAdapter::new_bound(
+            verbatim_root(r"D:\repo"),
+            Arc::clone(&projection),
+            scope.clone(),
+            Path::new(r"D:\repo"),
+        )
+        .expect("a verbatim runtime root binds to its URL spelling");
+        assert_eq!(verbatim.project_root, PathBuf::from(r"\\?\D:\repo"));
+        assert_eq!(
             SourceReadAdapter::new_bound(
                 verbatim_root(r"D:\foreign"),
                 Arc::clone(&projection),
                 scope.clone(),
                 Path::new(r"D:\repo"),
             )
-            .is_err()
+            .err(),
+            Some(source_binding_error())
         );
 
         let matching = Arc::new(SourceReadContext::new(

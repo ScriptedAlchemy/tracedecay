@@ -358,6 +358,7 @@ mod lock_contention_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+    use std::path::Path;
 
     use tempfile::tempdir;
 
@@ -421,16 +422,30 @@ mod tests {
 
     #[test]
     fn directory_tightening_rejects_symlinks_and_non_directories() {
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         let temp = tempdir().unwrap();
         let directory = temp.path().join("target");
         create_private_directory(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
         let link = temp.path().join("link");
         symlink(&directory, &link).unwrap();
-        assert!(super::make_private_directory(&link).is_err());
+        let refused = super::make_private_directory(&link).unwrap_err();
+        // `O_NOFOLLOW | O_DIRECTORY` on a symlink fails ENOTDIR on Linux and
+        // ELOOP (normalized to InvalidInput) on the BSDs.
+        assert!(
+            matches!(
+                refused.kind(),
+                std::io::ErrorKind::NotADirectory | std::io::ErrorKind::InvalidInput
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(mode(&directory), 0o755, "the link target stays untouched");
 
         let file_path = temp.path().join("regular");
         drop(create_private_file(&file_path).unwrap());
-        assert!(super::make_private_directory(&file_path).is_err());
+        let refused = super::make_private_directory(&file_path).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::NotADirectory);
+        assert_eq!(mode(&file_path), 0o600, "the file stays untouched");
     }
 
     #[test]
