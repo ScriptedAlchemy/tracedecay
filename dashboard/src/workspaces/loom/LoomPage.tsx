@@ -18,7 +18,7 @@ import {
   fittedWindowFor,
   layoutTemporalScene,
 } from '../../viz/temporal/layout.ts';
-import { layoutDensity } from '../../viz/temporal/density.ts';
+import { densityIndex, layoutDensity, membershipKey } from '../../viz/temporal/density.ts';
 import { glyphLabel } from '../../viz/temporal/glyphs.tsx';
 import { TemporalScene } from '../../viz/temporal/TemporalScene.tsx';
 import type {
@@ -64,10 +64,12 @@ import {
  * field on every reload and in every renderer; the scene only paints it.
  *
  * What is drawn is what an authority served: session extents from the store,
- * parentage from the subagent tree, commits and branch spans from the durable
+ * parentage from each session row's own parent columns cross-checked against
+ * the subagent tree, commits, timed edits and branch spans from the durable
  * relation rows, the selected session's turns from its loaded transcript page.
- * Handoffs, results and rejoins have no session-bound authority in this read,
- * so branches end at their recorded extent and the legend says so.
+ * Handoffs and results have no session-bound authority in this read; a join
+ * is drawn only where a child ends inside its parent's measured extent, and
+ * it is graded inferred.
  */
 export function LoomPage() {
   const scope = useScope((state) => state.scope);
@@ -246,10 +248,12 @@ function TemporalBody({
       }),
     [projection, width, window, zoom, collapsed, expanded, selectedLane, playback.active, playback.state.followLive, playback.reveal, hiddenKinds],
   );
-  const density = useMemo(
-    () => layoutDensity(projection, model, { reveal: playback.reveal, hiddenKinds }),
-    [projection, model, playback.reveal, hiddenKinds],
-  );
+  // The index reads only the page, the bundle membership (keyed, since
+  // `model` changes with every window), the filters and the cursor; a window
+  // change re-bins it and nothing more.
+  const membership = membershipKey(model);
+  const index = useMemo(() => densityIndex(projection, model, { reveal: playback.reveal, hiddenKinds }), [projection, membership, playback.reveal, hiddenKinds]);
+  const density = useMemo(() => layoutDensity(index, model), [index, model]);
 
   const update = (mutate: (next: URLSearchParams) => void) => {
     const next = new URLSearchParams(params);
@@ -267,10 +271,9 @@ function TemporalBody({
   const toggleBranch = (laneId: string) =>
     update((search) => {
       const lane = model.lanes.find((candidate) => candidate.id === laneId);
-      const dense = model.denseDefault;
-      const isRoot = (projection.lanes.find((candidate) => candidate.id === laneId)?.depth ?? 0) === 0;
-      if (dense && isRoot) {
-        // On a dense page a root starts collapsed; the explicit sets record
+      const depth = projection.lanes.find((candidate) => candidate.id === laneId)?.depth ?? 0;
+      if (model.denseDepth !== null && depth === model.denseDepth) {
+        // On a dense page this level starts collapsed; the explicit sets record
         // the reader's departure from that default in either direction.
         const currentlyCollapsed = lane?.kind === 'bundle';
         const nextExpanded = new Set(expanded);
@@ -319,6 +322,7 @@ function TemporalBody({
       case 'session_start':
       case 'session_end':
       case 'commit':
+      case 'file_edit':
         if (node.laneId !== selectedLane?.id) onSelect(node.laneId);
         return;
       default: {
@@ -446,9 +450,12 @@ function TemporalBody({
                 : !hierarchy?.available || hierarchy.error
                   ? 'unavailable'
                   : `${hierarchy.truncated ? 'partial' : 'loaded'} · ${hierarchy.missing_parent_count} missing parents · ${hierarchy.cycle_count} cycles`}
-              . Spawn curves leave the parent at the child session&apos;s recorded start;
-              no handoff, result or rejoin is drawn because no session-bound authority
-              serves one in this read. Only this temporal page is drawn.
+              . Forks leave the parent at the child session&apos;s recorded start, graded
+              inferred because the loaded transcript carries no tool-use identity; a
+              session row and the subagent tree that disagree are both drawn, ambiguous.
+              A join is inferred only where a child ends inside its parent&apos;s measured
+              extent; no handoff or result authority serves one. Only this temporal page
+              is drawn.
             </p>
 
             {selectedJourneyLane ? (
@@ -635,7 +642,7 @@ function FieldControls({
             {level}
           </button>
         ))}
-        <span className="text-text-muted">{selected ? 'event · selected session expanded, others compressed' : zoom === 'workstream' ? 'bundles per root session' : 'one lane per session'}</span>
+        <span className="text-text-muted">{selected ? 'event · selected session expanded, others compressed' : zoom === 'workstream' ? 'bundles where the work first fans out' : 'one lane per session'}</span>
       </div>
       <fieldset className="flex flex-wrap items-center gap-1" aria-label="Event filters">
         <legend className="sr-only">Event filters</legend>
@@ -773,9 +780,10 @@ function FieldCaption({
         {stats.undated > 0
           ? `${stats.undated} ${stats.undated === 1 ? 'row' : 'rows'} carried no usable start time and ${stats.undated === 1 ? 'is' : 'are'} not on the field at all. `
           : ''}
-        A spawn curve leaves a parent lane at the child&apos;s recorded start and is
-        drawn only for a recorded parent identity in this page; handoffs, results
-        and rejoins are unavailable in this read. {model.counts.lanesCollapsed > 0
+        A fork leaves a parent lane at the child&apos;s recorded start and is drawn
+        only for a recorded parent identity in this page; a join is inferred only
+        from a child ending inside its parent&apos;s measured extent, and handoffs
+        and results are unavailable in this read. {model.counts.lanesCollapsed > 0
           ? `${model.counts.lanesCollapsed} ${model.counts.lanesCollapsed === 1 ? 'branch is' : 'branches are'} collapsed into bundles whose counts include every descendant session. `
           : ''}
         Lane spacing is presentation only.
@@ -788,7 +796,7 @@ function fieldDescription(projection: JourneyProjection, model: TemporalSceneMod
   const providers = projection.stats.providers
     .map((provider) => `${provider.lanes} on ${provider.id}`)
     .join(', ');
-  return `Temporal execution field: ${projection.stats.lanes} sessions as horizontal lanes, time running left to right, hierarchy down by provider rail and recorded parent; providers ${providers || 'none'}. ${projection.stats.openEnded} have no recorded extent and are drawn open. ${projection.relations.length} recorded spawn relations are drawn as curves at the child's start; handoff and rejoin remain unavailable. ${model.counts.lanesCollapsed} branches are collapsed into bundles. The branch navigator table below is the accessible equivalent.`;
+  return `Temporal execution field: ${projection.stats.lanes} sessions as horizontal lanes, time running left to right, hierarchy down by provider rail and recorded parent; providers ${providers || 'none'}. ${projection.stats.openEnded} have no recorded extent and are drawn open. ${projection.relations.filter((relation) => relation.kind === 'spawn').length} recorded forks are drawn at the child's start and ${projection.relations.filter((relation) => relation.kind === 'rejoin').length} inferred joins where a child ends inside its parent; handoff and result remain unavailable. ${model.counts.lanesCollapsed} branches are collapsed into bundles. The branch navigator table below is the accessible equivalent.`;
 }
 
 /** Composed empty state: the frame stays, so an empty field reads as an

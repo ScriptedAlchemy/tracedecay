@@ -65,6 +65,13 @@ function glyphShape(kind: JourneyEventKind): JSX.Element {
           <line x1={4} y1={0} x2={8} y2={0} />
         </>
       );
+    case 'file_edit':
+      return (
+        <>
+          <path d="M-5 5 L-4 1.5 L3 -5.5 L5.5 -3 L-1.5 4 Z" strokeLinejoin="round" />
+          <line x1={1} y1={-3.5} x2={3.5} y2={-1} />
+        </>
+      );
     default: {
       const exhaustive: never = kind;
       throw new Error(`unknown event kind: ${String(exhaustive)}`);
@@ -105,6 +112,8 @@ export function glyphLabel(kind: JourneyEventKind): string {
       return 'spawn';
     case 'commit':
       return 'commit';
+    case 'file_edit':
+      return 'file edit';
     default: {
       const exhaustive: never = kind;
       throw new Error(`unknown event kind: ${String(exhaustive)}`);

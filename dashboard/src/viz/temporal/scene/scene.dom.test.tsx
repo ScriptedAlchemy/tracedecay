@@ -53,7 +53,7 @@ function model(over: Partial<TemporalSceneModel> = {}): TemporalSceneModel {
     minimap: { bins: [], lanes: [], window: { x0: 0, x1: 960 }, width: 960, height: 48 },
     cursor: null,
     counts: { lanesTotal: 6, lanesVisible: 3, lanesCollapsed: 1, eventsTotal: 3, eventsDrawn: 3, eventsCulled: 0, eventsWithheld: 0, eventsFiltered: 0, eventsFolded: 0, relationsTotal: 2, relationsDrawn: 2, relationsWithheld: 0 },
-    denseDefault: false,
+    denseDepth: null,
     ...over,
   };
 }
@@ -237,6 +237,15 @@ describe('temporal field paint', () => {
     it('tags every non-EXACT link with its grade', () => {
       const { container } = renderWith();
       expect([...container.querySelectorAll('[data-link-grade]')].map((tag) => tag.textContent)).toEqual(['AMBIGUOUS']);
+    });
+
+    it('tallies every drawn link grade in the ruler, joins apart from forks', () => {
+      const base = model();
+      const withJoin = model({
+        paths: [...base.paths, { id: 'p-join', kind: 'rejoin', fromId: CHILD, toId: ROOT, grade: 'inferred', basis: 'child recorded end inside the parent', focus: 'neutral', controls: [672, 130, 691, 130, 685, 80, 704, 80], weight: null }],
+      });
+      const { container } = renderWith({ model: withJoin });
+      expect(container.querySelector('[data-link-tally]')?.textContent).toBe('1 FORKS AMBIGUOUS · 1 FORKS EXACT · 1 JOINS INFERRED');
     });
 
     it('tags an EXACT link once it is on the lifted chain', () => {

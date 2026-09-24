@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { layoutDensity, newestLoadedTime } from './density.ts';
+import { densityIndex, layoutDensity, membershipKey, newestLoadedTime } from './density.ts';
 import { DEFAULT_DENSE_LANE_THRESHOLD, layoutTemporalScene } from './layout.ts';
 import type { JourneyEvent, JourneyLane, JourneyProjection, LayoutOptions } from './types.ts';
 
@@ -55,7 +55,7 @@ function options(over: Partial<LayoutOptions> = {}): LayoutOptions {
 function density(over: Partial<LayoutOptions> = {}) {
   const opts = options(over);
   const model = layoutTemporalScene(PROJECTION, opts);
-  return layoutDensity(PROJECTION, model, { reveal: opts.reveal, hiddenKinds: opts.hiddenKinds, binPx: 100 });
+  return layoutDensity(densityIndex(PROJECTION, model, { reveal: opts.reveal, hiddenKinds: opts.hiddenKinds }), model, 100);
 }
 
 describe('layoutDensity', () => {
@@ -89,7 +89,7 @@ describe('layoutDensity', () => {
     const projection = { ...PROJECTION, events: [...PROJECTION.events.filter((e) => e.source !== 'transcript'), ...turns] };
     const opts = options({ zoom: 'event', selectedLaneId: 'A' });
     const model = layoutTemporalScene(projection, opts);
-    const a = layoutDensity(projection, model, { reveal: null, hiddenKinds: new Set(), binPx: 100 }).lanes.get('A')!;
+    const a = layoutDensity(densityIndex(projection, model, { reveal: null, hiddenKinds: new Set() }), model, 100).lanes.get('A')!;
     // Five turns spread over the 400px lane extent sit 400/6 apart, closer than the row's 100px.
     expect(a.minGap).toBeCloseTo(400 / 6, 6);
     expect(a.totals.undated).toBe(5);
@@ -118,5 +118,22 @@ describe('layoutDensity', () => {
     expect(result.tailX).toBe(650);
     const outside = density({ viewport: { width: 1220, left: 200, right: 20, window: { start: T0 + 500, end: T0 + 1500 } } });
     expect(outside.tailX).toBeNull();
+  });
+
+  it('keeps one index across window changes and rebuilds it when a branch closes', () => {
+    const wide = layoutTemporalScene(PROJECTION, options());
+    const narrow = layoutTemporalScene(
+      PROJECTION,
+      options({ viewport: { width: 1220, left: 200, right: 20, window: { start: T0, end: T0 + 500 } } }),
+    );
+    const collapsed = layoutTemporalScene(PROJECTION, options({ branches: { collapsed: new Set(['A']), expanded: new Set() } }));
+    expect(membershipKey(narrow)).toBe(membershipKey(wide));
+    expect(membershipKey(collapsed)).not.toBe(membershipKey(wide));
+    // The index built for the wide window bins the narrow one exactly as a fresh index does.
+    const reused = layoutDensity(densityIndex(PROJECTION, wide, { reveal: null, hiddenKinds: new Set() }), narrow, 100);
+    const fresh = layoutDensity(densityIndex(PROJECTION, narrow, { reveal: null, hiddenKinds: new Set() }), narrow, 100);
+    expect(reused).toEqual(fresh);
+    // Half the span: A's measured extent 50..450 now covers bins 1 through 9.
+    expect(reused.lanes.get('A')!.bins.map((bin) => bin.active)).toEqual([0, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
   });
 });

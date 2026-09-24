@@ -3711,13 +3711,45 @@ function loomDelegationRows(): Record<string, unknown>[] {
       last_message_at: ended === null ? null : base + (ended - origin),
       messages: 12 + i * 9,
       is_subagent: node['is_subagent'],
+      // The sessions table's own parent columns, which the tree also reads.
+      parent_session_id: node['link'] === 'linked' ? node['parent_session_id'] : null,
+      parent_tool_use_id: node['link'] === 'linked' ? node['parent_tool_use_id'] : null,
     };
   });
 }
 
-function loomTemporalPayload(): Record<string, unknown> {
+/** Two cursor subagents whose parent is recorded only on the session row,
+ * never in the subagent tree, so the field draws a row-sourced fork. */
+const LOOM_ROW_PARENTS: Readonly<Record<number, number>> = { 5: 8, 17: 20 };
+
+/**
+ * The `dense-fanout` subagent tree's sessions as a Loom page (select with
+ * `?fixture=dense-fanout` on `/api/loom/temporal`): the tree's offsets kept,
+ * ending five minutes ago, each row carrying the tree's own parent columns.
+ */
+function loomDenseFanoutRows(): Record<string, unknown>[] {
+  const nodes = analyticsSubagentTreeDenseFanoutPayload()['nodes'] as Record<string, unknown>[];
+  const origin = Math.min(...nodes.map((node) => node['started_at'] as number));
+  const base = nowSecs - 14_400 - 300;
+  return nodes.map((node, i) => {
+    const ended = node['ended_at'] as number | null;
+    return {
+      session_id: node['session_id'],
+      provider: node['provider'],
+      title: `${String(node['agent'])} · ${String(node['session_id']).replace('session.dense.', '')}`,
+      started_at: base + ((node['started_at'] as number) - origin),
+      last_message_at: ended === null ? null : base + (ended - origin),
+      messages: i === 0 ? 998 : (node['depth'] as number) === 1 ? 120 + i : 4 + ((i * 37) % 60),
+      is_subagent: node['is_subagent'],
+      parent_session_id: node['link'] === 'linked' ? node['parent_session_id'] : null,
+      parent_tool_use_id: node['link'] === 'linked' ? node['parent_tool_use_id'] : null,
+    };
+  });
+}
+
+function loomTemporalPayload(scenario: 'default' | 'dense-fanout' = 'default'): Record<string, unknown> {
   // Past the dense-page threshold, so the page opens with its branches bundled.
-  const rows = [...loomSessionRows(45), ...loomDelegationRows()];
+  const rows = scenario === 'dense-fanout' ? loomDenseFanoutRows() : [...loomSessionRows(45), ...loomDelegationRows()];
   const sessions = rows.map((row, i) => ({
     session_id: row['session_id'],
     provider: row['provider'],
@@ -3731,6 +3763,12 @@ function loomTemporalPayload(): Record<string, unknown> {
     models: [{ model: null }, { model: pick(LOOM_MODELS, i) }],
     is_subagent: row['is_subagent'],
     edited_files_recorded: i % 3 !== 2,
+    parent_session_id:
+      (row['parent_session_id'] as string | null | undefined) ??
+      (scenario === 'default' && LOOM_ROW_PARENTS[i] !== undefined ? loomSessionId(LOOM_ROW_PARENTS[i]!) : null),
+    parent_tool_use_id:
+      (row['parent_tool_use_id'] as string | null | undefined) ??
+      (scenario === 'default' && LOOM_ROW_PARENTS[i] !== undefined ? `toolu_loom_${i}` : null),
   }));
   // Vocabulary is the daemon's own (`git_correlation::{CommitRelation,
   // CommitEvidence, SpanOverlapKind}`, snake_case on the wire): a produced
@@ -3764,6 +3802,8 @@ function loomTemporalPayload(): Record<string, unknown> {
       path: pick(GRAPH_FILES, i),
       change_type: i % 2 === 0 ? 'modified' : 'added',
       hunks: 1 + (i % 4),
+      // Most provider rollups record no edit time; these two did.
+      edited_at_micros: i % 2 === 0 && i < 4 ? ((session.started_at as number) + 1_200 + i * 600) * 1_000_000 : null,
     },
   ]);
   const branchSpans = sessions.slice(0, 4).map((session, i) => ({
@@ -3855,8 +3895,12 @@ function loomTemporalPayload(): Record<string, unknown> {
  * the page's `(provider, session_id)` keys exactly as `read_temporal` does.
  * The route clamps `limit` to 1..=500 and floors `offset` at 0.
  */
-function loomTemporalPageEnvelope(rawLimit: string | null, rawOffset: string | null): Record<string, unknown> {
-  const full = loomTemporalPayload();
+function loomTemporalPageEnvelope(
+  rawLimit: string | null,
+  rawOffset: string | null,
+  scenario: 'default' | 'dense-fanout' = 'default',
+): Record<string, unknown> {
+  const full = loomTemporalPayload(scenario);
   const parsedLimit = Number(rawLimit);
   const limit = Number.isFinite(parsedLimit) && rawLimit !== null ? Math.min(500, Math.max(1, Math.trunc(parsedLimit))) : 200;
   const parsedOffset = Number(rawOffset);
@@ -5831,7 +5875,11 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   // same coverage the route does.
   if (pathname === '/api/loom/temporal') {
     const params = new URLSearchParams(search);
-    return loomTemporalPageEnvelope(params.get('limit'), params.get('offset'));
+    return loomTemporalPageEnvelope(
+      params.get('limit'),
+      params.get('offset'),
+      params.get('fixture') === 'dense-fanout' ? 'dense-fanout' : 'default',
+    );
   }
   if (
     pathname === '/api/plugins/analytics/subagent-tree' &&

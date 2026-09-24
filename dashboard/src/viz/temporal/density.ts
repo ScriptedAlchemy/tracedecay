@@ -60,7 +60,6 @@ export interface SceneDensity {
 export interface DensityOptions {
   readonly reveal: RevealBoundary | null;
   readonly hiddenKinds: ReadonlySet<JourneyEventKind>;
-  readonly binPx?: number;
 }
 
 const DEFAULT_BIN_PX = 6;
@@ -79,19 +78,33 @@ export function newestLoadedTime(projection: JourneyProjection): number | null {
   return Number.isFinite(newest) ? newest : null;
 }
 
-export function layoutDensity(
-  projection: JourneyProjection,
-  model: TemporalSceneModel,
-  options: DensityOptions,
-): SceneDensity {
-  const { viewport } = model;
-  const binPx = Math.max(1, options.binPx ?? DEFAULT_BIN_PX);
-  const fieldX0 = viewport.left;
-  const fieldX1 = viewport.width - viewport.right;
-  const binCount = Math.max(1, Math.ceil((fieldX1 - fieldX0) / binPx));
+interface LaneIndex {
+  /** Revealed member extents; `end` null when unrecorded. */
+  readonly members: readonly { readonly start: number; readonly end: number | null }[];
+  /** Revealed dated event times, unsorted. */
+  readonly eventTimes: readonly number[];
+  readonly totals: LaneDensity['totals'];
+}
+
+/** The window-independent half of the density summary: who belongs to each
+ * scene lane and which of their records are revealed. Rebuilt only when the
+ * loaded page, the bundle membership, the filters or the cursor change. */
+export interface DensityIndex {
+  readonly lanes: ReadonlyMap<string, LaneIndex>;
+  readonly revealTime: number | null;
+  readonly headTime: number | null;
+  readonly tailTime: number | null;
+}
+
+/** Identity of the scene's lane and bundle membership; equal across window
+ * changes, different once a branch opens or closes. */
+export function membershipKey(model: TemporalSceneModel): string {
+  return `${model.lanes.map((lane) => lane.id).join('\n')}\u0000${model.clusters.map((cluster) => cluster.laneId).join('\n')}`;
+}
+
+export function densityIndex(projection: JourneyProjection, model: TemporalSceneModel, options: DensityOptions): DensityIndex {
   const { reveal, hiddenKinds } = options;
   const revealTime = reveal !== null ? reveal.time : null;
-
   const laneById = new Map(projection.lanes.map((lane) => [lane.id, lane] as const));
   const eventsByLane = new Map<string, JourneyEvent[]>();
   for (const event of projection.events) {
@@ -101,6 +114,62 @@ export function layoutDensity(
   }
   const membersOf = new Map<string, readonly string[]>();
   for (const cluster of model.clusters) membersOf.set(cluster.laneId, cluster.memberLaneIds);
+  const withheld = (event: JourneyEvent): boolean => {
+    if (reveal === null) return false;
+    if (event.time !== null && revealTime !== null && event.time > revealTime) return true;
+    return event.laneId === reveal.laneId && event.source === 'transcript' && event.sequence > reveal.sequence;
+  };
+  const lanes = new Map<string, LaneIndex>();
+  for (const sceneLane of model.lanes) {
+    const memberIds = [sceneLane.id, ...(membersOf.get(sceneLane.id) ?? [])];
+    const members = memberIds.map((id) => laneById.get(id)).filter((lane): lane is JourneyLane => lane !== undefined);
+    const extents: { start: number; end: number | null }[] = [];
+    const eventTimes: number[] = [];
+    let messages = 0;
+    let commits = 0;
+    let events = 0;
+    let undated = 0;
+    let openEnded = 0;
+    for (const member of members) {
+      messages += member.messages;
+      if (member.end === null) openEnded += 1;
+      for (const event of eventsByLane.get(member.id) ?? []) {
+        if (hiddenKinds.has(event.kind)) continue;
+        events += 1;
+        if (event.kind === 'commit') commits += 1;
+        if (event.time === null) undated += 1;
+        else if (!withheld(event)) eventTimes.push(event.time);
+      }
+      if (revealTime === null || member.start <= revealTime) extents.push({ start: member.start, end: member.end });
+    }
+    lanes.set(sceneLane.id, {
+      members: extents,
+      eventTimes,
+      totals: { sessions: members.length, messages, commits, events, undated, openEnded },
+    });
+  }
+  const headTime = projection.lanes.reduce<number | null>(
+    (oldest, lane) => (oldest === null || lane.start < oldest ? lane.start : oldest),
+    null,
+  );
+  return { lanes, revealTime, headTime, tailTime: newestLoadedTime(projection) };
+}
+
+/** Bins an index over the model's window, and measures mark spacing. */
+export function layoutDensity(index: DensityIndex, model: TemporalSceneModel, binPx = DEFAULT_BIN_PX): SceneDensity {
+  const { viewport } = model;
+  const pitch = Math.max(1, binPx);
+  const fieldX0 = viewport.left;
+  const fieldX1 = viewport.width - viewport.right;
+  const binCount = Math.max(1, Math.ceil((fieldX1 - fieldX0) / pitch));
+  const { revealTime } = index;
+  /** Bin index containing `time`, clamped; null when outside the window. */
+  const binOf = (time: number): number | null => {
+    const x = timeToX(viewport, time);
+    if (x < fieldX0 || x > fieldX1) return null;
+    return Math.min(binCount - 1, Math.floor((x - fieldX0) / pitch));
+  };
+  const revealBin = revealTime === null ? binCount - 1 : binOf(revealTime) ?? (revealTime < viewport.window.start ? -1 : binCount - 1);
   // Marks collide only within one row: the lane's own line or its undated gutter.
   const rowXs = new Map<string, Map<number, number[]>>();
   for (const node of model.nodes) {
@@ -111,97 +180,59 @@ export function layoutDensity(
     else rows.set(node.y, [node.x]);
   }
 
-  const withheld = (event: JourneyEvent): boolean => {
-    if (reveal === null) return false;
-    if (event.time !== null && revealTime !== null && event.time > revealTime) return true;
-    return event.laneId === reveal.laneId && event.source === 'transcript' && event.sequence > reveal.sequence;
-  };
-  /** Bin index containing `time`, clamped; null when outside the window. */
-  const binOf = (time: number): number | null => {
-    const x = timeToX(viewport, time);
-    if (x < fieldX0 || x > fieldX1) return null;
-    return Math.min(binCount - 1, Math.floor((x - fieldX0) / binPx));
-  };
-  const revealBin = revealTime === null ? binCount - 1 : binOf(revealTime) ?? (revealTime < viewport.window.start ? -1 : binCount - 1);
-
   const lanes = new Map<string, LaneDensity>();
   for (const sceneLane of model.lanes) {
-    const memberIds = [sceneLane.id, ...(membersOf.get(sceneLane.id) ?? [])];
-    const members = memberIds.map((id) => laneById.get(id)).filter((lane): lane is JourneyLane => lane !== undefined);
+    const laneIndex = index.lanes.get(sceneLane.id);
+    if (!laneIndex) continue;
     const active = new Array<number>(binCount).fill(0);
     const open = new Array<number>(binCount).fill(0);
     const starts = new Array<number>(binCount).fill(0);
     const events = new Array<number>(binCount).fill(0);
-    let messages = 0;
-    let commits = 0;
-    let eventTotal = 0;
-    let undated = 0;
-    let openEnded = 0;
-    for (const member of members) {
-      messages += member.messages;
-      if (member.end === null) openEnded += 1;
-      for (const event of eventsByLane.get(member.id) ?? []) {
-        if (hiddenKinds.has(event.kind)) continue;
-        eventTotal += 1;
-        if (event.kind === 'commit') commits += 1;
-        if (event.time === null) {
-          undated += 1;
-          continue;
-        }
-        if (withheld(event)) continue;
-        const bin = binOf(event.time);
-        if (bin !== null && bin <= revealBin) events[bin] = (events[bin] ?? 0) + 1;
-      }
-      if (revealTime !== null && member.start > revealTime) continue;
+    for (const time of laneIndex.eventTimes) {
+      const bin = binOf(time);
+      if (bin !== null && bin <= revealBin) events[bin] = (events[bin] ?? 0) + 1;
+    }
+    for (const member of laneIndex.members) {
       const startBin = binOf(member.start);
       if (startBin !== null && startBin <= revealBin) starts[startBin] = (starts[startBin] ?? 0) + 1;
       const first = member.start < viewport.window.start ? 0 : startBin;
       if (first === null) continue;
       if (member.end === null) {
-        for (let index = first; index <= revealBin; index += 1) open[index] = (open[index] ?? 0) + 1;
+        for (let bin = first; bin <= revealBin; bin += 1) open[bin] = (open[bin] ?? 0) + 1;
         continue;
       }
       const last = member.end > viewport.window.end ? binCount - 1 : binOf(member.end);
       if (last === null) continue;
-      for (let index = first; index <= Math.min(last, revealBin); index += 1) active[index] = (active[index] ?? 0) + 1;
+      for (let bin = first; bin <= Math.min(last, revealBin); bin += 1) active[bin] = (active[bin] ?? 0) + 1;
     }
-    const bins: DensityBin[] = active.map((count, index) => ({
-      x0: fieldX0 + index * binPx,
-      x1: Math.min(fieldX1, fieldX0 + (index + 1) * binPx),
+    const bins: DensityBin[] = active.map((count, bin) => ({
+      x0: fieldX0 + bin * pitch,
+      x1: Math.min(fieldX1, fieldX0 + (bin + 1) * pitch),
       active: count,
-      open: open[index] ?? 0,
-      starts: starts[index] ?? 0,
-      events: events[index] ?? 0,
+      open: open[bin] ?? 0,
+      starts: starts[bin] ?? 0,
+      events: events[bin] ?? 0,
     }));
     let minGap = Infinity;
     for (const row of rowXs.get(sceneLane.id)?.values() ?? []) {
       const xs = [...row].sort((a, b) => a - b);
-      for (let index = 1; index < xs.length; index += 1) minGap = Math.min(minGap, xs[index]! - xs[index - 1]!);
+      for (let i = 1; i < xs.length; i += 1) minGap = Math.min(minGap, xs[i]! - xs[i - 1]!);
     }
     lanes.set(sceneLane.id, {
       laneId: sceneLane.id,
       bins,
-      peak: {
-        active: Math.max(0, ...active),
-        open: Math.max(0, ...open),
-        events: Math.max(0, ...events),
-      },
-      totals: { sessions: members.length, messages, commits, events: eventTotal, undated, openEnded },
+      peak: { active: Math.max(0, ...active), open: Math.max(0, ...open), events: Math.max(0, ...events) },
+      totals: laneIndex.totals,
       minGap,
     });
   }
 
-  const tailTime = newestLoadedTime(projection);
-  const tailX = tailTime === null ? null : timeToX(viewport, tailTime);
-  const headTime = projection.lanes.reduce<number | null>(
-    (oldest, lane) => (oldest === null || lane.start < oldest ? lane.start : oldest),
-    null,
-  );
+  const tailX = index.tailTime === null ? null : timeToX(viewport, index.tailTime);
   return {
-    binPx,
+    binPx: pitch,
     lanes,
-    headTime,
-    tailTime,
+    headTime: index.headTime,
+    tailTime: index.tailTime,
     tailX: tailX !== null && tailX >= fieldX0 && tailX <= fieldX1 ? tailX : null,
   };
 }

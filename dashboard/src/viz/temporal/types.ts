@@ -81,7 +81,8 @@ export type JourneyEventKind =
   | 'message_other'
   | 'tool_call'
   | 'spawn'
-  | 'commit';
+  | 'commit'
+  | 'file_edit';
 
 export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'session_start',
@@ -92,6 +93,7 @@ export const JOURNEY_EVENT_KINDS: readonly JourneyEventKind[] = [
   'tool_call',
   'spawn',
   'commit',
+  'file_edit',
 ];
 
 /** One drawable record on a lane. */
@@ -133,6 +135,7 @@ export interface JourneyRelation {
 export type JourneyGapKind =
   | 'parent_outside_page'
   | 'parent_cycle'
+  | 'parentage_conflict'
   | 'parentage_unavailable'
   | 'extent_unknown'
   | 'undated_events'
@@ -460,6 +463,7 @@ export interface TemporalSceneModel {
   readonly minimap: SceneMinimap;
   readonly cursor: SceneCursor | null;
   readonly counts: SceneCounts;
-  /** True when the dense threshold made roots start collapsed. */
-  readonly denseDefault: boolean;
+  /** On a dense page, the hierarchy depth whose branches start bundled;
+   * null when the page is under the dense threshold. */
+  readonly denseDepth: number | null;
 }

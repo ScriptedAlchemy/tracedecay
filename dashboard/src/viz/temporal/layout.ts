@@ -233,11 +233,32 @@ export function layoutTemporalScene(
 
   // --- collapse & visibility -------------------------------------------------
   const denseDefault = lanes.length > options.denseLaneThreshold;
+  // A dense page bundles at the deepest hierarchy level whose lanes still fit
+  // the threshold: a lone orchestrator opens onto its workstreams, not into
+  // one bundle of everything.
+  let denseDepth: number | null = null;
+  if (denseDefault) {
+    denseDepth = 0;
+    for (let depth = 1; lanes.filter((lane) => lane.depth <= depth).length <= options.denseLaneThreshold; depth += 1) {
+      if (!lanes.some((lane) => lane.depth > depth)) break;
+      denseDepth = depth;
+    }
+  }
+  // Workstream zoom bundles where the work first fans out: the shallowest
+  // level at which more than one session delegates.
+  let workstreamDepth = 0;
+  const maxDepth = lanes.reduce((max, lane) => Math.max(max, lane.depth), 0);
+  for (let depth = 0; depth <= maxDepth; depth += 1) {
+    if (lanes.filter((lane) => lane.depth === depth && (childrenOf.get(lane.id)?.length ?? 0) > 0).length > 1) {
+      workstreamDepth = depth;
+      break;
+    }
+  }
   const isCollapsed = (lane: JourneyLane): boolean => {
     if ((childrenOf.get(lane.id)?.length ?? 0) === 0) return false;
     switch (zoom) {
       case 'workstream':
-        return true;
+        return lane.depth === workstreamDepth;
       case 'agent':
       case 'event':
         break;
@@ -247,7 +268,7 @@ export function layoutTemporalScene(
       }
     }
     if (branches.collapsed.has(lane.id)) return true;
-    return denseDefault && lane.depth === 0 && !branches.expanded.has(lane.id);
+    return lane.depth === denseDepth && !branches.expanded.has(lane.id);
   };
   const collapsedIds = new Set(lanes.filter(isCollapsed).map((lane) => lane.id));
   // The bundle a lane is hidden under is its outermost collapsed ancestor.
@@ -641,6 +662,7 @@ export function layoutTemporalScene(
         return { ...base, x: sceneLane.x1, y: sceneLane.y };
       case 'parent_outside_page':
       case 'parent_cycle':
+      case 'parentage_conflict':
       case 'parentage_unavailable':
       case 'handoff_unavailable':
         return { ...base, x: sceneLane.x0, y: sceneLane.y };
@@ -791,6 +813,6 @@ export function layoutTemporalScene(
       relationsDrawn,
       relationsWithheld,
     },
-    denseDefault,
+    denseDepth,
   };
 }

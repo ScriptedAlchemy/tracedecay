@@ -200,6 +200,12 @@ const DYNAMIC: ReadonlyArray<{
     schema: DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
   },
   {
+    label: 'loom_api::temporal dense-fanout page',
+    pathname: '/api/loom/temporal',
+    search: '?limit=200&fixture=dense-fanout',
+    schema: DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
+  },
+  {
     label: 'lcm_api::session',
     pathname: '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
     schema: DashboardEnvelopeV1Schema(LcmSessionPayloadV1Schema),

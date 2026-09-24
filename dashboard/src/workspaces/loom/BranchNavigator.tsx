@@ -10,6 +10,8 @@ import type {
 } from '../../viz/temporal/types.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 
+const COUNT_FORMAT = new Intl.NumberFormat();
+
 /**
  * The field's exact tree: every loaded session as a real table row, in the
  * same deterministic order the layout allocates lanes, with the same
@@ -169,7 +171,7 @@ export function BranchNavigator({
                     {formatMoment(lane.start)}
                   </td>
                   <td className="px-2 py-1 text-right text-text-secondary tabular-nums" data-cell="numeric">
-                    {lane.messages.toLocaleString()}
+                    {COUNT_FORMAT.format(lane.messages)}
                   </td>
                   <td className="px-2 py-1 text-text-muted">
                     <span data-grade={extentGrade(lane)}>{extentText(lane)}</span>

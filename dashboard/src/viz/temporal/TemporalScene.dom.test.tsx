@@ -90,7 +90,7 @@ function fixture(): TemporalSceneModel {
     },
     cursor: { x: 320, laneId: ROOT, xBasis: 'time' },
     counts: { lanesTotal: 7, lanesVisible: 3, lanesCollapsed: 4, eventsTotal: 12, eventsDrawn: 6, eventsCulled: 0, eventsWithheld: 4, eventsFiltered: 0, eventsFolded: 2, relationsTotal: 2, relationsDrawn: 1, relationsWithheld: 1 },
-    denseDefault: false,
+    denseDepth: null,
   };
 }
 

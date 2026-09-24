@@ -152,6 +152,12 @@ function proximityGrade(relation: FeedbackProximityRelationV1): EvidenceGrade {
   }
 }
 
+interface ParentClaim {
+  readonly parentSessionId: string;
+  readonly toolUseId: string | null;
+  readonly source: 'sessions row' | 'subagent tree';
+}
+
 function byStartThenId(a: LaneDraft, b: LaneDraft): number {
   return a.start - b.start || compareStrings(a.id, b.id);
 }
@@ -272,6 +278,21 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   const spawnEvents: JourneyEvent[] = [];
 
   // --- parentage -----------------------------------------------------------
+  // Two sources name a parent: the session row's own `parent_session_id`
+  // column, and the subagent tree. Where both speak they must agree; a
+  // disagreement is drawn as AMBIGUOUS with both candidates, never merged.
+  const claims = new Map<string, { row: ParentClaim | null; tree: ParentClaim | null }>();
+  const claimFor = (laneId: string) => {
+    let entry = claims.get(laneId);
+    if (!entry) claims.set(laneId, (entry = { row: null, tree: null }));
+    return entry;
+  };
+  for (const row of temporal.sessions) {
+    const parent = row.parent_session_id?.trim();
+    const laneId = keyOf(row.provider, row.session_id);
+    if (!parent || !drafts.has(laneId)) continue;
+    claimFor(laneId).row = { parentSessionId: parent, toolUseId: row.parent_tool_use_id?.trim() || null, source: 'sessions row' };
+  }
   const nodeByLane = new Map<string, AnalyticsSubagentNodeV1>();
   for (const node of hierarchy?.nodes ?? []) {
     nodeByLane.set(keyOf(node.provider, node.session_id), node);
@@ -283,49 +304,11 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     switch (node.link) {
       case 'root':
         break;
-      case 'linked': {
-        if (node.parent_session_id === null) break;
-        const parentId = keyOf(node.provider, node.parent_session_id);
-        const parent = drafts.get(parentId);
-        if (!parent) {
-          gaps.push({
-            id: `gap:parent_outside_page:${child.id}`,
-            laneId: child.id,
-            kind: 'parent_outside_page',
-            grade: 'unavailable',
-            detail: `recorded parent ${node.parent_session_id} is outside this loaded page`,
-          });
-          break;
+      case 'linked':
+        if (node.parent_session_id !== null) {
+          claimFor(laneId).tree = { parentSessionId: node.parent_session_id, toolUseId: node.parent_tool_use_id, source: 'subagent tree' };
         }
-        child.parentId = parent.id;
-        const precedes = child.start < parent.start;
-        const grade: EvidenceGrade = precedes ? 'ambiguous' : 'exact';
-        const basis =
-          `parent_session_id · parent_tool_use_id ${node.parent_tool_use_id ?? 'unrecorded'}` +
-          (precedes ? ' · child start precedes parent start' : '');
-        relations.push({
-          id: `rel:spawn:${child.id}`,
-          kind: 'spawn',
-          fromLaneId: parent.id,
-          toLaneId: child.id,
-          time: child.start,
-          grade,
-          basis,
-        });
-        spawnEvents.push({
-          id: `spawn:${child.id}`,
-          laneId: parent.id,
-          kind: 'spawn',
-          time: child.start,
-          sequence: 0,
-          grade,
-          source: 'parentage',
-          label: child.label,
-          detail: basis,
-          ref: child.id,
-        });
         break;
-      }
       case 'missing_parent':
         gaps.push({
           id: `gap:parent_outside_page:${child.id}`,
@@ -349,6 +332,90 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
         return unhandled;
       }
     }
+  }
+  for (const [laneId, { row, tree }] of claims) {
+    const child = drafts.get(laneId);
+    const primary = row ?? tree;
+    if (!child || !primary) continue;
+    const both = row !== null && tree !== null ? { row, tree } : null;
+    const parentsDiffer = both !== null && both.row.parentSessionId !== both.tree.parentSessionId;
+    const toolsDiffer =
+      both !== null &&
+      !parentsDiffer &&
+      both.row.toolUseId !== null &&
+      both.tree.toolUseId !== null &&
+      both.row.toolUseId !== both.tree.toolUseId;
+    if (both !== null && (parentsDiffer || toolsDiffer)) {
+      gaps.push({
+        id: `gap:parentage_conflict:${child.id}`,
+        laneId: child.id,
+        kind: 'parentage_conflict',
+        grade: 'ambiguous',
+        detail: parentsDiffer
+          ? `sessions row names parent ${both.row.parentSessionId}; subagent tree names ${both.tree.parentSessionId}`
+          : `sessions row names tool use ${both.row.toolUseId}; subagent tree names ${both.tree.toolUseId}`,
+      });
+    }
+    const candidates = both !== null && parentsDiffer ? [both.row, both.tree] : [primary];
+    for (const claim of candidates) {
+      const parent = drafts.get(keyOf(child.provider, claim.parentSessionId));
+      if (!parent) {
+        gaps.push({
+          id: `gap:parent_outside_page:${child.id}:${claim.source}`,
+          laneId: child.id,
+          kind: 'parent_outside_page',
+          grade: 'unavailable',
+          detail: `${claim.source} names parent ${claim.parentSessionId}, outside this loaded page`,
+        });
+        continue;
+      }
+      if (child.parentId === null) child.parentId = parent.id;
+      const precedes = child.start < parent.start;
+      const agreed = both !== null && !parentsDiffer;
+      // The loaded transcript carries no tool-use identity, so the fork
+      // cannot sit on the parent's tool call; it sits at the child's start.
+      const grade: EvidenceGrade = parentsDiffer || toolsDiffer || precedes ? 'ambiguous' : 'inferred';
+      const basis = [
+        agreed ? 'sessions row and subagent tree agree' : claim.source,
+        `parent_session_id · parent_tool_use_id ${claim.toolUseId ?? 'unrecorded'}`,
+        'fork placed at the child start: no tool-use identity in the loaded transcript',
+        parentsDiffer ? 'the other source names a different parent' : null,
+        toolsDiffer ? 'the sources name different tool uses' : null,
+        precedes ? 'child start precedes parent start' : null,
+      ]
+        .filter((part): part is string => part !== null)
+        .join(' · ');
+      const suffix = parentsDiffer ? `:${claim.source}` : '';
+      relations.push({ id: `rel:spawn:${child.id}${suffix}`, kind: 'spawn', fromLaneId: parent.id, toLaneId: child.id, time: child.start, grade, basis });
+      spawnEvents.push({
+        id: `spawn:${child.id}${suffix}`,
+        laneId: parent.id,
+        kind: 'spawn',
+        time: child.start,
+        sequence: 0,
+        grade,
+        source: 'parentage',
+        label: child.label,
+        detail: basis,
+        ref: child.id,
+      });
+    }
+  }
+  // A join only where the page shows it: the child's measured end inside its
+  // parent's measured extent. No result record backs it, so it is inferred.
+  for (const child of drafts.values()) {
+    const parent = child.parentId === null ? undefined : drafts.get(child.parentId);
+    if (!parent || child.end === null || parent.end === null) continue;
+    if (child.end < parent.start || child.end > parent.end) continue;
+    relations.push({
+      id: `rel:rejoin:${child.id}`,
+      kind: 'rejoin',
+      fromLaneId: child.id,
+      toLaneId: parent.id,
+      time: child.end,
+      grade: 'inferred',
+      basis: `child ${child.endSource === 'session_end' ? 'recorded end' : 'last message'} inside the parent's measured extent · no result or handoff record in this read`,
+    });
   }
 
   if (hierarchy === null) {
@@ -383,7 +450,7 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     kind: 'handoff_unavailable',
     grade: 'unavailable',
     detail:
-      'no handoff, result or rejoin authority is bound to session identity in this read; branches end at their recorded extent',
+      'no handoff or result authority is bound to session identity in this read; a join is drawn only where a child ends inside its parent\'s measured extent, graded inferred',
   });
 
   // --- depth (guarded against a cycle the authority did not flag) ----------
@@ -399,19 +466,28 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     draft.depth = depth;
   }
 
+  const untimedEditPaths = new Map<string, Set<string>>();
+  for (const file of temporal.edited_files) {
+    if (file.edited_at_micros != null) continue;
+    const laneId = keyOf(file.provider, file.session_id);
+    const bucket = untimedEditPaths.get(laneId);
+    if (bucket) bucket.add(file.path);
+    else untimedEditPaths.set(laneId, new Set([file.path]));
+  }
   const ordered = orderLanes([...drafts.values()]);
   const laneIndex = new Map(ordered.map((lane, index) => [lane.id, index] as const));
 
   for (const lane of ordered) {
-    // The edited-file rollup carries paths and hunks but no edit time, so an
-    // edit has no honest x; the lane says it has edits it cannot place.
-    if (lane.editedFileCount > 0) {
+    // An edit the rollup recorded without an integer time has no honest x;
+    // the lane says how many of its edited files it cannot place.
+    const untimed = untimedEditPaths.get(lane.id)?.size ?? 0;
+    if (untimed > 0) {
       gaps.push({
         id: `gap:edit_time_unrecorded:${lane.id}`,
         laneId: lane.id,
         kind: 'edit_time_unrecorded',
         grade: 'unavailable',
-        detail: `${lane.editedFileCount} edited ${lane.editedFileCount === 1 ? 'file' : 'files'} recorded · no edit time in this read`,
+        detail: `${untimed} edited ${untimed === 1 ? 'file' : 'files'} recorded · no edit time in this read`,
       });
     }
     if (lane.end === null) {
@@ -478,6 +554,23 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
       label: commit.commit_sha.slice(0, 7),
       detail,
       ref: commit.commit_sha,
+    });
+  }
+  for (const file of temporal.edited_files) {
+    const laneId = keyOf(file.provider, file.session_id);
+    if (!laneIndex.has(laneId) || file.edited_at_micros == null) continue;
+    const parts = [file.change_type, file.hunks === null ? null : `${file.hunks} ${file.hunks === 1 ? 'hunk' : 'hunks'}`, file.path];
+    pushRecorded({
+      id: `edit:${laneId}:${file.path}:${file.edited_at_micros}`,
+      laneId,
+      kind: 'file_edit',
+      time: file.edited_at_micros / 1_000_000,
+      sequence: 0,
+      grade: 'exact',
+      source: 'file_rollup',
+      label: file.path.split('/').pop() || file.path,
+      detail: parts.filter((part): part is string => part !== null).join(' · '),
+      ref: file.path,
     });
   }
   for (const event of spawnEvents) pushRecorded(event);

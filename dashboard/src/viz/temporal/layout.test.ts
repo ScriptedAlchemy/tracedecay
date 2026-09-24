@@ -357,7 +357,7 @@ describe('layoutTemporalScene', () => {
     }
     const proj = projection({ lanes });
     const dense = layoutTemporalScene(proj, optionsFor(proj, { denseLaneThreshold: 10 }));
-    expect(dense.denseDefault).toBe(true);
+    expect(dense.denseDepth).toBe(0);
     expect(dense.lanes.map((l) => l.id)).toEqual(['r0', 'r1', 'r2', 'r3', 'r4', 'r5']);
     expect(dense.lanes.every((l) => l.kind === 'bundle')).toBe(true);
     expect(dense.counts.lanesCollapsed).toBe(6);
@@ -374,8 +374,32 @@ describe('layoutTemporalScene', () => {
     expect(reopened.counts.lanesCollapsed).toBe(5);
 
     const sparse = layoutTemporalScene(proj, optionsFor(proj, { denseLaneThreshold: 12 }));
-    expect(sparse.denseDefault).toBe(false);
+    expect(sparse.denseDepth).toBeNull();
     expect(sparse.lanes).toHaveLength(12);
+  });
+
+  it('bundles a lone orchestrator at its workstream leads, not into one bundle', () => {
+    const lanes: JourneyLane[] = [lane({ id: 'orch', start: T0, end: T0 + 900, endSource: 'session_end' })];
+    for (let l = 0; l < 3; l += 1) {
+      lanes.push(lane({ id: `lead${l}`, parentId: 'orch', depth: 1, start: T0 + 10 + l }));
+      for (let w = 0; w < 4; w += 1) {
+        lanes.push(lane({ id: `w${l}.${w}`, parentId: `lead${l}`, depth: 2, start: T0 + 20 + l * 10 + w }));
+      }
+    }
+    const proj = projection({ lanes });
+    // 16 lanes over a threshold of 10: depth 1 keeps 4 visible, depth 2 would keep 16.
+    const dense = layoutTemporalScene(proj, optionsFor(proj, { denseLaneThreshold: 10 }));
+    expect(dense.denseDepth).toBe(1);
+    expect(dense.lanes.map((l) => [l.id, l.kind])).toEqual([
+      ['orch', 'session'],
+      ['lead0', 'bundle'],
+      ['lead1', 'bundle'],
+      ['lead2', 'bundle'],
+    ]);
+    expect(dense.clusters.map((c) => c.counts.sessions)).toEqual([4, 4, 4]);
+    // Workstream zoom bundles where more than one session first delegates.
+    const workstream = layoutTemporalScene(proj, optionsFor(proj, { zoom: 'workstream' }));
+    expect(workstream.lanes.map((l) => [l.id, l.kind])).toEqual(dense.lanes.map((l) => [l.id, l.kind]));
   });
 
   it('collapses every parent at workstream zoom', () => {

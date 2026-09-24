@@ -385,7 +385,7 @@ describe('projectJourney lanes', () => {
 });
 
 describe('projectJourney parentage', () => {
-  it('emits an exact spawn relation and parent-lane event only for a linked pair in the page', () => {
+  it('emits an inferred fork at the child start and a parent-lane event only for a linked pair in the page', () => {
     const projection = projectJourney(parentChild());
     expect(projection.relations).toHaveLength(1);
     const relation = projection.relations[0];
@@ -394,23 +394,149 @@ describe('projectJourney parentage', () => {
       fromLaneId: ROOT,
       toLaneId: CHILD,
       time: T0 + 60,
-      grade: 'exact',
+      grade: 'inferred',
     });
-    expect(relation?.basis).toContain('toolu_01');
-    expect(relation?.basis).toContain('parent_session_id');
+    // The transcript carries no tool-use identity, so the fork cannot sit on
+    // the parent's tool call and says so.
+    expect(relation?.basis).toBe(
+      'subagent tree · parent_session_id · parent_tool_use_id toolu_01 · fork placed at the child start: no tool-use identity in the loaded transcript',
+    );
     const child = projection.lanes.find((lane) => lane.id === CHILD);
     expect(child).toMatchObject({ parentId: ROOT, depth: 1, agent: 'explorer' });
     const spawn = projection.events.find((event) => event.kind === 'spawn');
     expect(spawn).toMatchObject({
       laneId: ROOT,
       time: T0 + 60,
-      grade: 'exact',
+      grade: 'inferred',
       source: 'parentage',
       label: 'child',
       ref: CHILD,
       id: `spawn:${CHILD}`,
     });
     expect(projection.stats).toMatchObject({ lanes: 2, roots: 1, subagents: 1 });
+  });
+
+  describe('parentage from the session row and the subagent tree', () => {
+    const rows = (child: Partial<LoomSessionRowV1>, extra: LoomSessionRowV1[] = []) =>
+      temporal({
+        sessions: [
+          session({ ended_at: T0 + 3600 }),
+          session({ session_id: 'other', started_at: T0 + 10 }),
+          session({ session_id: 'child', started_at: T0 + 60, is_subagent: true, ...child }),
+          ...extra,
+        ],
+      });
+    const linked = (parent: string, tool: string | null) =>
+      node({ session_id: 'child', link: 'linked', parent_session_id: parent, parent_tool_use_id: tool, is_subagent: true, depth: 1 });
+
+    it('forks from the row column alone when the tree is silent', () => {
+      const projection = projectJourney(sources({ temporal: rows({ parent_session_id: 'root', parent_tool_use_id: 'toolu_09' }) }));
+      expect(projection.relations.filter((r) => r.kind === 'spawn')).toEqual([
+        {
+          id: `rel:spawn:${CHILD}`,
+          kind: 'spawn',
+          fromLaneId: ROOT,
+          toLaneId: CHILD,
+          time: T0 + 60,
+          grade: 'inferred',
+          basis: 'sessions row · parent_session_id · parent_tool_use_id toolu_09 · fork placed at the child start: no tool-use identity in the loaded transcript',
+        },
+      ]);
+      expect(projection.lanes.find((lane) => lane.id === CHILD)).toMatchObject({ parentId: ROOT, depth: 1 });
+    });
+
+    it('draws one fork when the two sources agree', () => {
+      const projection = projectJourney(
+        sources({ temporal: rows({ parent_session_id: 'root', parent_tool_use_id: 'toolu_09' }), hierarchy: tree([node(), linked('root', 'toolu_09')]) }),
+      );
+      const spawns = projection.relations.filter((r) => r.kind === 'spawn');
+      expect(spawns).toHaveLength(1);
+      expect(spawns[0]?.basis.startsWith('sessions row and subagent tree agree · ')).toBe(true);
+      expect(projection.gaps.some((gap) => gap.kind === 'parentage_conflict')).toBe(false);
+    });
+
+    it('draws both candidates as ambiguous when the sources name different parents', () => {
+      const projection = projectJourney(
+        sources({ temporal: rows({ parent_session_id: 'root' }), hierarchy: tree([node(), linked('other', null)]) }),
+      );
+      const spawns = projection.relations.filter((r) => r.kind === 'spawn');
+      expect(spawns.map((r) => [r.id, r.fromLaneId, r.grade])).toEqual([
+        [`rel:spawn:${CHILD}:sessions row`, ROOT, 'ambiguous'],
+        [`rel:spawn:${CHILD}:subagent tree`, laneIdOf('cursor', 'other'), 'ambiguous'],
+      ]);
+      // Placement follows the session row; the disagreement is a gap, not a merge.
+      expect(projection.lanes.find((lane) => lane.id === CHILD)?.parentId).toBe(ROOT);
+      expect(projection.gaps.find((gap) => gap.kind === 'parentage_conflict')).toEqual({
+        id: `gap:parentage_conflict:${CHILD}`,
+        laneId: CHILD,
+        kind: 'parentage_conflict',
+        grade: 'ambiguous',
+        detail: 'sessions row names parent root; subagent tree names other',
+      });
+    });
+
+    it('grades an agreed parent ambiguous when the sources name different tool uses', () => {
+      const projection = projectJourney(
+        sources({ temporal: rows({ parent_session_id: 'root', parent_tool_use_id: 'toolu_a' }), hierarchy: tree([node(), linked('root', 'toolu_b')]) }),
+      );
+      expect(projection.relations.filter((r) => r.kind === 'spawn').map((r) => r.grade)).toEqual(['ambiguous']);
+      expect(projection.gaps.find((gap) => gap.kind === 'parentage_conflict')?.detail).toBe(
+        'sessions row names tool use toolu_a; subagent tree names toolu_b',
+      );
+    });
+
+    it('infers a join only where the child ends inside the parent measured extent', () => {
+      const ended = projectJourney(sources({ temporal: rows({ parent_session_id: 'root', ended_at: T0 + 900 }) }));
+      expect(ended.relations.filter((r) => r.kind === 'rejoin')).toEqual([
+        {
+          id: `rel:rejoin:${CHILD}`,
+          kind: 'rejoin',
+          fromLaneId: CHILD,
+          toLaneId: ROOT,
+          time: T0 + 900,
+          grade: 'inferred',
+          basis: "child recorded end inside the parent's measured extent · no result or handoff record in this read",
+        },
+      ]);
+      const open = projectJourney(sources({ temporal: rows({ parent_session_id: 'root' }) }));
+      expect(open.relations.some((r) => r.kind === 'rejoin')).toBe(false);
+      const outlives = projectJourney(sources({ temporal: rows({ parent_session_id: 'root', ended_at: T0 + 7200 }) }));
+      expect(outlives.relations.some((r) => r.kind === 'rejoin')).toBe(false);
+    });
+  });
+
+  describe('edited files', () => {
+    it('places a timed edit at its recorded time and keeps untimed edits as a gap', () => {
+      const projection = projectJourney(
+        sources({
+          temporal: temporal({
+            sessions: [session({ edited_files_recorded: true })],
+            edited_files: [
+              { path: 'src/a.ts', provider: 'cursor', session_id: 'root', change_type: 'modified', hunks: 2, edited_at_micros: (T0 + 120) * 1_000_000 },
+              { path: 'src/b.ts', provider: 'cursor', session_id: 'root', change_type: null, hunks: null, edited_at_micros: null },
+              { path: 'src/c.ts', provider: 'cursor', session_id: 'root', change_type: 'added', hunks: 1 },
+            ],
+          }),
+        }),
+      );
+      expect(projection.events.filter((event) => event.kind === 'file_edit')).toEqual([
+        {
+          id: `edit:${ROOT}:src/a.ts:${(T0 + 120) * 1_000_000}`,
+          laneId: ROOT,
+          kind: 'file_edit',
+          time: T0 + 120,
+          sequence: 1,
+          grade: 'exact',
+          source: 'file_rollup',
+          label: 'a.ts',
+          detail: 'modified · 2 hunks · src/a.ts',
+          ref: 'src/a.ts',
+        },
+      ]);
+      expect(projection.gaps.find((gap) => gap.kind === 'edit_time_unrecorded')?.detail).toBe(
+        '2 edited files recorded · no edit time in this read',
+      );
+    });
   });
 
   it('grades the relation ambiguous when the child starts before its parent', () => {
@@ -435,7 +561,7 @@ describe('projectJourney parentage', () => {
         laneId: ROOT,
         kind: 'parent_outside_page',
         grade: 'unavailable',
-        detail: 'recorded parent elsewhere is outside this loaded page',
+        detail: 'subagent tree names parent elsewhere, outside this loaded page',
       }),
     );
   });

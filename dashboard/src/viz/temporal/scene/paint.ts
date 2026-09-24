@@ -188,9 +188,20 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
     if (!lane || lane.kind === 'bundle') continue;
     const stroke = gradeStroke(path.grade, palette);
     const resolves = resolved.has(lane.id);
-    ctx.globalAlpha = focusAlpha(path.focus) * (resolves ? 1 : 0.7);
+    if (!resolves) {
+      // An aggregated session is its extent band; the grade rides on the
+      // hairline through it, since a dashed band reads as a barcode.
+      ctx.globalAlpha = 0.28 * focusAlpha(path.focus);
+      ctx.strokeStyle = stroke.color;
+      ctx.lineWidth = Math.max(2, lane.height - BAND_INSET * 4);
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      traceRail(ctx, lane);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = focusAlpha(path.focus);
     ctx.strokeStyle = stroke.color;
-    ctx.lineWidth = resolves ? 1 + (path.weight ?? 0) * 1.5 : Math.max(2, lane.height - BAND_INSET * 4);
+    ctx.lineWidth = 1 + (path.weight ?? 0) * 1.5;
     ctx.setLineDash([...stroke.dash]);
     ctx.beginPath();
     traceRail(ctx, lane);
@@ -199,7 +210,8 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
   const links = model.paths.filter(isLink);
   for (const path of links) {
     const stroke = gradeStroke(path.grade, palette);
-    ctx.globalAlpha = focusAlpha(path.focus);
+    // A join is an inference from two extents; it recedes behind the forks.
+    ctx.globalAlpha = focusAlpha(path.focus) * (path.kind === 'rejoin' ? 0.6 : 1);
     ctx.strokeStyle = stroke.color;
     ctx.lineWidth = 1;
     ctx.setLineDash([...stroke.dash]);

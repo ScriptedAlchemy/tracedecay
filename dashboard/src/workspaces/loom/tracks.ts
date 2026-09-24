@@ -152,32 +152,23 @@ export function axisTicks(view: LoomWindow, width: number): AxisTick[] {
   return ticks;
 }
 
+// `toLocale*String` builds a formatter per call; a dense page formats
+// hundreds of moments per redraw, so each format is built once.
+const SECONDS_FORMAT = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const CLOCK_FORMAT = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+const MOMENT_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const DAY_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+const MONTH_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', year: '2-digit' });
+
 function tickLabel(epochSeconds: number, step: number): string {
   const date = new Date(epochSeconds * 1000);
-  if (step < 60) {
-    return date.toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  }
-  if (step < 6 * 3600) {
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  }
+  if (step < 60) return SECONDS_FORMAT.format(date);
+  if (step < 6 * 3600) return CLOCK_FORMAT.format(date);
   // A window ticking every six hours or more spans days: a bare clock time
   // would repeat "12:00 AM" across the ruler with nothing to tell them apart.
-  if (step < 86_400) {
-    return date.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  }
-  if (step < 30 * 86_400) {
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  }
-  return date.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+  if (step < 86_400) return MOMENT_FORMAT.format(date);
+  if (step < 30 * 86_400) return DAY_FORMAT.format(date);
+  return MONTH_FORMAT.format(date);
 }
 
 /* -------------------------------------------------------------------------
@@ -206,10 +197,5 @@ export function formatDurationSeconds(seconds: number): string {
 }
 
 export function formatMoment(epochSeconds: number): string {
-  return new Date(epochSeconds * 1000).toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return MOMENT_FORMAT.format(new Date(epochSeconds * 1000));
 }

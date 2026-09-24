@@ -214,8 +214,12 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     const canvas = canvasRef.current;
     if (!canvas || !palette) return;
     const dpr = globalThis.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(width * dpr));
-    canvas.height = Math.max(1, Math.round(height * dpr));
+    // Assigning a size reallocates the bitmap even when it is unchanged; a
+    // window change repaints into the one it already has.
+    const pixelWidth = Math.max(1, Math.round(width * dpr));
+    const pixelHeight = Math.max(1, Math.round(height * dpr));
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       setLayer('unavailable');

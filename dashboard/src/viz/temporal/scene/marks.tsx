@@ -19,7 +19,7 @@ import { focusAlpha, isLifted, pathEnds, recencyAlpha, resolvedLanes, type Scene
 export const NODE_CLASS = 'cursor-pointer outline-none [&:focus-visible>.td-focus-ring]:opacity-100';
 
 /** Above this many drawn links, non-EXACT tags print only on the lifted chain. */
-const TAGGED_LINKS_MAX = 40;
+const TAGGED_LINKS_MAX = 16;
 
 const ENGRAVED: CSSProperties = { fontFamily: 'var(--font-display)', fontStretch: '112%' };
 const MONO: CSSProperties = { fontFamily: 'var(--font-mono)' };
@@ -151,8 +151,21 @@ export function FieldOverlay({ frame }: { frame: SceneFrame }): JSX.Element {
   const links = model.paths.filter(isLink);
   const tagAll = links.length <= TAGGED_LINKS_MAX;
   const gutterX = fieldX1 + (model.viewport.right + 8) / 2;
+  // Every drawn link's grade is printed: per link while they fit, and always
+  // as a tally in the ruler so a dense page never hides one.
+  const tally = new Map<string, number>();
+  for (const path of links) {
+    const key = `${path.kind === 'rejoin' ? 'JOINS' : 'FORKS'} ${GRADE_TAG[path.grade]}`;
+    tally.set(key, (tally.get(key) ?? 0) + 1);
+  }
+  const tallyText = [...tally.entries()].map(([key, count]) => `${count} ${key}`).join(' · ');
   return (
     <g pointerEvents="none">
+      {tallyText && (
+        <text data-link-tally x={frame.fieldX0 + 4} y={11} fontSize={9} letterSpacing="0.12em" fill="var(--raw-graph-text)" opacity={0.7} style={MONO}>
+          {tallyText}
+        </text>
+      )}
       {model.rails.map((rail) => {
         const text = `${rail.label.toUpperCase()} · ${rail.lanes}`;
         if (rail.y1 - rail.y0 < text.length * 7 + 8) return null;
@@ -199,16 +212,18 @@ export function FieldOverlay({ frame }: { frame: SceneFrame }): JSX.Element {
   );
 }
 
+const COUNT_FORMAT = new Intl.NumberFormat();
+
 /** The lane column's second line: exact totals over the page, never the window. */
 export function laneDetail(lane: SceneLane, frame: SceneFrame): string | null {
   const density = frame.density?.lanes.get(lane.id);
   if (!density) return null;
   const { totals, peak } = density;
   if (lane.kind === 'bundle') {
-    return `1+${totals.sessions - 1} sess · ${totals.messages.toLocaleString()} msg · peak ${peak.active}${peak.open > 0 ? ` · ${peak.open} open` : ''}`;
+    return `1+${totals.sessions - 1} sess · ${COUNT_FORMAT.format(totals.messages)} msg · peak ${peak.active}${peak.open > 0 ? ` · ${peak.open} open` : ''}`;
   }
   const commits = totals.commits > 0 ? ` · ${totals.commits} ${totals.commits === 1 ? 'commit' : 'commits'}` : '';
-  return `${lane.provider} · ${totals.messages.toLocaleString()} msg${commits}`;
+  return `${lane.provider} · ${COUNT_FORMAT.format(totals.messages)} msg${commits}`;
 }
 
 export function LegendEncodings(): JSX.Element {
