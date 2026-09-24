@@ -188,6 +188,26 @@ describe('Chart registered-series guard', () => {
     await waitFor(() => expect(applied.length).toBe(0));
   });
 
+  it('draws a scatter series, which the memory projection plots', async () => {
+    const { getByRole, queryByText } = render(
+      <Chart
+        option={
+          {
+            xAxis: { type: 'value' },
+            yAxis: { type: 'value' },
+            series: [{ type: 'scatter', data: [[0.2, 0.7]] }],
+          } as EChartsOption
+        }
+        ariaLabel="memory projection"
+      />,
+    );
+
+    const option = await lastOption();
+    expect(option.series).toEqual([{ type: 'scatter', data: [[0.2, 0.7]] }]);
+    expect(getByRole('img').getAttribute('aria-label')).toBe('memory projection');
+    expect(queryByText(/cannot draw/i)).toBeNull();
+  });
+
   it('reports every unregistered series once, and still refuses a mixed option', () => {
     const { getByText } = render(
       <Chart
