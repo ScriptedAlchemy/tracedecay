@@ -124,7 +124,7 @@ fn successful_envelope(response: &Value, tool: &str) -> Value {
 }
 
 fn retryable_advisory_unavailable(response: &Value) -> bool {
-    let problem = &response["result"]["problem"];
+    let problem = &response["result"]["structuredContent"]["problem"];
     response["result"]["isError"] == true
         && problem["retryable"] == true
         && problem["code"] == "feedback.advisory-cycle.unavailable"
@@ -354,7 +354,7 @@ fn assert_unknown_handle(response: &Value) {
         "request id must be the MCP connection identity, got {request_id}"
     );
     let problem = denied_problem(request_id);
-    assert_eq!(result["problem"], problem);
+    assert_eq!(result["structuredContent"]["problem"], problem);
     assert_eq!(
         envelope,
         json!({

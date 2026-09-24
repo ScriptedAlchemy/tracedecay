@@ -118,12 +118,12 @@ fn assert_problem(
     legal_actions: Value,
 ) {
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["problem"]["kind"], kind, "{result}");
-    assert_eq!(result["problem"]["code"], code, "{result}");
-    assert_eq!(result["problem"]["message"], message, "{result}");
-    assert_eq!(result["problem"]["retry"], retry, "{result}");
+    assert_eq!(result["structuredContent"]["problem"]["kind"], kind, "{result}");
+    assert_eq!(result["structuredContent"]["problem"]["code"], code, "{result}");
+    assert_eq!(result["structuredContent"]["problem"]["message"], message, "{result}");
+    assert_eq!(result["structuredContent"]["problem"]["retry"], retry, "{result}");
     assert_eq!(
-        result["problem"]["legal_actions"], legal_actions,
+        result["structuredContent"]["problem"]["legal_actions"], legal_actions,
         "{result}"
     );
 }

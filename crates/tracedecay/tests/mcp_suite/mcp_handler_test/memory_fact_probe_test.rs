@@ -408,26 +408,26 @@ fn assert_probe_hits(payload: &Value, expected: &[(&str, &str, &[&str], u64)]) {
 
 fn assert_invalid_request(result: &Value) {
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["problem"]["kind"], "invalid_request", "{result}");
+    assert_eq!(result["structuredContent"]["problem"]["kind"], "invalid_request", "{result}");
     assert_eq!(
-        result["problem"]["code"],
+        result["structuredContent"]["problem"]["code"],
         "application.retained.invalid-request"
     );
     assert_eq!(
-        result["problem"]["message"],
+        result["structuredContent"]["problem"]["message"],
         "The retained operation request is invalid."
     );
     assert_eq!(
-        result["problem"]["diagnostic"],
+        result["structuredContent"]["problem"]["diagnostic"],
         json!({
             "code": "application.retained.invalid-request",
             "message": "The retained operation request is invalid."
         })
     );
-    assert_eq!(result["problem"]["retry"], "never");
-    assert_eq!(result["problem"]["retryable"], false);
+    assert_eq!(result["structuredContent"]["problem"]["retry"], "never");
+    assert_eq!(result["structuredContent"]["problem"]["retryable"], false);
     assert_eq!(
-        result["problem"]["legal_actions"],
+        result["structuredContent"]["problem"]["legal_actions"],
         json!(["correct_request"])
     );
 }

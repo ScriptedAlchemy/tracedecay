@@ -275,7 +275,7 @@ fn assert_problem(response: &Value, expected: Value) {
     assert!(response["error"].is_null(), "{response}");
     let result = &response["result"];
     assert_eq!(result["isError"], true, "{response}");
-    assert_eq!(stable_problem(&result["problem"]), expected, "{response}");
+    assert_eq!(stable_problem(&result["structuredContent"]["problem"]), expected, "{response}");
     let envelope = parse_text(result);
     assert_eq!(
         envelope["contract"]["schema_id"], "schema.application.retained.fact-store-search.result",

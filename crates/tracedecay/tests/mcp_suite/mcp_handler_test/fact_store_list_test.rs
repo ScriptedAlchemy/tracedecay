@@ -427,9 +427,9 @@ fn assert_invalid_request_problem(response: &Value) {
     assert_eq!(problem["retryable"], false);
     assert_eq!(problem["revision"], json!(1));
     assert_eq!(problem["legal_actions"], json!(["correct_request"]));
-    assert_eq!(&response["result"]["problem"]["kind"], "invalid_request");
+    assert_eq!(&response["result"]["structuredContent"]["problem"]["kind"], "invalid_request");
     assert_eq!(
-        &response["result"]["problem"]["message"],
+        &response["result"]["structuredContent"]["problem"]["message"],
         "The retained operation request is invalid."
     );
 }

@@ -108,7 +108,7 @@ fn assert_invalid_request(response: &Value, context: &str) {
     let refused_at_parse =
         response["error"]["data"]["reason_code"] == "application_surface_invalid_request";
     let refused_by_contract = response["result"]["isError"] == true
-        && response["result"]["problem"]["kind"] == "invalid_request";
+        && response["result"]["structuredContent"]["problem"]["kind"] == "invalid_request";
     assert!(
         refused_at_parse || refused_by_contract,
         "{context} must be a typed invalid request: {response}"

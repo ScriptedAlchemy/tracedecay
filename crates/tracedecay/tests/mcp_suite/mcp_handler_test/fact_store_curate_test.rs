@@ -113,7 +113,7 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
             "an out-of-range bound is a typed problem, not a transport error: {rejected}"
         );
         assert_eq!(rejected["result"]["isError"], json!(true), "{rejected}");
-        let problem = &rejected["result"]["problem"];
+        let problem = &rejected["result"]["structuredContent"]["problem"];
         assert_eq!(problem["kind"], "invalid_request");
         assert_eq!(problem["code"], "application.retained.invalid-request");
         assert_eq!(

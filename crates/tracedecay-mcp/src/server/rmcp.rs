@@ -787,10 +787,26 @@ where
         }
         let started =
             (self.timings_enabled || self.context.timings_enabled()).then(std::time::Instant::now);
-        let mut result = rmcp_response_result::<CallToolResult>(
-            self.dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
-                .await?,
-        )?;
+        let mut response = self
+            .dispatch(context, "tools/call", McpDispatchParams::ToolsCall(request))
+            .await?;
+        // `CallToolResult` has no extension members, so the typed problem the
+        // dispatcher attaches beside `content` travels as structured content;
+        // otherwise a markdown-format refusal would reach clients only as prose.
+        let problem = response
+            .result
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .and_then(|result| result.remove("problem"));
+        let mut result = rmcp_response_result::<CallToolResult>(response)?;
+        if let Some(problem) = problem {
+            match result.structured_content.as_mut().and_then(Value::as_object_mut) {
+                Some(structured) => {
+                    structured.insert("problem".to_owned(), problem);
+                }
+                None => result.structured_content = Some(json!({ "problem": problem })),
+            }
+        }
         if let Some(started) = started {
             result
                 .meta

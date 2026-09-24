@@ -101,17 +101,18 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
         "each diagnostics call mints its own request id"
     );
     assert_eq!(
-        workspace["problem"]["code"], indexed_file["problem"]["code"],
+        workspace["structuredContent"]["problem"]["code"],
+        indexed_file["structuredContent"]["problem"]["code"],
         "a file read with no published generation uses the same authority state as the workspace"
     );
 
     assert_eq!(markdown["isError"], json!(true), "{markdown}");
-    assert_eq!(markdown["problem"]["kind"], "unsupported");
-    assert_eq!(markdown["problem"]["code"], UNPUBLISHED_CODE);
-    assert_eq!(markdown["problem"]["message"], UNPUBLISHED_MESSAGE);
-    assert_eq!(markdown["problem"]["retry"], "never");
-    assert_eq!(markdown["problem"]["retryable"], json!(false));
-    assert_eq!(markdown["problem"]["legal_actions"], json!([]));
+    assert_eq!(markdown["structuredContent"]["problem"]["kind"], "unsupported");
+    assert_eq!(markdown["structuredContent"]["problem"]["code"], UNPUBLISHED_CODE);
+    assert_eq!(markdown["structuredContent"]["problem"]["message"], UNPUBLISHED_MESSAGE);
+    assert_eq!(markdown["structuredContent"]["problem"]["retry"], "never");
+    assert_eq!(markdown["structuredContent"]["problem"]["retryable"], json!(false));
+    assert_eq!(markdown["structuredContent"]["problem"]["legal_actions"], json!([]));
     let markdown_text = extract_real_server_text(&markdown);
     assert!(
         markdown_text.starts_with(
@@ -143,7 +144,7 @@ async fn diagnostics_call_refuses_bad_arguments_and_reports_unpublished_reads() 
         "an unpublished read must not render as a clean empty page: {markdown_text}"
     );
     assert_ne!(
-        markdown["problem"]["request_id"].as_str().unwrap(),
+        markdown["structuredContent"]["problem"]["request_id"].as_str().unwrap(),
         workspace_id,
         "the markdown presentation is a separate call"
     );
@@ -178,7 +179,7 @@ fn assert_unpublished_json(label: &str, result: &Value) {
     let text = extract_real_server_text(result);
     let payload: Value = serde_json::from_str(text)
         .unwrap_or_else(|error| panic!("{label} text was not JSON ({error}): {text}"));
-    assert_eq!(result["problem"], payload["problem"], "{label}: {result}");
+    assert_eq!(result["structuredContent"]["problem"], payload["problem"], "{label}: {result}");
     assert!(
         payload.get("outcome").is_none(),
         "{label} must not be an evidence page: {payload}"
@@ -270,7 +271,7 @@ fn assert_unpublished_json(label: &str, result: &Value) {
 }
 
 fn request_id(result: &Value) -> &str {
-    result["problem"]["request_id"]
+    result["structuredContent"]["problem"]["request_id"]
         .as_str()
         .expect("diagnostics problem request id")
 }
