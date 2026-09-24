@@ -268,13 +268,13 @@ function FilterSelect({
   options: readonly { value: string; label: ReactNode }[];
 }) {
   return (
-    <label className="flex min-h-[var(--touch-target-min)] min-w-0 max-w-full items-center gap-2 border border-edge-subtle bg-surface-0 pl-2 pr-1 focus-within:border-accent">
+    <label className="flex min-h-[calc(var(--touch-target-min)+2px)] min-w-0 max-w-full items-center gap-2 border border-edge-subtle bg-surface-0 pl-2 pr-1 focus-within:border-accent">
       <span className="td-legend">{label}</span>
       <select
         value={value}
         aria-label={name}
         onChange={(event) => onChange(event.target.value)}
-        className="min-h-[calc(var(--touch-target-min)-2px)] min-w-0 max-w-[10rem] bg-transparent pr-1 text-sm text-text-primary outline-none"
+        className="min-h-[var(--touch-target-min)] min-w-0 max-w-[10rem] bg-transparent pr-1 text-sm text-text-primary outline-none"
       >
         {options.map((option) => (
           <option key={option.value} value={option.value}>

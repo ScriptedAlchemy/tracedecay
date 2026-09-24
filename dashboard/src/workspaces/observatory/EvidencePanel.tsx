@@ -158,7 +158,7 @@ export function EvidencePanel({
           data-evidence-panel-button={summary.id}
           aria-pressed={selected}
           aria-controls={EVIDENCE_INSPECTOR_ID}
-          className="td-title min-w-0 truncate text-left text-text-primary after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
+          className="td-title -my-[8px] min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)] truncate text-left text-text-primary after:absolute after:inset-0 after:content-[''] focus-visible:outline-none"
           onClick={() => onSelect(summary.id)}
           onFocus={() => onPreview(summary.id)}
           onBlur={onPreviewEnd}
