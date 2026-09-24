@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_contracts::ObservatoryReadModelV1;
-use tracedecay_domain::CoverageStateV1;
+use tracedecay_domain::{CoverageStateV1, ObservationScopeV1};
 
 use tracedecay_automation::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
@@ -25,6 +25,10 @@ use tracedecay_global_db::{
     AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, RegisteredGlobalDb,
 };
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_session_memory::provider_usage::{
+    ProviderUsageAggregateV1, ProviderUsageCoverageV1, ProviderUsageSessionTotalsV1,
+    provider_usage_aggregate, provider_usage_by_session,
+};
 
 use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
@@ -154,6 +158,12 @@ pub struct AnalyticsSubagentNodeV1 {
     /// Sessions below this one, transitively, excluding itself.
     pub descendants: i64,
     pub link: AnalyticsSubagentLinkV1,
+    /// Provider-reported billing usage the canonical provider-usage projection
+    /// attributes to this session. Absent means the projection holds no usage
+    /// event for it (or the whole read was unavailable, see the payload's
+    /// `usage_coverage`); nothing is estimated from message text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ProviderUsageSessionTotalsV1>,
 }
 
 /// The subagent tree: parent/child session edges, not a per-agent rollup.
@@ -168,6 +178,11 @@ pub struct AnalyticsSubagentTreePayloadV1 {
     #[serde(default)]
     pub error: Option<String>,
     pub nodes: Vec<AnalyticsSubagentNodeV1>,
+    /// Coverage of the provider-usage read that populated each node's `usage`.
+    /// `unavailable` means no node may be read as "used no tokens"; absent
+    /// means the tree itself was not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_coverage: Option<ProviderUsageCoverageV1>,
     /// Sessions read for this project before any tree was built. The only
     /// honest denominator for the counts below.
     pub sessions_read: i64,
@@ -645,15 +660,31 @@ fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNo
                 depth,
                 descendants: sizes[slot] - 1,
                 link: link[position],
+                usage: None,
             }
         })
         .collect()
+}
+
+/// Attach each node's provider-reported usage from one reduced aggregate.
+/// Sessions the projection never saw keep `usage: None`; the aggregate's own
+/// coverage is what tells a reader whether that absence means anything.
+fn attach_subagent_usage(
+    nodes: &mut [AnalyticsSubagentNodeV1],
+    aggregate: &ProviderUsageAggregateV1,
+) -> ProviderUsageCoverageV1 {
+    let mut by_session = provider_usage_by_session(aggregate);
+    for node in nodes {
+        node.usage = by_session.remove(&(node.provider.clone(), node.session_id.clone()));
+    }
+    aggregate.coverage
 }
 
 async fn subagent_tree_reading(
     host_io: &HostIo,
     db: Option<&RegisteredGlobalDb>,
     project_root: &Path,
+    usage_scope: Option<&ObservationScopeV1>,
 ) -> Result<AnalyticsSubagentTreePayloadV1, String> {
     let Some(db) = db else {
         return Ok(AnalyticsSubagentTreePayloadV1 {
@@ -661,6 +692,7 @@ async fn subagent_tree_reading(
             source: "session_store_unavailable".to_owned(),
             error: None,
             nodes: Vec::new(),
+            usage_coverage: None,
             sessions_read: 0,
             root_count: 0,
             edge_count: 0,
@@ -725,7 +757,16 @@ async fn subagent_tree_reading(
         })
         .collect();
 
-    let nodes = build_subagent_tree(session_rows);
+    let mut nodes = build_subagent_tree(session_rows);
+    // Without a resolved project scope there is no usage projection to read;
+    // that is the typed `unavailable`, not an empty aggregate.
+    let usage_coverage = match usage_scope {
+        Some(scope) => {
+            let aggregate = provider_usage_aggregate(db, scope, None, None).await;
+            attach_subagent_usage(&mut nodes, &aggregate)
+        }
+        None => ProviderUsageCoverageV1::Unavailable,
+    };
     let count_link = |wanted: AnalyticsSubagentLinkV1| {
         nodes.iter().filter(|node| node.link == wanted).count() as i64
     };
@@ -733,6 +774,7 @@ async fn subagent_tree_reading(
         available: true,
         source: "sessions".to_owned(),
         error: None,
+        usage_coverage: Some(usage_coverage),
         root_count: count_link(AnalyticsSubagentLinkV1::Root),
         edge_count: count_link(AnalyticsSubagentLinkV1::Linked),
         missing_parent_count: count_link(AnalyticsSubagentLinkV1::MissingParent),
@@ -756,10 +798,17 @@ pub async fn subagent_tree(
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
     hotpath::future!(
         async move {
+            let usage_scope = state
+                .resolved_scope
+                .as_ref()
+                .map(|scope| ObservationScopeV1::Project {
+                    project_id: scope.project_id.clone(),
+                });
             match subagent_tree_reading(
                 &state.host_io,
                 state.lcm_db.as_deref(),
                 &state.project_root,
+                usage_scope.as_ref(),
             )
             .await
             {
@@ -1401,10 +1450,16 @@ mod tests {
 
     use super::{
         AnalyticsSubagentLinkV1, HookAnalyticsRows, HookAnalyticsWindow, SubagentSessionRow,
-        build_subagent_tree, diagnostics_summary_from_parts, hint_efficacy_from_events,
-        read_hook_analytics_file, sort_hook_analytics_rows,
+        attach_subagent_usage, build_subagent_tree, diagnostics_summary_from_parts,
+        hint_efficacy_from_events, read_hook_analytics_file, sort_hook_analytics_rows,
     };
+    use tracedecay_domain::ObservationScopeV1;
     use tracedecay_global_db::AnalyticsEventRecord;
+    use tracedecay_session_memory::provider_usage::{
+        AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
+        ProviderUsageDeltaDerivationV1, ProviderUsageDeltaV1, ProviderUsageIssueKindV1,
+        ProviderUsageIssueV1,
+    };
 
     fn analytics_event(
         event_kind: &str,
@@ -1470,6 +1525,96 @@ mod tests {
                 ("child.b", 1, 0),
             ]
         );
+    }
+
+    fn usage_delta(sequence: u64, session_id: &str, input: u64, output: u64) -> ProviderUsageDeltaV1 {
+        ProviderUsageDeltaV1 {
+            observation_id: format!("sha256:{sequence:064x}"),
+            receipt_id: format!("receipt:{sequence}"),
+            observation_sequence: sequence,
+            usage_ordinal: 0,
+            scope: ObservationScopeV1::Profile,
+            provider: "codex".to_owned(),
+            model: Some("openai/gpt-5.6-codex".to_owned()),
+            session_id: session_id.to_owned(),
+            turn_id: None,
+            message_id: None,
+            request_id: None,
+            native_kind: "token_count".to_owned(),
+            native_field: "fixture.usage".to_owned(),
+            native_timestamp: Some(1_700_000_000 + sequence as i64),
+            derivation: ProviderUsageDeltaDerivationV1::NativeDelta,
+            derived_from_sequence: None,
+            counters: AggregatedProviderUsageCountersV1 {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: Some(0),
+                total_tokens: Some(input + output),
+            },
+        }
+    }
+
+    #[test]
+    fn node_usage_is_the_projection_sum_per_session_and_absent_where_unobserved() {
+        let mut nodes = build_subagent_tree(vec![
+            row("root", None),
+            row("child.billed", Some("root")),
+            row("child.silent", Some("root")),
+            row("child.broken", Some("root")),
+        ]);
+        let aggregate = ProviderUsageAggregateV1 {
+            coverage: ProviderUsageCoverageV1::Partial,
+            observations_seen: 4,
+            totals: AggregatedProviderUsageCountersV1::unknown(),
+            deltas: vec![
+                usage_delta(1, "root", 1_000, 50),
+                usage_delta(2, "child.billed", 300, 25),
+                usage_delta(3, "root", 200, 10),
+            ],
+            issues: vec![ProviderUsageIssueV1 {
+                kind: ProviderUsageIssueKindV1::MalformedCounters,
+                observation_sequence: Some(4),
+                provider: Some("codex".to_owned()),
+                session_id: Some("child.broken".to_owned()),
+            }],
+            upper_observation_sequence: Some(4),
+        };
+
+        let coverage = attach_subagent_usage(&mut nodes, &aggregate);
+        assert_eq!(coverage, ProviderUsageCoverageV1::Partial);
+
+        let usage = |id: &str| {
+            nodes
+                .iter()
+                .find(|node| node.session_id == id)
+                .unwrap()
+                .usage
+                .clone()
+        };
+        let root = usage("root").expect("root usage");
+        assert_eq!(root.usage_events, 2);
+        assert_eq!(root.counters.input_tokens, Some(1_200));
+        assert_eq!(root.counters.output_tokens, Some(60));
+        assert_eq!(root.counters.total_tokens, Some(1_260));
+        assert_eq!(root.counters.cache_read_tokens, None);
+        assert!(root.complete);
+
+        let billed = usage("child.billed").expect("billed child usage");
+        assert_eq!(billed.usage_events, 1);
+        assert_eq!(billed.counters.input_tokens, Some(300));
+        assert_eq!(billed.counters.output_tokens, Some(25));
+
+        // No usage event names this session: absent, never a zero.
+        assert_eq!(usage("child.silent"), None);
+
+        // The provider wrote usage that could not be reduced: present, flagged,
+        // and still not zero-filled.
+        let broken = usage("child.broken").expect("broken child usage");
+        assert_eq!(broken.usage_events, 0);
+        assert_eq!(broken.counters, AggregatedProviderUsageCountersV1::unknown());
+        assert!(!broken.complete);
     }
 
     #[test]

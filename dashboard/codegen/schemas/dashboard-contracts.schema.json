@@ -285,6 +285,67 @@
       ],
       "type": "object"
     },
+    "AggregatedProviderUsageCountersV1": {
+      "properties": {
+        "cache_read_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cache_write_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reasoning_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "total_tokens"
+      ],
+      "type": "object"
+    },
     "AnalyticsAgentUsageV1": {
       "properties": {
         "agent": {
@@ -997,6 +1058,17 @@
             "string",
             "null"
           ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderUsageSessionTotalsV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Provider-reported billing usage the canonical provider-usage projection\nattributes to this session. Absent means the projection holds no usage\nevent for it (or the whole read was unavailable, see the payload's\n`usage_coverage`); nothing is estimated from message text."
         }
       },
       "required": [
@@ -1070,6 +1142,17 @@
         "truncated": {
           "description": "True when the scan ceiling was reached, so edges may be cut and the\ncounts above describe a prefix of the store rather than all of it.",
           "type": "boolean"
+        },
+        "usage_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderUsageCoverageV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Coverage of the provider-usage read that populated each node's `usage`.\n`unavailable` means no node may be read as \"used no tokens\"; absent\nmeans the tree itself was not read."
         }
       },
       "required": [
@@ -15327,6 +15410,14 @@
             "null"
           ]
         },
+        "edited_at_micros": {
+          "description": "Unix microseconds of the edit when the provider rollup recorded\n`edited_at_micros` as an integer. Absent is unrecorded; it is never\nderived from the session bounds.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "hunks": {
           "format": "int64",
           "type": [
@@ -15437,6 +15528,20 @@
             "$ref": "#/$defs/LoomSessionModelV1"
           },
           "type": "array"
+        },
+        "parent_session_id": {
+          "description": "The delegating session as the provider recorded it on `sessions`, the\nsame column the analytics subagent tree reads. Absent means no parent\nwas recorded; a branch is never inferred from time overlap.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_tool_use_id": {
+          "description": "The tool invocation that spawned this session, when the provider\nrecorded one; it binds a fork to a specific call, not just a parent.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "provider": {
           "type": "string"
@@ -19945,6 +20050,37 @@
         "first_progress",
         "service",
         "terminal"
+      ],
+      "type": "object"
+    },
+    "ProviderUsageCoverageV1": {
+      "enum": [
+        "complete",
+        "partial",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "ProviderUsageSessionTotalsV1": {
+      "description": "Provider-reported usage attributed to one `(provider, session_id)`, summed\nfrom the reduced deltas of one aggregate.",
+      "properties": {
+        "complete": {
+          "description": "`false` when the reduction recorded an issue against this session, so\nthe sums are a lower bound on what the provider wrote.",
+          "type": "boolean"
+        },
+        "counters": {
+          "$ref": "#/$defs/AggregatedProviderUsageCountersV1"
+        },
+        "usage_events": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "usage_events",
+        "counters",
+        "complete"
       ],
       "type": "object"
     },

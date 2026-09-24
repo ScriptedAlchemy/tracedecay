@@ -760,6 +760,15 @@ fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
             assert_eq!(child["is_subagent"], true);
         }
 
+        // This fixture publishes no provider-usage projection checkpoint, so
+        // per-node usage is the typed unavailable read: no node carries a
+        // `usage` object, and none may be captioned as "used no tokens".
+        assert_eq!(payload["usage_coverage"], "unavailable");
+        assert!(
+            nodes.iter().all(|node| node.get("usage").is_none()),
+            "an unavailable usage read must not fabricate per-node counts: {payload}"
+        );
+
         // The edge set is the point of the route: without it these five rows
         // are the same five islands `/agents` already served.
         let mut delegated: Vec<&str> = nodes[1..]

@@ -107,6 +107,16 @@ export const AgentTaskRetryAttemptSchema = z.object({
 });
 export type AgentTaskRetryAttempt = z.infer<typeof AgentTaskRetryAttemptSchema>;
 
+export const AggregatedProviderUsageCountersV1Schema = z.object({
+  cache_read_tokens: z.number().int().safe().min(0).nullable(),
+  cache_write_tokens: z.number().int().safe().min(0).nullable(),
+  input_tokens: z.number().int().safe().min(0).nullable(),
+  output_tokens: z.number().int().safe().min(0).nullable(),
+  reasoning_tokens: z.number().int().safe().min(0).nullable(),
+  total_tokens: z.number().int().safe().min(0).nullable(),
+});
+export type AggregatedProviderUsageCountersV1 = z.infer<typeof AggregatedProviderUsageCountersV1Schema>;
+
 export const AnalyticsAgentsPayloadV1Schema = z.object({
   available: z.boolean(),
   by_agent: z.array(z.lazy(() => AnalyticsAgentUsageV1Schema)),
@@ -299,6 +309,7 @@ export const AnalyticsSubagentNodeV1Schema = z.object({
   session_id: z.string(),
   started_at: z.number().int().safe().nullable(),
   title: z.string().nullable(),
+  usage: z.union([z.lazy(() => ProviderUsageSessionTotalsV1Schema), z.null()]).optional(),
 });
 export type AnalyticsSubagentNodeV1 = z.infer<typeof AnalyticsSubagentNodeV1Schema>;
 
@@ -319,6 +330,7 @@ export const AnalyticsSubagentTreePayloadV1Schema = z.object({
   sessions_read: z.number().int().safe(),
   source: z.string(),
   truncated: z.boolean(),
+  usage_coverage: z.union([z.lazy(() => ProviderUsageCoverageV1Schema), z.null()]).optional(),
 });
 export type AnalyticsSubagentTreePayloadV1 = z.infer<typeof AnalyticsSubagentTreePayloadV1Schema>;
 
@@ -3517,6 +3529,7 @@ export type LoomCommitV1 = z.infer<typeof LoomCommitV1Schema>;
 
 export const LoomEditedFileV1Schema = z.object({
   change_type: z.string().nullable(),
+  edited_at_micros: z.number().int().safe().nullable().optional(),
   hunks: z.number().int().safe().nullable(),
   path: z.string(),
   provider: z.string(),
@@ -3546,6 +3559,8 @@ export const LoomSessionRowV1Schema = z.object({
   last_message_at: z.number().int().safe().nullable(),
   messages: z.number().int().safe(),
   models: z.array(z.lazy(() => LoomSessionModelV1Schema)),
+  parent_session_id: z.string().nullable().optional(),
+  parent_tool_use_id: z.string().nullable().optional(),
   provider: z.string(),
   session_id: z.string(),
   started_at: z.number().int().safe().nullable(),
@@ -4739,6 +4754,18 @@ export const ProviderLatencyReadModelV1Schema = z.object({
   terminal: z.lazy(() => LatencyDistributionReadModelV1Schema),
 });
 export type ProviderLatencyReadModelV1 = z.infer<typeof ProviderLatencyReadModelV1Schema>;
+
+export const ProviderUsageCoverageV1Schema = z.enum(["complete", "partial", "unavailable"]);
+export type ProviderUsageCoverageV1 = z.infer<typeof ProviderUsageCoverageV1Schema>;
+
+/** Provider-reported usage attributed to one `(provider, session_id)`, summed
+from the reduced deltas of one aggregate. */
+export const ProviderUsageSessionTotalsV1Schema = z.object({
+  complete: z.boolean(),
+  counters: z.lazy(() => AggregatedProviderUsageCountersV1Schema),
+  usage_events: z.number().int().safe().min(0),
+});
+export type ProviderUsageSessionTotalsV1 = z.infer<typeof ProviderUsageSessionTotalsV1Schema>;
 
 export const ProviderUsageSummaryV1Schema = z.object({
   available: z.boolean(),
