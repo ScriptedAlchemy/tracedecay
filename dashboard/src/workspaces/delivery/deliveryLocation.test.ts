@@ -20,6 +20,7 @@ describe('deliveryLocation', () => {
     const written = writeDeliveryLocation(new URLSearchParams(''), {
       mode: 'review',
       layout: 'table',
+      renderer: 'lanes',
       project: 'project.alpha',
       pullRequest: 'project.alpha:github:42',
       umbrella: 'shared_work_objective:work.retry-backoff',
@@ -37,6 +38,7 @@ describe('deliveryLocation', () => {
     expect(location).toEqual({
       mode: 'review',
       layout: 'table',
+      renderer: 'lanes',
       project: 'project.alpha',
       pullRequest: 'project.alpha:github:42',
       umbrella: 'shared_work_objective:work.retry-backoff',
@@ -54,9 +56,10 @@ describe('deliveryLocation', () => {
 
   it('rejects values outside the generated enums instead of guessing', () => {
     const location = readDeliveryLocation(
-      new URLSearchParams('mode=merge&attention=risk_score&status=shipped&provider=green&lane=ok'),
+      new URLSearchParams('mode=merge&attention=risk_score&status=shipped&provider=green&lane=ok&renderer=sun'),
     );
     expect(location.mode).toBe('inbox');
+    expect(location.renderer).toBeNull();
     expect(location.attention).toBeNull();
     expect(location.status).toBeNull();
     expect(location.provider).toBeNull();

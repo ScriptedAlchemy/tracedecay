@@ -25,6 +25,10 @@ import {
 } from './PullRequestInspector.tsx';
 import { relatedAcrossProjects, umbrellasFor } from './umbrella.ts';
 import { UmbrellaField } from './UmbrellaField.tsx';
+import { EnvelopeField } from './EnvelopeField.tsx';
+import { DepartureBoard, TransitPanel } from './TransitField.tsx';
+import { LaneField } from './LaneField.tsx';
+import { laneZoom } from './lanes.ts';
 
 const STATUS_OPTIONS = [
   ['open', 'Open'],
@@ -47,7 +51,7 @@ export function InboxWorkspace({
   rows: readonly DeliveryInboxPullRequestV1[];
   selectedRow: DeliveryInboxPullRequestV1 | null;
 }) {
-  const { inbox, location, navigate, umbrellas } = context;
+  const { inbox, location, umbrellas } = context;
   const scopedProject = projectFor(inbox, location.project);
   const related =
     location.project === null ? [] : relatedAcrossProjects(umbrellas, location.project);
@@ -83,7 +87,16 @@ export function InboxWorkspace({
       ) : location.layout === 'table' ? (
         <InboxTable context={context} rows={rows} related={related} />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[19rem_minmax(0,1fr)] xl:grid-cols-[19rem_minmax(0,1fr)_22rem]">
+        <div
+          className={cn(
+            'grid min-h-0 flex-1 grid-cols-1',
+            location.renderer === 'transit'
+              ? 'lg:grid-cols-[16rem_minmax(0,1fr)]'
+              : location.renderer === 'lanes'
+                ? 'lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_20rem]'
+                : 'lg:grid-cols-[19rem_minmax(0,1fr)] xl:grid-cols-[19rem_minmax(0,1fr)_22rem]',
+          )}
+        >
           <div className="flex min-h-0 flex-col border-r border-edge-subtle bg-surface-1">
             <PullRequestQueue
               context={context}
@@ -94,19 +107,9 @@ export function InboxWorkspace({
             {scopedProject === null ? null : <RelatedRail context={context} related={related} />}
           </div>
           <div className="flex min-h-64 min-w-0 flex-col border-r border-edge-subtle p-3">
-            <UmbrellaField
-              inbox={inbox}
-              rows={rows}
-              projection={umbrellas}
-              focusUmbrellaId={null}
-              selectedRowId={selectedRow?.id ?? null}
-              selectedUmbrellaId={null}
-              onSelectRow={(row) => navigate({ pullRequest: row.id })}
-              onSelectUmbrella={(umbrella) => navigate({ mode: 'umbrella', umbrella })}
-            />
-            <FieldLegend />
+            <FieldColumn context={context} rows={rows} selectedRow={selectedRow} />
           </div>
-          {selectedRow === null ? (
+          {location.renderer === 'transit' ? null : selectedRow === null ? (
             <aside className="flex items-center justify-center p-6 text-center text-xs text-text-muted lg:col-span-2 xl:col-span-1">
               Select a pull request to inspect its identity, attention evidence and correlation edges.
             </aside>
@@ -263,6 +266,74 @@ function ProjectStrip({ context }: { context: DeliveryContext }) {
       ))}
     </div>
   );
+}
+
+/** The field column for the selected renderer; absent `?renderer=` keeps the
+ * shipping umbrella field. */
+function FieldColumn({
+  context,
+  rows,
+  selectedRow,
+}: {
+  context: DeliveryContext;
+  rows: readonly DeliveryInboxPullRequestV1[];
+  selectedRow: DeliveryInboxPullRequestV1 | null;
+}) {
+  const { inbox, location, navigate, umbrellas } = context;
+  const selectRow = (row: DeliveryInboxPullRequestV1) => navigate({ pullRequest: row.id });
+  const renderer = location.renderer;
+  switch (renderer) {
+    case null:
+      return (
+        <>
+          <UmbrellaField
+            inbox={inbox}
+            rows={rows}
+            projection={umbrellas}
+            focusUmbrellaId={null}
+            selectedRowId={selectedRow?.id ?? null}
+            selectedUmbrellaId={null}
+            onSelectRow={selectRow}
+            onSelectUmbrella={(umbrella) => navigate({ mode: 'umbrella', umbrella })}
+          />
+          <FieldLegend />
+        </>
+      );
+    case 'envelopes':
+      return (
+        <EnvelopeField inbox={inbox} rows={rows} projection={umbrellas} selectedRowId={selectedRow?.id ?? null} onSelectRow={selectRow} />
+      );
+    case 'transit':
+      return selectedRow === null ? (
+        <DepartureBoard inbox={inbox} rows={rows} onSelectRow={selectRow} />
+      ) : (
+        <TransitPanel inbox={inbox} row={selectedRow} onOpenEpisode={(episode) => navigate({ mode: 'journey', episode })} />
+      );
+    case 'lanes': {
+      const focusProject = location.project ?? selectedRow?.project_id ?? null;
+      return (
+        <LaneField
+          inbox={inbox}
+          rows={rows}
+          projection={umbrellas}
+          zoom={laneZoom(location.project, selectedRow?.id ?? null)}
+          focusProject={focusProject}
+          selectedRowId={selectedRow?.id ?? null}
+          journey={null}
+          selectedEpisodeId={null}
+          onSelectRow={selectRow}
+          onSelectEpisode={null}
+          onZoom={(zoom) =>
+            navigate(zoom === 'portfolio' ? { project: null, pullRequest: null } : zoom === 'repository' ? { project: focusProject, pullRequest: null } : {})
+          }
+        />
+      );
+    }
+    default: {
+      const unhandled: never = renderer;
+      return unhandled;
+    }
+  }
 }
 
 function FieldLegend() {

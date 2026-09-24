@@ -28,6 +28,9 @@ import {
   type JourneyModel,
 } from './journey.ts';
 import { JourneyField } from './JourneyField.tsx';
+import { LaneField } from './LaneField.tsx';
+import { CompactRail, TransitField } from './TransitField.tsx';
+import { buildTransit } from './transit.ts';
 import { ProjectionLedger, laneStateDetail, overviewReadState } from './ProjectionLedger.tsx';
 
 /**
@@ -107,16 +110,21 @@ function JourneyBody({
         ]}
       />
 
-      <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_22rem]">
+      <div
+        className={cn(
+          'grid grid-cols-1',
+          location.renderer === 'transit' ? 'lg:grid-cols-[12rem_minmax(0,1fr)]' : 'xl:grid-cols-[minmax(0,1fr)_22rem]',
+        )}
+      >
+        {location.renderer === 'transit' ? (
+          <CompactRail inbox={context.inbox} selectedId={row.id} onSelect={(id) => navigate({ pullRequest: id, episode: null })} />
+        ) : null}
         <div className="flex min-w-0 flex-col border-r border-edge-subtle p-3">
-          <JourneyField
-            model={model}
-            selectedEpisodeId={location.episode}
-            onSelect={(episode) => navigate({ episode: episode.id })}
-          />
-          <FieldLegend />
+          <JourneyRenderer context={context} row={row} edges={edges} model={model} />
         </div>
-        <EpisodeInspector episode={selected} />
+        <div className={cn(location.renderer === 'transit' && 'border-t border-edge-subtle lg:col-start-2')}>
+          <EpisodeInspector episode={selected} />
+        </div>
       </div>
 
       <EpisodeTable model={model} selectedId={location.episode} onSelect={(id) => navigate({ episode: id })} />
@@ -124,6 +132,62 @@ function JourneyBody({
       <ProjectionLedger overview={overview} className="m-3" />
     </div>
   );
+}
+
+/** The journey field for the selected renderer; absent `?renderer=` (and the
+ * inbox-only envelopes candidate) keeps the shipping lane journey. */
+function JourneyRenderer({
+  context,
+  row,
+  edges,
+  model,
+}: {
+  context: DeliveryContext;
+  row: DeliveryInboxPullRequestV1;
+  edges: readonly DeliveryMembershipEdgeV1[];
+  model: JourneyModel;
+}) {
+  const { location, navigate } = context;
+  const selectEpisode = (episode: string) => navigate({ episode });
+  const renderer = location.renderer;
+  switch (renderer) {
+    case null:
+    case 'envelopes':
+      return (
+        <>
+          <JourneyField model={model} selectedEpisodeId={location.episode} onSelect={(episode) => selectEpisode(episode.id)} />
+          <FieldLegend />
+        </>
+      );
+    case 'transit':
+      return <TransitField model={buildTransit(row, edges, model)} selectedEpisodeId={location.episode} onSelectEpisode={selectEpisode} />;
+    case 'lanes':
+      return (
+        <LaneField
+          inbox={context.inbox}
+          rows={context.inbox.pull_requests}
+          projection={context.umbrellas}
+          zoom="pull_request"
+          focusProject={row.project_id}
+          selectedRowId={row.id}
+          journey={model}
+          selectedEpisodeId={location.episode}
+          onSelectRow={(next) => navigate({ pullRequest: next.id, episode: null })}
+          onSelectEpisode={selectEpisode}
+          onZoom={(zoom) =>
+            navigate(
+              zoom === 'portfolio'
+                ? { mode: 'inbox', project: null, pullRequest: null, episode: null }
+                : { mode: 'inbox', project: row.project_id, pullRequest: null, episode: null },
+            )
+          }
+        />
+      );
+    default: {
+      const unhandled: never = renderer;
+      return unhandled;
+    }
+  }
 }
 
 /** `MM-DD HH:MM → MM-DD HH:MM`; the year is in the exact table below. */
