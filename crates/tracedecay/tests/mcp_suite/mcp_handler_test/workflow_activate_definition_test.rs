@@ -299,7 +299,6 @@ fn disposition_without_clock(payload: &Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn activate_definition_publishes_active_revision_three() {
-    let _env_lock = super::lock_process_env().await;
     let production = production_composition_fixture().await;
     let project_id = production
         .harness

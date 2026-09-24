@@ -178,7 +178,3 @@ mod workflow_get_definition_test;
 mod workflow_list_test;
 #[cfg(all(feature = "test-transport", unix))]
 mod workflow_register_definition_test;
-
-// Shared lock used by sibling transport suites.
-#[cfg(feature = "test-transport")]
-pub(crate) use crate::support::lock_process_env;
