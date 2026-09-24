@@ -1,9 +1,13 @@
 //! Cursor CLI adapter used by daemon LCM compress to request an on-demand
 //! authoritative summary. Pressure-only hook compaction stays read-only and
 //! does not call this path.
+//!
+//! The executable is configuration data supplied by the caller from the
+//! `lcm.summarizer_executables.v1` setting. This module never consults `PATH`
+//! or the process environment to find it.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -15,29 +19,23 @@ const CURSOR_SUMMARY_CHILD_ENV: &str = "TRACEDECAY_CURSOR_SUMMARY_CHILD";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CursorAgentSummaryConfig {
-    pub(super) cursor_agent_bin: String,
+    pub(super) cursor_agent_bin: PathBuf,
     pub(super) model: Option<String>,
     pub(super) timeout: Duration,
     pub(super) workspace: Option<PathBuf>,
 }
 
-impl Default for CursorAgentSummaryConfig {
-    fn default() -> Self {
-        Self {
-            cursor_agent_bin: "cursor-agent".to_string(),
+impl CursorAgentSummaryConfig {
+    /// Tuning for one configured executable. Model, timeout, and workspace
+    /// are operator tuning knobs read from the environment; the executable
+    /// itself is never resolved that way.
+    pub(super) fn for_executable(cursor_agent_bin: &Path) -> Self {
+        let mut config = Self {
+            cursor_agent_bin: cursor_agent_bin.to_path_buf(),
             model: None,
             timeout: Duration::from_secs(90),
             workspace: None,
-        }
-    }
-}
-
-impl CursorAgentSummaryConfig {
-    pub(super) fn from_env() -> Self {
-        let mut config = Self::default();
-        if let Some(bin) = non_empty_env("TRACEDECAY_CURSOR_AGENT_BIN") {
-            config.cursor_agent_bin = bin;
-        }
+        };
         if let Some(model) = non_empty_env("TRACEDECAY_CURSOR_SUMMARY_MODEL") {
             config.model = Some(model);
         }
@@ -96,7 +94,10 @@ pub(super) fn summarize_with_cursor_agent(
         .stderr(Stdio::piped());
 
     let mut child = command.spawn().map_err(|err| TraceDecayError::Config {
-        message: format!("failed to start `{}`: {err}", config.cursor_agent_bin),
+        message: format!(
+            "failed to start `{}`: {err}",
+            config.cursor_agent_bin.display()
+        ),
     })?;
     let deadline = Instant::now() + config.timeout;
     loop {
@@ -107,7 +108,10 @@ pub(super) fn summarize_with_cursor_agent(
             let _ = child.kill();
             let _ = child.wait();
             return Err(TraceDecayError::Config {
-                message: format!("timed out waiting for `{}`", config.cursor_agent_bin),
+                message: format!(
+                    "timed out waiting for `{}`",
+                    config.cursor_agent_bin.display()
+                ),
             });
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -121,12 +125,13 @@ pub(super) fn summarize_with_cursor_agent(
             message: if stderr.is_empty() {
                 format!(
                     "`{}` exited with status {}",
-                    config.cursor_agent_bin, output.status
+                    config.cursor_agent_bin.display(),
+                    output.status
                 )
             } else {
                 format!(
                     "`{}` exited with status {}: {}",
-                    config.cursor_agent_bin,
+                    config.cursor_agent_bin.display(),
                     output.status,
                     stderr.chars().take(2000).collect::<String>()
                 )

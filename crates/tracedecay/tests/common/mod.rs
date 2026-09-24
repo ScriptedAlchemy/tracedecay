@@ -987,6 +987,15 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
         .env(
             tracedecay_daemon_protocol::SOCKET_ENV,
             home.join(".tracedecay/daemon.sock"),
+        )
+        // The Work/automation Codex launcher still honours this override; pin
+        // it to a path that cannot exist so a child daemon fails with the typed
+        // spawn error rather than resolving the operator's `codex` from PATH.
+        // LCM summarizers launch only through `lcm.summarizer_executables.v1`,
+        // which defaults to unconfigured, so they need no pin here.
+        .env(
+            "TRACEDECAY_CODEX_BIN",
+            home.join(".tracedecay/missing-codex-app-server-binary"),
         );
     detach_from_test_process_group(command);
 }

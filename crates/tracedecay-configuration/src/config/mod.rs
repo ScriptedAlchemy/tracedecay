@@ -24,16 +24,16 @@ use tracedecay_domain::configuration::{
     DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
     SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-    SYNC_READ_REFRESH_SETTING_KEY,
-    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
-    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
-    TELEMETRY_TIMINGS_SETTING_KEY,
+    SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
+    SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+    SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
+    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -60,6 +60,10 @@ pub struct RuntimeTraceDecayConfig {
     /// Whether the persistent native code graph may activate. Disabling it
     /// leaves exact and lexical retrieval available.
     pub native_graph_activation: bool,
+    /// The host CLIs on-demand LCM summarization may launch. Every provider
+    /// is unconfigured until an operator names its executable; the daemon
+    /// never resolves one from `PATH` or its environment.
+    pub lcm_summarizers: LcmSummarizerExecutablesV1,
     pub sync: SyncConfig,
     pub telemetry: TelemetryConfig,
 }
@@ -162,6 +166,11 @@ pub trait PinnedRuntimeConfigurationCachePort: Send + Sync {
     fn publish(&self, configuration: PinnedRuntimeConfiguration) -> Result<()>;
 
     fn cached_for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration>;
+
+    /// The pin published for an already-authoritative registered project,
+    /// for daemon work (session shards, background convergence) that has a
+    /// project identity but no route root.
+    fn cached_for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration>;
 }
 
 static PINNED_RUNTIME_CONFIGURATION_CACHE: OnceLock<Arc<dyn PinnedRuntimeConfigurationCachePort>> =
@@ -195,6 +204,19 @@ pub fn cached_pinned_runtime_configuration(
     pinned_runtime_configuration_cache()?.cached_for_root(project_root)
 }
 
+/// The summarizer executables the daemon published for one registered
+/// project. A missing cache or pin is a typed configuration error, not an
+/// unconfigured provider: the caller decides whether that means "pending".
+pub fn lcm_summarizer_executables_for_project(
+    project_id: &ProjectId,
+) -> Result<LcmSummarizerExecutablesV1> {
+    Ok(pinned_runtime_configuration_cache()?
+        .cached_for_project(project_id)?
+        .config()
+        .lcm_summarizers
+        .clone())
+}
+
 /// Converts a complete typed snapshot into the runtime settings every
 /// configuration consumer shares. There are no defaults, file reads, or
 /// environment reads: an absent or mistyped required setting is an error.
@@ -217,6 +239,7 @@ fn runtime_config_from_snapshot(
             snapshot,
             INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
         )?,
+        lcm_summarizers: required_lcm_summarizer_executables(snapshot)?,
         sync: SyncConfig {
             auto_watch: required_bool(snapshot, SYNC_AUTO_WATCH_SETTING_KEY)?,
             watch_linked_worktrees: required_bool(
@@ -320,6 +343,18 @@ pub fn required_string_list(
         ConfigurationValueV1::StringList(value) => Ok(value.clone()),
         value => Err(config_error(format!(
             "resolved configuration setting '{key_name}' has wrong type: expected string list, got {:?}",
+            value.kind()
+        ))),
+    }
+}
+
+fn required_lcm_summarizer_executables(
+    snapshot: &ConfigurationSnapshotV1,
+) -> Result<LcmSummarizerExecutablesV1> {
+    match required_setting(snapshot, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY)? {
+        ConfigurationValueV1::LcmSummarizerExecutables(value) => Ok(value.clone()),
+        value => Err(config_error(format!(
+            "resolved configuration setting '{LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY}' has wrong type: expected lcm summarizer executables, got {:?}",
             value.kind()
         ))),
     }

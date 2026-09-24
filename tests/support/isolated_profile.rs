@@ -49,11 +49,20 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// Environment override the Work/automation Codex launcher still honours.
+/// The isolated profile pins it to a path that cannot exist so a child daemon
+/// fails with the typed spawn error instead of resolving the operator's real
+/// `codex` from `PATH`. LCM summarizers need no pin: they launch only through
+/// the `lcm.summarizer_executables.v1` setting, which defaults to unconfigured.
+pub const CODEX_BIN_ENV: &str = "TRACEDECAY_CODEX_BIN";
+
 /// Points a child process at a throwaway home and profile.
 ///
 /// This is the command-env subset shared by daemon journeys. It does not
 /// detach the process group or pin `XDG_RUNTIME_DIR`; callers that need the
 /// full hermetic daemon environment still use `apply_tracedecay_home_env`.
+/// A journey that drives a scripted fake host CLI sets [`CODEX_BIN_ENV`] on
+/// the command after this call.
 pub fn apply_isolated_profile_env(command: &mut Command, home: &Path, profile: &Path) {
     command
         .env("HOME", home)
@@ -61,6 +70,7 @@ pub fn apply_isolated_profile_env(command: &mut Command, home: &Path, profile: &
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("TRACEDECAY_DATA_DIR", profile)
         .env("TRACEDECAY_GLOBAL_DB", profile.join("global.db"))
+        .env(CODEX_BIN_ENV, profile.join("missing-codex-app-server-binary"))
         .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
 }
 

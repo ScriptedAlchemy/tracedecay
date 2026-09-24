@@ -6,6 +6,9 @@
 
 pub mod config;
 pub mod configuration;
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub mod test_support;
 
 pub use config::model::{
     MIN_AUTO_TRACK_PR_POLL_SECS, RetentionConfig, SyncConfig, TelemetryConfig, brand_env,
@@ -14,7 +17,8 @@ pub use config::model::{
 pub use config::{
     OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, PinnedRuntimeConfigurationCachePort,
     RuntimeConfigurationTarget, cached_pinned_runtime_configuration,
-    install_pinned_runtime_configuration_cache, publish_pinned_runtime_configuration,
+    install_pinned_runtime_configuration_cache, lcm_summarizer_executables_for_project,
+    publish_pinned_runtime_configuration,
 };
 pub use configuration::{
     ConfigurationControlPlane, ConfigurationControlPlaneOperations,

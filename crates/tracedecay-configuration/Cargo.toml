@@ -7,6 +7,12 @@ license = "MIT"
 description = "Transport-neutral configuration control plane and runtime pin surfaces"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+# In-process pin cache and setting publication for tests that drive
+# configuration-gated runtime paths (for example LCM summarizer executables)
+# without the composition root's cache. Production code is never gated by it.
+test-helpers = []
+
 [dependencies]
 hotpath.workspace = true
 serde = { version = "1", features = ["derive"] }

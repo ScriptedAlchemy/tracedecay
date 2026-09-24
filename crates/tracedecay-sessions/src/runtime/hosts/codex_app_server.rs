@@ -180,6 +180,15 @@ impl Default for CodexAppServerSummaryConfig {
 }
 
 impl CodexAppServerSummaryConfig {
+    /// Tuning for an executable the caller resolved through configuration.
+    /// Only the model and timeout knobs come from the environment; the
+    /// binary is never looked up on `PATH` or through `TRACEDECAY_CODEX_BIN`.
+    pub fn for_executable(codex_bin: &Path) -> Self {
+        let mut config = Self::from_env();
+        config.codex_bin = codex_bin.to_string_lossy().into_owned();
+        config
+    }
+
     pub fn from_env() -> Self {
         let mut config = Self::default();
         if let Some(bin) = non_empty_env("TRACEDECAY_CODEX_BIN") {

@@ -26,6 +26,32 @@ anchors, then considers the older unsummarized backlog.
   than its source, the response records the fallback/rescue outcome instead of
   silently claiming a useful compaction.
 
+## On-demand summarizer executables
+
+When no host-native compaction summary exists, the daemon can ask a host CLI
+for one: `cursor-agent` for Cursor sessions and `codex` (app-server JSON-RPC)
+for Codex sessions. Those executables come only from the project setting
+`lcm.summarizer_executables.v1`, whose value has one entry per provider:
+
+```json
+{
+  "cursor_agent": { "state": "configured", "canonical_path": "/usr/local/bin/cursor-agent" },
+  "codex": { "state": "unconfigured" }
+}
+```
+
+Every provider defaults to `unconfigured`. The daemon never resolves a
+summarizer from `PATH` or from environment variables; an unconfigured provider
+leaves the pending page in the typed `cursor_agent_unconfigured` or
+`codex_app_server_unconfigured` state, a project shard whose configuration pin
+is not published reports `summarizer_configuration_unavailable`, and
+profile-wide session shards (which have no project configuration) stay
+unconfigured. Configured paths must be absolute. Set the value with
+`tracedecay_configuration_set` (or `tracedecay tool configuration_set`) on the
+project layer; model, timeout, and workspace tuning for a configured executable
+remain the `TRACEDECAY_CURSOR_SUMMARY_*` / `TRACEDECAY_CODEX_SUMMARY_*`
+environment knobs.
+
 ## Replay and recovery
 
 Replay is ordered by source/store position, with summary blocks preceding raw

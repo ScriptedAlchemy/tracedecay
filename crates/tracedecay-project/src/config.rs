@@ -272,6 +272,10 @@ impl tracedecay_configuration::config::PinnedRuntimeConfigurationCachePort
     fn cached_for_root(&self, project_root: &Path) -> Result<PinnedRuntimeConfiguration> {
         cached_runtime_configuration(project_root)
     }
+
+    fn cached_for_project(&self, project_id: &ProjectId) -> Result<PinnedRuntimeConfiguration> {
+        runtime_configuration_cache().for_project(project_id)
+    }
 }
 
 /// Installs the root-owned configuration read ports the lower crates reach

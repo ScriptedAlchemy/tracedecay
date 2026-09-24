@@ -18,10 +18,12 @@ use crate::research::{
     ProjectId, UtcMicros, canonical_sha256,
 };
 
+mod lcm_summarizer_executables;
 pub mod topology;
 mod work_executable_bindings;
 mod work_expertise_consent;
 
+pub use lcm_summarizer_executables::*;
 pub use topology::*;
 pub use work_executable_bindings::*;
 pub use work_expertise_consent::*;
@@ -38,6 +40,7 @@ pub const WORK_EXECUTABLE_BINDINGS_SETTING_KEY: &str = "work.executable_bindings
 pub const PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY: &str = "work.expertise_consent.v1";
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 pub const AUTOMATION_SETTINGS_SETTING_KEY: &str = "automation.settings.v1";
+pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executables.v1";
 
 /// Core setting keys that shipped in published betas and were then retired.
 /// A persisted snapshot carrying one converges by dropping it; its value has
@@ -91,6 +94,7 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY,
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     AUTOMATION_SETTINGS_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
     crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
     USER_UPLOAD_ENABLED_SETTING_KEY,
     USER_CODE_INDEX_WORKERS_SETTING_KEY,
@@ -524,6 +528,7 @@ pub enum ConfigurationValueKindV1 {
     WorkExpertiseConsent,
     ContextScoutSettings,
     AutomationSettings,
+    LcmSummarizerExecutables,
 }
 
 /// Profile-level worker-count intent for the process-wide code-index pool.
@@ -1166,6 +1171,7 @@ pub enum ConfigurationValueV1 {
     WorkExpertiseConsent(WorkExpertiseConsentV1),
     ContextScoutSettings(ContextScoutSettingsV1),
     AutomationSettings(Box<AutomationSettingsV1>),
+    LcmSummarizerExecutables(LcmSummarizerExecutablesV1),
 }
 
 impl ConfigurationValueV1 {
@@ -1184,6 +1190,7 @@ impl ConfigurationValueV1 {
             Self::WorkExpertiseConsent(_) => ConfigurationValueKindV1::WorkExpertiseConsent,
             Self::ContextScoutSettings(_) => ConfigurationValueKindV1::ContextScoutSettings,
             Self::AutomationSettings(_) => ConfigurationValueKindV1::AutomationSettings,
+            Self::LcmSummarizerExecutables(_) => ConfigurationValueKindV1::LcmSummarizerExecutables,
         }
     }
 
@@ -1221,6 +1228,7 @@ impl ConfigurationValueV1 {
             Self::WorkExpertiseConsent(consent) => consent.validate(),
             Self::ContextScoutSettings(settings) => settings.validate(),
             Self::AutomationSettings(settings) => settings.validate(),
+            Self::LcmSummarizerExecutables(executables) => executables.validate(),
         }
     }
 }
