@@ -2813,6 +2813,7 @@ fn content_addressed_reader_rejects_atomic_same_size_replacement() {
         builder.append_page(page, &control).expect("append page");
     }
     let verified = finish_staged_artifact(&mut builder, &source_receipt, &control);
+    drop(builder);
     let original_bytes = std::fs::read(&artifact_path).expect("read verified artifact bytes");
     std::fs::copy(&artifact_path, &replacement_path).expect("copy replacement artifact");
     let replacement = rusqlite::Connection::open(&replacement_path)

@@ -2394,6 +2394,8 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     assert!(!store.path().join(&stranded).exists());
     assert!(staged_root.join(&stranded).is_dir());
 
+    // A crashed process cannot keep its quarantine directory capability open.
+    drop(quarantine);
     recover_scope_root_retention(store.path()).expect("recover uncommitted reconciliation");
 
     assert!(
@@ -2446,6 +2448,8 @@ fn scope_recovery_completes_collection_once_the_receipt_is_durable() {
     )
     .expect("commit reconciliation receipt");
 
+    // A crashed process cannot keep its quarantine directory capability open.
+    drop(quarantine);
     recover_scope_root_retention(store.path()).expect("recover committed reconciliation");
 
     assert!(!store.path().join(&stranded).exists());
@@ -2535,6 +2539,142 @@ fn scope_binding_cleanup_intent_replays_after_filesystem_collection_restart() {
         recover_scope_root_binding_cleanup(store.path()).expect("completed cleanup stays complete"),
         None
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn pending_scope_journal_refuses_new_generation_locks_until_recovery() {
+    let (store, live, stranded) = fixture_scope_store();
+    let proof = fixture_scope_liveness_proof(live.clone(), stranded.clone());
+    let plan = plan_scope_root_retention_with_liveness_proof(
+        store.path(),
+        proof,
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        AGED_NOW_SECS,
+    )
+    .expect("plan scope collection");
+    let receipt = build_scope_receipt(&plan, plan.collectable_scopes.clone(), UtcMicros(15))
+        .expect("build scope receipt");
+    let quarantine = ScopeQuarantineAuthority::prepare(
+        store.path(),
+        &receipt.receipt_digest,
+        &receipt.collected_scopes,
+    )
+    .expect("prepare exact quarantine");
+    let transaction = ScopeRootRetentionTransactionV1 {
+        schema: SCOPE_RETENTION_TRANSACTION_SCHEMA.to_owned(),
+        receipt,
+        scope_identities: quarantine.scope_identities().clone(),
+    };
+    journal::persist_journal(store.path(), &SCOPE_TRANSACTION_JOURNAL, &transaction)
+        .expect("persist the scope fence before releasing generation locks");
+
+    let scope_root = store.path().join(&stranded);
+    let pass_lock = locking::acquire_scope_retention_lock(store.path())
+        .expect("hold the collector's parent fence");
+    assert!(
+        try_acquire_code_generation_store_lock(&scope_root)
+            .expect("try writer lock")
+            .is_none(),
+        "a writer must not enter after the collector releases its in-scope handle"
+    );
+    assert!(
+        try_acquire_code_generation_store_read_lock(&scope_root)
+            .expect("try reader lock")
+            .is_none(),
+        "a reader must not pin the directory while quarantine renames it"
+    );
+    assert!(
+        !scope_root.join(STORE_LOCK_FILE).exists(),
+        "a refused opener must not create or pin a descendant lock file"
+    );
+    drop(pass_lock);
+    assert!(matches!(
+        acquire_code_generation_store_lock(&scope_root),
+        Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy)
+    ));
+    let live_scope_root = store.path().join(&live);
+    assert!(
+        try_acquire_code_generation_store_lock(&live_scope_root)
+            .expect("try unrelated live writer lock")
+            .is_some(),
+        "the pending journal must not fence a live sibling scope"
+    );
+    assert!(
+        try_acquire_code_generation_store_read_lock(&live_scope_root)
+            .expect("try unrelated live reader lock")
+            .is_some(),
+        "the pending journal must not fence unrelated live readers"
+    );
+
+    drop(quarantine);
+    recover_scope_root_retention(store.path()).expect("roll back the uncommitted journal");
+    assert!(
+        try_acquire_code_generation_store_lock(&scope_root)
+            .expect("retry writer lock")
+            .is_some(),
+        "recovery must reopen the exact scope for generation work"
+    );
+}
+
+#[test]
+fn scope_collection_defers_an_external_generation_owner_then_retries() {
+    let (store, live, stranded) = fixture_scope_store();
+    let proof = fixture_scope_liveness_proof(live, stranded.clone());
+    let plan = plan_scope_root_retention_with_liveness_proof(
+        store.path(),
+        proof.clone(),
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        AGED_NOW_SECS,
+    )
+    .expect("plan scope collection");
+    let completed_at = UtcMicros(16);
+    prepare_scope_root_binding_cleanup(
+        store.path(),
+        &plan,
+        &stranded,
+        &proof.candidate_binding.source_scope,
+        &proof,
+        completed_at,
+    )
+    .expect("persist binding cleanup intent");
+    let held = try_acquire_code_generation_store_lock(&store.path().join(&stranded))
+        .expect("open external generation owner")
+        .expect("take external generation owner");
+    let error = execute_scope_root_retention(
+        store.path(),
+        plan,
+        &proof,
+        CodeGenerationRetentionModeV1::Apply,
+        AGED_NOW_SECS,
+        completed_at,
+    )
+    .expect_err("a held generation owner must defer scope collection");
+    assert!(matches!(
+        error,
+        CodeGenerationRetentionErrorV1::GenerationStoreBusy
+    ));
+    assert!(store.path().join(&stranded).is_dir());
+    assert!(!scope_transaction_path(store.path()).exists());
+
+    drop(held);
+    let retry = plan_scope_root_retention_with_liveness_proof(
+        store.path(),
+        proof.clone(),
+        DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
+        AGED_NOW_SECS,
+    )
+    .expect("replan after external owner leaves");
+    execute_scope_root_retention(
+        store.path(),
+        retry,
+        &proof,
+        CodeGenerationRetentionModeV1::Apply,
+        AGED_NOW_SECS,
+        completed_at,
+    )
+    .expect("collect after the external owner leaves");
+    assert!(!store.path().join(&stranded).exists());
 }
 
 #[test]
