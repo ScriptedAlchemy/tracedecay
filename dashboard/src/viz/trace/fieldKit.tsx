@@ -1,9 +1,7 @@
 /**
- * What the three candidate Trace renderers share in the DOM: the measured
- * width they lay out against, the inspect state a hover or keyboard focus
- * sets, and the focusable symbol target. Each renderer owns its geometry; none
- * owns interaction, so hover, focus and re-centring behave identically across
- * them and a comparison between them is a comparison of pictures.
+ * The Trace plate's DOM interaction: the measured width it lays out against,
+ * the inspect state a hover or keyboard focus sets, and the focusable symbol
+ * target.
  *
  * Hover and keyboard focus both INSPECT (light the symbol's drawn route to the
  * focus); only click or Enter re-centres the trace, which is the same
@@ -15,12 +13,14 @@ import {
   useEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
 
+import type { KindShape } from './plate.ts';
 import type { TraceModel, TraceNode } from './types.ts';
-import { inspectLine, inspectPath, type InspectedPath } from './variants.ts';
+import { inspectLine, inspectPath, type InspectedPath } from './inspect.ts';
 
 /** Kind hue as an SVG fill or stroke, through the same vars the list uses. */
 export const KIND_FILL = 'fill-[var(--kind-dark)] [[data-theme=light]_&]:fill-[var(--kind-light)]';
@@ -141,13 +141,51 @@ export function InspectReadout({ model, inspect }: { model: TraceModel; inspect:
     <p
       aria-live="polite"
       data-trace-inspect
-      className="min-h-8 border-t border-edge-subtle px-3 py-2 font-mono text-2xs text-text-secondary"
+      className="min-h-10 border-t border-edge-subtle px-3 py-2 text-sm text-text-secondary"
     >
-      {inspect.id === null
-        ? 'hover or focus a symbol to inspect its drawn route to the focus · click or Enter re-centres the trace on it'
-        : inspectLine(model, inspect.id)}
+      {inspect.id === null ? (
+        'Hover or focus a symbol to light its drawn route to the focus. Click or Enter re-centres the trace on it.'
+      ) : (
+        <span className="font-mono tabular-nums">{inspectLine(model, inspect.id)}</span>
+      )}
     </p>
   );
+}
+
+/** A kind's shape cue, centred on (x, y); the hue comes from the caller. */
+export function KindGlyph({
+  shape,
+  x,
+  y,
+  size = 7,
+  className,
+  style,
+}: {
+  shape: KindShape;
+  x: number;
+  y: number;
+  size?: number;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  const h = size / 2;
+  const common = { className, style };
+  switch (shape) {
+    case 'circle':
+      return <circle cx={x} cy={y} r={h} {...common} />;
+    case 'square':
+      return <rect x={x - h} y={y - h} width={size} height={size} {...common} />;
+    case 'diamond':
+      return <path d={`M${x},${y - h - 0.5} L${x + h + 0.5},${y} L${x},${y + h + 0.5} L${x - h - 0.5},${y} Z`} {...common} />;
+    case 'triangle':
+      return <path d={`M${x},${y - h - 0.5} L${x + h + 0.5},${y + h} L${x - h - 0.5},${y + h} Z`} {...common} />;
+    case 'bar':
+      return <rect x={x - h - 1} y={y - h / 2} width={size + 2} height={h} {...common} />;
+    default: {
+      const exhaustive: never = shape;
+      return exhaustive;
+    }
+  }
 }
 
 /** A legend entry: a small drawn sample and what it encodes. */

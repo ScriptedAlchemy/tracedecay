@@ -1,6 +1,11 @@
 /**
- * ANATOMY PLATE candidate renderer. Geometry comes from `plate.ts`; this file
- * draws it and wires the shared inspect state. Nothing here decides a number.
+ * The TRACE anatomy plate. Geometry comes from `plate.ts`; this file draws it
+ * and wires the inspect state. Nothing here decides a number.
+ *
+ * Connectors are faint hairlines at one fixed opacity. Where a corridor
+ * carries several, they overlap exactly, so a trunk's brightness is the
+ * compositing of its links, a count, not a styling choice. The inspected
+ * route is redrawn on top in cyan and every other connector steps back.
  */
 import { useMemo } from 'react';
 
@@ -8,6 +13,7 @@ import { kindColorVars } from '../graph/kindColor.ts';
 import { cn } from '../../ui/cn';
 import type { NeighborsPayload, UndrawnNeighbour } from './model.ts';
 import {
+  kindShape,
   layoutPlate,
   PLATE_FIELD_H,
   PLATE_HEAD_H,
@@ -16,11 +22,12 @@ import {
   type PlateLayout,
 } from './plate.ts';
 import type { TraceModel } from './types.ts';
-import { clip, clipStart, variantDescription } from './variants.ts';
+import { clip, clipStart, plateDescription } from './inspect.ts';
 import {
   DIM,
   InspectReadout,
   KIND_FILL,
+  KindGlyph,
   LegendEntry,
   SymbolTarget,
   useHostWidth,
@@ -37,10 +44,8 @@ function niceStep(pxPerCall: number): number {
   return 200;
 }
 
-function hairline(from: { x: number; y: number }, to: { x: number; y: number }): string {
-  const mid = (from.x + to.x) / 2;
-  return `M${from.x},${from.y} C${mid},${from.y} ${mid},${to.y} ${to.x},${to.y}`;
-}
+/** One connector's opacity at rest; overlapping ones composite into a trunk. */
+const CONNECTOR_ALPHA = 0.2;
 
 function Ruler({ layout, x0, x1, grow }: { layout: PlateLayout; x0: number; x1: number; grow: 1 | -1 }) {
   const { pxPerCall, maxCalls, y } = layout.scale;
@@ -87,10 +92,14 @@ function Plate({
       <rect x={x + 3.5} y={y + 3.5} width={width - 7} height={height - 7} rx={1} fill="none" className="stroke-edge-subtle" />
       {/* The selection gutter: this plate IS the selected symbol. */}
       <rect x={x} y={y} width={3} height={height} className="fill-accent" />
-      <text x={x + 14} y={y + 24} fontSize={15} className="fill-text-primary font-mono">
+      <text x={x + 14} y={y + 24} fontSize={14} className="fill-text-primary font-mono">
         {clip(focus.name, Math.floor((width - 28) / 9))}
       </text>
-      <rect x={x + 14} y={y + 32} width={8} height={8} rx={1} style={kindColorVars(focus.kind)} className={KIND_FILL} />
+      <KindGlyph shape={kindShape(focus.kind)} x={x + 18} y={y + 36} size={8} style={kindColorVars(focus.kind)} className={KIND_FILL} />
+      {/* Selection said in words and position, never by hue alone. */}
+      <text x={x + width - 12} y={y + 40} textAnchor="end" fontSize={10} letterSpacing="0.16em" className="td-legend fill-accent">
+        SELECTED
+      </text>
       <text x={x + 27} y={y + 40} fontSize={10} className="td-legend fill-text-muted" letterSpacing="0.16em">
         {focus.kind.toUpperCase()}
       </text>
@@ -152,8 +161,8 @@ export function PlateField({
             viewBox={`0 0 ${layout.width} ${layout.height}`}
             role="group"
             aria-roledescription="anatomy plate"
-            aria-label={variantDescription(model, 'an anatomy plate, callers left and callees right on one call-site scale')}
-            className="block"
+            aria-label={plateDescription(model)}
+            className="block tabular-nums"
           >
             {layout.columns.map((column) => (
               <g key={`${column.side}${column.hop}`}>
@@ -182,33 +191,46 @@ export function PlateField({
               </g>
             ))}
 
-            {layout.links.map((link) => {
-              const lit = inspect.litChannel(link.key) && inspect.id !== null;
-              return (
+            <g aria-hidden data-connectors>
+              {layout.connectors.map((connector) => (
                 <path
-                  key={`${link.key}:${link.from.y}`}
-                  d={hairline(link.from, link.to)}
+                  key={connector.key}
+                  d={connector.d}
                   fill="none"
-                  strokeWidth={lit ? 1.6 : 1}
-                  opacity={inspect.litChannel(link.key) ? 1 : DIM}
-                  className={cn(lit ? 'stroke-accent' : 'stroke-edge-strong', fade)}
+                  strokeWidth={1}
+                  opacity={inspect.id === null ? CONNECTOR_ALPHA : inspect.litChannel(connector.key) ? 0 : CONNECTOR_ALPHA / 3}
+                  className={cn('stroke-text-secondary', fade)}
                 />
-              );
-            })}
-            {layout.ports.map((port) => (
-              <line
-                key={port.key}
-                x1={port.x}
-                x2={port.x}
-                y1={port.y - 4}
-                y2={port.y + 4}
-                strokeWidth={2}
-                opacity={inspect.litChannel(port.key) ? 1 : DIM}
-                className={cn('stroke-text-secondary', fade)}
-              />
-            ))}
+              ))}
+              {inspect.id === null
+                ? null
+                : layout.connectors
+                    .filter((connector) => inspect.litChannel(connector.key))
+                    .map((connector) => (
+                      <path
+                        key={`lit:${connector.key}`}
+                        data-lit
+                        d={connector.d}
+                        fill="none"
+                        strokeWidth={1.6}
+                        className="stroke-accent"
+                      />
+                    ))}
+            </g>
 
             <Plate layout={layout} model={model} inspect={inspect} />
+            {layout.throughPorts.map((port) => (
+              <line
+                key={port.x}
+                aria-hidden
+                x1={port.x}
+                x2={port.x}
+                y1={port.y - 5}
+                y2={port.y + 5}
+                strokeWidth={2}
+                className="stroke-text-secondary"
+              />
+            ))}
 
             {layout.rows.map((row) => {
               const textX = row.anchorX;
@@ -228,7 +250,14 @@ export function PlateField({
                       height: PLATE_ROW - 4,
                     }}
                   >
-                    <text x={textX} y={row.y + 12} textAnchor={anchor} fontSize={11} className="fill-text-primary font-mono">
+                    <KindGlyph
+                      shape={kindShape(row.node.kind)}
+                      x={textX + row.grow * 4}
+                      y={row.y + 8}
+                      style={kindColorVars(row.node.kind)}
+                      className={KIND_FILL}
+                    />
+                    <text x={textX + row.grow * 14} y={row.y + 12} textAnchor={anchor} fontSize={11} className="fill-text-primary font-mono">
                       {row.name}
                     </text>
                     {row.segments.map((calls, i) => {
@@ -284,7 +313,7 @@ export function PlateField({
             >
               ONE SCALE · CALL SITES PER CHANNEL
             </text>
-            {layout.omittedChannels > 0 ? (
+            {layout.crossLinks > 0 ? (
               <text
                 x={layout.stacked ? 12 : layout.plate.x + layout.plate.width / 2}
                 y={layout.scale.y + (layout.stacked ? 44 : 20)}
@@ -292,7 +321,7 @@ export function PlateField({
                 fontSize={10}
                 className="fill-state-unknown font-mono"
               >
-                {`${layout.omittedChannels} ${layout.omittedChannels === 1 ? 'channel' : 'channels'} between neighbours not on the plate`}
+                {`${layout.crossLinks} of ${model.channels.length} links run between neighbours: connector only, no bar`}
               </text>
             ) : null}
           </svg>
@@ -314,16 +343,26 @@ export function PlateField({
           }
         />
         <LegendEntry
-          label="hairline to a port = the channel itself"
+          label="connector = one call link, caller port to callee port; a trunk brightens with the links it carries"
           sample={
             <>
-              <path d="M2 9 C14 9 14 3 25 3" fill="none" className="stroke-edge-strong" />
-              <line x1={26} x2={26} y1={0} y2={6} strokeWidth={2} className="stroke-text-secondary" />
+              <path d="M2 3 H12 V9 H26" fill="none" opacity={CONNECTOR_ALPHA} className="stroke-text-secondary" />
+              <path d="M2 3 H12 V9 H26" fill="none" opacity={CONNECTOR_ALPHA * 3} className="stroke-text-secondary" />
             </>
           }
         />
         <LegendEntry
-          label="cyan gutter = the selected symbol"
+          label="shape + hue = kind (● fn ◆ method ■ struct ▲ trait ▬ module)"
+          sample={
+            <>
+              <circle cx={4} cy={6} r={3} className="fill-text-secondary" />
+              <path d="M12 2.5 L15.5 6 L12 9.5 L8.5 6 Z" className="fill-text-secondary" />
+              <rect x={18} y={3} width={6} height={6} className="fill-text-secondary" />
+            </>
+          }
+        />
+        <LegendEntry
+          label="cyan gutter + SELECTED = the traced symbol"
           sample={<rect x={2} y={1} width={3} height={10} className="fill-accent" />}
         />
         <LegendEntry

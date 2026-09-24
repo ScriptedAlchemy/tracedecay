@@ -1,7 +1,7 @@
 /**
- * The three candidate Trace layouts against the wire-true neighbors and
- * strata fixtures. Every expectation is a value observed on that fixture, so
- * a layout that starts inventing, dropping or pooling a count fails here.
+ * The Trace anatomy plate against the wire-true neighbors fixture. Every
+ * expectation is a value observed on that fixture, so a layout that starts
+ * inventing, dropping or pooling a count fails here.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -9,7 +9,6 @@ import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import {
   DashboardEnvelopeV1Schema,
   GraphNeighborsPayloadV1Schema,
-  StructureReadV12Schema,
 } from '../../contracts/generated.ts';
 import {
   TRACE_BUDGET,
@@ -18,11 +17,9 @@ import {
   type NeighborsPayload,
   type TraceModelInput,
 } from './model.ts';
-import { layoutPlate } from './plate.ts';
-import { layoutRadial, moduleOf, sectorReading } from './radial.ts';
-import { gapReading, layoutTransit } from './transit.ts';
+import { elbowPath, kindShape, layoutPlate } from './plate.ts';
 import type { TraceModel } from './types.ts';
-import { inspectPath, parseTraceRenderer, variantDescription } from './variants.ts';
+import { channelKey, inspectPath, plateDescription } from './inspect.ts';
 
 function neighbors(id: string, limit = 200): NeighborsPayload {
   return DashboardEnvelopeV1Schema(GraphNeighborsPayloadV1Schema).parse(
@@ -54,26 +51,6 @@ function built(focusId = 'sym-0', limit = 200): { input: TraceModelInput; model:
   return { input, model: buildTraceModel(input) };
 }
 
-function strataDepths() {
-  const read = StructureReadV12Schema.parse(
-    (resolveFixture('/api/plugins/graph/strata') as { payload: unknown }).payload,
-  );
-  if (read.status !== 'measured') throw new Error('fixture strata is measured');
-  return {
-    byPath: new Map(read.measurement.files.map((file) => [file.path, file.depth])),
-    maxDepth: read.measurement.max_depth,
-    floor: false,
-  };
-}
-
-describe('renderer selection', () => {
-  it('keeps the shipped field unless a known candidate is named', () => {
-    expect(parseTraceRenderer(null)).toBe('current');
-    expect(parseTraceRenderer('plate')).toBe('plate');
-    expect(parseTraceRenderer('sankey')).toBe('current');
-  });
-});
-
 describe('undrawnNeighbours', () => {
   it('itemises exactly the symbols the coverage total counts', () => {
     const { input, model } = built();
@@ -97,10 +74,12 @@ describe('inspectPath', () => {
     expect(inspectPath(model, 'not-drawn').nodes.size).toBe(0);
   });
 
-  it('describes the arrangement without the spring field vocabulary', () => {
+  it('describes the plate without the spring field vocabulary', () => {
     const { model } = built();
-    const text = variantDescription(model, 'an anatomy plate');
-    expect(text).toContain('Call neighbourhood of subgraph_payload as an anatomy plate.');
+    const text = plateDescription(model);
+    expect(text).toContain(
+      'Call neighbourhood of subgraph_payload as an anatomy plate, callers left and callees right on one call-site scale.',
+    );
     expect(text).toContain('16 calling and 13 called symbols, joined by 90 channels');
     expect(text).not.toMatch(/tributar|delta/);
   });
@@ -135,8 +114,7 @@ describe('layoutPlate', () => {
     const lengths = layout.rows.map((row) => row.segments.reduce((a, b) => a + b, 0) * layout.scale.pxPerCall);
     expect(Math.max(...lengths)).toBeCloseTo(22 * layout.scale.pxPerCall);
     expect(layout.rows).toHaveLength(29);
-    expect(layout.links).toHaveLength(38);
-    expect(layout.omittedChannels).toBe(52);
+    expect(layout.crossLinks).toBe(52);
     // Readouts wrap to their column; the words are all there.
     expect(layout.columns.find((c) => c.side === 'up' && c.hop === 2)!.notes.map((n) => n.text).join(' ')).toBe(
       '+9 named, not drawn',
@@ -149,7 +127,9 @@ describe('layoutPlate', () => {
     const { input, model } = built();
     const layout = layoutPlate(model, input.root, { signature: null, endLine: null }, undrawnNeighbours(input, model), 289);
     expect(layout.stacked).toBe(true);
-    expect(layout.links).toHaveLength(0);
+    // One corridor down the gutter carries every link.
+    expect(new Set(layout.connectors.flatMap((c) => c.corridors))).toEqual(new Set([12]));
+    expect(layout.connectors).toHaveLength(model.channels.length);
     expect(layout.rows.every((row) => row.grow === 1)).toBe(true);
     const order = layout.columns.map((column) => `${column.side}${column.hop}`);
     expect(order).toEqual(['up2', 'up1', 'down1', 'down2']);
@@ -159,7 +139,7 @@ describe('layoutPlate', () => {
     const { input, model } = built('sym-0', 6);
     const layout = layoutPlate(model, input.root, { signature: null, endLine: null }, undrawnNeighbours(input, model), 926);
     expect(layout.fields.find((field) => field.label === 'callers')!.value).toBe(
-      '1 symbol · 6 sites · prefix at limit',
+      '1 symbol · 6 sites · prefix',
     );
     expect(layout.columns.find((c) => c.side === 'up' && c.hop === 1)!.notes.map((n) => n.text).join(' ')).toBe(
       'a list hit the row limit: prefix only',
@@ -167,82 +147,49 @@ describe('layoutPlate', () => {
   });
 });
 
-describe('layoutTransit', () => {
-  it('bands stations by measured file depth and never guesses a missing one', () => {
-    const { model } = built();
-    const layout = layoutTransit(model, strataDepths(), 926);
-    expect(layout.bands.map((band) => `${band.key}:${band.kind}`)).toEqual([
-      'd0:empty',
-      'd1:empty',
-      'd2:empty',
-      'd3:empty',
-      'd4:station',
-      'd5:empty',
-      'd6:empty',
-      'd7:empty',
-      'u:unmeasured',
-    ]);
-    // Only graph_service.rs is in the fixture's strata files.
-    const measured = layout.stations.filter((station) => station.depth !== null);
-    expect(measured.every((station) => station.node.filePath === 'src/dashboard/graph_service.rs')).toBe(true);
-    expect(measured.map((station) => station.depth)).toEqual([4, 4, 4, 4, 4]);
-    expect(layout.lines.filter((line) => line.kind === 'unmeasured')).toHaveLength(87);
-    expect(layout.gaps.map(gapReading)).toEqual([
-      '26 unmeasured',
-      'Δ 0 · 45 unmeasured',
-      'Δ 0 · 3 unmeasured',
-      'Δ 0 · 13 unmeasured',
-    ]);
-  });
-
-  it('draws a call into a shallower file as a climb and a deeper one as a descent', () => {
-    const { model } = built();
-    const focus = model.nodes.find((node) => node.id === model.focusId)!;
-    const byPath = new Map(model.nodes.map((node) => [node.filePath ?? '', node.ring === 0 ? 3 : node.ring < 0 ? 1 : 5]));
-    byPath.set(focus.filePath!, 3);
-    const layout = layoutTransit(model, { byPath, maxDepth: 7, floor: false }, 926);
-    const into = layout.lines.find((line) => line.channel.b === model.focusId && line.delta !== null)!;
-    expect(into.delta).toBeGreaterThanOrEqual(0);
-    expect(layout.lines.some((line) => line.kind === 'climb')).toBe(true);
-    for (const line of layout.lines) {
-      if (line.delta === null) continue;
-      expect(line.kind).toBe(line.delta < 0 ? 'climb' : line.delta === 0 ? 'level' : 'descend');
-    }
-  });
-
-  it('puts every station in the unmeasured band when strata is not measured', () => {
-    const { model } = built();
-    const layout = layoutTransit(model, { byPath: null, maxDepth: null, floor: false }, 926);
-    expect(layout.bands.map((band) => band.kind)).toEqual(['unmeasured']);
-    expect(layout.lines.every((line) => line.kind === 'unmeasured')).toBe(true);
-  });
-});
-
-describe('layoutRadial', () => {
-  it('sectors by module and prints each sector’s omissions apart', () => {
+describe('plate connectors', () => {
+  it('draws every drawn call link, bars or not, as one connector', () => {
     const { input, model } = built();
-    const undrawn = undrawnNeighbours(input, model);
-    const layout = layoutRadial(model, undrawn, 926);
-    expect(layout.sectors.map((sector) => `${sector.label}[${sectorReading(sector)}]`)).toEqual([
-      'dashboard/src/app[+1 sym]',
-      'src/storage[+1 sym]',
-      'dashboard/src/workspaces/code[+2 sym]',
-      'src/dashboard[+4 sym · 7 edges]',
-      'src/automation[+1 sym]',
-    ]);
-    const hidden = layout.sectors.reduce((sum, sector) => sum + sector.hiddenSymbols, 0);
-    expect(hidden).toBe(model.coverage.namedButNotDrawn);
-    expect(layout.edges).toHaveLength(model.channels.length);
-    // Every drawn symbol sits on the ring of its hop.
-    for (const entry of layout.nodes) {
-      const ring = layout.rings.find((r) => r.hop === Math.abs(entry.node.ring));
-      expect(entry.radius).toBe(ring?.r ?? 0);
-    }
+    const layout = layoutPlate(model, input.root, { signature: null, endLine: null }, undrawnNeighbours(input, model), 926);
+    expect(model.channels).toHaveLength(90);
+    expect(layout.connectors.map((c) => c.key).sort()).toEqual(model.channels.map(channelKey).sort());
+    expect(layout.connectors.every((c) => c.d.startsWith('M'))).toBe(true);
+    // Both plate edges carry a through port on this neighbourhood.
+    expect(layout.throughPorts.map((p) => p.x)).toEqual([layout.plate.x, layout.plate.x + layout.plate.width]);
   });
 
-  it('never guesses a module for a row with no file', () => {
-    expect(moduleOf(null)).toBeNull();
-    expect(moduleOf('src/a/b.rs')).toBe('src/a');
-    expect(moduleOf('lib.rs')).toBe('.');
+  it('bundles a column into one corridor, so trunks carry counted links', () => {
+    const { input, model } = built();
+    const layout = layoutPlate(model, input.root, { signature: null, endLine: null }, undrawnNeighbours(input, model), 926);
+    const corridor = new Map<number, number>();
+    for (const c of layout.connectors) for (const x of c.corridors) corridor.set(x, (corridor.get(x) ?? 0) + 1);
+    // Four corridors between five slots, nothing else.
+    expect(corridor.size).toBe(4);
+    const leftOfPlate = Math.round((layout.columns.find((c) => c.side === 'up' && c.hop === 1)!.x1 + layout.plate.x) / 2);
+    const upToFocus = model.channels.filter(
+      (c) => c.b === model.focusId && model.nodes.find((n) => n.id === c.a)!.ring === -1,
+    );
+    expect(upToFocus).toHaveLength(7);
+    for (const channel of upToFocus) {
+      expect(layout.connectors.find((c) => c.key === channelKey(channel))!.corridors).toEqual([leftOfPlate]);
+    }
+    expect([...corridor.values()].reduce((a, b) => a + b, 0)).toBeGreaterThan(model.channels.length);
+  });
+
+  it('rounds each elbow softly and never draws a zero-length corner', () => {
+    expect(elbowPath([[0, 0], [10, 0], [10, 10]])).toBe('M0,0 L5,0 Q10,0 10,5 L10,10');
+    expect(elbowPath([[0, 0], [20, 0], [20, 0], [20, 30]])).toBe('M0,0 L14,0 Q20,0 20,6 L20,30');
+    expect(elbowPath([[0, 0]])).toBe('');
+  });
+
+  it('gives each kind a shape cue so kind never rests on hue alone', () => {
+    expect(['function', 'method', 'struct', 'trait', 'module'].map(kindShape)).toEqual([
+      'circle',
+      'diamond',
+      'square',
+      'triangle',
+      'bar',
+    ]);
+    expect(kindShape('enum')).toBe(kindShape('enum'));
   });
 });

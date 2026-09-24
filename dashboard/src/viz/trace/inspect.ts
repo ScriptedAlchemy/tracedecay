@@ -1,29 +1,10 @@
 /**
- * The Trace renderer exploration: three candidate renderers beside the shipped
- * spring field, selected with `?trace=`. Without the parameter the surface
- * keeps the current field, so the choice is reversible by deleting the losing
- * renderer files and their entry here.
- *
- * Every candidate draws the same `TraceModel`; nothing here reads a payload.
- * The helpers below are the geometry-free rules all three share, so a hover
- * lights the same path whichever renderer draws it.
+ * Geometry-free rules the Trace plate and its interaction share: channel
+ * identity, the route a hover or keyboard focus lights, and the one line the
+ * inspect readout prints. Nothing here reads a payload.
  */
 import { coverageCaption } from './model.ts';
 import type { TraceChannel, TraceModel } from './types.ts';
-
-export const TRACE_RENDERERS = ['current', 'plate', 'transit', 'radial'] as const;
-export type TraceRenderer = (typeof TRACE_RENDERERS)[number];
-
-export function parseTraceRenderer(value: string | null): TraceRenderer {
-  return TRACE_RENDERERS.find((renderer) => renderer === value) ?? 'current';
-}
-
-export const TRACE_RENDERER_LABELS: Readonly<Record<TraceRenderer, string>> = {
-  current: 'Spring field',
-  plate: 'Anatomy plate',
-  transit: 'Transit map',
-  radial: 'Radial',
-};
 
 export function channelKey(channel: TraceChannel): string {
   return `${channel.a}\0${channel.b}`;
@@ -108,18 +89,14 @@ export function inspectLine(model: TraceModel, id: string): string {
   ].join(' · ');
 }
 
-/**
- * The field's accessible description for a candidate renderer: what is drawn,
- * in that renderer's own arrangement, and the same coverage caption the
- * shipped field states.
- */
-export function variantDescription(model: TraceModel, arrangement: string): string {
+/** The plate's accessible description: what is drawn, and the coverage caption. */
+export function plateDescription(model: TraceModel): string {
   const focus = model.nodes.find((node) => node.id === model.focusId);
   const up = model.nodes.filter((node) => node.ring < 0).length;
   const down = model.nodes.filter((node) => node.ring > 0).length;
   const sites = model.channels.reduce((sum, channel) => sum + channel.calls, 0);
   return (
-    `Call neighbourhood of ${focus?.name ?? model.focusId} as ${arrangement}. ` +
+    `Call neighbourhood of ${focus?.name ?? model.focusId} as an anatomy plate, callers left and callees right on one call-site scale. ` +
     `${up} calling and ${down} called symbols, joined by ${model.channels.length} channels carrying ${sites} call sites. ` +
     `${coverageCaption(model)}. Each symbol is a focusable control; the ranked list below carries the same symbols as text.`
   );
