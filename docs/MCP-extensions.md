@@ -104,9 +104,9 @@ for languages without exhaustive struct checking.
 sweep before diving into a large file. The cross-project scan found **618** invocations of
 this pattern, the single largest grep category.
 
-**Status:** Served by `tracedecay_source_outline` (`{ "file": "src/tracedecay.rs" }`): every
-indexed symbol in one file, including private ones, with line ranges and node IDs for
-follow-up graph calls. No code bodies.
+**Status:** Shipped as `tracedecay_source_outline` (`{ "file": "src/tracedecay.rs" }`). It
+returns every indexed symbol in one file, including private ones, with line ranges and node
+IDs for follow-up graph calls. It returns no code bodies.
 
 ---
 
@@ -217,8 +217,8 @@ signature shape, return types, parameter types, generic bounds, attributes.
 sub-pattern. Implementation can reuse the AST matcher already feeding `tracedecay_ast_grep_rewrite`.
 
 **Value:** Unlocks signature-based refactoring questions that currently force a grep
-+ manual filter. Smaller volume than the symbol-skeleton greps but high token cost when it
-does come up, a single signature query can replace dozens of file Reads.
++ manual filter. The volume is smaller than the symbol-skeleton greps, but the token cost is
+high when it does come up. A single signature query can replace dozens of file Reads.
 
 ---
 
@@ -340,9 +340,9 @@ last call within a session, rather than a new top-level tool.
 pattern was `grep -A 20 "pub fn resolve_provider_api_key"`, reading a function or constant body
 by name without knowing which file it lives in.
 
-**Status:** Served by `tracedecay_find_exact_symbol` (or `tracedecay_search` for partial
-names) followed by `tracedecay_source_body` with the returned node ID, which returns the
-exact body and its 1-based line range.
+**Status:** Shipped as two calls. `tracedecay_find_exact_symbol` (or `tracedecay_search`
+for partial names) returns the node ID. `tracedecay_source_body` with that node ID returns
+the exact body and its 1-based line range.
 
 ---
 
@@ -384,10 +384,10 @@ scan, where measurable.
 
 | Tool | Status | Evidence | Complexity | Impact |
 |---|---|---|---|---|
-| `tracedecay_source_body` | ✅ shipped | 1571 targeted Reads + 52 sed -n | Low | **High** |
-| `tracedecay_todos` | ✅ shipped | scattered across projects | Low | Medium |
+| `tracedecay_source_body` | shipped | 1571 targeted Reads + 52 sed -n | Low | **High** |
+| `tracedecay_todos` | shipped | scattered across projects | Low | Medium |
 | `tracedecay_diagnostics` | proposed | 777 cargo invocations | High (compiler integration) | **Very high** |
-| `tracedecay_source_outline` | ✅ shipped | 618 symbol-skeleton greps | Low | **High** |
+| `tracedecay_source_outline` | shipped | 618 symbol-skeleton greps | Low | **High** |
 | `tracedecay_unsafe_patterns` | proposed | recurring in review/audit | Low (AST predicates) | High |
 | `tracedecay_implementations` | proposed | tracedecay 22ff55cd, 67f09223 | Low (method edges) | High |
 | `tracedecay_signature_search` | proposed | smaller volume, high token cost | Medium (AST matcher) | High |
@@ -401,7 +401,7 @@ scan, where measurable.
 
 **Build order recommendation (revised after telemetry scan):**
 
-1. File symbol skeleton: shipped as `tracedecay_source_outline`; addresses the single
+1. File symbol skeleton, shipped as `tracedecay_source_outline`. It addresses the single
    largest grep category (618 hits).
 2. `tracedecay_unsafe_patterns`. AST predicates on top of the existing matcher. Replaces a
    recurring review-time grep family. Half-day.

@@ -391,9 +391,9 @@ The generated MCP entries use the resolved absolute path to the current `tracede
 Whenever tracedecay rewrites an agent config file, on `install`, on `uninstall`,
 or an explicitly authorized host-maintenance operation, it edits only its own
 entries and publishes the result atomically. It never leaves backup or
-"original" copies beside host configs; uninstall removes TraceDecay's entries
+"original" copies beside host configs. Uninstall removes TraceDecay's entries
 and leaves every other setting in place. Doctor only reports configuration
-findings; it never rewrites hooks.
+findings and never rewrites hooks.
 
 ### Removing an integration
 

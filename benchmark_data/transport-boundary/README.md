@@ -2,8 +2,9 @@
 
 > **Historical evidence only.** Current requirements come only from the
 > `docs/plans/tracedecay-v2/` hierarchy; exact commands and fields below are
-> not rebuild instructions. Transport parity is verified directly by
-> `crates/tracedecay/tests/product_surface_suite/api_application_parity.rs`.
+> not rebuild instructions.
+> `crates/tracedecay/tests/product_surface_suite/api_application_parity.rs`
+> verifies transport parity directly.
 
 The compile workload remains executable, but its measurement is explicitly
 pending execution. Static validation does not run Cargo:

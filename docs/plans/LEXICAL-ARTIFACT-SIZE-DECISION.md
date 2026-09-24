@@ -7,13 +7,14 @@ generation; there is no migration.
 ## Layout
 
 - Every posting family is one delta-varint list per serving key, clustered by
-  that key, with no secondary index: `term_postings` per `(term, field)` with
-  frequencies and the document frequency, `exact_postings` per
-  `(exact term, field)`, `ngram_postings` per `(kind, ngram)`. Dense n-gram
+  that key, with no secondary index. `term_postings` has one list per
+  `(term, field)` with frequencies and the document frequency,
+  `exact_postings` one per `(exact term, field)`, and `ngram_postings` one per
+  `(kind, ngram)`. Dense n-gram
   lists are stored as a bitset over the range they span when that is smaller.
 - Batches append page-ordered term and exact staging runs so appends stay at
   the tree tail; finalization merges each in one sorted pass and drops it.
-  N-gram lists are never staged: finalization rebuilds them from the stored
+  N-gram lists are never staged. Finalization rebuilds them from the stored
   rows in key order, spilling to further passes only past a quarter of the
   builder's memory budget. Freed pages are released
   (`auto_vacuum = INCREMENTAL`).
@@ -37,7 +38,7 @@ generation; there is no migration.
 
 Cold index of `/fast/projects/tracedecay` (6,468 tracked files, ~140 MB) in an
 isolated profile with the release daemon, September 23, 2026. The worktree
-moved slightly between runs (409,398 → 407,739 chunk documents).
+moved slightly between runs (from 409,398 to 407,739 chunk documents).
 
 | Section | Revision 14 | Revision 17 |
 | --- | ---: | ---: |
@@ -95,8 +96,8 @@ Revision 23 on the same journey (348,769 documents; the worktree moved):
   `(occurrence ordinal, position)` per fingerprint with its count. In the old
   layout the same clone rows took ~3.8 GB (payloads 2.35 GB, fingerprint rows
   1.1 GB, occurrences 311 MB) and their verification ran for over 20 minutes.
-- Cold index to sealed artifact: 262 s with the clone index (215 s for
-  revision 20 without it); finalization ~77 s.
+- A cold index to a sealed artifact takes 262 s with the clone index (215 s
+  for revision 20 without it), and finalization takes ~77 s.
 
 Revision 24 makes the file a function of its content and shares it across
 linked worktrees:
@@ -106,8 +107,8 @@ linked worktrees:
   and each clone occurrence's project, worktree, generation, and snapshot
   come from the opener. The receipt drops the sealed source's state and
   chunk-chain digests (both hash the building generation into every chunk
-  anchor), and `source_pages` keeps only content columns: the per-page
-  cursors sit in `source_page_cursors`, dropped before the seal, and the
+  anchor). `source_pages` keeps only content columns. The per-page cursors
+  sit in `source_page_cursors`, which is dropped before the seal, and the
   finalization state table is dropped at the seal.
 - Physical layout follows batch arrival order, so finalization `VACUUM`s the
   file before sealing and normalizes SQLite's commit counters; the same
@@ -155,9 +156,9 @@ builds:
   sealed source (the format and every file segment's key, occurrence,
   content address, and symbol identities) and the projection's content
   metadata. A descriptor any scope published under that key is adopted once
-  its file opens against its content address and this projection; a failed
-  verification builds, and publication replaces a shared file that no longer
-  hashes to its name.
+  its file opens against its content address and this projection. If that
+  verification fails, the worktree builds the artifact, and publication
+  replaces a shared file that no longer hashes to its name.
 
 Same journey, HEAD `37d94657c0`:
 
@@ -174,8 +175,8 @@ Revision 26 stores only case-sensitive windows in the case-preserving
 n-gram kind. Normalized text is the ASCII-lowercased raw text at the same
 byte offsets, so a raw window without an ASCII uppercase byte is already the
 normalized window there. A case-sensitive quoted, diagnostic, or error literal
-looks up each of its windows in the kind that holds it: uppercase windows in
-the raw kind, the rest in the normalized kind. A literal with no uppercase
+looks up each of its windows in the kind that holds it. Uppercase windows are
+in the raw kind, and the rest are in the normalized kind. A literal with no uppercase
 window skips the raw lookup, because the normalized query already admits
 every raw match. The exact lane still confirms every candidate against the
 row text, so results are unchanged.
@@ -191,7 +192,7 @@ The production build path (`build_and_publish` and then
 | `ngram_postings` | 244,899,840 | 155,242,496 |
 | **File** | **656,666,624** | **566,894,592** |
 
-## Remaining levers
+## Largest remaining tables
 
 - `ngram_postings` (155 MB) is still the largest table. Normalized
   unigram and bigram lists (35 MB) serve only one- and two-byte literals.
