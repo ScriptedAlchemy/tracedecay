@@ -221,10 +221,35 @@ async fn automatic_apply_commits_a_terminal_receipt_with_canonical_evidence() {
         receipt.validation,
         Some(serde_json::json!({"dedupe": {"source_index": 3}}))
     );
-    assert!(receipt.applied_fact_id.is_some());
     assert_eq!(
         receipt.add_fact_request.source_label.as_deref(),
         Some("automatic-fact-test")
+    );
+    let stored = memory
+        .list_project_memory_facts(
+            ProjectMemoryFactListQueryV1::new(memory.owner().clone(), None, None, None, 10)
+                .unwrap(),
+            run_control.read_control(),
+        )
+        .await
+        .unwrap()
+        .facts()
+        .iter()
+        .filter_map(|projection| match projection {
+            ProjectMemoryFactProjectionV1::Available(fact) => Some((
+                Some(fact.fact_id().as_str().to_owned()),
+                fact.content().to_owned(),
+            )),
+            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stored,
+        [(
+            receipt.applied_fact_id.clone(),
+            "Keep automatic fact effects in the canonical memory authority".to_owned()
+        )],
+        "the receipt names the one canonical fact it applied"
     );
 
     let loaded =

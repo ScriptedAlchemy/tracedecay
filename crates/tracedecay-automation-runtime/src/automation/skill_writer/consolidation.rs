@@ -641,7 +641,13 @@ mod tests {
         ));
         assert_eq!(merge.target_skill_id, "workflow-a");
         assert_eq!(merge.source_skill_id, "workflow-b");
-        assert!(merge.update.is_some());
+        assert_eq!(
+            merge
+                .update
+                .as_ref()
+                .and_then(|update| update.body_markdown.as_deref()),
+            Some("Merged workflow guidance covering both variants.")
+        );
 
         let archive_only = assert_ok(skill_merge_from_proposal(
             &json!({

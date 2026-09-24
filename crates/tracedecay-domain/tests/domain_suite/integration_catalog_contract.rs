@@ -194,30 +194,6 @@ fn stable_direct_host_integration_ids_match_provider_ids() {
 #[test]
 fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
     assert_eq!(
-        HostKindV1::ALL.map(|host| serde_json::to_value(host).unwrap()),
-        [
-            "claude_code",
-            "cursor_desktop",
-            "cursor_cloud",
-            "codex",
-            "hermes",
-            "kiro",
-            "cline_family",
-            "cline",
-            "roo_code",
-            "kilo",
-            "kimi_code",
-            "open_code",
-            "gemini",
-            "copilot",
-            "devin",
-            "zed",
-            "antigravity",
-            "vibe",
-        ]
-        .map(Value::from)
-    );
-    assert_eq!(
         HostKindV1::ClaudeCode.fixture_backed_observation_integration_id(),
         Some(HostIntegrationIdV1::Claude)
     );

@@ -202,11 +202,14 @@ async fn discover_project_root_with_identity_preserves_sync_fast_path() {
     fs::create_dir_all(&store.data_root).unwrap();
     fs::write(&store.graph_db_path, b"").unwrap();
 
-    let sync = super::discover_project_root(&project_root);
-    assert!(sync.is_some(), "sync resolver must see the path-local store");
+    assert_eq!(
+        super::discover_project_root(&project_root),
+        Some(project_root.clone()),
+        "sync resolver must see the path-local store"
+    );
     assert_eq!(
         super::discover_project_root_with_identity(&project_root).await,
-        sync,
+        Some(project_root),
         "identity wrapper fast path must equal the sync result"
     );
 }

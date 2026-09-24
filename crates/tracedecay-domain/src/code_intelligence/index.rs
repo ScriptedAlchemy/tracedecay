@@ -503,24 +503,28 @@ mod tests {
     }
 
     #[test]
-    fn relation_edge_kind_as_str_matches_its_serde_spelling() {
-        assert_eq!(RelationEdgeKindV1::TypeOf.as_str(), "type_of");
-        for kind in [
-            RelationEdgeKindV1::Calls,
-            RelationEdgeKindV1::Uses,
-            RelationEdgeKindV1::TypeOf,
-            RelationEdgeKindV1::Contains,
-            RelationEdgeKindV1::Implements,
-            RelationEdgeKindV1::Extends,
-            RelationEdgeKindV1::Annotates,
-            RelationEdgeKindV1::Returns,
-            RelationEdgeKindV1::Receives,
+    fn relation_edge_kinds_have_literal_wire_spellings() {
+        for (kind, wire) in [
+            (RelationEdgeKindV1::Calls, "calls"),
+            (RelationEdgeKindV1::Uses, "uses"),
+            (RelationEdgeKindV1::TypeOf, "type_of"),
+            (RelationEdgeKindV1::Contains, "contains"),
+            (RelationEdgeKindV1::Implements, "implements"),
+            (RelationEdgeKindV1::Extends, "extends"),
+            (RelationEdgeKindV1::Annotates, "annotates"),
+            (RelationEdgeKindV1::Returns, "returns"),
+            (RelationEdgeKindV1::Receives, "receives"),
         ] {
             assert_eq!(
                 serde_json::to_value(kind).expect("serialize"),
-                serde_json::Value::String(kind.as_str().to_owned()),
-                "{kind:?} as_str diverged from its serde spelling"
+                serde_json::json!(wire)
             );
+            assert_eq!(
+                serde_json::from_value::<RelationEdgeKindV1>(serde_json::json!(wire))
+                    .expect("deserialize"),
+                kind
+            );
+            assert_eq!(kind.as_str(), wire);
         }
     }
 

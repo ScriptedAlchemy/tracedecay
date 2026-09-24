@@ -1614,55 +1614,50 @@ mod tests {
     fn clone_lanes_report_one_unavailable_wire_protocol() {
         use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1 as Reason;
 
-        // Retired branch-local opaque tokens, never shipped on master; must
-        // stay absent from the shared mapper wire (migrate-then-delete, not
-        // one-release alias).
-        const RETIRED_OPAQUE_REASON_CODES: &[&str] = &[
-            "verified-code-redundancy-unavailable",
-            "verified-code-similarity-unavailable",
-        ];
-
-        for reason in [
-            Reason::CapabilityUnavailable,
-            Reason::AuthorityUnavailable,
-            Reason::LinkedWorktreeDisabled,
-            Reason::Cancelled,
-            Reason::TimedOut,
-            Reason::CapacityUnavailable,
-            Reason::GenerationUnavailable,
-            Reason::GenerationUnverified,
-            Reason::InvalidRequest,
-            Reason::CorruptionResetRequired,
-            Reason::Internal,
+        for (reason, code, retryable) in [
+            (
+                Reason::CapabilityUnavailable,
+                "code_index_unavailable",
+                false,
+            ),
+            (Reason::AuthorityUnavailable, "authority_unavailable", false),
+            (
+                Reason::LinkedWorktreeDisabled,
+                "linked_worktree_disabled",
+                false,
+            ),
+            (Reason::Cancelled, "cancelled", true),
+            (Reason::TimedOut, "timed_out", true),
+            (
+                Reason::CapacityUnavailable,
+                "search_capacity_unavailable",
+                true,
+            ),
+            (
+                Reason::GenerationUnavailable,
+                "generation_unavailable",
+                true,
+            ),
+            (Reason::GenerationUnverified, "generation_unverified", true),
+            (Reason::InvalidRequest, "invalid_request", false),
+            (
+                Reason::CorruptionResetRequired,
+                "index_corruption_reset_required",
+                false,
+            ),
+            (Reason::Internal, "search_failed", false),
         ] {
-            let similarity = clone_lane_unavailable_error("similarity", reason);
-            let family = clone_lane_unavailable_error("family", reason);
-            let (similarity_code, similarity_retryable, similarity_detail) = similarity
-                .project_route_context()
-                .expect("clone lane failures are typed project-route errors");
-            let (family_code, family_retryable, family_detail) = family
-                .project_route_context()
-                .expect("clone lane failures are typed project-route errors");
-            assert_eq!(similarity_code, reason.as_str());
-            assert_eq!(family_code, reason.as_str());
-            assert_eq!(similarity_retryable, reason.is_retryable());
-            assert_eq!(family_retryable, reason.is_retryable());
-            for retired in RETIRED_OPAQUE_REASON_CODES {
-                assert_ne!(
-                    similarity_code, *retired,
-                    "similarity lane must not re-emit retired opaque reason"
-                );
-                assert_ne!(
-                    family_code, *retired,
-                    "family lane must not re-emit retired opaque reason"
-                );
-                assert!(
-                    !similarity_detail.contains(retired),
-                    "similarity detail must not mention retired opaque reason"
-                );
-                assert!(
-                    !family_detail.contains(retired),
-                    "family detail must not mention retired opaque reason"
+            for lane in ["similarity", "family"] {
+                let error = clone_lane_unavailable_error(lane, reason);
+                assert_eq!(
+                    error
+                        .project_route_context()
+                        .expect("clone lane failures are typed project-route errors"),
+                    (
+                        code,
+                        retryable,
+                        format!("the maintained clone {lane} lane is unavailable: {code}").as_str(),
+                    )
                 );
             }
         }

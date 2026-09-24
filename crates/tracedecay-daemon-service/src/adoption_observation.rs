@@ -147,17 +147,6 @@ mod tests {
         "capability.application.retained.",
         "capability.application.source-edit.",
     ];
-
-    /// Families the composed application catalog can truthfully census today.
-    const COMPOSED_FAMILIES: &[&str] = &[
-        "retrieval",
-        "context_scout",
-        "feedback",
-        "git",
-        "lsp",
-        "analytics",
-    ];
-
     #[test]
     fn every_composed_capability_is_classified_or_deliberately_out_of_scope() {
         let contributions = application_catalog_contributions().expect("composed catalog");
@@ -179,43 +168,33 @@ mod tests {
     }
 
     #[test]
-    fn census_counts_hold_the_funnel_order_for_every_composed_family() {
+    fn census_counts_each_composed_family_and_omits_uncomposed_families() {
         let census = adoption_eligibility_census().expect("catalog census");
-        assert!(!census.is_empty(), "the composed catalog census is empty");
-        let by_family: BTreeMap<&str, &AdoptionEligibilityObservedV1> = census
+        let counts: Vec<(&str, u64, u64, u64)> = census
             .iter()
-            .map(|observation| (observation.capability.as_str(), observation))
+            .map(|observation| {
+                (
+                    observation.capability.as_str(),
+                    observation.eligible,
+                    observation.enabled,
+                    observation.available,
+                )
+            })
             .collect();
-        for family in COMPOSED_FAMILIES {
-            let observation = by_family
-                .get(family)
-                .unwrap_or_else(|| panic!("{family} family missing from the catalog census"));
-            assert!(
-                observation.eligible > 0,
-                "{family} must census a non-zero eligible population"
-            );
-            assert!(observation.enabled <= observation.eligible);
-            assert!(observation.available <= observation.enabled);
-        }
-        // The default profile serves callable retrieval capabilities, so the
-        // census must observe them as enabled and available, not merely
-        // composed.
-        assert!(by_family["retrieval"].available > 0);
-        // Families this catalog authority does not compose must be absent
-        // instead of claiming a Known-zero eligible population.
-        for family in [
-            "automation",
-            "work",
-            "workflow",
-            "hooks",
-            "mcp",
-            "dashboard",
-        ] {
-            assert!(
-                !by_family.contains_key(family),
-                "{family} has no composed catalog capability and must not be emitted"
-            );
-        }
+        // (family, eligible, enabled, available); families such as
+        // automation, work, and workflow compose no catalog capability and so
+        // must be absent rather than a Known-zero population.
+        assert_eq!(
+            counts,
+            [
+                ("analytics", 1, 1, 1),
+                ("context_scout", 11, 11, 11),
+                ("feedback", 11, 9, 9),
+                ("git", 22, 19, 19),
+                ("lsp", 2, 0, 0),
+                ("retrieval", 34, 34, 34),
+            ]
+        );
     }
 
     #[tokio::test]

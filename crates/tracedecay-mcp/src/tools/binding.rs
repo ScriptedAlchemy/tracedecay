@@ -1025,6 +1025,22 @@ mod tests {
             .into_iter()
             .map(|entry| entry.name)
             .collect::<Vec<_>>();
+        // One tool per binding source: a root binding, a root binding merged
+        // with its application operation, an application-only operation, and
+        // the Work and Workflow families.
+        for tool in [
+            "tracedecay_search",
+            "tracedecay_callers",
+            "tracedecay_code_exact_occurrence",
+            "tracedecay_work_create",
+            "tracedecay_workflow_start_run",
+        ] {
+            assert_eq!(
+                names.iter().filter(|name| *name == tool).count(),
+                1,
+                "{tool} must be bound exactly once"
+            );
+        }
         let total = names.len();
         names.sort_unstable();
         names.dedup();

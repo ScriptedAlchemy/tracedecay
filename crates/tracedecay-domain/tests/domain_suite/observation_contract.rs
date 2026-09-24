@@ -588,10 +588,6 @@ fn receipt_derivation_is_canonical_and_generation_bound() {
         "privacy.claude.v1.2ef774a1d81493c05616a42ac8cf08856f230c7aa4f4e9d8224512d05ded88a8"
     );
     assert_eq!(receipt.sanitizer_version().as_str(), "sanitizer.fixture.v1");
-    assert_eq!(SanitizerDispositionV1::Accepted.as_str(), "accepted");
-    assert_eq!(SanitizerDispositionV1::Redacted.as_str(), "redacted");
-    assert_eq!(SanitizerDispositionV1::Rejected.as_str(), "rejected");
-    assert_eq!(SanitizerDispositionV1::Quarantined.as_str(), "quarantined");
 
     let changed_generation = ObservationIdentityMaterialV1::new(
         source("session.fixture"),

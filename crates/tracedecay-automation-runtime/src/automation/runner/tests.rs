@@ -113,7 +113,11 @@ fn asymmetric_combined_failure_preserves_the_successful_sibling_record() {
     assert_eq!(failure.reflector_record, Some(record));
     assert!(failure.reflector_error.is_none());
     assert!(failure.skill_writer_record.is_none());
-    assert!(failure.skill_writer_error.is_some());
+    assert!(matches!(
+        failure.skill_writer_error,
+        Some(tracedecay_domain::errors::TraceDecayError::Config { ref message })
+            if message == "skill terminal construction failed"
+    ));
 }
 
 #[test]

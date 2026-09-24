@@ -1359,28 +1359,19 @@ mod tests {
     }
 
     #[test]
-    fn activity_families_serialize_with_their_own_family_tags() {
-        for family in ActivityFamilyV1::ALL {
-            let kind = DashboardEventKindV1::activity(family, 1, 1, None);
-            let value = serde_json::to_value(&kind).unwrap();
-            let tag = value["family"].as_str().expect("family tag").to_string();
-            assert!(
-                tag.ends_with("_activity"),
-                "activity families are tagged as activity: {tag}"
-            );
-            // The SSE event name must be the one the frontend subscribes to.
-            assert_eq!(kind.stream(), family.stream_name());
-        }
+    fn tool_call_activity_serializes_its_family_tag_and_sse_stream() {
+        let kind = DashboardEventKindV1::activity(
+            ActivityFamilyV1::ToolCall,
+            4,
+            4,
+            Some("tracedecay_context".into()),
+        );
         assert_eq!(
-            serde_json::to_value(DashboardEventKindV1::activity(
-                ActivityFamilyV1::ToolCall,
-                4,
-                4,
-                Some("tracedecay_context".into()),
-            ))
-            .unwrap()["family"],
+            serde_json::to_value(&kind).unwrap()["family"],
             "tool_call_activity"
         );
+        // The SSE event name the frontend subscribes to.
+        assert_eq!(kind.stream(), "tool_call");
     }
 
     #[test]

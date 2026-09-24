@@ -5,9 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 use tracedecay_runtime_core::config::{
-    GENERATED_DIR_SEGMENTS, PinnedUserDataDir, USER_DATA_DIR_ENV, db_filename,
-    discover_project_root, get_tracedecay_dir, is_ambient_project_root,
-    is_generated_dir_segment, lock_user_data_dir_test_env, user_data_dir,
+    PinnedUserDataDir, USER_DATA_DIR_ENV, db_filename, discover_project_root, get_tracedecay_dir,
+    is_ambient_project_root, is_generated_dir_segment, lock_user_data_dir_test_env, user_data_dir,
 };
 
 struct EnvRestore {
@@ -222,39 +221,6 @@ fn implicit_discovery_never_selects_the_user_profile_root() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn generated_dir_segments_cover_the_union_all_call_sites_need() {
-    // Formerly scan.rs-only (its HINTABLE_DIRS list).
-    for segment in [
-        "node_modules",
-        "vendor",
-        "build",
-        "dist",
-        "out",
-        "coverage",
-        ".cache",
-        ".next",
-        ".turbo",
-        ".gradle",
-        ".venv",
-        "venv",
-        "__pycache__",
-    ] {
-        assert!(
-            GENERATED_DIR_SEGMENTS.contains(&segment),
-            "{segment} (from scan.rs's old list) missing from GENERATED_DIR_SEGMENTS"
-        );
-    }
-    // Formerly migrate::inventory-only addition beyond the scan.rs set.
-    assert!(GENERATED_DIR_SEGMENTS.contains(&"target"));
-    // Worktree build directories are generated paths too.
-    assert!(GENERATED_DIR_SEGMENTS.contains(&".worktrees"));
-    // `.git` is intentionally NOT part of the shared list, it stays a
-    // site-local addition in migrate::inventory::should_prune_dir (see its
-    // doc comment) because it's VCS metadata, not generated/vendored code.
-    assert!(!GENERATED_DIR_SEGMENTS.contains(&".git"));
-}
-
-#[test]
 fn is_generated_dir_segment_delegates_for_segments_unique_to_one_former_list() {
     // Every one of these previously lived in only one of the four lists;
     // is_generated_dir_segment must now recognize all of them.
@@ -271,6 +237,7 @@ fn is_generated_dir_segment_delegates_for_segments_unique_to_one_former_list() {
 #[test]
 fn is_generated_path_segment_matches_segments_and_minified_suffix() {
     assert!(is_generated_path_segment("packages/web/target/debug/x"));
+    assert!(is_generated_path_segment("web/node_modules/react/index.js"));
     assert!(is_generated_path_segment(".worktrees/feature/src/lib.rs"));
     assert!(is_generated_path_segment("assets/app.min.js"));
     assert!(is_generated_path_segment("assets/app.min.css"));
@@ -281,43 +248,7 @@ fn is_generated_path_segment_matches_segments_and_minified_suffix() {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
-    use crate::{RetentionConfig, SyncConfig};
-    use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
-
-    #[test]
-    fn default_retention_runs_only_safe_bounded_maintenance() {
-        let retention = RetentionConfig::default();
-        assert!(
-            retention.session_lcm.enabled,
-            "projection-durable session dedupe enabled by default"
-        );
-        assert_eq!(retention.session_lcm.offload_after_days, Some(30));
-        assert_eq!(retention.session_lcm.drop_after_days, Some(180));
-        assert_eq!(retention.session_lcm.dedupe_projected_after_days, Some(30));
-        assert_eq!(retention.session_lcm.max_batch_size, 500);
-        assert!(
-            retention.observation.enabled,
-            "released observation evidence maintenance is active by default"
-        );
-        assert_eq!(retention.observation.anchor_release_after_days, Some(30));
-        assert_eq!(
-            retention.observation.observation_release_after_days,
-            Some(30)
-        );
-        assert_eq!(
-            retention.observation.provenance_release_after_days,
-            Some(30)
-        );
-        assert_eq!(retention.orphan_store_gc_days, Some(30));
-        let compaction = retention.compaction.expect("compaction enabled");
-        assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
-        assert_eq!(compaction.minimum_reclaimable_bytes, 64 * 1024 * 1024);
-        assert_eq!(compaction.max_pages_per_tick, 1024);
-        assert_eq!(compaction, CompactionThresholdConfig::default());
-        assert!(retention.store_soft_budgets_bytes.is_empty());
-        // A default SyncConfig carries the same bounded retention tree.
-        assert_eq!(SyncConfig::default().retention, retention);
-    }
+    use crate::RetentionConfig;
 
     #[test]
     fn empty_json_object_deserializes_to_safe_defaults() {

@@ -394,7 +394,6 @@ mod tests {
                     definition.annotations.as_ref().unwrap()["readOnlyHint"],
                     dispatch["read_only"]
                 );
-                assert!(dispatch["deadline"]["maximum_millis"].as_u64().unwrap() > 0);
                 dispatch["fingerprint"].as_str().unwrap()
             })
             .collect::<BTreeSet<_>>();
@@ -421,8 +420,19 @@ mod tests {
         let dispatch = &doctor.meta.as_ref().unwrap()["tracedecay/dispatch"];
         assert_eq!(dispatch["effect"], "read");
         assert_eq!(dispatch["availability"]["state"], "available");
+        assert_eq!(dispatch["deadline"]["maximum_millis"], 30_000);
         assert!(dispatch.get("receipt").is_none());
         assert!(dispatch.get("reconciliation").is_none());
+
+        let affected_tests = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_run_affected_tests")
+            .unwrap();
+        assert_eq!(
+            affected_tests.meta.as_ref().unwrap()["tracedecay/dispatch"]["deadline"]["maximum_millis"],
+            600_000,
+            "a long-running tool gets the ten-minute ceiling"
+        );
 
         for retired in [
             "tracedecay_lcm_preflight",

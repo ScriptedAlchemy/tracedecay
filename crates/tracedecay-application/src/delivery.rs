@@ -2596,7 +2596,22 @@ mod tests {
                     && item.coverage == ProjectDeliveryInboxCoverageV1::Unsupported
             })
             .collect::<Vec<_>>();
-        assert!(!unsupported.is_empty());
+        assert_eq!(
+            unsupported
+                .iter()
+                .map(|item| item.source)
+                .collect::<Vec<_>>(),
+            [
+                ProjectDeliveryAttentionSourceV1::Contradiction,
+                ProjectDeliveryAttentionSourceV1::UnsafePattern,
+                ProjectDeliveryAttentionSourceV1::TestRisk,
+                ProjectDeliveryAttentionSourceV1::UnreviewedChangedCode,
+                ProjectDeliveryAttentionSourceV1::WeakEvidence,
+                ProjectDeliveryAttentionSourceV1::OverlappingEdit,
+                ProjectDeliveryAttentionSourceV1::ConfirmedConflict,
+                ProjectDeliveryAttentionSourceV1::DivergentSharedImplementation,
+            ]
+        );
         assert!(unsupported.iter().all(|item| {
             item.evidence.is_empty()
                 && item.coverage == ProjectDeliveryInboxCoverageV1::Unsupported

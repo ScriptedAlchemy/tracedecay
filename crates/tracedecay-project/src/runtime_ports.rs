@@ -297,6 +297,17 @@ mod tests {
             .await
             .expect("the root resolves a canonical layout for any checkout");
         assert_eq!(layout.project_root, checkout);
-        assert!(layout.identity.project_id.is_some());
+        let project_id = layout
+            .identity
+            .project_id
+            .expect("the layout carries a project identity");
+        let again = (runtime.store_layout_resolver)(&checkout)
+            .await
+            .expect("the same checkout resolves again");
+        assert_eq!(
+            again.identity.project_id,
+            Some(project_id),
+            "one checkout resolves to one stable project identity"
+        );
     }
 }

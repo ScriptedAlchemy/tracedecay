@@ -882,49 +882,62 @@ mod tests {
     use crate::application_surface::parse_application_surface_request;
     use crate::contract::{DaemonInvocationOutcome, DaemonInvocationProblem};
 
-    /// A caller body decodes, re-encodes as the invocation payload, and the
-    /// executor decodes that payload back to the same payload.
-    fn assert_payload_round_trips(operation: ApplicationSurfaceOperation, body: serde_json::Value) {
-        let payload = parse_application_surface_request(operation, body)
-            .unwrap_or_else(|error| panic!("{operation:?} body: {error}"))
-            .into_invocation_payload()
-            .expect("payload");
-        let decoded = parse_application_surface_invocation_payload(operation, payload.clone())
-            .unwrap_or_else(|error| panic!("{operation:?} payload {payload}: {error}"));
-        assert!(decoded.matches(operation), "{operation:?}");
-        assert_eq!(
-            decoded
-                .into_invocation_payload()
-                .expect("re-encoded payload"),
-            payload,
-            "{operation:?}"
-        );
-    }
-
     #[test]
-    fn invocation_payloads_round_trip_through_the_executor_decoder() {
-        for (operation, body) in [
+    fn caller_bodies_encode_to_literal_payloads_the_executor_accepts() {
+        for (operation, body, payload) in [
             (
-                ApplicationSurfaceOperation::ConfigurationGet,
-                json!({"key": "mcp.tool_timings"}),
+                ApplicationSurfaceOperation::ConfigurationList,
+                json!({}),
+                json!({}),
             ),
-            (ApplicationSurfaceOperation::ConfigurationList, json!({})),
             (
                 ApplicationSurfaceOperation::FeedbackList,
                 json!({"request_handle": "feedback.handle.v1"}),
+                json!({"request_handle": "feedback.handle.v1"}),
             ),
-            (ApplicationSurfaceOperation::GitStatus, json!({})),
+            (
+                ApplicationSurfaceOperation::GitStatus,
+                json!({}),
+                json!({
+                    "max_entries": 1000,
+                    "max_bytes": 4_194_304,
+                    "request": {"query": "status"}
+                }),
+            ),
             (
                 ApplicationSurfaceOperation::GitHistory,
                 json!({"count": 5, "path": "src/lib.rs"}),
+                json!({
+                    "max_entries": 1000,
+                    "max_bytes": 4_194_304,
+                    "request": {
+                        "query": "history",
+                        "max_count": 5,
+                        "path": "src/lib.rs",
+                        "follow": false,
+                        "first_parent": false
+                    }
+                }),
             ),
             (
                 ApplicationSurfaceOperation::StorageStatus,
                 json!({"include_details": false}),
+                json!({"include_details": false}),
             ),
-            (ApplicationSurfaceOperation::ObservatoryRead, json!({})),
+            (
+                ApplicationSurfaceOperation::ObservatoryRead,
+                json!({}),
+                json!({"window_days": 14}),
+            ),
         ] {
-            assert_payload_round_trips(operation, body);
+            let encoded = parse_application_surface_request(operation, body)
+                .unwrap_or_else(|error| panic!("{operation:?} body: {error}"))
+                .into_invocation_payload()
+                .expect("payload");
+            assert_eq!(encoded, payload, "{operation:?}");
+            let decoded = parse_application_surface_invocation_payload(operation, payload)
+                .unwrap_or_else(|error| panic!("{operation:?} payload: {error}"));
+            assert!(decoded.matches(operation), "{operation:?}");
         }
     }
 
