@@ -946,7 +946,7 @@ mod tests {
         let worker_flag = Arc::clone(&worker_ran);
         let outcome = control
             .run_retained(&registry, async move {
-                worker_flag.store(true, std::sync::atomic::Ordering::Release);
+                worker_flag.store(true, Ordering::Release);
                 Ok::<_, tracedecay_domain::errors::TraceDecayError>("authority settled")
             })
             .await;
@@ -965,7 +965,7 @@ mod tests {
         );
         registry.shutdown().await;
         assert!(
-            worker_ran.load(std::sync::atomic::Ordering::Acquire),
+            worker_ran.load(Ordering::Acquire),
             "the admitted worker must run so the invocation authority settles it"
         );
     }
@@ -1022,7 +1022,7 @@ mod tests {
         let worker_flag = Arc::clone(&worker_ran);
         let outcome = control
             .run_retained(&registry, async move {
-                worker_flag.store(true, std::sync::atomic::Ordering::Release);
+                worker_flag.store(true, Ordering::Release);
                 Ok::<_, tracedecay_domain::errors::TraceDecayError>("never admitted")
             })
             .await;
@@ -1036,7 +1036,7 @@ mod tests {
         );
         registry.shutdown().await;
         assert!(
-            !worker_ran.load(std::sync::atomic::Ordering::Acquire),
+            !worker_ran.load(Ordering::Acquire),
             "no settlement authority exists, so the worker must never be admitted"
         );
     }
