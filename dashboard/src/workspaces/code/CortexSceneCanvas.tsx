@@ -497,7 +497,7 @@ export function CortexSceneCanvas<L>({
     );
   }
   return (
-    <div className={cn('relative flex min-h-0 flex-1 flex-col', className)}>
+    <div className={cn('td-night relative flex min-h-0 flex-1 flex-col', className)}>
       <div
         ref={hostRef}
         role="group"
