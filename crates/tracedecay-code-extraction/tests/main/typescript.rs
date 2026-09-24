@@ -981,10 +981,9 @@ test.describe("", () => {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
     let fns = ts_functions(&result);
-    assert!(
-        fns.iter().all(|f| !f.name.is_empty()),
-        "no extracted node may carry an empty name; got {:?}",
-        fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+    assert_eq!(
+        fns.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["<anonymous>", "adds"]
     );
     let suite = fns
         .iter()

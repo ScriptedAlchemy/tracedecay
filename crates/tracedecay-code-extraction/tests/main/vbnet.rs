@@ -18,12 +18,7 @@ End Class
         .iter()
         .find(|n| n.kind == NodeKind::Class && n.name == "MyClass")
         .expect("MyClass not found");
-    assert!(class.docstring.is_some(), "Expected docstring on MyClass");
-    assert!(
-        class.docstring.as_ref().unwrap().contains("test class"),
-        "Docstring should contain 'test class', got: {:?}",
-        class.docstring
-    );
+    assert_eq!(class.docstring.as_deref(), Some("A test class."));
 }
 
 #[test]
@@ -135,10 +130,9 @@ End Class
         .iter()
         .filter(|n| n.kind == NodeKind::Method)
         .collect();
-    assert!(
-        methods.len() >= 2,
-        "expected >= 2 methods, got {}",
-        methods.len()
+    assert_eq!(
+        methods.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["GetValue", "DoWork"]
     );
     assert!(methods.iter().any(|m| m.name == "GetValue"));
     assert!(methods.iter().any(|m| m.name == "DoWork"));
@@ -181,10 +175,9 @@ End Class
         .iter()
         .filter(|n| n.kind == NodeKind::Property)
         .collect();
-    assert!(
-        props.len() >= 2,
-        "expected >= 2 properties, got {}",
-        props.len()
+    assert_eq!(
+        props.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["Name", "Id"]
     );
     assert!(props.iter().any(|p| p.name == "Name"));
     assert!(props.iter().any(|p| p.name == "Id"));

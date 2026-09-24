@@ -2,6 +2,8 @@ use tracedecay_code_extraction::JavaExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_java_empty_javadoc_no_panic() {
     let source = r#"
@@ -441,16 +443,9 @@ public class Foo {
 "#;
     let extractor = JavaExtractor;
     let result = extractor.extract_artifact("Foo.java", source).result;
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File contains: Class; Class contains: Field, Method
-    assert!(
-        contains.len() >= 3,
-        "should have Contains edges: {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("Foo.java", "Foo"), ("Foo", "x"), ("Foo", "bar")]
     );
 }
 

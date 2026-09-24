@@ -44,7 +44,7 @@ fn ref_names(result: &ExtractionResult, kind: EdgeKind) -> Vec<&str> {
 
 /// Names of the nodes `parent` directly contains, in emission order.
 fn contained_children<'a>(result: &'a ExtractionResult, parent: &str) -> Vec<&'a str> {
-    contains_pairs(result)
+    edge_pairs(result, EdgeKind::Contains)
         .into_iter()
         .filter(|(source, _)| *source == parent)
         .map(|(_, child)| child)

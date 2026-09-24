@@ -173,7 +173,10 @@ fn test_scala_extract_class_params_as_fields() {
         .filter(|n| n.kind == NodeKind::ValField)
         .collect();
     // x and y are val params, z is a plain param (also extracted as ValField but private)
-    assert!(vals.len() >= 2);
+    assert_eq!(
+        vals.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["x", "y", "z"]
+    );
     assert!(vals.iter().any(|n| n.name == "x"));
     assert!(vals.iter().any(|n| n.name == "y"));
 }
@@ -182,7 +185,7 @@ fn test_scala_extract_class_params_as_fields() {
 fn test_scala_contains_edges() {
     let result = extract("object Main {\n  def hello(): Unit = ()\n}");
     assert_eq!(
-        contains_pairs(&result),
+        edge_pairs(&result, EdgeKind::Contains),
         [("test.scala", "Main"), ("Main", "hello")]
     );
 }

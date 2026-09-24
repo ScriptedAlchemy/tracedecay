@@ -58,10 +58,9 @@ end
             .iter()
             .filter(|n| n.kind == NodeKind::Method)
             .collect();
-        assert!(
-            methods.len() >= 2,
-            "expected >= 2 methods, got {}",
-            methods.len()
+        assert_eq!(
+            methods.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["initialize", "bark", "species"]
         );
         assert!(methods.iter().any(|m| m.name == "bark"));
 

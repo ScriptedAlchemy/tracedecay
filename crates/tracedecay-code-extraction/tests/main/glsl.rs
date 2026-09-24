@@ -251,7 +251,7 @@ fn test_glsl_contains_edges() {
         .extract_artifact("sample.glsl", &source)
         .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains = contains_pairs(&result);
+    let contains = edge_pairs(&result, EdgeKind::Contains);
     let nested: Vec<_> = contains
         .iter()
         .filter(|(parent, _)| *parent != "sample.glsl")

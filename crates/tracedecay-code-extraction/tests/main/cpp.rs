@@ -6,6 +6,8 @@ use tracedecay_domain::*;
 // into this module's own namespace, so the tests below call them unqualified
 // without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
+include!("support/edges.rs");
+
 #[test]
 fn test_cpp_file_node_is_root() {
     let source = r#"
@@ -117,10 +119,12 @@ public:
         .iter()
         .filter(|n| n.kind == NodeKind::Constructor)
         .collect();
-    assert!(
-        constructors.len() >= 2,
-        "should have 2 constructors, got: {:?}",
+    assert_eq!(
         constructors
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Foo", "Foo"]
     );
 
     // Destructor can also be a Method with special name
@@ -153,16 +157,13 @@ namespace mylib {
     assert_eq!(namespaces[0].name, "mylib");
 
     // Namespace should contain the function
-    let ns_id = &namespaces[0].id;
-    let contains_from_ns: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains && e.source == *ns_id)
-        .collect();
-    assert!(
-        !contains_from_ns.is_empty(),
-        "namespace should contain children, got: {:?}",
-        contains_from_ns
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("lib.cpp", "mylib"),
+            ("mylib", "helper"),
+            ("mylib", "value")
+        ]
     );
 
     let fns: Vec<_> = result
@@ -550,15 +551,9 @@ void bar() {}
     let result = extractor.extract_artifact("test.cpp", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 2,
-        "should have Contains edges from File to Functions, got: {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("test.cpp", "foo"), ("test.cpp", "bar")]
     );
 }
 
@@ -707,10 +702,12 @@ class C : public A, public B {};
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(
-        extends_refs.len() >= 2,
-        "should have 2 Extends refs, got: {:?}",
+    assert_eq!(
         extends_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "B"]
     );
     assert!(extends_refs.iter().any(|r| r.reference_name == "A"));
     assert!(extends_refs.iter().any(|r| r.reference_name == "B"));
@@ -738,23 +735,21 @@ class [[nodiscard]] Result {
         .iter()
         .filter(|n| n.kind == NodeKind::AnnotationUsage)
         .collect();
-    assert!(
-        annots.len() >= 3,
-        "expected at least 3 annotations, got: {:?}",
-        annots.iter().map(|a| &a.name).collect::<Vec<_>>()
+    assert_eq!(
+        annots.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["nodiscard", "deprecated", "nodiscard"]
     );
     assert!(annots.iter().any(|a| a.name == "nodiscard"));
     assert!(annots.iter().any(|a| a.name == "deprecated"));
 
     // Should have Annotates edges.
-    let annotates_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Annotates)
-        .collect();
-    assert!(
-        annotates_edges.len() >= 3,
-        "expected at least 3 Annotates edges"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [
+            ("nodiscard", "getValue"),
+            ("deprecated", "oldFunc"),
+            ("nodiscard", "Result")
+        ]
     );
 
     // Should have Annotates unresolved refs.
@@ -763,7 +758,13 @@ class [[nodiscard]] Result {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Annotates)
         .collect();
-    assert!(annot_refs.len() >= 3, "expected at least 3 Annotates refs");
+    assert_eq!(
+        annot_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["nodiscard", "deprecated", "nodiscard"]
+    );
 }
 
 #[test]

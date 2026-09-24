@@ -2,6 +2,8 @@ use tracedecay_code_extraction::CSharpExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_cs_file_node_is_root() {
     let source = "public class Main {}";
@@ -330,22 +332,17 @@ public class Foo
     let extractor = CSharpExtractor;
     let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let annots: Vec<_> = result
+    let annots: Vec<&str> = result
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::AnnotationUsage)
+        .map(|n| n.name.as_str())
         .collect();
-    assert!(
-        annots.len() >= 2,
-        "should extract attribute usages, got: {:?}",
-        annots.iter().map(|a| &a.name).collect::<Vec<_>>()
+    assert_eq!(annots, ["Obsolete", "Serializable"]);
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [("Obsolete", "OldMethod"), ("Serializable", "NewMethod")]
     );
-    let has_annotates = result.edges.iter().any(|e| e.kind == EdgeKind::Annotates)
-        || result
-            .unresolved_refs
-            .iter()
-            .any(|r| r.reference_kind == EdgeKind::Annotates);
-    assert!(has_annotates, "should have Annotates edges");
 }
 
 #[test]
@@ -491,16 +488,14 @@ public class Foo
     let extractor = CSharpExtractor;
     let result = extractor.extract_artifact("test.cs", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File contains: Class; Class contains: Field, Property, Method
-    assert!(
-        contains.len() >= 4,
-        "should have Contains edges: {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("test.cs", "Foo"),
+            ("Foo", "_x"),
+            ("Foo", "Name"),
+            ("Foo", "Bar")
+        ]
     );
 }
 

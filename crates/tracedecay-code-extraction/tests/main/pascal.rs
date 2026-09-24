@@ -6,6 +6,7 @@ use tracedecay_domain::*;
 // into this module's own namespace, so the tests below call them unqualified
 // without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
+include!("support/edges.rs");
 fn extract(source: &str) -> ExtractionResult {
     let extractor = PascalExtractor;
     extractor.extract_artifact("test.pas", source).result
@@ -359,10 +360,9 @@ end."#,
         .iter()
         .filter(|n| n.kind == NodeKind::Constructor)
         .collect();
-    assert!(
-        !ctors.is_empty(),
-        "Should have at least one constructor, got {}",
-        ctors.len()
+    assert_eq!(
+        ctors.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["Create", "Create"]
     );
     assert!(ctors.iter().any(|n| n.name == "Create"));
 }
@@ -395,10 +395,9 @@ end."#,
         .iter()
         .filter(|n| n.kind == NodeKind::Method && n.name == "Destroy")
         .collect();
-    assert!(
-        !methods.is_empty(),
-        "Should have at least one destructor-as-method, got {}",
-        methods.len()
+    assert_eq!(
+        methods.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["Destroy", "Destroy"]
     );
 }
 
@@ -818,9 +817,9 @@ end."#,
         .iter()
         .filter(|n| n.kind == NodeKind::Method && n.name == "DoSomething")
         .collect();
-    assert!(
-        !methods.is_empty(),
-        "Should have at least one Method node for DoSomething"
+    assert_eq!(
+        methods.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["DoSomething"]
     );
 }
 
@@ -941,9 +940,9 @@ end."#;
         .iter()
         .filter(|n| n.kind == NodeKind::Use)
         .collect();
-    assert!(
-        uses.len() >= 3,
-        "Should have at least 3 uses (SysUtils, Classes, Math)"
+    assert_eq!(
+        uses.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["SysUtils", "Classes", "Math"]
     );
 
     // Should have the class.
@@ -1002,11 +1001,31 @@ end."#;
             .any(|n| n.kind == NodeKind::Field && n.name == "FName")
     );
 
-    // Should have Contains edges.
-    assert!(!result.edges.is_empty(), "Should have Contains edges");
-    assert!(
-        result.edges.iter().any(|e| e.kind == EdgeKind::Contains),
-        "Should have at least one Contains edge"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("test.pas", "MyUnit"),
+            ("MyUnit", "SysUtils"),
+            ("MyUnit", "Classes"),
+            ("MyUnit", "TMyClass"),
+            ("TMyClass", "FName"),
+            ("TMyClass", "Create"),
+            ("TMyClass", "Destroy"),
+            ("TMyClass", "DoSomething"),
+            ("TMyClass", "GetName"),
+            ("TMyClass", "Name"),
+            ("MyUnit", "TMyRecord"),
+            ("TMyRecord", "X"),
+            ("TMyRecord", "Y"),
+            ("MyUnit", "TMyAlias"),
+            ("MyUnit", "MAX_VALUE"),
+            ("MyUnit", "GlobalVar"),
+            ("MyUnit", "Math"),
+            ("MyUnit", "Create"),
+            ("MyUnit", "Destroy"),
+            ("MyUnit", "DoSomething"),
+            ("MyUnit", "GetName")
+        ]
     );
 }
 

@@ -4,6 +4,8 @@ use tracedecay_code_extraction::DockerfileExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_dockerfile_file_node_is_root() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
@@ -126,14 +128,19 @@ fn test_dockerfile_contains_edges() {
         .extract_artifact("sample.dockerfile", &source)
         .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        !contains.is_empty(),
-        "should have Contains edges from file/stage to children"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("sample.dockerfile", "builder"),
+            ("builder", "APP_VERSION"),
+            ("builder", "CARGO_HOME"),
+            ("builder", "8080"),
+            ("sample.dockerfile", "runtime"),
+            ("runtime", "maintainer"),
+            ("runtime", "version"),
+            ("runtime", "APP_PORT"),
+            ("runtime", "LOG_LEVEL")
+        ]
     );
 }
 
@@ -155,10 +162,7 @@ fn test_dockerfile_copy_from_creates_uses_edge() {
         .iter()
         .filter(|e| e.kind == EdgeKind::Uses && e.target == builder.id)
         .collect();
-    assert!(
-        !uses_edges.is_empty(),
-        "COPY --from=builder should create a Uses edge to the builder stage node"
-    );
+    assert_eq!(uses_edges.len(), 1);
 }
 
 #[test]

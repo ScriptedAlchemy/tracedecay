@@ -4,6 +4,8 @@ use tracedecay_code_extraction::{
 use tracedecay_domain::*;
 use tree_sitter::Parser;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_rust_cfg_attribute_in_struct_pattern_field() {
     let source = r#"
@@ -483,10 +485,7 @@ mod tests {
         .iter()
         .filter(|e| e.kind == EdgeKind::Annotates && e.target == modules[0].id)
         .collect();
-    assert!(
-        !cfg_annotations.is_empty(),
-        "expected #[cfg(test)] to annotate the 'tests' module"
-    );
+    assert_eq!(cfg_annotations.len(), 1);
     let cfg_source = result
         .nodes
         .iter()
@@ -514,10 +513,7 @@ mod tests {
         .iter()
         .filter(|e| e.kind == EdgeKind::Annotates && e.target == test_fn.id)
         .collect();
-    assert!(
-        !test_annotations.is_empty(),
-        "expected #[test] to annotate the test function"
-    );
+    assert_eq!(test_annotations.len(), 1);
     let test_annot = result
         .nodes
         .iter()
@@ -918,9 +914,15 @@ pub struct Config {
         .iter()
         .filter(|e| e.kind == EdgeKind::Annotates)
         .collect();
-    assert!(
-        !annotates_edges.is_empty(),
-        "expected Annotates edges, found none"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [
+            ("test", "my_test"),
+            ("cfg", "guarded_fn"),
+            ("allow", "guarded_fn"),
+            ("inline", "fast_add"),
+            ("serde", "Config")
+        ]
     );
     assert_eq!(
         annotates_edges.len(),

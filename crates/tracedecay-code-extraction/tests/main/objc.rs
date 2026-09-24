@@ -329,7 +329,7 @@ fn test_objc_extract_implementation() {
     );
 
     assert_eq!(
-        contains_pairs(&result),
+        edge_pairs(&result, EdgeKind::Contains),
         [
             ("sample.m", "Base"),
             ("Base", "initWithName"),
@@ -398,10 +398,12 @@ fn test_objc_message_expression_calls() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(
-        calls.len() >= 3,
-        "expected >= 3 call refs, got {}",
-        calls.len()
+    assert_eq!(
+        calls
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["self.doSomething", "NSString.stringWithFormat", "NSLog"]
     );
     // Message sends create receiver.method format
     assert!(

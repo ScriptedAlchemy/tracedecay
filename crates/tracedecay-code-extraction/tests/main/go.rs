@@ -2,6 +2,8 @@ use tracedecay_code_extraction::GoExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_go_extract_package() {
     let source = r#"package main
@@ -168,14 +170,9 @@ func (c Circle) String() string {
         .collect();
     assert_eq!(methods.len(), 2);
     // Check Receives edges
-    let receives: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Receives)
-        .collect();
-    assert!(
-        !receives.is_empty(),
-        "should have Receives edges for methods with receivers"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Receives),
+        [("Area", "Circle"), ("String", "Circle")]
     );
 }
 
@@ -323,9 +320,9 @@ func Map[T any, U any](s []T, f func(T) U) []U {
         .iter()
         .filter(|n| n.kind == NodeKind::GenericParam)
         .collect();
-    assert!(
-        generics.len() >= 2,
-        "should extract generic type params T and U"
+    assert_eq!(
+        generics.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["T", "U"]
     );
 }
 
@@ -358,16 +355,14 @@ func (f Foo) Baz() {}
 "#;
     let extractor = GoExtractor;
     let result = extractor.extract_artifact("main.go", source).result;
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File contains: GoPackage, Struct, StructMethod; Struct contains: Field
-    assert!(
-        contains.len() >= 4,
-        "should have Contains edges: {:?}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("main.go", "main"),
+            ("main.go", "Foo"),
+            ("Foo", "Bar"),
+            ("main.go", "Baz")
+        ]
     );
 }
 

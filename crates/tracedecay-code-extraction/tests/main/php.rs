@@ -60,10 +60,9 @@ class User {
             .iter()
             .filter(|n| n.kind == NodeKind::Method)
             .collect();
-        assert!(
-            methods.len() >= 2,
-            "expected >= 2 methods, got {}",
-            methods.len()
+        assert_eq!(
+            methods.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["__construct", "getName", "validate"]
         );
         assert!(methods.iter().any(|m| m.name == "getName"));
 
@@ -86,9 +85,9 @@ class User {
             .iter()
             .filter(|n| n.kind == NodeKind::Field)
             .collect();
-        assert!(
-            !fields.is_empty(),
-            "expected field nodes for class properties"
+        assert_eq!(
+            fields.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["name"]
         );
 
         // Contains edges
@@ -197,9 +196,9 @@ class Service {
             .iter()
             .filter(|n| n.kind == NodeKind::Use)
             .collect();
-        assert!(
-            !uses.is_empty(),
-            "expected Use node for `use Logger` inside class"
+        assert_eq!(
+            uses.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["Logger"]
         );
     }
 

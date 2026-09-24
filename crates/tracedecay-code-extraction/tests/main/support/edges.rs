@@ -3,8 +3,11 @@
 // Paths stay fully qualified so this file can be `include!`d next to
 // `docstrings.rs` without duplicate imports.
 
-/// `Contains` edges as `(parent name, child name)` pairs in emission order.
-pub fn contains_pairs(result: &tracedecay_domain::ExtractionResult) -> Vec<(&str, &str)> {
+/// Edges of `kind` as `(source name, target name)` pairs in emission order.
+pub fn edge_pairs(
+    result: &tracedecay_domain::ExtractionResult,
+    kind: tracedecay_domain::EdgeKind,
+) -> Vec<(&str, &str)> {
     let name_of = |id: &str| {
         result
             .nodes
@@ -16,7 +19,7 @@ pub fn contains_pairs(result: &tracedecay_domain::ExtractionResult) -> Vec<(&str
     result
         .edges
         .iter()
-        .filter(|e| e.kind == tracedecay_domain::EdgeKind::Contains)
+        .filter(|e| e.kind == kind)
         .map(|e| (name_of(&e.source), name_of(&e.target)))
         .collect()
 }

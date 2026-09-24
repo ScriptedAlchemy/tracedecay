@@ -88,20 +88,3 @@ fn test_powershell_docstrings() {
         main_fn.docstring
     );
 }
-
-#[test]
-fn test_powershell_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
-    let extractor = PowerShellExtractor;
-    let result = extractor.extract_artifact("sample.ps1", &source).result;
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 9,
-        "should have >= 9 Contains edges, got {}",
-        contains.len()
-    );
-}

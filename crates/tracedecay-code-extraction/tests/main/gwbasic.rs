@@ -36,44 +36,18 @@ fn test_gwbasic_gosub_calls() {
 #[test]
 fn test_gwbasic_docstrings() {
     let result = extract_fixture();
-
-    let validate_fn = result
+    let docs: Vec<(&str, &str)> = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "VALIDATE_CONFIGURATION")
-        .expect("VALIDATE_CONFIGURATION function not found");
-    assert!(
-        validate_fn.docstring.is_some(),
-        "VALIDATE_CONFIGURATION should have docstring"
-    );
-    assert!(
-        validate_fn
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("VALIDATE CONFIGURATION"),
-        "docstring: {:?}",
-        validate_fn.docstring
-    );
-
-    let connect_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "CONNECT_TO_SERVER")
-        .expect("CONNECT_TO_SERVER function not found");
-    assert!(
-        connect_fn.docstring.is_some(),
-        "CONNECT_TO_SERVER should have docstring"
-    );
-
-    let disconnect_fn = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "DISCONNECT")
-        .expect("DISCONNECT function not found");
-    assert!(
-        disconnect_fn.docstring.is_some(),
-        "DISCONNECT should have docstring"
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+        .collect();
+    assert_eq!(
+        docs,
+        [
+            ("VALIDATE_CONFIGURATION", "VALIDATE CONFIGURATION"),
+            ("CONNECT_TO_SERVER", "CONNECT TO SERVER"),
+            ("DISCONNECT", "DISCONNECT"),
+        ]
     );
 }
 
@@ -94,20 +68,6 @@ fn test_gwbasic_subroutine_complexity() {
 
     let validate_fn = result
         .nodes
-
-#[test]
-fn test_gwbasic_let_name_keeps_underscores() {
-    let result = GwBasicExtractor
-        .extract_artifact("names.gw", "10 LET MAX_RETRIES = 3\n20 LET MR = 1\n")
-        .result;
-    let consts: Vec<&str> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .map(|n| n.name.as_str())
-        .collect();
-    assert_eq!(consts, ["MAX_RETRIES", "MR"]);
-}
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "VALIDATE_CONFIGURATION")
         .expect("VALIDATE_CONFIGURATION function not found");
@@ -133,4 +93,18 @@ fn test_gwbasic_subroutine_signatures() {
         "signature should contain GOSUB: {:?}",
         validate_fn.signature
     );
+}
+
+#[test]
+fn test_gwbasic_let_name_keeps_underscores() {
+    let result = GwBasicExtractor
+        .extract_artifact("names.gw", "10 LET MAX_RETRIES = 3\n20 LET MR = 1\n")
+        .result;
+    let consts: Vec<&str> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(consts, ["MAX_RETRIES", "MR"]);
 }

@@ -7,6 +7,8 @@ use tracedecay_domain::*;
 // without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
 
+include!("support/edges.rs");
+
 #[test]
 fn test_py_function_declaration() {
     let source = r#"
@@ -145,19 +147,16 @@ class MyClass:
         .iter()
         .filter(|n| n.kind == NodeKind::Decorator)
         .collect();
-    assert!(
-        decorators.len() >= 2,
-        "should have at least 2 decorators, got {}",
-        decorators.len()
+    assert_eq!(
+        decorators
+            .iter()
+            .map(|x| x.name.as_str())
+            .collect::<Vec<_>>(),
+        ["property", "name.setter"]
     );
-    let annotates: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Annotates)
-        .collect();
-    assert!(
-        annotates.len() >= 2,
-        "should have at least 2 Annotates edges"
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Annotates),
+        [("property", "name"), ("name.setter", "name")]
     );
 }
 
@@ -354,13 +353,12 @@ def main():
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(
-        call_refs.len() >= 2,
-        "should have call refs for print and some_func, got: {:?}",
+    assert_eq!(
         call_refs
             .iter()
-            .map(|r| &r.reference_name)
-            .collect::<Vec<_>>()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["print", "some_func"]
     );
 }
 
@@ -398,16 +396,13 @@ def standalone():
     let extractor = PythonExtractor;
     let result = extractor.extract_artifact("edges.py", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File → Class, File → Function, Class → Method
-    assert!(
-        contains.len() >= 3,
-        "should have at least 3 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [
+            ("edges.py", "Dog"),
+            ("Dog", "bark"),
+            ("edges.py", "standalone")
+        ]
     );
 }
 
@@ -459,13 +454,12 @@ class Child(Base, Mixin):
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(
-        extends_refs.len() >= 2,
-        "should have Extends refs for Base and Mixin, got: {:?}",
+    assert_eq!(
         extends_refs
             .iter()
-            .map(|r| &r.reference_name)
-            .collect::<Vec<_>>()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["Base", "Mixin"]
     );
 }
 

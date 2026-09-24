@@ -194,20 +194,3 @@ fn test_bash_docstrings() {
         main_fn.docstring
     );
 }
-
-#[test]
-fn test_bash_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
-    let extractor = BashExtractor;
-    let result = extractor.extract_artifact("sample.sh", &source).result;
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(
-        contains.len() >= 8,
-        "should have >= 8 Contains edges, got {}",
-        contains.len()
-    );
-}

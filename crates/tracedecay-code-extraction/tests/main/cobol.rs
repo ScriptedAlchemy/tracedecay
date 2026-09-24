@@ -84,51 +84,27 @@ fn test_cobol_perform_calls() {
 #[test]
 fn test_cobol_docstrings() {
     let result = extract_fixture();
-    let validate = result
+    let docs: Vec<(&str, &str)> = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "VALIDATE-CONFIG");
-    assert!(validate.is_some(), "VALIDATE-CONFIG not found");
-    assert!(
-        validate.unwrap().docstring.is_some(),
-        "VALIDATE-CONFIG should have docstring"
-    );
-
-    let log_msg = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "LOG-MESSAGE");
-    assert!(log_msg.is_some(), "LOG-MESSAGE not found");
-    assert!(
-        log_msg.unwrap().docstring.is_some(),
-        "LOG-MESSAGE should have docstring"
-    );
-
-    let connect = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "CONNECT-SERVER");
-    assert!(connect.is_some(), "CONNECT-SERVER not found");
-    assert!(
-        connect.unwrap().docstring.is_some(),
-        "CONNECT-SERVER should have docstring"
-    );
-
-    let disconnect = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "DISCONNECT-SERVER");
-    assert!(disconnect.is_some(), "DISCONNECT-SERVER not found");
-    assert!(
-        disconnect.unwrap().docstring.is_some(),
-        "DISCONNECT-SERVER should have docstring"
-    );
-
-    let max_retries = result.nodes.iter().find(|n| n.name == "WS-MAX-RETRIES");
-    assert!(max_retries.is_some(), "WS-MAX-RETRIES not found");
-    assert!(
-        max_retries.unwrap().docstring.is_some(),
-        "WS-MAX-RETRIES should have docstring"
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+        .collect();
+    assert_eq!(
+        docs,
+        [
+            ("WS-MAX-RETRIES", "Maximum number of retries."),
+            ("WS-DEFAULT-PORT", "Default port number."),
+            ("WS-HOST", "Connection host name."),
+            ("WS-PORT", "Connection port."),
+            ("WS-CONNECTED", "Connection status flag."),
+            ("WS-LOG-LEVEL", "Log level."),
+            ("WS-LOG-MESSAGE", "Log message text."),
+            ("WS-RETRY-COUNT", "Retry counter."),
+            ("VALIDATE-CONFIG", "Validates the configuration."),
+            ("LOG-MESSAGE", "Logs a message with timestamp."),
+            ("CONNECT-SERVER", "Connects to the remote server."),
+            ("DISCONNECT-SERVER", "Disconnects from the server."),
+        ]
     );
 }
 

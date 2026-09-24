@@ -2,6 +2,8 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::ZigExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_zig_extract_imports() {
     let source = r#"const std = @import("std");
@@ -253,16 +255,9 @@ fn test_zig_contains_edges() {
 "#;
     let extractor = ZigExtractor;
     let result = extractor.extract_artifact("foo.zig", source).result;
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File -> Struct, Struct -> Field, Struct -> Method = 3 minimum
-    assert!(
-        contains.len() >= 3,
-        "should have >= 3 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("foo.zig", "Foo"), ("Foo", "x"), ("Foo", "bar")]
     );
 }
 

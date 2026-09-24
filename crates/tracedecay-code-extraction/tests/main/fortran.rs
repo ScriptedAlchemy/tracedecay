@@ -104,34 +104,32 @@ fn test_fortran_call_sites() {
 #[test]
 fn test_fortran_docstrings() {
     let result = extract_fixture();
-    let log_msg = result
+    let docs: Vec<(&str, &str)> = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "log_message");
-    assert!(log_msg.is_some(), "log_message not found");
-    assert!(
-        log_msg.unwrap().docstring.is_some(),
-        "log_message should have docstring"
-    );
-
-    let create_ep = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "create_endpoint");
-    assert!(create_ep.is_some(), "create_endpoint not found");
-    assert!(
-        create_ep.unwrap().docstring.is_some(),
-        "create_endpoint should have docstring"
-    );
-
-    let ep = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Struct && n.name == "Endpoint");
-    assert!(ep.is_some(), "Endpoint not found");
-    assert!(
-        ep.unwrap().docstring.is_some(),
-        "Endpoint should have docstring"
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+        .collect();
+    assert_eq!(
+        docs,
+        [
+            (
+                "networking",
+                "Sample Fortran file exercising extractor features."
+            ),
+            ("MAX_RETRIES", "Maximum number of retries."),
+            ("DEFAULT_PORT", "Default port for connections."),
+            ("Endpoint", "Represents a network endpoint."),
+            (
+                "PooledEndpoint",
+                "Extends Endpoint with pool functionality."
+            ),
+            ("Connectable", "Interface for connectable types."),
+            ("log_message", "Logs a message with the given level."),
+            ("create_endpoint", "Creates a new endpoint."),
+            ("connect_endpoint", "Connects an endpoint."),
+            ("disconnect_endpoint", "Disconnects an endpoint."),
+            ("is_connected", "Checks if endpoint is connected."),
+        ]
     );
 }
 

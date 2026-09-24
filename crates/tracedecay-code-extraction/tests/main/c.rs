@@ -6,6 +6,8 @@ use tracedecay_domain::*;
 // into this module's own namespace, so the tests below call them unqualified
 // without each extractor module re-declaring the support module.
 include!("support/docstrings.rs");
+include!("support/edges.rs");
+
 #[test]
 fn test_c_file_node_is_root() {
     let source = r#"
@@ -315,10 +317,12 @@ int main() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(
-        call_refs.len() >= 2,
-        "should have call refs for helper and printf, got: {:?}",
+    assert_eq!(
         call_refs
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["helper", "printf"]
     );
     assert!(call_refs.iter().any(|r| r.reference_name == "helper"));
     assert!(call_refs.iter().any(|r| r.reference_name == "printf"));
@@ -333,16 +337,9 @@ void bar() {}
     let extractor = CExtractor;
     let result = extractor.extract_artifact("test.c", source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File -> foo, File -> bar = at least 2
-    assert!(
-        contains.len() >= 2,
-        "should have Contains edges from File to Functions, got: {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("test.c", "foo"), ("test.c", "bar")]
     );
 }
 

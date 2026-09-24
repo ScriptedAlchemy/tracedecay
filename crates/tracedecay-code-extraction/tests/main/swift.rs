@@ -2,6 +2,8 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::SwiftExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_swift_extract_imports() {
     let source = r#"import Foundation
@@ -71,7 +73,13 @@ class Connection: Base {}
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(!extends.is_empty(), "expected Extends refs for inheritance");
+    assert_eq!(
+        extends
+            .iter()
+            .map(|x| x.reference_name.as_str())
+            .collect::<Vec<_>>(),
+        ["Base"]
+    );
     assert!(
         extends.iter().any(|r| r.reference_name == "Base"),
         "expected Extends ref to Base"
@@ -135,10 +143,9 @@ fn test_swift_struct_with_fields_and_methods() {
         .iter()
         .filter(|n| n.kind == NodeKind::Property)
         .collect();
-    assert!(
-        props.len() >= 2,
-        "expected >= 2 properties, got {}",
-        props.len()
+    assert_eq!(
+        props.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+        ["x", "y"]
     );
 
     let methods: Vec<_> = result
@@ -333,16 +340,9 @@ fn test_swift_contains_edges() {
 "#;
     let extractor = SwiftExtractor;
     let result = extractor.extract_artifact("foo.swift", source).result;
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    // File contains: Class; Class contains: Property, Method
-    assert!(
-        contains.len() >= 3,
-        "should have >= 3 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        edge_pairs(&result, EdgeKind::Contains),
+        [("foo.swift", "Foo"), ("Foo", "bar"), ("Foo", "baz")]
     );
 }
 
@@ -452,50 +452,20 @@ fn test_swift_annotation_extraction() {
         .collect();
 
     let annot_names: Vec<&str> = annots.iter().map(|a| a.name.as_str()).collect();
-
-    assert!(
-        annot_names.contains(&"objc"),
-        "expected 'objc' annotation, got: {:?}",
-        annot_names
-    );
-
-    assert!(
-        annot_names.contains(&"discardableResult"),
-        "expected 'discardableResult' annotation, got: {:?}",
-        annot_names
-    );
-
-    assert!(
-        annot_names.contains(&"available"),
-        "expected 'available' annotation, got: {:?}",
-        annot_names
-    );
-
-    // Verify Annotates edges exist
-    let annotates_edges: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Annotates)
-        .collect();
-    assert!(
-        !annotates_edges.is_empty(),
-        "expected Annotates edges, found none"
-    );
+    assert_eq!(annot_names, ["objc", "discardableResult", "available"]);
     assert_eq!(
-        annotates_edges.len(),
-        annots.len(),
-        "each AnnotationUsage should have an Annotates edge"
+        edge_pairs(&result, EdgeKind::Annotates),
+        [
+            ("objc", "MyController"),
+            ("discardableResult", "doWork"),
+            ("available", "newFeature")
+        ]
     );
-
-    // Verify Annotates unresolved refs exist
-    let annotates_refs: Vec<_> = result
+    let annot_refs: Vec<&str> = result
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Annotates)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert_eq!(
-        annotates_refs.len(),
-        annots.len(),
-        "each AnnotationUsage should have an Annotates unresolved ref"
-    );
+    assert_eq!(annot_refs, ["objc", "discardableResult", "available"]);
 }

@@ -55,68 +55,35 @@ fn test_lua_call_sites() {
 #[test]
 fn test_lua_docstrings() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
-    let extractor = LuaExtractor;
-    let result = extractor.extract_artifact("sample.lua", &source).result;
+    let result = LuaExtractor.extract_artifact("sample.lua", &source).result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-
-    let log_fn = result
+    let docs: Vec<(&str, &str)> = result
         .nodes
         .iter()
-        .find(|n| n.kind == NodeKind::Function && n.name == "log")
-        .expect("log function not found");
-    assert!(log_fn.docstring.is_some(), "log should have docstring");
-    let doc = log_fn.docstring.as_ref().unwrap();
-    assert!(
-        doc.contains("Logs a message"),
-        "docstring should contain 'Logs a message', got: {}",
-        doc
-    );
-
-    let connect_method = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Method && n.name == "connect")
-        .expect("connect method not found");
-    assert!(
-        connect_method
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("Connects to the remote host"),
-        "docstring: {:?}",
-        connect_method.docstring
-    );
-
-    let max_retries = result
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Const && n.name == "MAX_RETRIES")
-        .expect("MAX_RETRIES not found");
-    assert!(
-        max_retries
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("Maximum number of retries"),
-        "docstring: {:?}",
-        max_retries.docstring
-    );
-}
-
-#[test]
-fn test_lua_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.lua").unwrap();
-    let extractor = LuaExtractor;
-    let result = extractor.extract_artifact("sample.lua", &source).result;
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
         .collect();
-    assert!(
-        contains.len() >= 12,
-        "should have >= 12 Contains edges, got {}",
-        contains.len()
+    assert_eq!(
+        docs,
+        [
+            ("MAX_RETRIES", "Maximum number of retries."),
+            ("DEFAULT_PORT", "Default port for connections."),
+            (
+                "log",
+                "Logs a message with the given level.\n\
+                 @param level string The log level\n\
+                 @param message string The message to log"
+            ),
+            (
+                "new",
+                "Creates a new Connection.\n\
+                 @param host string The host to connect to\n\
+                 @param port number The port number\n\
+                 @return Connection"
+            ),
+            ("connect", "Connects to the remote host."),
+            ("disconnect", "Disconnects from the remote host."),
+            ("isConnected", "Checks if the connection is active."),
+        ]
     );
 }
 
