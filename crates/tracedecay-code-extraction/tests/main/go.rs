@@ -108,8 +108,15 @@ type Config struct {
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::StructTag)
+        .map(|n| (n.name.as_str(), n.signature.as_deref()))
         .collect();
-    assert!(tags.len() >= 2, "should extract struct tags");
+    assert_eq!(
+        tags,
+        [
+            ("Name:tag", Some(r#"`json:"name" yaml:"name"`"#)),
+            ("Port:tag", Some(r#"`json:"port"`"#)),
+        ]
+    );
 }
 
 #[test]
@@ -241,8 +248,9 @@ func main() {
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
+    assert_eq!(call_refs, ["fmt.Println", "greet"]);
 }
 
 #[test]

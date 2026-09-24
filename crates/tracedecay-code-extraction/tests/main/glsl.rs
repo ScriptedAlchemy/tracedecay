@@ -4,6 +4,8 @@ use tracedecay_code_extraction::GlslExtractor;
 use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_glsl_file_node_is_root() {
     let source = std::fs::read_to_string("../../tests/fixtures/sample.glsl").unwrap();
@@ -258,12 +260,56 @@ fn test_glsl_contains_edges() {
         .extract_artifact("sample.glsl", &source)
         .result;
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let contains: Vec<_> = result
-        .edges
+    let contains = contains_pairs(&result);
+    let nested: Vec<_> = contains
         .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
+        .filter(|(parent, _)| *parent != "sample.glsl")
+        .copied()
         .collect();
-    assert!(!contains.is_empty(), "should have Contains edges");
+    assert_eq!(
+        nested,
+        [
+            ("PointLight", "position"),
+            ("PointLight", "color"),
+            ("PointLight", "intensity"),
+            ("PointLight", "radius"),
+            ("Material", "albedo"),
+            ("Material", "metallic"),
+            ("Material", "roughness"),
+        ]
+    );
+    let top_level: Vec<&str> = contains
+        .iter()
+        .filter(|(parent, _)| *parent == "sample.glsl")
+        .map(|(_, child)| *child)
+        .collect();
+    assert_eq!(
+        top_level,
+        [
+            "MAX_LIGHTS",
+            "aPosition",
+            "aNormal",
+            "aTexCoord",
+            "vWorldPos",
+            "vNormal",
+            "vTexCoord",
+            "uModelMatrix",
+            "uViewMatrix",
+            "uProjectionMatrix",
+            "uTime",
+            "PointLight",
+            "Material",
+            "uLights",
+            "uNumLights",
+            "uMaterial",
+            "PI",
+            "fresnelSchlick",
+            "distributionGGX",
+            "geometrySchlickGGX",
+            "calculatePointLight",
+            "main",
+        ]
+    );
 }
 
 #[test]

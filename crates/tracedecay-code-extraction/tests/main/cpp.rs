@@ -312,11 +312,6 @@ public:
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(
-        !extends_refs.is_empty(),
-        "should have Extends refs, got: {:?}",
-        extends_refs
-    );
     assert!(extends_refs.iter().any(|r| r.reference_name == "Animal"));
 }
 
@@ -540,11 +535,9 @@ int main() {
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
     assert!(
-        !call_refs.is_empty(),
-        "should have call refs for helper, got: {:?}",
-        call_refs
+        call_refs.iter().any(|r| r.reference_name == "helper"),
+        "should have call refs for helper, got: {call_refs:?}"
     );
-    assert!(call_refs.iter().any(|r| r.reference_name == "helper"));
 }
 
 #[test]

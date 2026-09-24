@@ -415,8 +415,6 @@ mod tests {
     #[test]
     fn descriptor_lookups_are_canonical_and_deterministic() {
         let registry = StaticLanguageRegistry::new();
-        let again = StaticLanguageRegistry::new();
-        assert_eq!(registry.registry_revision(), again.registry_revision());
 
         let rust = registry
             .descriptor(&language("rust"))
@@ -448,8 +446,11 @@ mod tests {
         assert!(registry.descriptor(&language("cobol-nope")).is_none());
         assert!(registry.descriptor_for_extension("nope").is_none());
         assert_eq!(
-            registry.descriptor_revision(&language("rust")),
-            Some(rust.descriptor_revision.clone())
+            registry
+                .descriptor_revision(&language("rust"))
+                .as_ref()
+                .map(|revision| revision.as_str()),
+            Some("descriptor.rust.v1")
         );
 
         // Canonical language-identity order.
@@ -461,6 +462,73 @@ mod tests {
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted);
+    }
+
+    #[test]
+    #[cfg(feature = "full")]
+    fn full_tier_registers_every_compiled_extractor_language() {
+        let registry = StaticLanguageRegistry::new();
+        let ids: Vec<&str> = registry
+            .descriptors()
+            .iter()
+            .map(|d| d.language.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "astro",
+                "bash",
+                "batch",
+                "c",
+                "clojure",
+                "cobol",
+                "cpp",
+                "csharp",
+                "dart",
+                "dockerfile",
+                "elixir",
+                "erlang",
+                "fortran",
+                "fsharp",
+                "glsl",
+                "go",
+                "gwbasic",
+                "haskell",
+                "hlsl",
+                "java",
+                "julia",
+                "kotlin",
+                "lean",
+                "lua",
+                "markdown",
+                "metal",
+                "msbasic2",
+                "nix",
+                "objc",
+                "ocaml",
+                "pascal",
+                "perl",
+                "php",
+                "powershell",
+                "protobuf",
+                "python",
+                "qbasic",
+                "quickbasic",
+                "quint",
+                "r",
+                "ruby",
+                "rust",
+                "scala",
+                "sql",
+                "svelte",
+                "swift",
+                "toml",
+                "typescript",
+                "vbnet",
+                "wgsl",
+                "zig",
+            ]
+        );
     }
 
     #[test]

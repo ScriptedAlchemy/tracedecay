@@ -95,7 +95,6 @@ fn test_nix_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call site refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "mkConnection"),
         "should find mkConnection call, got: {:?}",

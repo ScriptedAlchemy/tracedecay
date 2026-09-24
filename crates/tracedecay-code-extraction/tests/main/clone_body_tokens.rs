@@ -325,7 +325,20 @@ fn clone_bodies_bind_to_method_and_stable_arrow_occurrences() {
 fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shape() {
     let source = "pub fn publish(input: &str) -> bool {\n    let trimmed = input.trim();\n    let ready = !trimmed.is_empty();\n    let flagged = trimmed.starts_with('!');\n    let long = trimmed.len() > 4;\n    ready && long && !flagged\n}\n";
     let emitted = tokens(&RustExtractor, "borrowed.rs", source);
-    assert!(!emitted.is_empty());
+    assert_eq!(emitted.len(), 92);
+    let texts: Vec<&str> = emitted
+        .iter()
+        .filter_map(|token| match token {
+            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts.join(" "),
+        "{ let trimmed = input . trim ( ) ; let ready = ! trimmed . is_empty ( ) ; \
+         let flagged = trimmed . starts_with ( '!' ) ; let long = trimmed . len ( ) > 4 ; \
+         ready && long && ! flagged }"
+    );
     for token in &emitted {
         let kind = match token {
             ConservativeCloneTokenV1::StructureStart { syntax_kind }
@@ -339,9 +352,9 @@ fn extracted_token_kinds_borrow_the_grammar_table_without_changing_the_wire_shap
     }
 
     let encoded = serde_json::to_string(&emitted[0]).expect("token encodes");
-    assert!(
-        encoded.contains("\"syntax_kind\":\""),
-        "the persisted clone-token shape changed: {encoded}"
+    assert_eq!(
+        encoded, r#"{"kind":"structure_start","syntax_kind":"block"}"#,
+        "the persisted clone-token shape changed"
     );
     let decoded: ConservativeCloneTokenV1 = serde_json::from_str(&encoded).expect("token decodes");
     assert_eq!(decoded, emitted[0]);

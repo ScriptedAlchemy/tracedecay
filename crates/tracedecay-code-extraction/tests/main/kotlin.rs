@@ -415,7 +415,6 @@ fn test_kt_call_site() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!calls.is_empty(), "expected at least one call site");
     assert!(
         calls.iter().any(|c| c.reference_name == "println"),
         "expected println call, got: {:?}",

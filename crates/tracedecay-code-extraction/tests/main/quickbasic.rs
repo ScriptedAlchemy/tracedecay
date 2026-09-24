@@ -95,7 +95,6 @@ mod quickbasic_tests {
             .iter()
             .filter(|r| r.reference_kind == EdgeKind::Calls)
             .collect();
-        assert!(!calls.is_empty(), "expected call site refs");
         assert!(
             calls.iter().any(|r| r.reference_name == "LogInit"),
             "expected CALL LogInit from InitSystem"

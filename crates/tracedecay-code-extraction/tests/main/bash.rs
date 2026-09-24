@@ -37,7 +37,6 @@ fn test_bash_call_sites() {
         .iter()
         .find(|node| node.kind == NodeKind::Module && node.name == "sample")
         .expect("script execution scope");
-    assert!(!call_refs.is_empty(), "should have call refs");
     assert!(
         call_refs.iter().any(|r| r.reference_name == "echo"),
         "should find echo call"

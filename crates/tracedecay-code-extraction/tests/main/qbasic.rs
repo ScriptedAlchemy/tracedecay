@@ -46,8 +46,6 @@ fn test_qbasic_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs");
-
     assert!(
         calls.iter().any(|r| r.reference_name == "ValidateConfig"),
         "expected CALL ValidateConfig, got: {:?}",

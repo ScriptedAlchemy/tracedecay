@@ -60,7 +60,6 @@ fn test_cobol_perform_calls() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs");
     assert!(
         calls.iter().any(|r| r.reference_name == "VALIDATE-CONFIG"),
         "expected call to VALIDATE-CONFIG, got: {:?}",

@@ -80,7 +80,6 @@ fn test_fortran_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs");
     assert!(
         calls.iter().any(|r| r.reference_name == "log_message"),
         "expected call to log_message, got: {:?}",

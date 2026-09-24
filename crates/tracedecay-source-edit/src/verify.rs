@@ -172,19 +172,30 @@ mod tests {
             unavailable.state,
             SourceEditVerificationStateV1::Unavailable
         );
-        assert!(unavailable.message.is_some());
+        assert_eq!(unavailable.verdict, "unavailable");
+        assert_message_retains(&unavailable, "diagnostics unavailable");
 
         let cancelled = failed_edit_verification(TraceDecayError::Io(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "diagnostics cancelled",
         )));
         assert_eq!(cancelled.state, SourceEditVerificationStateV1::Cancelled);
-        assert!(cancelled.message.is_some());
+        assert_eq!(cancelled.verdict, "cancelled");
+        assert_message_retains(&cancelled, "diagnostics cancelled");
 
         let failed = failed_edit_verification(TraceDecayError::Config {
             message: "diagnostics failed".to_owned(),
         });
         assert_eq!(failed.state, SourceEditVerificationStateV1::Failed);
-        assert!(failed.message.is_some());
+        assert_eq!(failed.verdict, "failed");
+        assert_message_retains(&failed, "diagnostics failed");
+    }
+
+    fn assert_message_retains(verification: &SourceEditVerificationV1, cause: &str) {
+        let message = verification.message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains(cause),
+            "verification message {message:?} dropped the cause {cause:?}"
+        );
     }
 }

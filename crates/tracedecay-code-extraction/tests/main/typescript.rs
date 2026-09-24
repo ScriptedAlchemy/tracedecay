@@ -478,18 +478,11 @@ function main(): void {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
-    // Should have: console.log from greet, greet from main
-    assert!(
-        call_refs.iter().any(|r| r.reference_name.contains("greet")),
-        "should have a call to greet"
-    );
-    assert!(
-        call_refs
-            .iter()
-            .any(|r| r.reference_name.contains("console.log")),
-        "should have a call to console.log"
-    );
+    let callees: Vec<&str> = call_refs
+        .iter()
+        .map(|r| r.reference_name.as_str())
+        .collect();
+    assert_eq!(callees, ["console.log", "greet"]);
 }
 
 #[test]
@@ -537,7 +530,6 @@ export class Child extends Base implements Printable {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Extends)
         .collect();
-    assert!(!extends_refs.is_empty(), "should have Extends ref for Base");
     assert!(extends_refs.iter().any(|r| r.reference_name == "Base"));
 
     // Check for Implements unresolved ref
@@ -546,10 +538,6 @@ export class Child extends Base implements Printable {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Implements)
         .collect();
-    assert!(
-        !impl_refs.is_empty(),
-        "should have Implements ref for Printable"
-    );
     assert!(impl_refs.iter().any(|r| r.reference_name == "Printable"));
 }
 

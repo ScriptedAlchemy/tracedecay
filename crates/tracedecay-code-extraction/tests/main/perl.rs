@@ -14,8 +14,6 @@ fn test_perl_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
-
     // connect method calls main::log_message (qualified call)
     assert!(
         call_refs

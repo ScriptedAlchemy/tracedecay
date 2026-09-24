@@ -174,7 +174,6 @@ fn fresh_context<'a>(
 fn canonical_code_graph_namespace_is_per_shard() {
     let primary = canonical_projection("worktree.primary");
     let linked = canonical_projection("worktree.linked");
-    assert_eq!(primary, canonical_projection("worktree.primary"));
     assert_ne!(primary, linked);
     assert!(is_code_graph_shard_namespace(&primary.namespace));
 }

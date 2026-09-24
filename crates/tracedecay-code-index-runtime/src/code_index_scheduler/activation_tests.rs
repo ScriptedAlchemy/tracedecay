@@ -504,7 +504,28 @@ fn superseded_generation_churn_never_evicts_the_pinned_active_generation() {
         .latest_complete()
         .expect("active generation after churn");
     assert_eq!(served.generation().manifest().generation_id, active);
-    assert!(!served.exact().expect("exact admission").is_empty());
+    let exact = served.exact().expect("exact admission");
+    let files = &served.generation().snapshot().files;
+    let exact_paths: BTreeSet<&str> = exact
+        .iter()
+        .map(|admitted| {
+            files
+                .iter()
+                .find(|file| file.file_occurrence_id == admitted.chunk().anchor.file_occurrence_id)
+                .map(|file| file.logical_path.as_str())
+                .expect("exact chunk names a snapshot file")
+        })
+        .collect();
+    assert_eq!(exact_paths, BTreeSet::from(["src/lib.rs"]));
+    let latest_body = format!("activation_revision() -> u32 {{ {} }}", revisions - 1);
+    assert!(
+        exact.iter().any(|admitted| admitted
+            .chunk()
+            .sanitized_text
+            .as_str()
+            .contains(&latest_body)),
+        "the active generation must serve the last published revision"
+    );
     assert_eq!(
         scheduler.sealed_decode_count(),
         after_activation + pinned_decodes,

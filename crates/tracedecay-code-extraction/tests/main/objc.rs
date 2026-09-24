@@ -2,6 +2,8 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::ObjcExtractor;
 use tracedecay_domain::*;
 
+include!("support/edges.rs");
+
 #[test]
 fn test_objc_extract_imports() {
     let source = r#"#import <Foundation/Foundation.h>
@@ -312,15 +314,29 @@ fn test_objc_extract_implementation() {
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs");
+    assert_eq!(
+        calls,
+        [
+            "super.init",
+            "name.copy",
+            "NSString.stringWithFormat",
+            "NSStringFromClass",
+            "self.class",
+            "NSAssert",
+        ]
+    );
 
-    let contains: Vec<_> = result
-        .edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .collect();
-    assert!(contains.len() >= 3, "expected >= 3 Contains edges");
+    assert_eq!(
+        contains_pairs(&result),
+        [
+            ("sample.m", "Base"),
+            ("Base", "initWithName"),
+            ("Base", "description"),
+            ("Base", "validate"),
+        ]
+    );
 }
 
 #[test]
@@ -356,8 +372,9 @@ void logMessage(LogLevel level, NSString *message) {
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs from NSLog");
+    assert_eq!(calls, ["NSLog"]);
 }
 
 #[test]

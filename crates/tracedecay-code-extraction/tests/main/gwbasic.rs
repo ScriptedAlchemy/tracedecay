@@ -18,8 +18,6 @@ fn test_gwbasic_gosub_calls() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!calls.is_empty(), "expected call site refs");
-
     assert!(
         calls.iter().any(|r| r.reference_name == "1000"),
         "expected GOSUB 1000 call, got: {:?}",

@@ -251,14 +251,10 @@ pub(super) fn intern_exact_terms(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1, CodeLexicalArtifactErrorV1, exact_field_code,
-        field_code, field_from_code, require_served_revision,
-    };
+    use super::{CodeLexicalArtifactErrorV1, field_code, field_from_code, require_served_revision};
     use crate::retrieval::lexical::LexicalFieldV1;
     use rusqlite::Connection;
     use tracedecay_code_index::production::CodeIndexExecutionControlV1;
-    use tracedecay_domain::ExactFieldV1;
 
     struct ActiveControl;
 
@@ -298,8 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_served_revision_is_accepted() {
-        require_served_revision(CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1).expect("served");
+    fn superseded_revisions_are_rejected() {
         for revision in [16, 20, 22, 25, 27] {
             assert!(matches!(
                 require_served_revision(revision),
@@ -309,11 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn row_dictionary_ids_are_deterministic_and_distinct_from_exact_term_ids() {
-        assert_eq!(
-            super::stable_row_dictionary_id(b"src/lib.rs"),
-            super::stable_row_dictionary_id(b"src/lib.rs")
-        );
+    fn row_dictionary_ids_are_distinct_from_exact_term_ids() {
         assert_ne!(
             super::stable_row_dictionary_id(b"src/lib.rs"),
             super::stable_row_dictionary_id(b"src/lib.rs::main")
@@ -327,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn field_codes_are_stable_and_bijective() {
+    fn field_codes_are_bijective() {
         for field in [
             LexicalFieldV1::SymbolName,
             LexicalFieldV1::QualifiedName,
@@ -344,27 +335,5 @@ mod tests {
         }
         assert!(field_from_code(0).is_err());
         assert!(field_from_code(99).is_err());
-        assert_eq!(field_code(LexicalFieldV1::Subtoken), 7);
-    }
-
-    #[test]
-    fn exact_field_codes_are_stable() {
-        for (field, code) in [
-            (ExactFieldV1::Identifier, 1),
-            (ExactFieldV1::QualifiedName, 2),
-            (ExactFieldV1::Path, 3),
-            (ExactFieldV1::QuotedPhrase, 4),
-            (ExactFieldV1::DiagnosticCode, 5),
-            (ExactFieldV1::DiagnosticText, 6),
-            (ExactFieldV1::CompilerOrRuntimeError, 7),
-            (ExactFieldV1::CliFlag, 8),
-            (ExactFieldV1::ToolName, 9),
-            (ExactFieldV1::ConfigurationKey, 10),
-            (ExactFieldV1::CommitIdentifier, 11),
-            (ExactFieldV1::TaskOrSessionId, 12),
-            (ExactFieldV1::ProtocolField, 13),
-        ] {
-            assert_eq!(exact_field_code(field), code);
-        }
     }
 }

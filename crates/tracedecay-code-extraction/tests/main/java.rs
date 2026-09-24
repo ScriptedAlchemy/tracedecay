@@ -364,8 +364,9 @@ public class Box<T> {
         .nodes
         .iter()
         .filter(|n| n.kind == NodeKind::GenericParam)
+        .map(|n| n.name.as_str())
         .collect();
-    assert!(!generics.is_empty(), "should extract generic type param T");
+    assert_eq!(generics, ["T"]);
 }
 
 #[test]
@@ -387,8 +388,12 @@ public class App {
         .unresolved_refs
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
+        .map(|r| r.reference_name.as_str())
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
+    assert_eq!(
+        call_refs,
+        ["System.out.println", "helper", "new ArrayList<>"]
+    );
 }
 
 #[test]

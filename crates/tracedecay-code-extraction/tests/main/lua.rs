@@ -14,8 +14,6 @@ fn test_lua_call_sites() {
         .iter()
         .filter(|r| r.reference_kind == EdgeKind::Calls)
         .collect();
-    assert!(!call_refs.is_empty(), "should have call refs");
-
     assert!(
         call_refs.iter().any(|r| r.reference_name == "print"),
         "should find print call"
