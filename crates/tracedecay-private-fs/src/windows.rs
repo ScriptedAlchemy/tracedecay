@@ -234,12 +234,12 @@ pub fn make_private_file(path: &Path) -> io::Result<File> {
 /// Protect an existing directory through its exact opened handle, when the
 /// current user may rewrite its owner and DACL.
 ///
-/// The directory analogue of [`make_private_file`]: it converges a legacy
-/// directory an older binary created without the protected private ACL. The
+/// The directory analogue of [`make_private_file`]: it protects a directory
+/// the caller created through an ordinary path. The
 /// `WRITE_DAC | WRITE_OWNER` open is the authorization proof, a caller that
 /// cannot take ownership of the object is refused by the open itself.
 #[hotpath::measure(label = "private_fs.make_private_directory")]
-pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirectory> {
+pub fn make_private_directory(path: &Path) -> io::Result<()> {
     let file = open_handle_with_share(
         path,
         OPEN_EXISTING,
@@ -249,10 +249,7 @@ pub fn make_private_directory(path: &Path) -> io::Result<crate::MadePrivateDirec
     )?;
     validate_file_kind(&file, path, PathKind::Directory)?;
     protect_existing(&file, path, PathKind::Directory)?;
-    validate_private_handle(&file, path, PathKind::Directory)?;
-    Ok(crate::MadePrivateDirectory {
-        previous_unix_mode: None,
-    })
+    validate_private_handle(&file, path, PathKind::Directory)
 }
 
 /// Open or create a private lock file with concurrent read-write sharing.
@@ -1155,9 +1152,8 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         assert!(open_private_directory(&path).is_err());
 
-        let receipt = make_private_directory(&path).unwrap();
+        make_private_directory(&path).unwrap();
 
-        assert_eq!(receipt.previous_unix_mode, None);
         let snapshot = snapshot(&path, PathKind::Directory);
         assert!(snapshot.owner_is_current_user);
         assert!(snapshot.dacl_is_protected);

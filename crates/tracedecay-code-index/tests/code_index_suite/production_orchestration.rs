@@ -3083,16 +3083,16 @@ const PARTITIONED_FORMAT_STATE_DIGEST: &str =
     "sha256:ce70aa9c7cfe6357b9f56d8f31ad14c22fff1210cc6cb49d35a0be29bef9289a";
 const PARTITIONED_FORMAT_SEGMENTS: &[(&str, u64)] = &[
     (
-        "sha256:36075db7d9c76751586958358f3888a87bf4558a31e38474123433eda85396d1",
-        2_230,
+        "sha256:d459a8147cff5a99f10ce10fb144bdddfc443318c9b4eb36c2e03a3a7fcb7897",
+        2_227,
     ),
     (
-        "sha256:83051dac5bee69f2cb57fb1d5f00b41ac9ac1679f97d263b96e8b5ecb5100127",
-        1_433,
+        "sha256:bb00f9a412e136c877257955f5747bcd83ab98ea3635173e58905d656099abd4",
+        1_430,
     ),
     (
-        "sha256:8bf615eada8fd4deb8c07c817d8e9d6d9fa8b8f6a385110872649336c4a06217",
-        1_482,
+        "sha256:8250f37e248f46fc1bdc10aa93b2a940f9de87e0f139fa71505444148a18dde3",
+        1_477,
     ),
     (
         "sha256:51b7d16817def8c21c1ed0b154cce1ad5cc49c6966899ea7cc28d14a6d5005d9",

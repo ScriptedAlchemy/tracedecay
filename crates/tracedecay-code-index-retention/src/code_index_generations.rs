@@ -97,7 +97,6 @@ use text_artifacts::{
 };
 use text_artifacts::{
     execute_text_artifact_retention_under_store_lock, plan_collectable_text_artifacts_cancellable,
-    remove_retired_text_artifact_paths,
     recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
 };
 
@@ -593,10 +592,6 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// staging file exists, so a successor build is in flight whose
     /// publication replaces that artifact and leaves it unreferenced.
     active_text_replacement_in_flight: bool,
-    /// Text-artifact paths of the per-scope layout no descriptor can name:
-    /// a scope's own completed-artifact directory and staging files in the
-    /// shared directory. Execution removes them whole.
-    retired_text_artifact_paths: Vec<PathBuf>,
     /// How thoroughly this plan proved generation integrity. Apply-mode
     /// execution refuses anything but [`GenerationDigestVerificationV1::Full`].
     pub verification: GenerationDigestVerificationV1,
@@ -628,7 +623,6 @@ impl CodeGenerationRetentionPlanV1 {
     pub fn has_collectable_work(&self) -> bool {
         !self.collectable_generations.is_empty()
             || !self.collectable_text_artifacts.is_empty()
-            || !self.retired_text_artifact_paths.is_empty()
             || self
                 .collectable_generation_segments
                 .may_have_collectable_segments()
@@ -777,7 +771,6 @@ struct CodeTextArtifactRetentionInventoryV1 {
     candidates: Vec<CodeTextArtifactRetentionCandidateV1>,
     unique_bytes: u64,
     active_text_replacement_in_flight: bool,
-    retired_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -909,7 +902,6 @@ fn unpublished_store_plan(
         collectable_generation_segments: GenerationSegmentCensusV1::NoneFound,
         text_artifact_inventory_bytes: 0,
         active_text_replacement_in_flight: false,
-        retired_text_artifact_paths: Vec::new(),
         verification: GenerationDigestVerificationV1::Full,
         active_pointer: None,
     }
@@ -1275,7 +1267,6 @@ fn plan_code_generation_retention_with_verification_cancellable(
         text_artifact_inventory_bytes: text_artifact_inventory.unique_bytes,
         active_text_replacement_in_flight: text_artifact_inventory
             .active_text_replacement_in_flight,
-        retired_text_artifact_paths: text_artifact_inventory.retired_paths,
         verification,
         active_pointer,
     })
@@ -1858,8 +1849,6 @@ pub fn execute_code_generation_retention_cancellable(
                 is_cancelled,
             )?
         };
-
-    remove_retired_text_artifact_paths(&plan.retired_text_artifact_paths)?;
 
     let reclaimed_bytes = receipt
         .as_ref()

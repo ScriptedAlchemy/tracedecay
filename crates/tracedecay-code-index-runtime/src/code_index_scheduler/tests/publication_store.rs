@@ -3261,20 +3261,12 @@ fn retiring_one_worktree_keeps_the_text_artifact_its_sibling_references() {
         shared.exists(),
         "retention from one scope keeps an artifact a sibling scope names"
     );
-    // A scope from the per-scope layout left its own artifact directory.
-    let retired = scopes.first_scope.join("code-text-artifacts-v1");
-    std::fs::create_dir_all(&retired).expect("retired per-scope artifact directory");
-    std::fs::write(retired.join("text-artifact-retired.bin"), b"retired").expect("retired artifact");
     // Collecting the linked scope leaves the artifact unnamed.
     std::fs::remove_dir_all(&scopes.linked_scope).expect("collect linked scope");
     retain(&scopes.first_scope);
     assert!(
         !shared.exists(),
         "an artifact no scope names is collected"
-    );
-    assert!(
-        !retired.exists(),
-        "a per-scope artifact directory from the retired layout is removed"
     );
 }
 

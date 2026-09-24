@@ -220,7 +220,7 @@ impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
             .parent()
             .ok_or(HookConfigurationPublicationError::Unavailable)?;
         std::fs::create_dir_all(parent)
-            .and_then(|_| tracedecay_private_fs::make_private_directory(parent).map(drop))
+            .and_then(|_| tracedecay_private_fs::make_private_directory(parent))
             .map_err(|_| HookConfigurationPublicationError::Unavailable)?;
         let current = match read_snapshot(&self.path) {
             Ok(current) => current,

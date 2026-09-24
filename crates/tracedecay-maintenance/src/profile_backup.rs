@@ -1098,14 +1098,12 @@ fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
 /// private" step, not a repair of foreign material.
 #[cfg(windows)]
 fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
-    tracedecay_private_fs::make_private_directory(path)
-        .map(drop)
-        .map_err(|error| {
-            ProfileBackupError::unavailable(format!(
-                "restrict directory '{}': {error}",
-                path.display()
-            ))
-        })
+    tracedecay_private_fs::make_private_directory(path).map_err(|error| {
+        ProfileBackupError::unavailable(format!(
+            "restrict directory '{}': {error}",
+            path.display()
+        ))
+    })
 }
 
 #[cfg(not(any(unix, windows)))]

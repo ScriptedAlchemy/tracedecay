@@ -279,12 +279,6 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
                 .to_owned(),
         ));
     }
-    let mut retired_paths = Vec::new();
-    let scope_artifacts_root = store_root.join(super::CODE_TEXT_ARTIFACTS_DIRECTORY_V1);
-    if scope_artifacts_root != root && private_directory_exists(&scope_artifacts_root)? {
-        retired_paths.push(scope_artifacts_root);
-    }
-
     // The index can name at most 32 completed artifacts, and only the active
     // generation has a resumable build authority. Verify the completed
     // liveness set directly before scanning debris, so an early candidate page
@@ -414,12 +408,6 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
                         })
                     }
                 }
-                // Staging kept beside completed artifacts by the per-scope
-                // layout; this scope now stages in its own directory.
-                (true, Some(_), _) => {
-                    retired_paths.push(path);
-                    None
-                }
                 // The active build's staging family is the builder's
                 // property; any other staging database or sidecar is crash
                 // debris.
@@ -452,7 +440,6 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
             .values()
             .fold(0_u64, |total, bytes| total.saturating_add(*bytes)),
         active_text_replacement_in_flight,
-        retired_paths,
     })
 }
 
@@ -519,30 +506,6 @@ fn private_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetention
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(storage(error)),
     }
-}
-
-/// Remove the per-scope layout's text-artifact paths. Run under the store and
-/// project locks: no descriptor resolves into them, so nothing reads them.
-pub(super) fn remove_retired_text_artifact_paths(
-    paths: &[PathBuf],
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    for path in paths {
-        let removed = match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_dir() => std::fs::remove_dir_all(path),
-            Ok(_) => std::fs::remove_file(path),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(storage(error)),
-        };
-        match removed {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(storage(error)),
-        }
-        if let Some(parent) = path.parent() {
-            sync_directory(parent)?;
-        }
-    }
-    Ok(())
 }
 
 /// The directory a candidate of `kind` lives in.
