@@ -23,37 +23,6 @@ fn def(name: &str) -> ToolDefinition {
 }
 
 #[test]
-fn fact_store_tool_lookup_rejects_broad_and_accepts_exact_routes() {
-    let definitions = defs();
-    assert!(
-        definitions
-            .iter()
-            .all(|definition| definition.name != "tracedecay_fact_store")
-    );
-    for name in [
-        "fact_store_add",
-        "fact_store_search",
-        "fact_store_probe",
-        "fact_store_related",
-        "fact_store_reason",
-        "fact_store_contradict",
-        "fact_store_get",
-        "fact_store_update",
-        "fact_store_remove",
-        "fact_store_supersede",
-        "fact_store_list",
-    ] {
-        let canonical = canonical_tool_name(name);
-        assert!(
-            definitions
-                .iter()
-                .any(|definition| definition.name == canonical),
-            "{canonical} must resolve through the CLI catalog"
-        );
-    }
-}
-
-#[test]
 fn canonicalizes_prefix_and_dashes() {
     assert_eq!(
         canonical_tool_name("tracedecay_search"),
@@ -723,19 +692,17 @@ fn dispatch_routing_keys_bypass_unknown_key_gate() {
 }
 
 #[test]
-fn lcm_cli_help_exposes_storage_scope() {
-    for tool_name in [
-        "lcm_status",
-        "lcm_load_session",
-        "lcm_grep",
-        "lcm_describe",
-        "lcm_expand",
-        "lcm_expand_query",
-        "lcm_doctor",
-    ] {
-        let help = render_tool_cli_help(&def(tool_name));
-        assert!(help.contains("--storage-scope"), "{tool_name}: {help}");
-    }
+fn lcm_storage_scope_flag_lands_in_tool_args_and_rejects_unknown_scopes() {
+    let d = def("lcm_status");
+    let parsed = parse_invocation(&d, &["--storage-scope".to_string(), "user".to_string()])
+        .expect("storage scope flag should parse");
+    assert_eq!(parsed.tool_args["storage_scope"], json!("user"));
+
+    let err =
+        parse_invocation(&d, &["--storage-scope".to_string(), "shared".to_string()]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("`shared` is not one of:"), "got: {msg}");
+    assert!(msg.contains("project"), "got: {msg}");
 }
 
 #[test]

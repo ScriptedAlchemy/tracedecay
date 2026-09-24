@@ -1390,7 +1390,14 @@ mod tests {
             .find(|asset| asset.relative_path.ends_with("plugins/tracedecay.ts"))
             .map(|asset| String::from_utf8(asset.bytes.clone()).unwrap())
             .expect("OpenCode set includes Hook V2 plugin");
-        assert!(!plugin.is_empty(), "OpenCode set includes a plugin payload");
+        for marker in [
+            r#"dispatchAfterAck("hook-opencode-event", event, deliver)"#,
+            r#"dispatchAfterAck("hook-opencode-tool-after", { input, output }, deliver)"#,
+            r#""tool.execute.after": ("#,
+            r#"id: "tracedecay-hooks""#,
+        ] {
+            assert!(plugin.contains(marker), "OpenCode plugin lacks {marker}");
+        }
     }
 
     #[test]

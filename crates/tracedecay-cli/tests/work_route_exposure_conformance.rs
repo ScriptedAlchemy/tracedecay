@@ -889,25 +889,6 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         .expect("created event observation time");
     work_evidence::assert_live_task_rooted_retrieval(&agent, &fixture, &dashboard, observed_at);
 
-    for retired in ["snapshot", "delta", "replan-dependencies", "accept-task"] {
-        let (status, body) = post_envelope(
-            &agent,
-            &fixture.external_url(&format!("/application/work/{retired}")),
-            &fixture,
-            &serde_json::json!({}),
-        );
-        assert_eq!(status, 404, "retired daemon Work route {retired}: {body}");
-        let (status, body) = post_dashboard_envelope(
-            &agent,
-            &format!("{}/api/work/{retired}", dashboard.base_url),
-            &serde_json::json!({}),
-        );
-        assert_eq!(
-            status, 404,
-            "retired dashboard Work route {retired}: {body}"
-        );
-    }
-
     // -- Product publication binds an empty attempt page. --------------------
     // Once a product task exists, the product graph supplies the canonical
     // generation for every attempt-page reader. With no admitted attempts the

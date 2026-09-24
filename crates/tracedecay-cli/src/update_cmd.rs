@@ -669,10 +669,18 @@ mod tests {
 
     #[test]
     fn daemon_restart_forces_stopped_service_running() {
+        let order = RefCell::new(Vec::new());
         let result = restart_daemon_service_with(
-            || Ok(daemon_control::DaemonServiceState::StoppedEnabled),
-            || Ok(()),
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(daemon_control::DaemonServiceState::StoppedEnabled)
+            },
+            || {
+                order.borrow_mut().push("acquire");
+                Ok(())
+            },
             |state| {
+                order.borrow_mut().push("refresh");
                 assert_eq!(state, daemon_control::DaemonServiceState::RunningEnabled);
                 Ok(Some((PathBuf::from("service"), PathBuf::from("socket"))))
             },
@@ -680,7 +688,11 @@ mod tests {
         )
         .expect("restart orchestration");
 
-        assert!(result.is_some());
+        assert_eq!(
+            result,
+            Some((PathBuf::from("service"), PathBuf::from("socket")))
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire", "refresh"]);
     }
 
     #[test]

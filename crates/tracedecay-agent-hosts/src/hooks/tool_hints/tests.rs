@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::plugin_bundle::claude_files;
 
 #[test]
 fn benign_git_narration_does_not_fire_the_unexpected_change_hint() {
@@ -68,22 +69,29 @@ fn every_category_has_compact_skill_backed_rendering() {
         HintCategory::UnexpectedChanges,
     ];
 
+    let shipped = claude_files();
     for category in categories {
         let hint = hint_for_category(category);
         let visible = format!("{}\n{}", hint.message, hint.context);
-        assert_eq!(hint.category, category);
-        assert!(!hint.message.is_empty(), "{category:?}");
-        assert!(!hint.context.is_empty(), "{category:?}");
         assert!(
             visible.len() <= 850,
             "{category:?} hint is too verbose: {} chars\n{}",
             visible.len(),
             visible
         );
-        let skill = category_skill(category);
+        let skill = visible
+            .split_once("Skill: tracedecay:")
+            .and_then(|(_, rest)| rest.split_once('.'))
+            .map(|(skill, _)| skill)
+            .unwrap_or_else(|| panic!("{category:?} hint names no skill:\n{visible}"));
+        let skill_path = format!("skills/{skill}/SKILL.md");
+        let (_, skill_body) = shipped
+            .iter()
+            .find(|(relative, _)| *relative == skill_path)
+            .unwrap_or_else(|| panic!("{category:?} points at unshipped skill {skill_path}"));
         assert!(
-            visible.contains(&format!("Skill: tracedecay:{skill}.")),
-            "{category:?} missing skill trigger"
+            skill_body.starts_with(&format!("---\nname: {skill}\n")),
+            "{skill_path} frontmatter must name {skill}"
         );
     }
 }

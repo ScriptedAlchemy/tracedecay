@@ -947,6 +947,7 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
     let case = host_case(HostKindV1::Hermes);
     seed_host(case, &cli);
 
+    let bin_literal = serde_json::to_string(&cli.bin_dir.join("tracedecay")).unwrap();
     let assert_dashboard_absent = || {
         for plugin in [
             cli.home.path().join(".hermes/plugins/tracedecay"),
@@ -954,10 +955,33 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
                 .path()
                 .join(".hermes/profiles/review/plugins/tracedecay"),
         ] {
+            let manifest = fs::read_to_string(plugin.join("plugin.yaml")).unwrap();
+            assert!(
+                manifest.starts_with("name: tracedecay\nkind: standalone\n"),
+                "{}: {manifest}",
+                plugin.display()
+            );
+            let tools = fs::read_to_string(plugin.join("tools.py")).unwrap();
+            assert!(
+                tools.contains(&format!(
+                    r#"TRACEDECAY_BIN = os.environ.get("TRACEDECAY_BIN") or {bin_literal}"#
+                )),
+                "{}: tools.py must invoke the installed binary",
+                plugin.display()
+            );
+            let skill = fs::read_to_string(plugin.join("skills/tracedecay/SKILL.md")).unwrap();
+            assert!(skill.starts_with("---\nname: tracedecay\n"), "{skill}");
             assert!(!plugin.join("dashboard/manifest.json").exists());
             assert!(!plugin.join("dashboard/plugin_api.py").exists());
             assert!(!plugin.join("dashboard/dist/index.js").exists());
         }
+        let config: toml::Value =
+            toml::from_str(&fs::read_to_string(cli.profile.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(
+            config["agent_dashboard_enabled"]["hermes"].as_bool(),
+            Some(false),
+            "the opt-out must persist: {config}"
+        );
     };
 
     assert_success(

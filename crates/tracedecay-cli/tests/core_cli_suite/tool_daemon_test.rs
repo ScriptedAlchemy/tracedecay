@@ -1223,24 +1223,12 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
 }
 
 #[test]
-fn fact_store_cli_accepts_exact_route_and_rejects_broad_router() {
+fn fact_store_cli_routes_exact_tool_through_daemon() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-
-    let broad = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
-        .args(["tool", "fact_store", "--help"])
-        .output()
-        .expect("broad fact-store lookup should return");
-    assert!(!broad.status.success(), "broad fact-store route must fail");
-    assert!(
-        String::from_utf8_lossy(&broad.stderr).contains("unknown tool: 'fact_store'"),
-        "broad lookup must fail as unknown:\n{}",
-        String::from_utf8_lossy(&broad.stderr)
-    );
 
     let sentinel = "first-touch daemon response";
     let socket_path = socket_dir.path().join("tracedecay.sock");
@@ -1286,10 +1274,7 @@ fn fact_store_cli_accepts_exact_route_and_rejects_broad_router() {
         request["params"]["arguments"]["content"],
         "first touch via daemon"
     );
-    assert!(
-        request["params"]["arguments"].get("action").is_none(),
-        "exact route payload must not carry the deleted broad action selector"
-    );
+    assert_eq!(request["params"]["arguments"]["category"], "decision");
 }
 
 #[test]

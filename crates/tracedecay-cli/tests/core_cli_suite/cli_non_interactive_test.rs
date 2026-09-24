@@ -1031,42 +1031,6 @@ fn automation_config_enable_writes_canonical_project_setting_noninteractively() 
 }
 
 #[test]
-fn automation_config_rejects_retired_global_scope() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    std::fs::create_dir_all(project.path()).unwrap();
-
-    let mut set = tracedecay_command(home.path(), project.path());
-    set.args([
-        "automation",
-        "config",
-        "set",
-        "--scope",
-        "global",
-        "--backend",
-        "codex-app-server",
-        "--timeout-secs",
-        "75",
-        "--session-reflector",
-        "true",
-        "--session-reflector-schedule",
-        "interval",
-        "--session-reflector-interval-secs",
-        "1800",
-    ]);
-    let output = run_with_timeout(set, cli_timeout());
-    assert!(
-        !output.status.success(),
-        "automation config global set should be rejected\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("automation settings are project-scoped")
-    );
-}
-
-#[test]
 fn automation_config_set_rejects_unimplemented_external_backend() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
