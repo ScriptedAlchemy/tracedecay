@@ -833,6 +833,18 @@ fn scheduler_rejects_rfc3339_started_at() {
         AutomationRunStatus::Succeeded,
         1_000,
     );
+    assert_eq!(schema_v2.started_at, "999");
+    assert!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[schema_v2.clone()],
+            SessionActivity::at(1_001),
+            1_500,
+        )
+        .is_due()
+    );
+
     schema_v2.started_at = "1970-01-01T00:16:39Z".to_string();
     assert_eq!(
         schedule_decision(

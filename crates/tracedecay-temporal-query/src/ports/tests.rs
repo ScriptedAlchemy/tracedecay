@@ -1698,9 +1698,38 @@ fn authorized_lifecycle_states_do_not_become_snapshot_denials() {
 
 #[test]
 fn manifests_without_explicit_authorization_are_rejected() {
-    let participant = participant("session.stale", "claude", 1);
-    let mut wire = serde_json::to_value(participant).unwrap();
-    wire.as_object_mut().unwrap().remove("q");
+    let denied = TemporalParticipantGeneration::new(
+        SessionId::new("session.denied").unwrap(),
+        "claude",
+        TemporalWatermarks {
+            generation: 1,
+            source: 2,
+            projection: 3,
+            index: 4,
+            summary: 5,
+        },
+        6,
+        &BindingDigest::new("configuration", digest('7')).unwrap(),
+        &BindingDigest::new("authorization", digest('8')).unwrap(),
+        TemporalParticipantAuthorization::Denied,
+        TemporalSourceAccess::Available,
+    )
+    .unwrap();
+    let manifest = TemporalParticipantManifest::new(vec![denied]).unwrap();
+    let mut wire = serde_json::to_value(&manifest).unwrap();
 
-    assert!(serde_json::from_value::<TemporalParticipantGeneration>(wire).is_err());
+    let decoded: TemporalParticipantManifest = serde_json::from_value(wire.clone()).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded, manifest);
+    assert_eq!(
+        decoded.entries()[0].authorization(),
+        TemporalParticipantAuthorization::Denied
+    );
+
+    wire["p"][0].as_object_mut().unwrap().remove("q");
+    let error = serde_json::from_value::<TemporalParticipantManifest>(wire).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `q`"),
+        "unexpected rejection: {error}"
+    );
 }

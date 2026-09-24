@@ -27,15 +27,28 @@ fn routing_draft() -> ManagedSkillDraft {
 
 #[tokio::test]
 async fn missing_or_invalid_routing_is_rejected_without_rewriting_records() {
-    for invalid in [
-        None,
-        Some(serde_json::Value::Null),
-        Some(serde_json::Value::String(String::new())),
+    for (invalid, expected_error) in [
+        (None, "missing field `routing_description`"),
+        (
+            Some(serde_json::Value::Null),
+            "invalid type: null, expected a string",
+        ),
+        (
+            Some(serde_json::Value::String(String::new())),
+            "native description cannot be empty",
+        ),
     ] {
         let profile = tempfile::TempDir::new().unwrap();
         let skill = create_managed_skill(profile.path(), routing_draft())
             .await
             .unwrap();
+        let loaded = load_managed_skill(profile.path(), &skill.metadata.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded.metadata.routing_description,
+            r#"Use when diagnosing "quoted" paths"#
+        );
         let dir = managed_skill_dir(profile.path(), &skill.metadata.id).unwrap();
         let record = dir.join("skill.json");
         let mut value = serde_json::to_value(&skill).unwrap();
@@ -52,12 +65,17 @@ async fn missing_or_invalid_routing_is_rejected_without_rewriting_records() {
         std::fs::write(&record, &bytes).unwrap();
         let markdown = std::fs::read(dir.join("SKILL.md")).unwrap();
 
-        assert!(
+        for error in [
             load_managed_skill(profile.path(), &skill.metadata.id)
                 .await
-                .is_err()
-        );
-        assert!(list_managed_skills(profile.path()).await.is_err());
+                .unwrap_err(),
+            list_managed_skills(profile.path()).await.unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains(expected_error),
+                "unexpected rejection: {error:?}"
+            );
+        }
         assert_eq!(std::fs::read(&record).unwrap(), bytes);
         assert_eq!(std::fs::read(dir.join("SKILL.md")).unwrap(), markdown);
     }

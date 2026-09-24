@@ -729,21 +729,44 @@ fn durable_admission_accepts_distinct_run_and_retained_effect_input_digests() {
 #[test]
 fn inline_terminal_wire_shape_is_rejected_without_rewrite() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let path = temp.path().join("inline-terminal.json");
+    let current = temp.path().join("current-terminal.json");
     let admitted = admission("run.inline-journal", "request.inline-journal");
     let terminal = success_terminal(&admitted, "run.inline-journal");
-    let inline = serde_json::to_vec_pretty(&json!({
-        "admission": admitted,
-        "state": {
-            "state": "terminal",
-            "terminal": terminal,
-        },
-    }))
-    .expect("inline bytes");
+    assert!(matches!(
+        reserve_or_replay_blocking(&current, admitted.clone()).expect("reserve"),
+        ReservationResult::Execute { .. }
+    ));
+    persist_terminal_blocking(&current, &admitted, terminal.clone()).expect("persist terminal");
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&current).expect("current journal"))
+            .expect("current journal json");
+    assert_eq!(journal["state"]["state"], "terminal");
+    assert_eq!(journal["state"]["value"]["terminal"]["schema_version"], 1);
+    let ReservationResult::Replay {
+        terminal: replay, ..
+    } = reserve_or_replay_blocking(&current, admitted.clone()).expect("current replay")
+    else {
+        panic!("current nested terminal must replay")
+    };
+    assert_eq!(replay, terminal);
+
+    let path = temp.path().join("inline-terminal.json");
+    journal["state"] = json!({
+        "state": "terminal",
+        "terminal": terminal,
+    });
+    let inline = serde_json::to_vec_pretty(&journal).expect("inline bytes");
     std::fs::write(&path, &inline).expect("inline journal");
 
-    let requested = admission("run.inline-journal", "request.inline-journal");
-    assert!(reserve_or_replay_blocking(&path, requested).is_err());
+    let Err(error) = reserve_or_replay_blocking(&path, admitted) else {
+        panic!("inline terminal journal must be rejected")
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(r#"string "terminal", expected "state" or "value""#),
+        "unexpected rejection: {error}"
+    );
     assert_eq!(std::fs::read(&path).expect("preserved bytes"), inline);
     assert!(!terminal_sidecar_path(&path).expect("sidecar").exists());
 }

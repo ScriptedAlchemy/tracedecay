@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 use tokio::sync::Barrier;
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 
 use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
@@ -243,6 +244,28 @@ async fn run_ledger_loads_records_without_optional_fields() {
 async fn run_ledger_rejects_schema_v1_rfc3339_rows() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
+    let current = serde_json::json!({
+        "schema_version": 2,
+        "run_id": "schema-v2-row",
+        "trigger": "manual_cli",
+        "task": "memory_curator",
+        "backend": "codex_app_server",
+        "status": "succeeded",
+        "accepted_count": 1,
+        "rejected_count": 0,
+        "started_at": "1782277200",
+        "completed_at": "1782277201",
+        "completed_at_micros": 1_782_277_201_000_000_i64
+    });
+    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
+    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{current}\n"))
+        .await
+        .unwrap();
+    let loaded = load_run_records(&dashboard_root, 10).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].run_id, "schema-v2-row");
+    assert_eq!(loaded[0].completed_at_micros, Some(1_782_277_201_000_000));
+
     let schema_v1 = serde_json::json!({
         "schema_version": 1,
         "run_id": "schema-v1-row",
@@ -255,12 +278,18 @@ async fn run_ledger_rejects_schema_v1_rfc3339_rows() {
         "started_at": "2026-06-24T05:00:00Z",
         "completed_at": "2026-06-24T05:00:01Z"
     });
-    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
     tokio::fs::write(run_ledger_path(&dashboard_root), format!("{schema_v1}\n"))
         .await
         .unwrap();
 
-    assert!(load_run_records(&dashboard_root, 10).await.is_err());
+    let error = load_run_records(&dashboard_root, 10).await.unwrap_err();
+    let TraceDecayError::Config { message } = &error else {
+        panic!("schema v1 row must be a typed config error, got {error:?}");
+    };
+    assert!(
+        message.contains("schema version 1 is unsupported"),
+        "unexpected rejection: {message}"
+    );
 }
 
 #[tokio::test]
