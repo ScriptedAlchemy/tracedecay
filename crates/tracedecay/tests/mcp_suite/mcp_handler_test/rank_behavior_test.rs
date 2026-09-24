@@ -13,7 +13,6 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 
-use crate::common::IsolatedEnv;
 use crate::support::{
     ProductionCompositionFixture, handle_real_server_tool_call_raw,
     production_composition_fixture_with_sources, wait_for_current_graph,
@@ -64,7 +63,6 @@ impl Draw for Square {}
 ";
 
 struct RankSession {
-    _isolated_env: IsolatedEnv,
     fixture: ProductionCompositionFixture,
     server: Arc<McpServer>,
 }
@@ -92,18 +90,13 @@ fn write_rank_sources(project: &std::path::Path) {
 }
 
 async fn open_rank_session() -> RankSession {
-    let (isolated_env, _) = IsolatedEnv::acquire().await;
     let fixture = production_composition_fixture_with_sources(write_rank_sources).await;
     let server = fixture
         .harness
         .server(&fixture.project_root)
         .expect("production rank server");
     wait_for_current_graph(&server).await;
-    RankSession {
-        _isolated_env: isolated_env,
-        fixture,
-        server,
-    }
+    RankSession { fixture, server }
 }
 
 fn ranking_rows(payload: &Value) -> Vec<Value> {
@@ -222,14 +215,9 @@ fn rank_payload(response: &Value) -> Value {
 }
 
 async fn shutdown(session: RankSession) {
-    let RankSession {
-        _isolated_env,
-        fixture,
-        server,
-    } = session;
+    let RankSession { fixture, server } = session;
     drop(server);
     fixture.harness.shutdown().await;
-    drop(_isolated_env);
 }
 
 #[tokio::test]

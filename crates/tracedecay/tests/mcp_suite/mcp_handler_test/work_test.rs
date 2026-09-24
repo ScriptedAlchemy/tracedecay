@@ -160,20 +160,11 @@ async fn configure_attempt_provider(production: &ProductionCompositionFixture) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn work_attempt_consumers_read_the_public_start_attempt_effect() {
     let production = production_composition_fixture().await;
-    let project_root = production.project_root.clone();
-    let isolation_root = project_root
-        .parent()
-        .expect("production fixture isolation root")
-        .to_path_buf();
     configure_attempt_provider(&production).await;
-    production.harness.shutdown().await;
-    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
-        &isolation_root,
-        [project_root.clone()],
-    )
-    .await
-    .expect("reopen production composition with Work provider");
-    let server = harness
+    let production = production.reopen().await;
+    let project_root = production.project_root.clone();
+    let server = production
+        .harness
         .server(&production.project_root)
         .expect("production MCP server");
     let occurred_at = now_micros();
@@ -747,21 +738,11 @@ async fn generate_proposal_success(server: &tracedecay::mcp::McpServer, argument
 async fn generate_proposal_allows_a_ready_task_on_the_configured_route_and_refuses_a_missing_task()
 {
     let production = production_composition_fixture().await;
-    let project_root = production.project_root.clone();
-    let isolation_root = project_root
-        .parent()
-        .expect("production fixture isolation root")
-        .to_path_buf();
     configure_attempt_provider(&production).await;
-    production.harness.shutdown().await;
-    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
-        &isolation_root,
-        [project_root.clone()],
-    )
-    .await
-    .expect("reopen production composition with Work provider");
-    let server = harness
-        .server(&project_root)
+    let production = production.reopen().await;
+    let server = production
+        .harness
+        .server(&production.project_root)
         .expect("production MCP server");
     let selection = json!({ "selection": "profile_owned_no_git" });
     let occurred_at = now_micros();

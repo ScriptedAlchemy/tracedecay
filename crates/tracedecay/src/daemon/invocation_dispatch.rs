@@ -267,6 +267,7 @@ async fn open_scope_set_cas_projects<'a>(
         .await;
         match project_server {
             Ok(Ok(_)) => {}
+            Ok(Err(error)) if error_is_project_open_retryable(&error) => {}
             Ok(Err(error)) => {
                 record_project_open_refusal("multi_root_scope_set_compare_and_swap", &error);
                 return Err(project_open_refusal_response(
