@@ -709,6 +709,163 @@ function memoryTrustHistoryPayload(factId: string): Record<string, unknown> {
   };
 }
 
+/** Width of the synthetic phase encodings the geometry reads report. */
+const GEOMETRY_DIM = 256;
+
+/** A small deterministic generator, so the scatter is stable across a
+ * screenshot pair without pretending to be a decomposition. */
+function geometryRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+function geometryFactId(index: number): string {
+  return `fact.${'e'.repeat(64)}.${index.toString(16).padStart(64, '0')}`;
+}
+
+function geometryContent(index: number): string {
+  const category = FACT_CATEGORIES[index % FACT_CATEGORIES.length]!;
+  return `Synthetic geometry fixture fact #${String(index).padStart(4, '0')} (${category})`;
+}
+
+/**
+ * `GET /api/plugins/holographic/projection` (memory_service/projection.rs):
+ * the request limit's worth of synthetic facts, one cluster per category on a
+ * ring with seeded jitter. The coordinates are arithmetic, not a PCA; they only
+ * need the shape of one. The store holds more facts than the limit, so the
+ * coverage is `bounded` by `request_limit_reached`, as the handler reports.
+ * The `q` filter keeps facts whose content contains it.
+ */
+function memoryProjectionPayload(search: string): Record<string, unknown> {
+  const params = new URLSearchParams(search);
+  const raw = Number(params.get('limit'));
+  const limit = Number.isFinite(raw) && raw > 0 ? Math.min(2000, Math.trunc(raw)) : 400;
+  const query = (params.get('q') ?? '').toLowerCase();
+  const random = geometryRandom(0x5eed);
+  const points = Array.from({ length: limit }, (_, index) => {
+    const lobe = index % FACT_CATEGORIES.length;
+    const angle = (lobe / FACT_CATEGORIES.length) * Math.PI * 2;
+    const spread = 0.12 + 0.22 * random();
+    const theta = random() * Math.PI * 2;
+    const createdAt = nowMicros - (index + 1) * 3_600_000_000;
+    return {
+      fact_id: geometryFactId(index),
+      payload_access: 'eligible',
+      category: FACT_CATEGORIES[lobe]!,
+      content: geometryContent(index),
+      tags: ['synthetic'],
+      entities: [],
+      entity_count: 0,
+      metadata: {},
+      source_label: 'story-fixture',
+      trust_score: 0.2 + 0.75 * random(),
+      access_count: index % 17,
+      retrieval_count: index % 11,
+      helpful_count: index % 5,
+      unhelpful_count: index % 3,
+      created_at: createdAt,
+      updated_at: createdAt,
+      last_recalled_at: index % 4 === 0 ? null : createdAt,
+      projected_as_of: nowMicros,
+      x: Math.cos(angle) * 0.62 + Math.cos(theta) * spread,
+      y: Math.sin(angle) * 0.48 + Math.sin(theta) * spread,
+    };
+  }).filter((point) => query === '' || point.content.toLowerCase().includes(query));
+  return {
+    exists: true,
+    error: '',
+    method: 'pca',
+    dim: GEOMETRY_DIM,
+    limit,
+    points,
+    coverage: {
+      completeness: 'bounded',
+      examined: limit,
+      limit,
+      omission_reasons: ['request_limit_reached'],
+    },
+    scan: { cache_scope: 'store_revision', cache_state: 'hit', vector_rows_read: limit },
+  };
+}
+
+/** `similarity_classification` in session-memory/similarity.rs, by score alone. */
+function geometryClassification(similarity: number): string {
+  if (similarity >= 0.95) return 'likely_duplicate';
+  if (similarity >= 0.9) return 'high_similarity';
+  return 'related';
+}
+
+/**
+ * `GET /api/plugins/holographic/similarity` (memory_analysis.rs): 400 encoded
+ * synthetic facts, every pair scored into the handler's 20 fixed-width bins
+ * between the observed minimum and maximum, and the highest-scoring pairs at
+ * or above the floor, capped at the request limit.
+ */
+function memorySimilarityPayload(search: string): Record<string, unknown> {
+  const params = new URLSearchParams(search);
+  const floor = Number(params.get('min_similarity') ?? '0.85');
+  const rawLimit = Number(params.get('limit'));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(2000, Math.trunc(rawLimit)) : 25;
+  const encoded = 400;
+  const totalPairs = (encoded * (encoded - 1)) / 2;
+  const minScore = -0.25;
+  const maxScore = 0.99;
+  const average = 0.14;
+  const width = (maxScore - minScore) / 20;
+  const weights = Array.from({ length: 20 }, (_, bin) => {
+    const centre = minScore + (bin + 0.5) * width;
+    return Math.exp(-(((centre - average) / 0.2) ** 2));
+  });
+  const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
+  const counts = weights.map((weight) => Math.max(1, Math.floor((weight / weightSum) * totalPairs)));
+  const peak = weights.indexOf(Math.max(...weights));
+  counts[peak] = counts[peak]! + totalPairs - counts.reduce((sum, count) => sum + count, 0);
+  const bins = counts.map((count, bin) => ({
+    start: Math.round((minScore + bin * width) * 1e9) / 1e9,
+    end: Math.round((minScore + (bin + 1) * width) * 1e9) / 1e9,
+    count,
+  }));
+  const pairs = Array.from({ length: 60 }, (_, rank) => {
+    const similarity = Math.round((maxScore - rank * 0.009) * 1e4) / 1e4;
+    const a = rank * 2;
+    const b = rank * 2 + FACT_CATEGORIES.length;
+    return {
+      a_id: geometryFactId(a),
+      a_category: FACT_CATEGORIES[a % FACT_CATEGORIES.length]!,
+      a_content: geometryContent(a),
+      b_id: geometryFactId(b),
+      b_category: FACT_CATEGORIES[b % FACT_CATEGORIES.length]!,
+      b_content: geometryContent(b),
+      similarity,
+      classification: geometryClassification(similarity),
+    };
+  })
+    .filter((pair) => pair.similarity >= floor)
+    .slice(0, limit);
+  return {
+    exists: true,
+    error: '',
+    count: encoded,
+    dim: GEOMETRY_DIM,
+    limit,
+    min_similarity: floor,
+    total_pairs: totalPairs,
+    pairs,
+    score_distribution: {
+      bin_count: bins.length,
+      total_pairs: totalPairs,
+      min_score: minScore,
+      max_score: maxScore,
+      average_score: average,
+      bins,
+    },
+    scan: { cache_scope: 'store_revision', cache_state: 'hit', vector_rows_read: encoded },
+  };
+}
+
 /* ==========================================================================
  * /api/plugins/graph/*. Overview / search / subgraph
  * (graph_service.rs overview_payload / search_payload / subgraph_payload;
@@ -5281,6 +5438,8 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (trustHistory) return memoryTrustHistoryPayload(decodeURIComponent(trustHistory[1]!));
   const factDetail = /^\/api\/plugins\/holographic\/fact\/([^/]+)$/.exec(pathname);
   if (factDetail) return memoryFactDetailEnvelope(decodeURIComponent(factDetail[1]!));
+  if (pathname === '/api/plugins/holographic/projection') return memoryProjectionPayload(search);
+  if (pathname === '/api/plugins/holographic/similarity') return memorySimilarityPayload(search);
   // The Loom temporal read is a real `limit`/`offset` page over the session
   // store (loom_api.rs `PAGE_CTE`), and the Sessions index pages it. Serving
   // the whole fixture population for every page would audit a 25-row page

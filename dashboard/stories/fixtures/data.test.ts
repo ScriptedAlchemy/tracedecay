@@ -49,6 +49,7 @@ import {
   LoomTemporalPayloadV1Schema,
   MemoryFactDetailPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
+  MemorySimilarityPayloadV1Schema,
   AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
@@ -67,7 +68,10 @@ import {
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
 import { AutomationOutcomesPayloadSchema } from '../../src/data/query/automation.ts';
-import { TrustHistoryPayloadSchema } from '../../src/data/query/memory.ts';
+import {
+  ProjectionPayloadSchema,
+  TrustHistoryPayloadSchema,
+} from '../../src/data/query/memory.ts';
 
 /** Parse one resolved fixture, surfacing zod's issues on failure. The same
  * reporting shape `endpoint-fixtures.test.ts` uses, so a drift report reads the
@@ -214,6 +218,24 @@ const DYNAMIC: ReadonlyArray<{
     schema: TrustHistoryPayloadSchema,
   },
   {
+    label: 'memory_api::projection',
+    pathname: '/api/plugins/holographic/projection',
+    search: '?limit=400',
+    schema: ProjectionPayloadSchema,
+  },
+  {
+    label: 'memory_api::projection filtered',
+    pathname: '/api/plugins/holographic/projection',
+    search: '?limit=400&q=decision',
+    schema: ProjectionPayloadSchema,
+  },
+  {
+    label: 'memory_api::similarity',
+    pathname: '/api/plugins/holographic/similarity',
+    search: '?min_similarity=0.85&limit=25',
+    schema: MemorySimilarityPayloadV1Schema,
+  },
+  {
     label: 'graph_api::subgraph seeded',
     pathname: '/api/plugins/graph/subgraph',
     search: '?node_id=sym-0',
@@ -279,4 +301,39 @@ describe('fixtures parse against the generated contract for their route', () => 
     },
   );
 
+});
+
+describe('memory geometry fixtures answer the request they were given', () => {
+  it('bounds the projection by its limit and filters by q', () => {
+    const page = ProjectionPayloadSchema.parse(
+      resolveFixture('/api/plugins/holographic/projection', '?limit=400'),
+    );
+    expect(page.points).toHaveLength(400);
+    expect(page.coverage).toEqual({
+      completeness: 'bounded',
+      examined: 400,
+      limit: 400,
+      omission_reasons: ['request_limit_reached'],
+    });
+    const filtered = ProjectionPayloadSchema.parse(
+      resolveFixture('/api/plugins/holographic/projection', '?limit=400&q=decision'),
+    );
+    expect(filtered.points).toHaveLength(67);
+    expect(new Set(filtered.points.map((point) => point.category))).toEqual(new Set(['decision']));
+  });
+
+  it('applies the similarity floor before the cap and bins every scored pair', () => {
+    const at = (floor: number) =>
+      MemorySimilarityPayloadV1Schema.parse(
+        resolveFixture('/api/plugins/holographic/similarity', `?min_similarity=${floor}&limit=25`),
+      );
+    const strict = at(0.95);
+    expect(strict.pairs).toHaveLength(5);
+    expect(new Set(strict.pairs.map((pair) => pair.classification))).toEqual(new Set(['likely_duplicate']));
+    expect(at(0.85).pairs).toHaveLength(16);
+    expect(at(0.6).pairs).toHaveLength(25);
+    expect(strict.total_pairs).toBe(79_800);
+    expect(strict.score_distribution.bins.reduce((sum, bin) => sum + bin.count, 0)).toBe(79_800);
+    expect(strict.score_distribution.bins[0]).toEqual({ start: -0.25, end: -0.188, count: 558 });
+  });
 });
