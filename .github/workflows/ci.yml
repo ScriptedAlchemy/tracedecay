@@ -18,7 +18,7 @@ on:
         type: boolean
         default: false
       run_full_nextest:
-        description: "Also run the full Linux workspace in one nextest process"
+        description: "Also run the full Linux search and transport selections"
         type: boolean
         default: false
 
@@ -716,10 +716,14 @@ jobs:
 
   # Optional cross-test isolation proof. The partition lane cannot expose
   # authorities leaked between targets that it runs in separate jobs. Keep
-  # this off ordinary pushes and run it after the normal Linux verdict so its
-  # extra compilation and eight concurrent tests do not crowd that lane.
+  # the evaluator and transport resolutions separate: the transport surface
+  # includes a generation-scale cancellation journey whose bounded receipts
+  # assume it is not competing with the entire workspace. Each compatible
+  # selection still shares one nextest process across all of its targets.
+  # Keep this off ordinary pushes and run it after the normal Linux verdict so
+  # its extra compilation and eight concurrent tests do not crowd that lane.
   linux-full-nextest:
-    name: Test Linux full workspace isolation
+    name: Test Linux full selection isolation
     needs: linux-test
     if: ${{ !cancelled() && needs.linux-test.result != 'skipped' && github.event_name == 'workflow_dispatch' && inputs.run_full_nextest }}
     runs-on: ubuntu-24.04-arm
@@ -752,20 +756,49 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      # Build the test targets and the executables they spawn with the same
-      # feature set and perf resolution that nextest runs below.
-      - name: Build full workspace tests and support executables
-        run: cargo build --workspace --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval,tracedecay/test-transport,tracedecay-cli/test-transport
+      # Build the evaluator selection and the executables its journeys spawn
+      # with the same feature set and perf resolution nextest uses below.
+      - name: Build full evaluator selection and support executables
+        run: cargo build --workspace --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
 
-      - name: Run full workspace tests
-        run: cargo test-ci --locked --features tracedecay/test-transport,tracedecay-cli/test-transport --no-tests=fail
+      - name: Run full evaluator selection
+        run: |
+          set +e
+          cargo test-ci --locked --no-tests=fail
+          status=$?
+          set -e
+          if [ -f target/nextest/ci/junit.xml ]; then
+            mv target/nextest/ci/junit.xml target/nextest/ci/full-evaluator.xml
+          fi
+          exit "$status"
 
-      - name: Upload full-workspace nextest report
+      # Transport-only modules live inside otherwise ordinary root targets, so
+      # run every root library, binary, and integration target in one process.
+      # The evaluator selection above already covers the remaining workspace
+      # crates without implicitly linking evaluator code into this resolution.
+      - name: Build full transport selection and support executables
+        id: transport_build
+        if: always()
+        run: cargo build -p tracedecay -p tracedecay-cli --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport
+
+      - name: Run full transport selection
+        if: ${{ always() && steps.transport_build.outcome == 'success' }}
+        run: |
+          set +e
+          cargo nextest run -p tracedecay -p tracedecay-cli --bins --tests --profile ci --cargo-profile perf --locked --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport --no-tests=fail
+          status=$?
+          set -e
+          if [ -f target/nextest/ci/junit.xml ]; then
+            mv target/nextest/ci/junit.xml target/nextest/ci/full-transport.xml
+          fi
+          exit "$status"
+
+      - name: Upload full-selection nextest reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nextest-junit-Linux-full-workspace
-          path: target/nextest/ci/junit.xml
+          name: nextest-junit-Linux-full-selections
+          path: target/nextest/ci/full-*.xml
           if-no-files-found: ignore
           retention-days: 7
 
