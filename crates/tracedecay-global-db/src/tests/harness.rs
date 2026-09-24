@@ -836,7 +836,9 @@ impl HostAdmissionTestRuntimeV1 {
                 tracedecay_runtime_core::db::engine::params![
                     provider,
                     session_id,
-                    transcript_path.to_string_lossy().as_ref()
+                    tracedecay_sessions::runtime::shared::path_identity_key(
+                        transcript_path.to_string_lossy().as_ref()
+                    )
                 ],
             )
             .await?;

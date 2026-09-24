@@ -268,10 +268,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 .iter()
                 .flat_map(|(path, providers)| {
                     providers.iter().map(move |provider| {
+                        // `set_parse_offset` stores every cursor under its
+                        // identity key, so a Windows location must be looked
+                        // up the same way to find its checkpoint.
                         let key = if provider == "codex" {
                             codex_cursor_key(Path::new(path)).durable_text()
                         } else {
-                            path.clone()
+                            path_identity_key(path)
                         };
                         serde_json::json!({ "path": path, "key": key })
                     })
