@@ -119,7 +119,6 @@ export function RingGlyph({
   radius,
   maxDescendants,
   hatchId,
-  inspected,
   selected,
   lifted,
   dim,
@@ -129,7 +128,6 @@ export function RingGlyph({
   radius: number;
   maxDescendants: number;
   hatchId: string;
-  inspected: boolean;
   selected: boolean;
   /** Beneath the selection: a restrained cyan halo, no glow. */
   lifted: boolean;
@@ -152,15 +150,12 @@ export function RingGlyph({
       {lifted ? (
         <circle cx={at.x} cy={at.y} r={radius + 3.5} fill="none" stroke="var(--raw-graph-accent)" strokeOpacity={0.35} strokeWidth={1} data-topology-halo="true" />
       ) : null}
-      {inspected && !selected ? (
-        <circle cx={at.x} cy={at.y} r={radius + 4} fill="none" stroke="var(--raw-graph-text)" strokeOpacity={0.55} strokeWidth={1} />
-      ) : null}
       <circle
         cx={at.x}
         cy={at.y}
         r={radius * 0.72}
         fill={kind === 'cycle' ? `url(#${hatchId})` : tone.stroke}
-        fillOpacity={kind === 'cycle' ? 0.8 : inspected || selected ? Math.min(0.5, core + 0.1) : core}
+        fillOpacity={kind === 'cycle' ? 0.8 : selected ? Math.min(0.5, core + 0.1) : core}
       />
       <circle cx={at.x} cy={at.y} r={radius} fill="none" stroke={tone.stroke} strokeWidth={1.4} strokeDasharray={tone.dash} />
       {kind === 'bundle' ? (

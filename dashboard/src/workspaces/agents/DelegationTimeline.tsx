@@ -181,7 +181,6 @@ export function DelegationTimeline({
                 x={x}
                 domain={domain}
                 hatchId={hatchId}
-                inspected={row.mark.id === inspectedId}
                 selected={row.mark.id === selectedId}
                 lifted={lifted !== null && lifted.has(row.mark.id) && row.mark.id !== selectedId}
                 dim={isDim(row.mark.id)}
@@ -280,7 +279,6 @@ function TimelineBar({
   x,
   domain,
   hatchId,
-  inspected,
   selected,
   lifted,
   dim,
@@ -290,7 +288,6 @@ function TimelineBar({
   x: (at: number) => number;
   domain: { start: number; end: number } | null;
   hatchId: string;
-  inspected: boolean;
   selected: boolean;
   lifted: boolean;
   dim: boolean;
@@ -313,7 +310,6 @@ function TimelineBar({
     <g opacity={dim ? 0.3 : 1} data-timeline-bar={open ? 'open' : 'closed'} data-timeline-recency={recency}>
       {lifted ? <rect x={x1 - 3} y={y - 8} width={x2 - x1 + 6} height={16} fill="none" stroke="var(--raw-graph-accent)" strokeOpacity={0.35} data-timeline-halo="true" /> : null}
       {selected ? <rect x={x1 - 4} y={y - 10} width={x2 - x1 + 8} height={20} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={2} /> : null}
-      {inspected && !selected ? <rect x={x1 - 3} y={y - 9} width={x2 - x1 + 6} height={18} fill="none" stroke="var(--raw-graph-text)" strokeOpacity={0.5} /> : null}
       {stub ? (
         <line x1={x1 - 28} x2={x1 - 2} y1={y} y2={y} stroke={tone.stroke} strokeWidth={1.2} strokeDasharray="3 2" />
       ) : null}
@@ -323,7 +319,7 @@ function TimelineBar({
         width={x2 - x1}
         height={10}
         fill={tone.fill === 'hatch' ? `url(#${hatchId})` : tone.fill}
-        fillOpacity={tone.fill === 'hatch' ? 1 : open ? 0.08 : Math.min(0.55, recency + (inspected || selected ? 0.12 : 0))}
+        fillOpacity={tone.fill === 'hatch' ? 1 : open ? 0.08 : Math.min(0.55, recency + (selected ? 0.12 : 0))}
         stroke={tone.stroke}
         strokeWidth={1}
         strokeDasharray={open || row.mark.kind === 'bundle' ? '3 2' : undefined}
@@ -376,7 +372,7 @@ function TimelineRowControl({
       style={{ top, height: ROW, width, color: 'var(--raw-graph-text)' }}
       {...markHandlers(row.mark, interaction)}
     >
-      {selected ? <span aria-hidden className="absolute inset-y-1 left-0 w-[3px] bg-accent" /> : null}
+      {selected ? <span aria-hidden className="absolute inset-y-1 left-0 w-[2px] bg-accent" /> : null}
       <span
         className="flex min-w-0 flex-col"
         style={{ paddingLeft: 12 + row.mark.generation * INDENT, width: GUTTER - 8 }}

@@ -170,7 +170,7 @@ export function LaneField({
           <defs>
             <HatchDefs id="lane-hatch" />
           </defs>
-          <text x="12" y="18" fontSize="10" fontFamily="var(--font-mono)" letterSpacing="0.14em" fill="var(--raw-graph-text)" fillOpacity="0.7">
+          <text x="12" y="18" fontSize="10" fontFamily="var(--font-display)" fontStretch="112%" letterSpacing="0.16em" fill="var(--raw-graph-text)" fillOpacity="0.7">
             OBSERVED TIME · UTC
           </text>
           {layout.ticks.map((tick) => (
@@ -264,7 +264,7 @@ export function LaneField({
                     strokeWidth={incident ? 1.4 : 1}
                     strokeDasharray={gradeDash(link.grade)}
                   />
-                  <text x={from.x + 6} y={from.y + (down ? 13 + slot * 11 : -7 - slot * 11)} fontSize="9" fontFamily="var(--font-mono)" letterSpacing="0.06em" fill="var(--raw-graph-text)" fillOpacity="0.85">
+                  <text x={from.x + 6} y={from.y + (down ? 13 + slot * 11 : -7 - slot * 11)} fontSize="10" fontFamily="var(--font-mono)" letterSpacing="0.06em" fill="var(--raw-graph-text)" fillOpacity="0.85">
                     {`${link.code} · ${gradeLabel(link.grade)}`}
                   </text>
                 </g>

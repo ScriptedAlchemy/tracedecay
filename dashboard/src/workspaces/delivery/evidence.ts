@@ -5,6 +5,7 @@ import type {
   DeliveryProviderStateV1,
 } from '../../contracts/generated.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
+import { gradeDashArray } from '../../viz/temporal/palette.ts';
 
 /**
  * The evidence-grade ladder Delivery renders beside every relation, identity,
@@ -92,29 +93,9 @@ export function sourceClassLabel(source: SourceClass): string {
   }
 }
 
-/**
- * The stroke grammar the ladder shares across the SVG fields so grade survives
- * monochrome and forced colours: solid, dash-dot, dashed, dotted, hatched, gap.
- */
+/** The grade ladder's stroke, from the one grammar every drawn relation shares. */
 export function gradeDash(grade: EvidenceGrade): string | undefined {
-  switch (grade) {
-    case 'exact':
-      return undefined;
-    case 'explicit':
-      return '6 2 1 2';
-    case 'inferred':
-      return '4 3';
-    case 'ambiguous':
-      return '1 3';
-    case 'stale':
-      return '2 2';
-    case 'unavailable':
-      return '1 5';
-    default: {
-      const unhandled: never = grade;
-      return unhandled;
-    }
-  }
+  return gradeDashArray(grade) || undefined;
 }
 
 /**

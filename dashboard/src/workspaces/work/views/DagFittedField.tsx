@@ -111,7 +111,7 @@ export function FittedCard({
         'absolute flex min-h-[44px] flex-col gap-0.5 border px-2.5 py-1.5 text-left rounded-[var(--radius-panel)]',
         'td-raised transition-opacity duration-[var(--dur-state)]',
         'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-        selected ? 'border-accent' : 'border-edge-strong hover:border-text-muted',
+        selected ? 'border-accent' : 'border-edge-strong',
         treatment.dashed && !selected && 'border-dashed',
         node.cyclic && !selected && 'border-state-conflicting/70',
         dimmed && 'opacity-40',
@@ -129,7 +129,7 @@ export function FittedCard({
       data-work-lane-family={treatment.family}
       data-work-dag-critical-node={onCritical ? 'true' : undefined}
     >
-      {selected ? <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-accent" /> : null}
+      {selected ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-accent" /> : null}
       {onCritical ? <span aria-hidden className="absolute inset-x-0 top-0 h-[2px] bg-alert" /> : null}
       <span className={cn('flex min-w-0 items-center justify-between gap-2', treatment.family === 'disconnected' && 'opacity-75')}>
         <span className="td-value truncate text-2xs text-text-secondary">{task.task_id}</span>

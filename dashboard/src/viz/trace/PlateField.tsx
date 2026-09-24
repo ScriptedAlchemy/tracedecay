@@ -91,7 +91,7 @@ function Plate({
       <rect x={x} y={y} width={width} height={height} rx={2} className="fill-surface-1 stroke-edge-strong" />
       <rect x={x + 3.5} y={y + 3.5} width={width - 7} height={height - 7} rx={1} fill="none" className="stroke-edge-subtle" />
       {/* The selection gutter: this plate IS the selected symbol. */}
-      <rect x={x} y={y} width={3} height={height} className="fill-accent" />
+      <rect x={x} y={y} width={2} height={height} className="fill-accent" />
       <text x={x + 14} y={y + 24} fontSize={14} className="fill-text-primary font-mono">
         {clip(focus.name, Math.floor((width - 28) / 9))}
       </text>
@@ -363,7 +363,7 @@ export function PlateField({
         />
         <LegendEntry
           label="cyan gutter + SELECTED = the traced symbol"
-          sample={<rect x={2} y={1} width={3} height={10} className="fill-accent" />}
+          sample={<rect x={2} y={1} width={2} height={10} className="fill-accent" />}
         />
         <LegendEntry
           label="absent / not drawn = the wire was silent or the budget stopped"

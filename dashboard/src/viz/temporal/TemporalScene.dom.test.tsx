@@ -222,6 +222,8 @@ describe('TemporalScene', () => {
       expect(onInspect).toHaveBeenLastCalledWith(model.nodes.find((entry) => entry.id === 'n-tool'));
       const otherLane = container.querySelector(`[data-lane-group='${CHILD}']`) as SVGGElement;
       expect(otherLane.style.opacity).toBe('0.55');
+      // Hover dims the unrelated and draws nothing on the hovered mark.
+      expect(tool.querySelector('rect[fill="none"][stroke="var(--raw-graph-accent)"], line[stroke="var(--raw-graph-accent)"]')).toBeNull();
       fireEvent.mouseOut(tool);
       expect(onInspect).toHaveBeenLastCalledWith(null);
       expect(otherLane.style.opacity).toBe('1');

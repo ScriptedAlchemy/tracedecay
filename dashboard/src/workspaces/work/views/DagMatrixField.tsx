@@ -145,7 +145,7 @@ export function DagMatrixField({
             data-work-task={taskId}
             data-work-lane-family={treatment.family}
           >
-            {isSelected ? <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-accent" /> : null}
+            {isSelected ? <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-accent" /> : null}
             <span className={cn('td-value w-5 shrink-0 text-3xs', row === crossRow ? 'text-accent' : 'text-text-muted')}>
               {String(row + 1).padStart(2, '0')}
             </span>

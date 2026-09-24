@@ -41,22 +41,17 @@ function FocusRing({ x, y, r }: { x: number; y: number; r: number }): JSX.Elemen
   return <circle className="td-focus-ring" cx={x} cy={y} r={r} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={2} opacity={0} pointerEvents="none" />;
 }
 
-export function NodeMark({ node, hovered, frame }: { node: SceneNode; hovered: boolean; frame: SceneFrame }): JSX.Element {
+export function NodeMark({ node, frame }: { node: SceneNode; frame: SceneFrame }): JSX.Element {
   const color = gradeColorVar(node.grade);
   const luminance = isLifted(node.focus) ? 1 : recencyAlpha(frame, node.x);
   if (!resolvedLanes(frame).has(node.laneId) && !node.selected) {
-    return (
-      <>
-        <FocusRing x={node.x} y={node.y} r={6} />
-        {hovered && <line x1={node.x} x2={node.x} y1={node.y - 8} y2={node.y + 8} stroke="var(--raw-graph-accent)" strokeWidth={1} pointerEvents="none" />}
-      </>
-    );
+    return <FocusRing x={node.x} y={node.y} r={6} />;
   }
   return (
     <>
       {node.selected && <circle cx={node.x} cy={node.y} r={15} fill="var(--raw-graph-accent)" opacity={0.14} pointerEvents="none" />}
-      {(node.selected || hovered) && (
-        <rect x={node.x - 10} y={node.y - 10} width={20} height={20} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={node.selected ? 2 : 1} opacity={node.selected ? 1 : 0.6} pointerEvents="none" />
+      {node.selected && (
+        <rect x={node.x - 10} y={node.y - 10} width={20} height={20} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={2} pointerEvents="none" />
       )}
       <FocusRing x={node.x} y={node.y} r={13} />
       <g opacity={luminance} pointerEvents="none">
@@ -196,7 +191,7 @@ export function FieldOverlay({ frame }: { frame: SceneFrame }): JSX.Element {
             data-link-grade={path.grade}
             x={(x0 + x1) / 2 - 4}
             y={(y0 + y1) / 2 + 3}
-            fontSize={8}
+            fontSize={10}
             letterSpacing="0.1em"
             textAnchor="end"
             fill={gradeColorVar(path.grade)}

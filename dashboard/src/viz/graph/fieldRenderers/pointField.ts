@@ -404,9 +404,10 @@ export const createPointField: FieldRendererFactory = ({
       const heat = field.heatOf(body.id);
       if (body.role === 'hub' && heat > 0) drawHub(context, cam, body, lerpRgbTuple(colors.ink, colors.alert, Math.min(1, heat * 1.4)), 1);
     }
-    // Inspection: a 2px cyan ring on the exact body, and on its cell's frame
-    // while that cell is unresolved. Never a glow.
-    const inspected = view.inspected != null ? byId.get(view.inspected) : undefined;
+    // Keyboard inspection: a 2px cyan ring on the exact body, and on its
+    // cell's frame while that cell is unresolved. Never a glow. The pointer's
+    // own body gets no mark; hover only dims the unrelated.
+    const inspected = view.inspected != null && view.inspected !== hovered ? byId.get(view.inspected) : undefined;
     if (inspected) {
       const [x, y] = toScreen(cam, inspected.x, inspected.y);
       context.strokeStyle = rgbaString(colors.hot, 1);
@@ -508,7 +509,7 @@ export const createPointField: FieldRendererFactory = ({
           strike && index === lines.length - 1
             ? rgbaString(colors.alert, 0.95)
             : index === 0
-              ? rgbaString(body.id === view.inspected ? colors.hot : colors.ink, 0.94 * alpha)
+              ? rgbaString(body.id === view.inspected && body.id !== hovered ? colors.hot : colors.ink, 0.94 * alpha)
               : rgbaString(colors.inkMuted, 0.92 * alpha),
         alpha,
       );

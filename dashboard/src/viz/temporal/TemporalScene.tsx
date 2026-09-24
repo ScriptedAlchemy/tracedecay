@@ -481,7 +481,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         tabIndex={0}
         data-cluster={cluster.id}
         aria-label={label}
-        className="cursor-pointer outline-none [&:focus>path]:stroke-white"
+        className="cursor-pointer outline-none [&:focus-visible>path]:stroke-[var(--raw-graph-accent)] [&:focus-visible>path]:[stroke-width:2]"
         opacity={focusAlpha(cluster.focus)}
         onClick={() => onToggleBranch(cluster.laneId)}
         onKeyDown={(event) => {
@@ -492,14 +492,19 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         }}
       >
         <title>{label}</title>
-        <rect x={cluster.x0} y={Math.min(top, cluster.y - 22)} width={x1 - cluster.x0} height={Math.max(cluster.height, 44)} fill="transparent" />
+        <rect
+          x={Math.min(cluster.x0, (cluster.x0 + x1) / 2 - 22)}
+          y={Math.min(top, cluster.y - 22)}
+          width={Math.max(x1 - cluster.x0, 44)}
+          height={Math.max(cluster.height, 44)}
+          fill="transparent"
+        />
         <ClusterMark cluster={cluster} />
       </g>
     );
   };
 
   const renderNode = (node: SceneNode): JSX.Element => {
-    const hovered = hover === node.id;
     const halfHit = Math.max(1, node.halfHit);
     const title = `${glyphLabel(node.kind)} · ${node.label}${node.detail ? ` · ${node.detail}` : ''} · ${node.grade}${node.xBasis === 'sequence' ? ' · recorded order, timestamp unrecorded' : ''}`;
     const select = (): void => onSelectEvent(node.id);
@@ -531,7 +536,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
       >
         <title>{title}</title>
         <rect x={node.x - halfHit} y={node.y - 22} width={Math.max(2, halfHit * 2)} height={44} fill="transparent" />
-        <NodeMark node={node} hovered={hovered} frame={frame} />
+        <NodeMark node={node} frame={frame} />
       </g>
     );
   };

@@ -241,7 +241,6 @@ export function DelegationTopology({
                 radius={radiusOf(mark)}
                 maxDescendants={model.maxDescendants}
                 hatchId={hatchId}
-                inspected={mark.id === inspectedId}
                 selected={mark.id === selectedId}
                 lifted={lifted !== null && lifted.has(mark.id) && mark.id !== selectedId}
                 dim={isDim(mark.id)}
