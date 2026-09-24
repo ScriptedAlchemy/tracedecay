@@ -101,6 +101,20 @@ describe('the register strip', () => {
     expect(cells[5]?.reading).toMatchObject({ value: 'force-directed' });
     expect(cells[6]?.reading).toMatchObject({ value: 'degree' });
   });
+
+  it('names the layout rule of whichever renderer draws the field', () => {
+    const payload = {
+      totals: { nodes: 12_873, edges: 41_206, files: 642 },
+      nodes_by_kind: [{ kind: 'module', count: 393 }],
+    };
+    expect(cortexRegister(payload, 'plate')[5]?.reading).toEqual({
+      kind: 'measured',
+      value: 'stratified',
+      note: 'depth bands × directory columns',
+    });
+    expect(cortexRegister(payload, 'relief')[5]?.reading).toMatchObject({ value: 'module-packed' });
+    expect(cortexRegister(payload, 'luminous')[5]?.reading).toMatchObject({ value: 'force-directed' });
+  });
 });
 
 describe('field legends', () => {

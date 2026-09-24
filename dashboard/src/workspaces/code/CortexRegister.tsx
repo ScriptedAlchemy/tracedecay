@@ -9,12 +9,15 @@
  * daemon's own state across the strip rather than seven dashes that would read
  * as an empty graph.
  */
+import { useSearchParams } from 'react-router';
+
 import type { GraphOverviewPayloadV1 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn';
 import { cortexRegister, type RegisterCell } from './cortex.ts';
+import { readCortexRender } from './cortexScene.ts';
 
 export function CortexRegister({
   pending,
@@ -23,6 +26,8 @@ export function CortexRegister({
   pending: boolean;
   result: EnvelopeResult<GraphOverviewPayloadV1> | undefined;
 }) {
+  const [params] = useSearchParams();
+  const render = readCortexRender(params);
   const state = envelopeReadState(pending, result, {
     loading: 'reading the code graph overview',
     transport: 'the code graph overview could not be read',
@@ -34,7 +39,9 @@ export function CortexRegister({
       data-graph-register={state.kind === 'ready' ? state.value.domain_state : state.state}
     >
       {state.kind === 'ready' ? (
-        cortexRegister(state.value.payload).map((cell) => <Cell key={cell.label} cell={cell} />)
+        cortexRegister(state.value.payload, render).map((cell) => (
+          <Cell key={cell.label} cell={cell} />
+        ))
       ) : (
         <div className="flex min-w-0 items-center gap-3 px-3 py-2">
           <span className="td-legend shrink-0">graph</span>

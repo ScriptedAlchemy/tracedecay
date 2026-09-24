@@ -12,15 +12,33 @@
  * own `onInspect` / `onSelect`, so the list beside it and the inspector share
  * one identity model with the picture and the picture never owns a selection.
  */
-import type { ComponentProps, ReactNode } from 'react';
+import { useMemo, type ComponentProps, type ReactNode } from 'react';
+import { useSearchParams } from 'react-router';
 
-import type { GraphSubgraphPayloadV1 } from '../../contracts/generated.ts';
+import {
+  StructureReadV12Schema as StrataReadSchema,
+  type GraphSubgraphPayloadV1,
+  type StrataMeasurementV1,
+} from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { useStructure } from '../../data/query/structure.ts';
 import { CenteredState, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { cn } from '../../ui/cn';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
+import { CortexSceneCanvas } from './CortexSceneCanvas.tsx';
 import { kindLegend, relationLegend, type LegendEntry } from './cortex.ts';
+import { luminousPainter } from './cortexLuminous.ts';
+import { platePainter } from './cortexPlate.ts';
+import { reliefPainter } from './cortexReliefField.ts';
+import {
+  kindColorAt,
+  kindStyle,
+  readCortexRender,
+  sceneFromSlice,
+  type CortexRender,
+  type KindShape,
+} from './cortexScene.ts';
 import { describeSubgraph } from './hubs.ts';
 
 /** The most kinds a legend prints before folding the rest into one line. */
@@ -51,6 +69,8 @@ export function CortexField({
   totalNodes: number | null;
   seedLabel: string | null;
 }) {
+  const [params] = useSearchParams();
+  const render = readCortexRender(params);
   const state = envelopeReadState(pending, result, {
     loading: 'reading the graph slice',
     transport: 'the graph slice could not be read',
@@ -84,6 +104,23 @@ export function CortexField({
   const caption = describeSubgraph(payload, totalNodes, seedLabel);
   const kinds = kindLegend(payload.nodes);
   const relations = relationLegend(payload.edges);
+  if (render !== 'current') {
+    return (
+      <CortexCanvasField
+        render={render}
+        payload={payload}
+        caption={caption}
+        kinds={kinds}
+        relations={relations}
+        selectedId={selectedId}
+        inspectedId={inspectedId}
+        onSelect={onSelect}
+        onInspect={onInspect}
+        activation={activation}
+        ariaLabel={fieldDescription(payload, caption?.scale ?? null, kinds, seedLabel)}
+      />
+    );
+  }
   return (
     <div className="flex min-h-0 flex-1 flex-col p-3" data-cortex-field="ready">
       <GraphCanvas
@@ -149,6 +186,232 @@ export function CortexField({
   );
 }
 
+type CanvasRender = Exclude<CortexRender, 'current'>;
+
+/** What each canvas renderer's marks measure, printed beside the field. */
+const RENDER_READINGS: Record<CanvasRender, readonly (readonly [string, string])[]> = {
+  relief: [
+    ['size', 'degree · area ∝ in + out'],
+    ['hue + shape', 'kind'],
+    ['relief', 'drawn relation endpoints'],
+    ['hull', 'directory of the file'],
+    ['bundle', 'relations across directories'],
+  ],
+  luminous: [
+    ['size', 'degree'],
+    ['brightness', 'degree'],
+    ['hue', 'kind'],
+    ['line', 'relation · overlap adds light'],
+    ['labels', 'six highest degree'],
+  ],
+  plate: [
+    ['band', 'dependency depth'],
+    ['column', 'directory of the file'],
+    ['station', 'symbol · size degree'],
+    ['line', 'routed dependency'],
+    ['error hue', 'cycle or climb'],
+  ],
+};
+
+/** The canvas renderers under comparison; `?render=` selects one. */
+function CortexCanvasField({
+  render,
+  payload,
+  caption,
+  kinds,
+  relations,
+  selectedId,
+  inspectedId,
+  onSelect,
+  onInspect,
+  activation,
+  ariaLabel,
+}: {
+  render: CanvasRender;
+  payload: GraphSubgraphPayloadV1;
+  caption: ReturnType<typeof describeSubgraph>;
+  kinds: readonly LegendEntry[];
+  relations: readonly LegendEntry[];
+  selectedId: string | null;
+  inspectedId: string | null;
+  onSelect: (id: string | null) => void;
+  onInspect: (id: string | null) => void;
+  activation: ComponentProps<typeof GraphCanvas>['activation'];
+  ariaLabel: string;
+}) {
+  const scene = useMemo(() => sceneFromSlice(payload.nodes, payload.edges), [payload]);
+  const strata = useStructure<StrataMeasurementV1>(
+    ['graph', 'strata'],
+    '/api/plugins/graph/strata',
+    StrataReadSchema,
+    { enabled: render === 'plate' },
+  );
+  const strataInput = strata.isPending ? 'pending' : strata.data;
+  const plate = useMemo(() => platePainter(strataInput), [strataInput]);
+  const shared = {
+    scene,
+    selectedId,
+    inspectedId,
+    onSelect,
+    onInspect,
+    activation,
+    ariaLabel,
+  };
+  const slice = caption ? (
+    <>
+      <span className="td-value text-2xs text-text-primary">{caption.scale}</span>
+      {caption.capped ? (
+        <span className="td-legend text-state-partial">capped at the limit · more exists</span>
+      ) : null}
+      <span className="td-legend normal-case tracking-normal text-text-muted">
+        {payload.mode === 'seeded' ? 'seeded neighbourhood' : 'busiest connected region'}
+      </span>
+      {scene.unknownDegree > 0 ? (
+        <span className="td-legend normal-case tracking-normal text-state-unknown">
+          degree absent for {scene.unknownDegree} · dashed, not zero
+        </span>
+      ) : null}
+    </>
+  ) : null;
+  // One engraved strip under the field: what each mark measures, the
+  // selection vocabulary, and the relation kinds with their line styles.
+  const reading = (
+    <div
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 border-y border-edge-subtle/70 py-1 text-3xs"
+      aria-label="Field reading"
+    >
+      {RENDER_READINGS[render].map(([term, value]) => (
+        <span key={term} className="inline-flex items-baseline gap-1.5">
+          <span className="td-legend">{term}</span>
+          <span className="td-value text-text-secondary">{value}</span>
+        </span>
+      ))}
+      <StateKey />
+      {relations.length > 0 ? (
+        <LegendList entries={relations} unit="edges" swatch={render === 'luminous' ? 'line' : 'styled'} inline />
+      ) : null}
+    </div>
+  );
+  if (render === 'plate') {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-1.5 p-3" data-cortex-field="ready">
+        <CortexSceneCanvas {...shared} painter={plate} />
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-3xs">
+          {slice ? <span className="inline-flex flex-wrap items-baseline gap-x-2">{slice}</span> : null}
+          <KindShapeList entries={kinds} inline />
+        </div>
+        {reading}
+      </div>
+    );
+  }
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-1.5 p-3" data-cortex-field="ready">
+      <CortexSceneCanvas
+        {...shared}
+        painter={render === 'relief' ? reliefPainter : luminousPainter}
+        overlay={
+          <>
+            {slice ? (
+              <Hud className="left-3 top-3 max-w-[60%]" label="slice">
+                {slice}
+              </Hud>
+            ) : null}
+            <Hud className="bottom-3 left-3" label="symbol kind">
+              {render === 'luminous' ? (
+                <LegendList entries={kinds} unit="drawn" swatch="kind" />
+              ) : (
+                <KindShapeList entries={kinds} />
+              )}
+            </Hud>
+          </>
+        }
+      />
+      {reading}
+    </div>
+  );
+}
+
+/** Selection vocabulary, identical across the canvas renderers. */
+function StateKey() {
+  return (
+    <ul className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-3xs text-text-secondary">
+      <li className="flex items-center gap-1.5">
+        <svg aria-hidden width="14" height="10" viewBox="0 0 14 10" className="shrink-0">
+          <rect x="0" y="1" width="2" height="8" className="fill-accent" />
+          <circle cx="9" cy="5" r="3.5" fill="none" strokeWidth="1.5" className="stroke-accent" />
+        </svg>
+        pinned
+      </li>
+      <li className="flex items-center gap-1.5">
+        <svg aria-hidden width="14" height="10" viewBox="0 0 14 10" className="shrink-0">
+          <circle cx="9" cy="5" r="3.5" fill="none" strokeWidth="1" className="stroke-text-primary" />
+        </svg>
+        hover or focus · inspects only
+      </li>
+      <li className="flex items-center gap-1.5">
+        <svg aria-hidden width="14" height="10" viewBox="0 0 14 10" className="shrink-0">
+          <circle cx="9" cy="5" r="4.5" fill="none" strokeWidth="0.8" strokeDasharray="0" className="stroke-accent opacity-60" />
+        </svg>
+        search hit · decays
+      </li>
+    </ul>
+  );
+}
+
+function ShapeSwatch({ shape, kind }: { shape: KindShape; kind: string }) {
+  const color = kindColorAt(kind, 0.76);
+  return (
+    <svg aria-hidden width="10" height="10" viewBox="0 0 10 10" className="shrink-0">
+      {shape === 'square' ? (
+        <rect x="1.5" y="1.5" width="7" height="7" fill={color} />
+      ) : shape === 'diamond' ? (
+        <path d="M5 0.5 L9.5 5 L5 9.5 L0.5 5 Z" fill={color} />
+      ) : shape === 'ring' ? (
+        <circle cx="5" cy="5" r="3.3" fill="none" stroke={color} strokeWidth="1.6" />
+      ) : (
+        <circle cx="5" cy="5" r="3.8" fill={color} />
+      )}
+    </svg>
+  );
+}
+
+function KindShapeList({
+  entries,
+  inline = false,
+}: {
+  entries: readonly LegendEntry[];
+  inline?: boolean;
+}) {
+  return (
+    <ul
+      className={cn('text-3xs', inline ? 'flex flex-wrap gap-x-3 gap-y-0.5' : 'flex flex-col gap-0.5')}
+      aria-label="drawn by kind"
+    >
+      {entries.slice(0, inline ? entries.length : LEGEND_ROWS).map((entry) => (
+        <li key={entry.kind} className="flex items-center gap-1.5">
+          <ShapeSwatch shape={kindStyle(entry.kind).shape} kind={entry.kind} />
+          <span className="td-value min-w-0 flex-1 truncate text-text-secondary">{entry.kind}</span>
+          <span className="td-value shrink-0 text-text-muted" data-cell="numeric">
+            {entry.count.toLocaleString()}
+          </span>
+        </li>
+      ))}
+      {!inline && entries.length > LEGEND_ROWS ? (
+        <li className="text-text-muted">
+          + {entries.length - LEGEND_ROWS} more ·{' '}
+          {entries
+            .slice(LEGEND_ROWS)
+            .reduce((sum, entry) => sum + entry.count, 0)
+            .toLocaleString()}{' '}
+          drawn
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
+const RELATION_DASH: Record<string, string> = { references: '3 2', contains: '1 2' };
+
 /** One HUD plate on the field: bracketed, translucent, pointer-transparent. */
 function Hud({
   label,
@@ -182,16 +445,21 @@ function LegendList({
   entries,
   unit,
   swatch = 'disc',
+  inline = false,
 }: {
   entries: readonly LegendEntry[];
   unit: string;
-  swatch?: 'disc' | 'line';
+  swatch?: 'disc' | 'line' | 'kind' | 'styled';
+  inline?: boolean;
 }) {
   const shown = entries.slice(0, LEGEND_ROWS);
   const folded = entries.slice(LEGEND_ROWS);
   const foldedCount = folded.reduce((sum, entry) => sum + entry.count, 0);
   return (
-    <ul className="flex flex-col gap-0.5 text-3xs" aria-label={`${unit} by kind`}>
+    <ul
+      className={cn('text-3xs', inline ? 'flex flex-wrap gap-x-3 gap-y-0.5' : 'flex flex-col gap-0.5')}
+      aria-label={`${unit} by kind`}
+    >
       {shown.map((entry) => (
         <li key={entry.kind} className="flex items-center gap-1.5">
           {swatch === 'disc' ? (
@@ -200,6 +468,24 @@ function LegendList({
               className="size-1.5 shrink-0 rounded-full bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
               style={kindColorVars(entry.kind)}
             />
+          ) : swatch === 'kind' ? (
+            <span
+              aria-hidden
+              className="size-1.5 shrink-0 rounded-full"
+              style={{ background: kindColorAt(entry.kind, 0.8) }}
+            />
+          ) : swatch === 'styled' ? (
+            <svg aria-hidden width="12" height="4" viewBox="0 0 12 4" className="shrink-0">
+              <line
+                x1="0"
+                y1="2"
+                x2="12"
+                y2="2"
+                strokeWidth="1"
+                className="stroke-edge-strong"
+                strokeDasharray={RELATION_DASH[entry.kind]}
+              />
+            </svg>
           ) : (
             <span aria-hidden className="h-px w-3 shrink-0 bg-edge-strong" />
           )}
