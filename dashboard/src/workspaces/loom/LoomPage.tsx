@@ -607,7 +607,7 @@ function FieldControls({
   const { counts } = model;
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border border-edge-subtle px-2 py-1 text-3xs">
-      <div className="flex items-center gap-2" role="group" aria-label="Loaded tail">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1" role="group" aria-label="Loaded tail">
         {following ? (
           <span className="border border-accent/40 px-1.5 py-0.5 td-legend text-accent" data-follow="following">
             following loaded tail
@@ -622,9 +622,9 @@ function FieldControls({
             RETURN TO LOADED TAIL
           </button>
         )}
-        <span className="text-text-muted">NOW = newest record in this loaded page · not a live stream</span>
+        <span className="text-text-muted max-sm:basis-full">NOW = newest record in this loaded page · not a live stream</span>
       </div>
-      <div className="flex items-center gap-1" role="group" aria-label="Semantic zoom">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1" role="group" aria-label="Semantic zoom">
         <span className="td-legend">zoom</span>
         {(['workstream', 'agent'] as const).map((level) => (
           <button
@@ -634,7 +634,7 @@ function FieldControls({
             disabled={selected}
             onClick={() => onZoom(level)}
             className={cn(
-              'td-hit border px-1.5 td-legend',
+              'td-hit border px-2 td-legend',
               zoom === level ? 'border-accent/60 text-accent' : 'border-edge-subtle text-text-secondary',
               selected && 'text-text-muted',
             )}
@@ -642,7 +642,7 @@ function FieldControls({
             {level}
           </button>
         ))}
-        <span className="text-text-muted">{selected ? 'event · selected session expanded, others compressed' : zoom === 'workstream' ? 'bundles where the work first fans out' : 'one lane per session'}</span>
+        <span className="text-text-muted max-sm:basis-full">{selected ? 'event · selected session expanded, others compressed' : zoom === 'workstream' ? 'bundles where the work first fans out' : 'one lane per session'}</span>
       </div>
       <fieldset className="flex flex-wrap items-center gap-1" aria-label="Event filters">
         <legend className="sr-only">Event filters</legend>
