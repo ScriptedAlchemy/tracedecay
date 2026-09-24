@@ -32,6 +32,7 @@ pub mod execution_topology_metrics;
 pub mod external_source;
 pub mod feedback;
 pub mod git;
+pub mod graph_tool;
 pub mod handlers;
 pub mod handoff;
 pub mod handoff_catalog;

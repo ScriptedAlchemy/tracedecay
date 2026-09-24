@@ -100,7 +100,8 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile
         | DaemonInvocationOperation::SourceEdit
         | DaemonInvocationOperation::SourceEditReconcile
-        | DaemonInvocationOperation::SourceEditRollback => FeedbackOperationV1::FeedbackCycle,
+        | DaemonInvocationOperation::SourceEditRollback
+        | DaemonInvocationOperation::GraphTool => FeedbackOperationV1::FeedbackCycle,
     }
 }
 
@@ -126,6 +127,7 @@ pub(super) fn invocation_response_outcome(
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
         | DaemonInvocationOutcome::RetainedApplication { .. }
+        | DaemonInvocationOutcome::GraphTool { .. }
         | DaemonInvocationOutcome::GitHubStackSignalExpand { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetRead { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { .. }

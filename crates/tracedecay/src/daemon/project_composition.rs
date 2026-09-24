@@ -1022,15 +1022,23 @@ impl ProjectOpenInputs<'_> {
                 .await?,
             )
         };
-        // The source-edit owner is the core's only runtime component, so its
-        // registration is what creates the registry slot this publication
-        // attempt fences. A read-only database registers none.
+        // Graph reads are served from the core onward, read-only or not; the
+        // full server re-registers as their owner once it is swapped in.
+        resolved
+            .register_graph_tool_owner(
+                self.canonical_project_path,
+                core.ports.code_index.scope.clone(),
+            )
+            .await?;
+        // The source-edit and graph-tool owners are the core's runtime
+        // components, so their registration creates the registry slot this
+        // publication attempt fences.
         let publication_attempt = self
             .invocation
             .service
             .project_runtimes
             .begin_publication(self.canonical_project_path);
-        if publication_attempt.is_none() && core_source_edit_mutation.is_some() {
+        if publication_attempt.is_none() {
             return Err(TraceDecayError::Config {
                 message: "project runtime disappeared before its publication began".to_owned(),
             });
@@ -1409,6 +1417,12 @@ impl ProjectOpenInputs<'_> {
     ) -> Result<()> {
         let full_setup_started = Instant::now();
         project_open_cancellation_checkpoint(self.cancellation)?;
+        full_server
+            .register_graph_tool_owner(
+                self.canonical_project_path,
+                core.ports.code_index.scope.clone(),
+            )
+            .await?;
         // The shared invocation registry admits one source-edit owner per
         // project root. Core publication already registered it; the full
         // upgrade reuses that owner and marks its mutation gate ready after

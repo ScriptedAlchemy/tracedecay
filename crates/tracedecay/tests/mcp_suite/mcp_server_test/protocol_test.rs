@@ -189,6 +189,7 @@ async fn test_tools_list() {
                 "format": {
                     "type": "string",
                     "enum": ["markdown", "json"],
+                    "default": "markdown",
                     "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
                 },
                 "project_selector": {

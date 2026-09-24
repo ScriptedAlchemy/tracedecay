@@ -421,6 +421,7 @@ where
                             request_id,
                             scope,
                             outcome,
+                            touched_files: Vec::new(),
                         }),
                     )
                     .into_http_response();

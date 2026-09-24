@@ -213,6 +213,7 @@ where
         request_id,
         scope,
         outcome,
+        touched_files: Vec::new(),
     };
     let payload = json!({
         "binding_id": binding_id(operation)?,

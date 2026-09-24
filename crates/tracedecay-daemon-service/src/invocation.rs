@@ -187,6 +187,7 @@ mod retained;
 mod source_edit;
 #[cfg(test)]
 mod tests;
+mod graph_tool;
 mod types;
 mod work;
 mod work_attempt_exec;
@@ -215,6 +216,11 @@ use primitive::*;
 use retained::*;
 use source_edit::{
     execute_source_edit, execute_source_edit_reconcile, execute_source_edit_rollback,
+};
+use graph_tool::execute_graph_tool;
+pub use graph_tool::{
+    DaemonGraphToolOwnerRegistrationError, GraphToolFuture, GraphToolInvocationV1,
+    ProjectGraphToolPortV1, RegisteredGraphToolOwnerV1,
 };
 use tracedecay_contracts::now_micros;
 use types::*;

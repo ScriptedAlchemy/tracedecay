@@ -719,17 +719,7 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
 
     assert_eq!(
         compatibility_operations,
-        [
-            "context",
-            "impact",
-            "node",
-            "port_order",
-            "port_status",
-            "redundancy",
-            "rename_preview",
-            "similar",
-            "todos",
-        ]
+        ["context"]
         .into_iter()
         .map(str::to_owned)
         .collect()

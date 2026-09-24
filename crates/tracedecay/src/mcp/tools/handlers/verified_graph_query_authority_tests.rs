@@ -134,15 +134,7 @@ async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query
     ];
 
     for (tool_name, args, expected_reason, expected_detail) in cases {
-        let outcome = handle_tool_call_with_registry_options(
-            &cg,
-            tool_name,
-            args,
-            None,
-            None,
-            options.clone(),
-        )
-        .await;
+        let outcome = dispatch_on_graph_authority(&cg, tool_name, args, options.clone()).await;
         let error = outcome.expect_err(tool_name);
         let (reason_code, retryable, detail) = error
             .project_route_context()
@@ -152,6 +144,29 @@ async fn clone_family_tools_refuse_absent_executors_without_awaiting_graph_query
         assert_eq!(detail, expected_detail, "{tool_name}");
     }
     cg.close();
+}
+
+/// Graph-tool operations execute on the project's graph-tool owner, which
+/// computes them under the owning server's admitted authorities; every other
+/// tool still dispatches through the MCP handler table.
+async fn dispatch_on_graph_authority(
+    cg: &TraceDecay,
+    tool_name: &str,
+    args: serde_json::Value,
+    options: ToolCallRegistryOptions<'_>,
+) -> Result<()> {
+    match ApplicationSurfaceOperation::from_tool_name(tool_name)
+        .filter(|operation| operation.is_graph_tool())
+    {
+        Some(operation) => {
+            super::compute_graph_tool_for_owner(cg, operation, args, None, options)
+                .await
+                .map(drop)
+        }
+        None => handle_tool_call_with_registry_options(cg, tool_name, args, None, None, options)
+            .await
+            .map(drop),
+    }
 }
 
 fn lower_level_ports_without_query(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {
@@ -226,12 +241,10 @@ async fn absent_query_port_fails_closed_for_every_awaiting_graph_handler() {
     let options = lower_level_ports_without_query(&cg);
     let mut seen = 0usize;
     for tool_name in graph_handlers_that_await_query() {
-        let outcome = handle_tool_call_with_registry_options(
+        let outcome = dispatch_on_graph_authority(
             &cg,
             tool_name,
             query_authority_probe_args(tool_name),
-            None,
-            None,
             options.clone(),
         )
         .await;

@@ -319,6 +319,7 @@ pub async fn execute_profile_retained_application(
                 request_id,
                 scope,
                 outcome,
+                touched_files: Vec::new(),
             }),
             Err(problem) => Err(application_problem_envelope(
                 operation.result_contract().clone(),

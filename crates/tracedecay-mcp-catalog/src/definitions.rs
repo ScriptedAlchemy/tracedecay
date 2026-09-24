@@ -827,6 +827,7 @@ fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCata
             json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
+                "default": "markdown",
                 "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
         );

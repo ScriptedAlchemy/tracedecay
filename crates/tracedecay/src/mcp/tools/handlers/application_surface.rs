@@ -482,6 +482,142 @@ pub async fn execute_retained_surface_tool(
     })
 }
 
+/// Invoke one graph-tool operation through the project's graph-tool owner and
+/// return its typed result. A refusal comes back as the handler's own error
+/// kind, so every surface reports the failure it always reported.
+#[allow(clippy::too_many_arguments)]
+#[hotpath::measure(future = true, label = "mcp.graph_tool.total")]
+pub async fn execute_graph_tool_surface(
+    surface: tracedecay_tool_catalog::BindingSurface,
+    operation: ApplicationSurfaceOperation,
+    args: Value,
+    executor: Option<&dyn DaemonInvocationExecutor>,
+    protocol_request_id: Option<RequestId>,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
+) -> Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1> {
+    let request = parse_application_surface_request(operation, args).map_err(|error| {
+        TraceDecayError::Config {
+            message: match error {
+                tracedecay_daemon_protocol::ApplicationSurfaceAdapterError::InvalidSurfaceRequest {
+                    detail,
+                } => detail,
+                error => error.to_string(),
+            },
+        }
+    })?;
+    let request_id = match protocol_request_id {
+        Some(request_id) => request_id,
+        None => self::request_id()?,
+    };
+    let (deadline, cancellation) =
+        complete_protocol_controls(operation, &request_id, deadline, cancellation)?.ok_or_else(
+            || {
+                TraceDecayError::project_route(
+                    "application_surface_controls_unavailable",
+                    true,
+                    "graph-tool protocol controls are unavailable",
+                )
+            },
+        )?;
+    let dispatched = tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
+        surface,
+        operation,
+        request_id,
+        request,
+        tracedecay_contracts::PageRequest::first(10).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?,
+        Some(deadline),
+        cancellation,
+        RequestedOutputFormat::Json,
+    )
+    .map_err(application_surface_dispatch_error)?;
+    let result = tracedecay_daemon_service::application_surface::execute_application_surface(
+        operation, dispatched, executor,
+    )
+    .await
+    .map_err(application_surface_dispatch_error)?
+    .result;
+    let envelope = result.map_err(|problem| graph_tool_problem_error(&problem.problem))?;
+    let ApplicationOutcome::Result(value) = envelope.outcome else {
+        return Err(TraceDecayError::project_route(
+            "application_surface_invalid_response",
+            false,
+            format!("{} returned a non-result outcome", operation.mcp_tool_name()),
+        ));
+    };
+    let result = tracedecay_contracts::graph_tool::GraphToolResultV1::from_result_value(
+        operation, value,
+    )
+    .map_err(|error| {
+        TraceDecayError::project_route(
+            "application_surface_invalid_response",
+            false,
+            format!("{} returned an invalid result: {error}", operation.mcp_tool_name()),
+        )
+    })?;
+    Ok(tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
+        result,
+        touched_files: envelope.touched_files,
+    })
+}
+
+/// The graph-tool owner reports handler argument errors as invalid requests
+/// and every other refusal under its own reason code.
+fn graph_tool_problem_error(
+    problem: &tracedecay_contracts::ApplicationProblemRecord,
+) -> TraceDecayError {
+    let message = problem
+        .diagnostic
+        .as_ref()
+        .map_or_else(|| problem.message.clone(), |diagnostic| diagnostic.message.clone());
+    match problem.kind {
+        ApplicationProblemKind::InvalidRequest => TraceDecayError::Config { message },
+        _ => TraceDecayError::project_route(problem.code.clone(), problem.retryable, message),
+    }
+}
+
+/// The owner-side counterpart of [`graph_tool_problem_error`].
+pub(crate) fn graph_tool_error_problem(
+    error: &TraceDecayError,
+) -> tracedecay_contracts::ApplicationProblem {
+    match error {
+        TraceDecayError::Config { message } => {
+            tracedecay_contracts::ApplicationProblem::invalid_request_without_action(
+                "application.surface.invalid_request",
+                message.clone(),
+            )
+        }
+        TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable,
+            detail,
+        } => graph_tool_unavailable(reason_code, *retryable, detail),
+        error => graph_tool_unavailable("graph_tool.failed", false, &error.to_string()),
+    }
+}
+
+fn graph_tool_unavailable(
+    code: &str,
+    retryable: bool,
+    message: &str,
+) -> tracedecay_contracts::ApplicationProblem {
+    let diagnostic = tracedecay_contracts::SafeDiagnostic {
+        code: code.to_owned(),
+        message: message.to_owned(),
+    };
+    if retryable {
+        return tracedecay_contracts::ApplicationProblem::unavailable(diagnostic);
+    }
+    tracedecay_contracts::ApplicationProblem::Unavailable {
+        classification: tracedecay_contracts::ApplicationUnavailableClassV1::Authority,
+        diagnostic,
+        retry: tracedecay_contracts::RetryDirective::Never,
+        legal_actions: Vec::new(),
+    }
+}
+
 pub(super) fn render_retained_result(
     project_root: Option<&std::path::Path>,
     operation: RetainedSurfaceOperation,

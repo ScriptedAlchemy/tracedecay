@@ -2,8 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ToolResult;
-use crate::{decode_primitive_request, generic_tool_result, unique_file_paths};
+use crate::handlers::graph::graph_tool_completion;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
+use crate::{decode_primitive_request, unique_file_paths};
 use serde_json::Value;
 use tracedecay_contracts::retrieval::{
     PortMatchedSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1, PortTargetOnlySymbolV1,
@@ -39,7 +40,7 @@ fn kind_compat_group(kind: &str) -> u8 {
     }
 }
 
-/// Composite match key used by `handle_port_status`.
+/// Composite match key used by `compute_port_status`.
 ///
 /// Combines the lowercased name, an optional parent qualifier (for methods,
 /// fields, and variants), and a kind compatibility group, so siblings whose
@@ -85,7 +86,10 @@ fn port_parent_qualifier(kind: &str, qualified_name: &str) -> Option<String> {
 }
 
 #[hotpath::measure(label = "mcp.info.port_status.total")]
-pub async fn handle_port_status(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
+pub async fn compute_port_status(
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
     let request: PortStatusSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_port_status")?;
     let kind_strs = request.kinds.as_ref().map_or_else(
@@ -232,12 +236,8 @@ pub async fn handle_port_status(graph: &VerifiedGraphQuery, args: Value) -> Resu
         matched_symbols,
         target_only_symbols: target_only,
     };
-    let output = serde_json::to_value(result)?;
-
-    Ok(generic_tool_result(
-        Some(graph.project_root()?),
-        &args,
-        &output,
+    Ok(graph_tool_completion(
+        GraphToolResultV1::PortStatus(result),
         touched_files,
     ))
 }

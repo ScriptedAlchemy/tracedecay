@@ -426,6 +426,7 @@ pub enum DaemonInvocationOperation {
     SourceEdit,
     SourceEditReconcile,
     SourceEditRollback,
+    GraphTool,
 }
 
 impl DaemonInvocationOperation {
@@ -491,6 +492,7 @@ impl DaemonInvocationOperation {
             Self::SourceEdit => "source_edit",
             Self::SourceEditReconcile => "source_edit_reconcile",
             Self::SourceEditRollback => "source_edit_rollback",
+            Self::GraphTool => "graph_tool",
         }
     }
 }
@@ -761,9 +763,39 @@ pub enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    GraphTool {
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
 }
 
 impl DaemonInvocationRequest {
+    pub fn graph_tool(
+        request_id: impl Into<String>,
+        surface_operation: ApplicationSurfaceOperation,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::GraphTool {
+                surface_operation,
+                arguments,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     /// One typed constructor for the whole Plan 36 native-integration journey.
     ///
     /// The transport carries exact typed identity only; it contains no Git
@@ -938,6 +970,16 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::SourceEditReconcile
             | ApplicationSurfaceOperation::SourceEditRollback => {
                 unreachable!("source-edit operations use their typed constructors")
+            }
+            ApplicationSurfaceOperation::Node
+            | ApplicationSurfaceOperation::Impact
+            | ApplicationSurfaceOperation::Similar
+            | ApplicationSurfaceOperation::Redundancy
+            | ApplicationSurfaceOperation::RenamePreview
+            | ApplicationSurfaceOperation::PortStatus
+            | ApplicationSurfaceOperation::PortOrder
+            | ApplicationSurfaceOperation::Todos => {
+                unreachable!("graph-tool operations use their typed constructor")
             }
             ApplicationSurfaceOperation::FactStoreCurate
             | ApplicationSurfaceOperation::FactStoreAdd
@@ -1787,6 +1829,7 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::SourceEditRollback { .. } => {
                 DaemonInvocationOperation::SourceEditRollback
             }
+            DaemonInvocationPayload::GraphTool { .. } => DaemonInvocationOperation::GraphTool,
         }
     }
 
@@ -1847,6 +1890,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::SourceEdit
                 | DaemonInvocationOperation::SourceEditReconcile
                 | DaemonInvocationOperation::SourceEditRollback
+                | DaemonInvocationOperation::GraphTool
         )
     }
 
@@ -2077,6 +2121,19 @@ impl DaemonInvocationRequest {
                 ..
             } => {
                 if !valid_observation_window(observed_at, deadline, cancellation) {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::GraphTool {
+                surface_operation,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if !valid_observation_window(observed_at, deadline, cancellation)
+                    || !surface_operation.is_graph_tool()
+                {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
@@ -2802,6 +2859,10 @@ pub enum DaemonInvocationOutcome {
     SourceEdit {
         scope: ResolvedScope,
         result: tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+    },
+    GraphTool {
+        scope: ResolvedScope,
+        completion: tracedecay_contracts::graph_tool::GraphToolCompletionV1,
     },
     Problem {
         problem: DaemonInvocationProblem,

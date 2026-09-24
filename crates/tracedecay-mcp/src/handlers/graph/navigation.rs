@@ -1,9 +1,10 @@
 //! Dependency-clean graph-navigation handlers over [`VerifiedGraphQuery`].
 
 use serde_json::{Value, json};
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ImpactNodeV1, ImpactResultV1, NodeDepthSurfaceRequestV1, NodeDetailsV1, NodeExpansionCostV1,
-    NodeSurfaceRequestV1,
+    NodeResultV1, NodeSurfaceRequestV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -12,13 +13,16 @@ use crate::{ToolResult, decode_primitive_request, generic_tool_result, text_tool
 
 use super::{
     GRAPH_RELATION_READ_LIMIT, cost_to_expand_verified, graph_occurrence_id, graph_symbol_corrupt,
-    graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths, node_not_found,
-    nodes_addressed_by_args, require_positive_depth, required_graph_file_path,
+    graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths, graph_tool_completion,
+    node_not_found_result, nodes_addressed_by_args, require_positive_depth, required_graph_file_path,
     required_graph_metadata, user_line,
 };
 
 #[hotpath::measure(label = "mcp.graph.impact.total")]
-pub async fn handle_impact(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
+pub async fn compute_impact(
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
     let request: NodeDepthSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_impact")?;
     let max_depth = request.max_depth.map_or(3, |value| value.min(10));
     require_positive_depth(max_depth)?;
@@ -56,26 +60,20 @@ pub async fn handle_impact(graph: &VerifiedGraphQuery, args: Value) -> Result<To
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let output = hotpath::measure_block!(
-        "mcp.graph.impact.serialize",
-        serde_json::to_value(ImpactResultV1 {
-            node_count: nodes.len(),
-            complete: impact.complete,
-            unavailable_fields: vec!["edge_count".to_owned()],
-            nodes,
-        })?
-    );
-
-    Ok(generic_tool_result(
-        Some(graph.project_root()?),
-        &args,
-        &output,
+    let result = ImpactResultV1 {
+        node_count: nodes.len(),
+        complete: impact.complete,
+        unavailable_fields: vec!["edge_count".to_owned()],
+        nodes,
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Impact(result),
         touched_files,
     ))
 }
 
 #[hotpath::measure(label = "mcp.graph.node.total")]
-pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<ToolResult> {
+pub async fn compute_node(graph: &VerifiedGraphQuery, args: Value) -> Result<GraphToolCompletionV1> {
     let request: NodeSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_node")?;
     let occurrence = graph_occurrence_id(&request.node_id)?;
     let node = hotpath::measure_block!("mcp.graph.node.graph", graph.symbol_summary(&occurrence)?);
@@ -115,9 +113,7 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
                 unavailable_fields.sort_unstable();
             }
             let line_count = end_line - metadata.start_line + 1;
-            let output = hotpath::measure_block!(
-                "mcp.graph.node.serialize",
-                serde_json::to_value(NodeDetailsV1 {
+            let details = NodeDetailsV1 {
                     id: n.occurrence.as_str().to_owned(),
                     name: metadata.simple_name.clone(),
                     kind: metadata.kind.clone(),
@@ -139,17 +135,19 @@ pub async fn handle_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Tool
                         body: u64::from(line_count) * 20,
                         full_file: file_size_bytes / 4,
                     },
-                    unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
-                })?
-            );
-            Ok(generic_tool_result(
-                Some(graph.project_root()?),
-                &args,
-                &output,
+                unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
+            };
+            Ok(graph_tool_completion(
+                GraphToolResultV1::Node(NodeResultV1::Found(Box::new(details))),
                 touched_files,
             ))
         }
-        None => node_not_found(&request.node_id),
+        None => Ok(graph_tool_completion(
+            GraphToolResultV1::Node(NodeResultV1::NotFound(node_not_found_result(
+                &request.node_id,
+            ))),
+            Vec::new(),
+        )),
     }
 }
 

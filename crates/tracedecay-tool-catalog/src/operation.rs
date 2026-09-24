@@ -169,6 +169,14 @@ application_surface_operations! {
     SourceBody => "source_body";
     SourceOutline => "source_outline";
     ModuleApi => "module_api";
+    Node => "node";
+    Impact => "impact";
+    Similar => "similar";
+    Redundancy => "redundancy";
+    RenamePreview => "rename_preview";
+    PortStatus => "port_status";
+    PortOrder => "port_order";
+    Todos => "todos";
     HealthRead => "health_read";
     HealthDelta => "health_delta";
     StorageStatus => "storage_status";
@@ -233,6 +241,25 @@ application_surface_operations! {
     LcmDescribe => "lcm_describe";
     LcmExpand => "lcm_expand";
     LcmExpandQuery => "lcm_expand_query";
+}
+
+impl ApplicationSurfaceOperation {
+    /// Graph and port reads answered by the project's graph-tool owner with
+    /// their typed catalog result in `ApplicationOutcome::Result`.
+    pub const GRAPH_TOOL_OPERATIONS: [Self; 8] = [
+        Self::Node,
+        Self::Impact,
+        Self::Similar,
+        Self::Redundancy,
+        Self::RenamePreview,
+        Self::PortStatus,
+        Self::PortOrder,
+        Self::Todos,
+    ];
+
+    pub fn is_graph_tool(self) -> bool {
+        Self::GRAPH_TOOL_OPERATIONS.contains(&self)
+    }
 }
 
 #[cfg(test)]

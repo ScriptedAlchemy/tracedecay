@@ -17,6 +17,7 @@ use tracedecay_mcp::handlers::{
     VerifiedGraphOpenFuture, unknown_tool_error, verified_read_operation,
 };
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
+use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
 use tracedecay_mcp::{
     AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
     McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
@@ -374,6 +375,23 @@ fn dispatch_application_surface_tools_inner<'a>(
             )
             .await;
         }
+        if operation.is_graph_tool() {
+            let execution = application_surface::execute_graph_tool_surface(
+                BindingSurface::Mcp,
+                operation,
+                args.clone(),
+                options.application_invocation_executor,
+                options.application_request_id.clone(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await?;
+            return tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+                Some(cg.project_root()),
+                &args,
+                execution,
+            );
+        }
         if tracedecay_daemon_protocol::is_source_edit_operation(operation) {
             return edit::source_edit_tool(
                 Some(cg.project_root()),
@@ -419,6 +437,50 @@ fn dispatch_application_surface_tools_inner<'a>(
             },
         )
         .await
+    })
+}
+
+/// Computes one graph-tool operation for the project's graph-tool owner,
+/// under the same admitted authorities and dispatch ceiling as every other
+/// graph read.
+pub(crate) fn compute_graph_tool_for_owner<'a>(
+    cg: &'a TraceDecay,
+    operation: ApplicationSurfaceOperation,
+    args: Value,
+    scope_prefix: Option<&'a str>,
+    options: ToolCallRegistryOptions<'a>,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<tracedecay_contracts::graph_tool::GraphToolCompletionV1>,
+            > + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let tool_name = operation.mcp_tool_name();
+        let Some(budget) = tool_dispatch_budget(tool_name, options.application_deadline.as_ref())
+        else {
+            return Err(tool_dispatch_deadline_error(
+                tool_name,
+                std::time::Duration::ZERO,
+            ));
+        };
+        let project = admitted_project_authorities(cg, &options)?;
+        let snapshots = AdmittedRequestSnapshotsV1::default();
+        let ctx = admitted_tool_context(&options, &project, &snapshots, None)?;
+        let open = verified_graph_open(&options);
+        let computed = tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
+            &ctx,
+            &open,
+            operation,
+            args,
+            scope_prefix,
+        );
+        match tokio::time::timeout(budget, computed).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+        }
     })
 }
 

@@ -131,6 +131,11 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
     if server.daemon_invocation_service().is_none() {
         return Ok(false);
     }
+    if let Some(scope) = server.admitted_project_scope() {
+        server
+            .register_graph_tool_owner(graph.project_root(), scope)
+            .await?;
+    }
     let Some(code_graph) = server.code_graph_projection_read_port() else {
         // A directly constructed test server carries no production code-graph
         // projection port, so the daemon-owned source-edit authority cannot

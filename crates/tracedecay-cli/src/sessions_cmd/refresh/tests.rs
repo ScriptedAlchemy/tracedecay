@@ -97,6 +97,7 @@ fn effect_reply(operation: RetainedSurfaceOperation, result: RetainedSurfaceResu
         request_id: context.request_id().clone(),
         scope: scope(),
         outcome,
+        touched_files: Vec::new(),
     })
     .unwrap()
 }

@@ -213,6 +213,12 @@ fn run_inner(
                 return dispatch_cli_retained(operation, tool_args, dispatch, raw_json, deadline)
                     .await;
             }
+            if operation.is_graph_tool() {
+                let project_path =
+                    DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path;
+                return dispatch_cli_graph_tool(operation, tool_args, project_path, raw_json, deadline)
+                    .await;
+            }
             if tracedecay_daemon_protocol::is_source_edit_operation(operation) {
                 let project_path =
                     DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path;
@@ -309,6 +315,14 @@ fn run_inner(
             let dispatch =
                 DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
             return dispatch_cli_retained(operation, tool_args, dispatch, raw_json, deadline).await;
+        }
+        if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
+            && operation.is_graph_tool()
+        {
+            let project_path =
+                DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path;
+            return dispatch_cli_graph_tool(operation, tool_args, project_path, raw_json, deadline)
+                .await;
         }
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && tracedecay_daemon_protocol::is_source_edit_operation(operation)
@@ -660,6 +674,62 @@ async fn dispatch_cli_source_edit(
     print_tool_output(&result.value, raw_json);
     tool_result_process_outcome(&result.value, tool_name)
 }
+
+/// Run one graph or port read through its project owner and print the same
+/// tool result its MCP call returns.
+#[hotpath::measure(label = "cli.tool.graph_tool", future = true)]
+async fn dispatch_cli_graph_tool(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    project: Option<PathBuf>,
+    raw_json: bool,
+    deadline: Instant,
+) -> Result<()> {
+    let tool_name = operation.mcp_tool_name();
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate an application surface request id".to_owned(),
+        })?;
+    let handshake =
+        tracedecay::daemon::handshake_for_current_client(project.clone(), None, false, false)?;
+    let client = tracedecay_daemon_identity::invocation_client_for_current(handshake)?;
+    // A cold daemon refuses with the mounting problem while the project open
+    // warms; that refusal precedes admission, so it is re-sent until the CLI
+    // deadline like every other surface.
+    let completion = loop {
+        let (request_deadline, cancellation) = cli_request_controls(&request_id, deadline)?;
+        let outcome = tracedecay::mcp::tools::execute_graph_tool_surface(
+            tracedecay_tool_catalog::BindingSurface::Cli,
+            operation,
+            tool_args.clone(),
+            Some(&client),
+            Some(request_id.clone()),
+            Some(request_deadline),
+            Some(cancellation),
+        )
+        .await;
+        let mounting = outcome.as_ref().err().is_some_and(|error| {
+            error
+                .project_route_context()
+                .is_some_and(|(code, _, _)| code == tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
+        });
+        if !mounting || deadline.saturating_duration_since(Instant::now()) <= GRAPH_TOOL_RESEND_DELAY
+        {
+            break outcome?;
+        }
+        tokio::time::sleep(GRAPH_TOOL_RESEND_DELAY).await;
+    };
+    let mut result = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        project.as_deref(),
+        &tool_args,
+        completion,
+    )?;
+    tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+    print_tool_output(&result.value, raw_json);
+    tool_result_process_outcome(&result.value, tool_name)
+}
+
+const GRAPH_TOOL_RESEND_DELAY: Duration = Duration::from_millis(250);
 
 fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,

@@ -110,6 +110,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 "format": {
                     "type": "string",
                     "enum": ["markdown", "json"],
+                    "default": "markdown",
                     "description": "Optional output format. MCP defaults to compact Markdown; use json for the full compatibility and temporal envelopes."
                 }
             },

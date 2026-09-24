@@ -6,8 +6,7 @@ use tracedecay_domain::errors::Result;
 
 use super::{
     handle_by_qualified_name, handle_context, handle_derives, handle_find_exact_symbol,
-    handle_impact, handle_node, handle_redundancy, handle_rename_preview, handle_search,
-    handle_signature, handle_similar,
+    handle_search, handle_signature,
 };
 use crate::ToolResult;
 use crate::handlers::ast_grep::handle_ast_grep_search;
@@ -67,13 +66,6 @@ pub async fn dispatch_tool(
         }
         "tracedecay_context" => {
             handle_context(ctx, open(read("context")?), args, scope_prefix).await
-        }
-        "tracedecay_impact" => handle_impact(&open(read("impact")?).await?, args).await,
-        "tracedecay_node" => handle_node(&open(read("node")?).await?, args).await,
-        "tracedecay_similar" => handle_similar(ctx, args).await,
-        "tracedecay_redundancy" => handle_redundancy(ctx, args).await,
-        "tracedecay_rename_preview" => {
-            handle_rename_preview(ctx, &open(read("rename_preview")?).await?, args).await
         }
         "tracedecay_find_exact_symbol" => {
             handle_find_exact_symbol(

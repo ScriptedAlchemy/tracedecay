@@ -25,7 +25,15 @@ const PROTECTED_CHANGE_GUIDANCE: &str = "Read the affected setting first through
 
 /// Operations whose shipped MCP definition (input schema and description) is
 /// the handwritten `def_*` in [`super`], not a projection of the catalog.
-const HANDWRITTEN_DEFINITION_OPERATIONS: [ApplicationSurfaceOperation; 37] = [
+const HANDWRITTEN_DEFINITION_OPERATIONS: [ApplicationSurfaceOperation; 45] = [
+    ApplicationSurfaceOperation::Node,
+    ApplicationSurfaceOperation::Impact,
+    ApplicationSurfaceOperation::Similar,
+    ApplicationSurfaceOperation::Redundancy,
+    ApplicationSurfaceOperation::RenamePreview,
+    ApplicationSurfaceOperation::PortStatus,
+    ApplicationSurfaceOperation::PortOrder,
+    ApplicationSurfaceOperation::Todos,
     ApplicationSurfaceOperation::StrReplace,
     ApplicationSurfaceOperation::MultiStrReplace,
     ApplicationSurfaceOperation::InsertAt,

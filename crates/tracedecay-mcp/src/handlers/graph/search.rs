@@ -8,10 +8,12 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
     ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
-    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
+    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
+    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
     RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
     SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
 };
@@ -48,7 +50,7 @@ use super::search_freshness::{
 use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{
     graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
-    line_for_byte_offset, node_not_found as node_not_found_result, required_graph_file_path,
+    line_for_byte_offset, graph_tool_completion, node_not_found_result, required_graph_file_path,
     required_graph_metadata, single_graph_adjacency_batch, user_line,
 };
 use super::{lexical_routing, search_evidence};
@@ -1055,7 +1057,10 @@ pub async fn handle_find_exact_symbol(
 }
 
 #[hotpath::measure(label = "mcp.graph.similar.total")]
-pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
+pub async fn compute_similar(
+    ctx: &McpToolContext<'_>,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
     let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
     let project_id = request.project_id;
     let repository_id = request.repository_id;
@@ -1207,9 +1212,10 @@ pub async fn handle_similar(ctx: &McpToolContext<'_>, args: Value) -> Result<Too
         families,
         coverage,
     };
-    let value =
-        hotpath::measure_block!("mcp.graph.similar.serialize", serde_json::to_value(result)?);
-    Ok(generic_tool_result(ctx, &args, &value, touched_files))
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Similar(result),
+        touched_files,
+    ))
 }
 
 /// The one clone-family unavailable wire shape. `tracedecay_similar` and
@@ -1236,7 +1242,10 @@ fn clone_lane_unavailable_error(
 }
 
 #[hotpath::measure(label = "mcp.graph.redundancy.total")]
-pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<ToolResult> {
+pub async fn compute_redundancy(
+    ctx: &McpToolContext<'_>,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
     let request: RedundancySurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_redundancy")?;
     if request.project_id != ctx.admitted_scope().project_id
@@ -1320,11 +1329,10 @@ pub async fn handle_redundancy(ctx: &McpToolContext<'_>, args: Value) -> Result<
         .collect::<Vec<_>>();
     touched_files.sort();
     touched_files.dedup();
-    let value = hotpath::measure_block!(
-        "mcp.graph.redundancy.serialize",
-        serde_json::to_value(outcome)?
-    );
-    Ok(generic_tool_result(ctx, &args, &value, touched_files))
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Redundancy(outcome),
+        touched_files,
+    ))
 }
 
 fn similar_occurrence(
@@ -1433,11 +1441,11 @@ struct RenameReferenceSiteInput {
 /// that are NOT backed by a graph edge ("text-only matches, review
 /// manually"). Nothing is rewritten.
 #[hotpath::measure(label = "mcp.graph.rename_preview.total")]
-pub async fn handle_rename_preview(
+pub async fn compute_rename_preview(
     ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
-) -> Result<ToolResult> {
+) -> Result<GraphToolCompletionV1> {
     let request: RenamePreviewPrimitiveRequestV1 =
         decode_primitive_request(&args, "tracedecay_rename_preview")?;
 
@@ -1451,7 +1459,12 @@ pub async fn handle_rename_preview(
     let (mut declaration, declaration_line, symbol_name, reference_inputs) =
         hotpath::measure_block!("mcp.graph.rename_preview.graph", {
             let Some(node) = graph.symbol_summary(&occurrence)? else {
-                return node_not_found_result(&request.node_id);
+                return Ok(graph_tool_completion(
+                    GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::NotFound(
+                        node_not_found_result(&request.node_id),
+                    )),
+                    Vec::new(),
+                ));
             };
             let node_metadata = required_graph_metadata(&node)?;
             let node_file = required_graph_file_path(&node)?;
@@ -1583,9 +1596,7 @@ pub async fn handle_rename_preview(
     })??;
     declaration.snippet = decl_snippet;
 
-    let output = hotpath::measure_block!(
-        "mcp.graph.rename_preview.serialize",
-        serde_json::to_value(RenamePreviewPrimitiveResultV1 {
+    let result = RenamePreviewPrimitiveResultV1 {
             read_only: true,
             note: "Preview only. Nothing is edited. 'references' are graph reference sites \
                (the declaration is reported separately in 'node'); 'text_only_matches' are \
@@ -1596,13 +1607,14 @@ pub async fn handle_rename_preview(
             symbol: symbol_name,
             new_name: request.new_name,
             node: declaration,
-            reference_count: references.len(),
-            references,
-            text_only_matches,
-        })?
-    );
-
-    Ok(generic_tool_result(ctx, &args, &output, touched_files))
+        reference_count: references.len(),
+        references,
+        text_only_matches,
+    };
+    Ok(graph_tool_completion(
+        GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::Preview(result)),
+        touched_files,
+    ))
 }
 
 #[cfg(test)]
@@ -1747,7 +1759,7 @@ mod tests {
                 },
             })
             .expect("admitted similar binding");
-            let result = handle_similar(
+            let result = compute_similar(
                 &ctx,
                 json!({
                     "project_id": admitted.project_id,
@@ -1816,7 +1828,7 @@ mod tests {
                 },
             })
             .expect("admitted redundancy binding");
-            let result = handle_redundancy(
+            let result = compute_redundancy(
                 &ctx,
                 json!({
                     "project_id": admitted.project_id,
@@ -1882,7 +1894,7 @@ mod tests {
             },
         })
         .expect("admitted similar-only binding");
-        let redundancy_err = handle_redundancy(
+        let redundancy_err = compute_redundancy(
             &redundancy_ctx,
             json!({
                 "project_id": admitted.project_id,
@@ -1925,7 +1937,7 @@ mod tests {
             },
         })
         .expect("admitted redundancy-only binding");
-        let similar_err = handle_similar(
+        let similar_err = compute_similar(
             &similar_ctx,
             json!({
                 "project_id": admitted.project_id,

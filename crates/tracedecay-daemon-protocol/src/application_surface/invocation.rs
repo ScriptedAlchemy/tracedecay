@@ -98,6 +98,7 @@ impl ApplicationSurfaceRequest {
             Self::SourceEditReconcile(request) => body(request),
             Self::SourceEditRollback(request) => body(request),
             Self::Retained(request) => body(request),
+            Self::GraphTool(arguments) => Ok(Value::Object(arguments)),
         }
     }
 }
@@ -350,6 +351,16 @@ fn daemon_invocation_request(
                 cancellation,
             )
         }
+        ApplicationSurfaceRequest::GraphTool(arguments) => {
+            DaemonInvocationRequest::graph_tool(
+                request_id,
+                operation,
+                arguments,
+                observed_at,
+                deadline,
+                cancellation,
+            )
+        }
     }
 }
 
@@ -511,6 +522,7 @@ pub fn application_response(
             request_id,
             scope,
             outcome,
+            touched_files: Vec::new(),
         },
         DaemonInvocationOutcome::SourceEdit { scope, result } => ApplicationEnvelope {
             contract: result_contract,
@@ -519,6 +531,19 @@ pub fn application_response(
             outcome: ApplicationOutcome::Result(
                 serde_json::to_value(result).map_err(|_| InvocationError::Unavailable)?,
             ),
+            touched_files: Vec::new(),
+        },
+        DaemonInvocationOutcome::GraphTool { scope, completion } => ApplicationEnvelope {
+            contract: result_contract,
+            request_id,
+            scope,
+            outcome: ApplicationOutcome::Result(
+                completion
+                    .result
+                    .result_value()
+                    .map_err(|_| InvocationError::Unavailable)?,
+            ),
+            touched_files: completion.touched_files,
         },
         // The daemon already resolved this invocation to a typed problem
         // (e.g. `configuration.conflict`); carry it whole so surface adapters
@@ -573,6 +598,7 @@ fn retained_application_response(
                 request_id,
                 scope,
                 outcome: application_outcome_value(outcome).map_err(|_| invalid())?,
+                touched_files: Vec::new(),
             }))
         }
         DaemonInvocationOutcome::RetainedApplicationProblem { scope, problem }
@@ -774,6 +800,14 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::SourceBody
         | ApplicationSurfaceOperation::SourceOutline
         | ApplicationSurfaceOperation::ModuleApi
+        | ApplicationSurfaceOperation::Node
+        | ApplicationSurfaceOperation::Impact
+        | ApplicationSurfaceOperation::Similar
+        | ApplicationSurfaceOperation::Redundancy
+        | ApplicationSurfaceOperation::RenamePreview
+        | ApplicationSurfaceOperation::PortStatus
+        | ApplicationSurfaceOperation::PortOrder
+        | ApplicationSurfaceOperation::Todos
         | ApplicationSurfaceOperation::HealthRead
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus

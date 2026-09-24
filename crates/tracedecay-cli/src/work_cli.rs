@@ -419,6 +419,7 @@ pub async fn invoke_work_cli_with_delivery(
                 request_id: request_id.clone(),
                 scope,
                 outcome: erase_work_outcome(outcome)?,
+                touched_files: Vec::new(),
             })
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => Err(

@@ -16,9 +16,11 @@ pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, session_refresh_profile_scope_requested,
 };
 pub use handlers::{
-    RetainedSurfaceExecution, ToolCallRegistryOptions, execute_retained_surface_tool,
-    handle_tool_call, handle_tool_call_with_registry_options, render_retained_execution,
+    RetainedSurfaceExecution, ToolCallRegistryOptions, execute_graph_tool_surface,
+    execute_retained_surface_tool, handle_tool_call, handle_tool_call_with_registry_options,
+    render_retained_execution,
 };
+pub(crate) use handlers::{compute_graph_tool_for_owner, graph_tool_error_problem};
 
 /// Explicit owner for advertised tools awaiting typed application contracts.
 ///

@@ -219,6 +219,9 @@ pub enum ApplicationSurfaceRequest {
     SourceEditReconcile(SourceEditReconciliationInvocationV1),
     SourceEditRollback(SourceEditRollbackInvocationV1),
     Retained(RetainedSurfaceRequestV1),
+    /// A graph or port read's argument object. Its owning handler decodes the
+    /// typed request so argument diagnostics stay the handler's own.
+    GraphTool(serde_json::Map<String, Value>),
 }
 
 pub struct ApplicationSurfaceInvocationResult {
@@ -235,6 +238,9 @@ impl ApplicationSurfaceRequest {
         }
         if let Self::Retained(request) = self {
             return request.operation().as_str() == operation.as_str();
+        }
+        if let Self::GraphTool(_) = self {
+            return operation.is_graph_tool();
         }
         matches!(
             (self, operation),
@@ -878,6 +884,20 @@ pub fn parse_application_surface_request(
                 .map(ApplicationSurfaceRequest::Retained)
                 .map_err(ApplicationSurfaceAdapterError::invalid_request)
         }
+        ApplicationSurfaceOperation::Node
+        | ApplicationSurfaceOperation::Impact
+        | ApplicationSurfaceOperation::Similar
+        | ApplicationSurfaceOperation::Redundancy
+        | ApplicationSurfaceOperation::RenamePreview
+        | ApplicationSurfaceOperation::PortStatus
+        | ApplicationSurfaceOperation::PortOrder
+        | ApplicationSurfaceOperation::Todos => match value {
+            Value::Object(arguments) => Ok(ApplicationSurfaceRequest::GraphTool(arguments)),
+            _ => Err(ApplicationSurfaceAdapterError::invalid_request(format!(
+                "invalid arguments: {} expects a JSON object",
+                operation.mcp_tool_name()
+            ))),
+        },
     }
 }
 

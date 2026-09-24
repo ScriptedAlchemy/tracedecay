@@ -100,7 +100,15 @@ pub const fn http_application_owner_kind(
         | ApplicationSurfaceOperation::MoveSymbol
         | ApplicationSurfaceOperation::RenameSymbol
         | ApplicationSurfaceOperation::SourceEditReconcile
-        | ApplicationSurfaceOperation::SourceEditRollback => return None,
+        | ApplicationSurfaceOperation::SourceEditRollback
+        | ApplicationSurfaceOperation::Node
+        | ApplicationSurfaceOperation::Impact
+        | ApplicationSurfaceOperation::Similar
+        | ApplicationSurfaceOperation::Redundancy
+        | ApplicationSurfaceOperation::RenamePreview
+        | ApplicationSurfaceOperation::PortStatus
+        | ApplicationSurfaceOperation::PortOrder
+        | ApplicationSurfaceOperation::Todos => return None,
         ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch

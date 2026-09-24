@@ -327,6 +327,7 @@ impl DaemonInvocationService {
         let retained_runtime = runtimes.retained;
         let lsp_owner = runtimes.lsp_owner;
         let source_edit_owner = runtimes.source_edit;
+        let graph_tool_owner = runtimes.graph_tool;
 
         let response = match request.payload {
             DaemonInvocationPayload::GitRead {
@@ -803,6 +804,27 @@ impl DaemonInvocationService {
                     request,
                     resolved_scope,
                     observed_at,
+                    deadline,
+                    cancellation,
+                    request_cancellation,
+                ))
+                .await
+            }
+            DaemonInvocationPayload::GraphTool {
+                surface_operation,
+                arguments,
+                observed_at: _,
+                deadline,
+                cancellation,
+            } => {
+                let Some(owner) = graph_tool_owner else {
+                    return missing_registered_owner_problem(publication, request_id);
+                };
+                Box::pin(execute_graph_tool(
+                    request_id,
+                    owner,
+                    surface_operation,
+                    arguments,
                     deadline,
                     cancellation,
                     request_cancellation,

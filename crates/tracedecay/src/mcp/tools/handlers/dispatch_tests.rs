@@ -1567,11 +1567,14 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
         TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.blank-node-id")
             .await
             .unwrap();
-    for tool_name in ["tracedecay_impact", "tracedecay_node"] {
+    for (tool_name, operation) in [
+        ("tracedecay_impact", ApplicationSurfaceOperation::Impact),
+        ("tracedecay_node", ApplicationSurfaceOperation::Node),
+    ] {
         for blank in ["", "   "] {
-            let error = dispatch_graph_tools(
-                tool_name,
+            let error = super::compute_graph_tool_for_owner(
                 &cg,
+                operation,
                 json!({"node_id": blank}),
                 None,
                 verified_graph_options(&cg, ToolCallRegistryOptions::default()),
@@ -1589,10 +1592,10 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     // Handlers clamp depth with `min(max)`, which leaves an explicit zero
     // intact, so a valid node id still reaches the guard from this side.
     let node_id = "symbol.blank-probe";
-    for tool_name in ["tracedecay_impact"] {
-        let error = dispatch_graph_tools(
-            tool_name,
+    for (tool_name, operation) in [("tracedecay_impact", ApplicationSurfaceOperation::Impact)] {
+        let error = super::compute_graph_tool_for_owner(
             &cg,
+            operation,
             json!({"node_id": node_id, "max_depth": 0}),
             None,
             verified_graph_options(&cg, ToolCallRegistryOptions::default()),

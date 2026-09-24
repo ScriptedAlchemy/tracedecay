@@ -278,6 +278,7 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
             json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
+                "default": "markdown",
                 "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
             "{tool_name} format schema"

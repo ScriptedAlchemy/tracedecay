@@ -115,6 +115,10 @@ pub struct ApplicationEnvelope<T> {
     pub request_id: RequestId,
     pub scope: ResolvedScope,
     pub outcome: ApplicationOutcome<T>,
+    /// Project-relative files the operation read, reported for session
+    /// activity beside the result rather than inside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touched_files: Vec<String>,
 }
 
 impl<T> ApplicationEnvelope<T> {
@@ -129,6 +133,7 @@ impl<T> ApplicationEnvelope<T> {
             request_id,
             scope,
             outcome: ApplicationOutcome::Evidence(packet),
+            touched_files: Vec::new(),
         }
     }
 
@@ -143,6 +148,7 @@ impl<T> ApplicationEnvelope<T> {
             request_id,
             scope,
             outcome: ApplicationOutcome::Preview(preview),
+            touched_files: Vec::new(),
         }
     }
 
@@ -157,6 +163,7 @@ impl<T> ApplicationEnvelope<T> {
             request_id,
             scope,
             outcome: ApplicationOutcome::Effect(effect),
+            touched_files: Vec::new(),
         }
     }
 }
