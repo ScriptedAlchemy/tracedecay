@@ -1,5 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
+import { ScopedField } from './BrainField.tsx';
+import { fieldVariantFromLocation } from './fieldVariant.ts';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { useActivationField } from '../../viz/graph/useActivationField.ts';
 import {
@@ -49,6 +51,7 @@ import { SchemaConvergencePanel } from '../observatory/DoctorInspector.tsx';
 export function ScopedBrain({ projectId, label }: { projectId: string; label: string }) {
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const selectAllProjects = useScope((s) => s.selectAllProjects);
+  const fieldVariant = fieldVariantFromLocation();
 
   // The holdings rail is a scroll container at `lg` and an ordinary block
   // below it, so whether it needs a tab stop is a question about the rendered
@@ -210,6 +213,18 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           >
             {(envelope) => {
               const slice = envelope.payload;
+              if (fieldVariant && nodes.length > 0) {
+                return (
+                  <ScopedField
+                    variant={fieldVariant}
+                    nodes={nodes}
+                    edges={edges}
+                    inspectedId={inspectedId}
+                    onInspect={setInspectedId}
+                    label={label}
+                  />
+                );
+              }
               return nodes.length > 0 ? (
                 <GraphCanvas
                   cameraControls

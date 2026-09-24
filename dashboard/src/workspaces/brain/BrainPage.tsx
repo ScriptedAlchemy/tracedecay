@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
@@ -21,6 +21,8 @@ import {
 } from './field.ts';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import { ProjectInspector } from './ProjectInspector.tsx';
+import { BrainField, FieldLegend } from './BrainField.tsx';
+import { buildRegistryScene, fieldVariantFromLocation, type FieldVariant } from './fieldVariant.ts';
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
@@ -38,6 +40,7 @@ export function BrainPage() {
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [registryFilter, setRegistryFilter] = useState('');
   const [repositoryView, setRepositoryView] = useState<string | null>(null);
+  const fieldVariant = fieldVariantFromLocation();
   const scope = useScope((s) => s.scope);
   const projects = useProjectRegistry();
   const registryRead = envelopeReadState(projects.isPending, toEnvelopeResult(projects.data), {
@@ -121,6 +124,62 @@ export function BrainPage() {
         const matchingGroups = groups.map((group) => ({ ...group, projects: group.projects.filter((project) =>
           [project.label, project.project_id, project.canonical_root].some((value) => value.toLowerCase().includes(query)),
         ) })).filter((group) => group.projects.length > 0);
+        const registryList = (
+          <>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="text-2xs">Search project registry
+                <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 w-full border border-edge-subtle bg-surface-0 p-2 text-xs sm:w-72" />
+              </label>
+              {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects</p> : null}
+              {/* The counts that are the same on every row, said once. */}
+              {holdings?.uniformLine ? (
+                <p className="text-3xs leading-relaxed text-text-muted">{holdings.uniformLine}</p>
+              ) : null}
+            </div>
+            {viewedRepository ? <nav aria-label="Brain camera breadcrumb" className="flex flex-wrap items-center gap-2 text-xs">
+              <button type="button" className="td-hit underline" onClick={() => setRepositoryView(null)}>Registry overview</button>
+              <span aria-hidden> / </span><span>{viewedRepository.label} repository · {viewedRepository.projects.length} registered {viewedRepository.projects.length === 1 ? 'project' : 'projects'}</span>
+            </nav> : null}
+            <div className={fieldVariant ? 'grid gap-2' : 'grid gap-2 md:grid-cols-2 xl:grid-cols-3'}>
+              {(viewedRepository ? [viewedRepository] : matchingGroups).map((group, index) => (
+                <RepoGroupCard
+                  key={`${group.git_common_dir ?? group.label}#${index}`}
+                  group={group}
+                  holdings={holdings}
+                  onInspect={setInspectedId}
+                />
+              ))}
+            </div>
+          </>
+        );
+        const inspection = inspectedProject && inspectedGroup ? <ProjectInspector project={inspectedProject} group={inspectedGroup} onClose={() => setInspectedId(null)} onRepository={() => setRepositoryView(inspectedGroup.git_common_dir)} /> : <p className="text-2xs text-text-muted">Hover or focus a project to inspect its registry evidence. Click or Enter selects project scope. Escape dismisses inspection.</p>;
+        if (fieldVariant) {
+          return (
+            <div className="flex h-full min-h-0 flex-col" onKeyDown={(event) => {
+              if (event.key === 'Escape') setInspectedId(null);
+            }}>
+              <EnvelopeTruth envelope={envelope} refreshing={projects.isFetching} onRefresh={() => void projects.refetch()} />
+              <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
+                <h1 className="text-sm font-semibold tracking-tight">Brain</h1>
+                <span className="text-2xs text-text-muted">
+                  {summary.repo_count} repositories · {summary.project_count} projects
+                  {summary.truncated ? ' · truncated' : ''}
+                </span>
+                {viewedRepository ? <button type="button" className="td-hit ml-auto text-2xs underline" onClick={() => setRepositoryView(null)}>Registry overview</button> : null}
+              </div>
+              <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+                <section aria-label="Registry field" className="flex min-h-[70vw] flex-1 flex-col p-3 md:min-h-[60vh] lg:min-h-0">
+                  <RegistryFieldCanvas variant={fieldVariant} groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
+                </section>
+                <aside aria-label="Registry readouts" className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-96 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0">
+                  <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
+                  {inspection}
+                  <section aria-label="Project registry" className="flex flex-col gap-3">{registryList}</section>
+                </aside>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="flex h-full min-h-0 flex-col" onKeyDown={(event) => {
             if (event.key === 'Escape') setInspectedId(null);
@@ -140,35 +199,10 @@ export function BrainPage() {
             {/* The registry is the page. Readouts and the inspector sit in a
              * rail beside it so no row is hidden behind chrome. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-              <RegistryPane>
-                <div className="flex flex-wrap items-end gap-3">
-                  <label className="text-2xs">Search project registry
-                    <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 w-full border border-edge-subtle bg-surface-0 p-2 text-xs sm:w-72" />
-                  </label>
-                  {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects</p> : null}
-                  {/* The counts that are the same on every row, said once. */}
-                  {holdings?.uniformLine ? (
-                    <p className="text-3xs leading-relaxed text-text-muted">{holdings.uniformLine}</p>
-                  ) : null}
-                </div>
-                {viewedRepository ? <nav aria-label="Brain camera breadcrumb" className="flex flex-wrap items-center gap-2 text-xs">
-                  <button type="button" className="td-hit underline" onClick={() => setRepositoryView(null)}>Registry overview</button>
-                  <span aria-hidden> / </span><span>{viewedRepository.label} repository · {viewedRepository.projects.length} registered {viewedRepository.projects.length === 1 ? 'project' : 'projects'}</span>
-                </nav> : null}
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                  {(viewedRepository ? [viewedRepository] : matchingGroups).map((group, index) => (
-                    <RepoGroupCard
-                      key={`${group.git_common_dir ?? group.label}#${index}`}
-                      group={group}
-                      holdings={holdings}
-                      onInspect={setInspectedId}
-                    />
-                  ))}
-                </div>
-              </RegistryPane>
+              <RegistryPane>{registryList}</RegistryPane>
               <aside aria-label="Registry readouts" className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-96 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0">
                 <RegistryFieldView groups={groups} repository={viewedRepository} onInspect={setInspectedId} />
-                {inspectedProject && inspectedGroup ? <ProjectInspector project={inspectedProject} group={inspectedGroup} onClose={() => setInspectedId(null)} onRepository={() => setRepositoryView(inspectedGroup.git_common_dir)} /> : <p className="text-2xs text-text-muted">Hover or focus a project to inspect its registry evidence. Click or Enter selects project scope. Escape dismisses inspection.</p>}
+                {inspection}
               </aside>
             </div>
           </div>
@@ -261,6 +295,60 @@ function RegistryFieldView({
         <FieldAxis field={field} />
       )}
     </>
+  );
+}
+
+/** The measured registry field in the selected renderer variant. Rebuilt only
+ * when the registry's measurements change, never per live pulse. */
+function RegistryFieldCanvas({
+  variant,
+  groups,
+  repository,
+  inspectedId,
+  onInspect,
+}: {
+  variant: FieldVariant;
+  groups: ProjectRepoGroup[];
+  repository?: ProjectRepoGroup;
+  inspectedId: string | null;
+  onInspect: (id: string | null) => void;
+}) {
+  const selectProject = useScope((s) => s.selectProject);
+  const groupsRef = useRef(groups);
+  groupsRef.current = groups;
+  const signature = groups
+    .map((group) => `${group.git_common_dir ?? group.label}|${group.projects
+      .map((project) => `${project.project_id}:${project.kind}:${indexedMass(project)}:${project.last_seen_at}`)
+      .join(',')}`)
+    .join(';');
+  const scene = useMemo(
+    () => buildRegistryScene(composeRegistryField(groupsRef.current), groupsRef.current),
+    [signature],
+  );
+  const repositoryKey = repository?.git_common_dir ?? null;
+  const focus = useMemo(() => {
+    if (repositoryKey === null) return null;
+    const ids = new Set(scene.bodies.filter((body) => body.group === repositoryKey).map((body) => body.id));
+    return ids as ReadonlySet<string>;
+  }, [scene, repositoryKey]);
+  const projectCount = scene.bodies.filter((body) => body.role === 'body').length;
+  return (
+    <BrainField
+      variant={variant}
+      scene={scene}
+      inspectedId={inspectedId}
+      onInspect={onInspect}
+      onSelect={(id) => {
+        const project = groupsRef.current.flatMap((group) => group.projects).find((entry) => entry.project_id === id);
+        if (project) selectProject(project.project_id, project.label);
+      }}
+      focus={focus}
+      activity
+      ariaLabel={repository
+        ? `${repository.label} repository in camera focus: ${repository.projects.length} registered projects; other projects recede. The project registry beside it is the exact equivalent.`
+        : `Registry field: ${projectCount} projects across recency columns. The project registry beside it is the exact equivalent.`}
+      legend={<FieldLegend variant={variant} scene={scene} />}
+    />
   );
 }
 
