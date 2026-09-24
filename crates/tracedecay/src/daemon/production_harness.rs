@@ -781,6 +781,8 @@ impl ProductionProjectCompositionHarnessV1 {
                     ),
                 }
             })?;
+        let canonical_project_path =
+            tracedecay_runtime_core::path_safety::plain_host_path(&canonical_project_path);
         self.resources
             .as_ref()
             .and_then(|resources| resources.servers.get(&canonical_project_path))
