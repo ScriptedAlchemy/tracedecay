@@ -13,9 +13,9 @@ use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
     ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
     RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
-    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
-    RenamePreviewTextOnlyMatchV1, SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1,
-    SimilarOccurrenceV1, SimilarResultV1, SimilarSurfaceRequestV1, SimilarTargetV1,
+    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
+    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
+    SimilarSurfaceRequestV1, SimilarTargetV1,
 };
 use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -34,8 +34,8 @@ use crate::{McpToolContext, ToolResult};
 
 use super::context_markdown::verified_plan_context;
 use super::context_support::{
-    ContextMemoryOutcome, context_memory_analytics, context_memory_options,
-    context_memory_outcome, context_memory_read_control,
+    ContextMemoryOutcome, context_memory_analytics, context_memory_options, context_memory_outcome,
+    context_memory_read_control,
 };
 use super::primitive_surface::{
     search_coverage as primitive_search_coverage, symbol_location as primitive_symbol_location,
@@ -49,7 +49,7 @@ use super::search_freshness::{
 use super::verified::CODE_SYMBOL_EVIDENCE_PREFIX;
 use super::{
     graph_occurrence_id, graph_symbol_end_line, graph_symbol_paths, graph_symbols_in_scope,
-    line_for_byte_offset, graph_tool_completion, node_not_found_result, required_graph_file_path,
+    graph_tool_completion, line_for_byte_offset, node_not_found_result, required_graph_file_path,
     required_graph_metadata, single_graph_adjacency_batch, user_line,
 };
 use super::{lexical_routing, search_evidence};
@@ -1493,16 +1493,16 @@ pub async fn compute_rename_preview(
     declaration.snippet = decl_snippet;
 
     let result = RenamePreviewPrimitiveResultV1 {
-            read_only: true,
-            note: "Preview only. Nothing is edited. 'references' are graph reference sites \
+        read_only: true,
+        note: "Preview only. Nothing is edited. 'references' are graph reference sites \
                (the declaration is reported separately in 'node'); 'text_only_matches' are \
                literal name occurrences NOT backed by a graph edge (comments, strings, \
                dynamic dispatch, unresolved refs) and must be reviewed by hand. Graph \
                call-edge coverage improves as the resolver does."
-                .to_owned(),
-            symbol: symbol_name,
-            new_name: request.new_name,
-            node: declaration,
+            .to_owned(),
+        symbol: symbol_name,
+        new_name: request.new_name,
+        node: declaration,
         reference_count: references.len(),
         references,
         text_only_matches,

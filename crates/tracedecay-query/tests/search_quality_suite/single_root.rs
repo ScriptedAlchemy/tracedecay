@@ -4,10 +4,10 @@ use std::sync::Arc;
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, CompactCandidate, ComponentRevision, DiversityPolicy,
     EdgeAuthorityV1, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass,
-    FixedPointScore, FusionProfile, HydrationReceipt, QueryNormalizationRevision,
-    RankedCandidate, RelationEdgeKindV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainCalibrationV1, SourceSpan, SymbolOccurrenceId, UtcMicros,
+    FixedPointScore, FusionProfile, HydrationReceipt, QueryNormalizationRevision, RankedCandidate,
+    RelationEdgeKindV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch, RetrieverCoverage,
+    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainCalibrationV1, SourceSpan,
+    SymbolOccurrenceId, UtcMicros,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,

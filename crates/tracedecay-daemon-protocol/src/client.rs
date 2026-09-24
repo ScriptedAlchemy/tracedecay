@@ -1207,8 +1207,11 @@ mod tests {
 
     #[test]
     fn transport_failures_name_version_skew_when_the_authority_daemon_differs() {
-        let connection = crate::connection::DaemonConnection::new(unused_test_endpoint(), "unused-token".to_owned())
-            .with_daemon_version("0.1.0-beta.36+aaaa");
+        let connection = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        )
+        .with_daemon_version("0.1.0-beta.36+aaaa");
         let mut handshake = test_skew_handshake();
         handshake.client_version = "0.1.0-beta.37+bbbb".to_owned();
 
@@ -1237,9 +1240,15 @@ mod tests {
 
     #[test]
     fn transport_failures_stay_untouched_without_version_skew() {
-        let matching = crate::connection::DaemonConnection::new(unused_test_endpoint(), "unused-token".to_owned())
-            .with_daemon_version("0.1.0-beta.37+cccc");
-        let unknown = crate::connection::DaemonConnection::new(unused_test_endpoint(), "unused-token".to_owned());
+        let matching = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        )
+        .with_daemon_version("0.1.0-beta.37+cccc");
+        let unknown = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        );
         let mut handshake = test_skew_handshake();
         handshake.client_version = "0.1.0-beta.37+cccc".to_owned();
 
@@ -1285,8 +1294,11 @@ mod tests {
 
         // The skew decorator must not relabel the daemon's definitive answer,
         // even when the authority record names a different daemon version.
-        let connection = crate::connection::DaemonConnection::new(unused_test_endpoint(), "unused-token".to_owned())
-            .with_daemon_version("0.1.0-beta.36+dddd");
+        let connection = crate::connection::DaemonConnection::new(
+            unused_test_endpoint(),
+            "unused-token".to_owned(),
+        )
+        .with_daemon_version("0.1.0-beta.36+dddd");
         let decorated = super::with_daemon_version_skew_context(error, &connection, &handshake);
         let (code, _, _) = decorated
             .project_route_context()

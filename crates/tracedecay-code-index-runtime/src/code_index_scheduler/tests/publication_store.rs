@@ -14,8 +14,8 @@ use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, DurableGenerationIndexEntryV1,
     DurablePublicationPointerV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
     acquire_code_generation_store_lock, code_generation_segments_root,
-    code_text_artifact_staging_root, code_text_artifacts_root,
-    durable_generation_index_digest, execute_code_generation_retention_cancellable,
+    code_text_artifact_staging_root, code_text_artifacts_root, durable_generation_index_digest,
+    execute_code_generation_retention_cancellable,
     prepare_next_code_generation_retention_cancellable, run_code_generation_retention,
     try_acquire_code_generation_store_read_lock, withdraw_verified_text_artifact_under_lock,
 };
@@ -2944,8 +2944,7 @@ fn retiring_one_worktree_keeps_the_segments_its_sibling_still_names() {
 fn serve_scope_text(
     worktree: &Path,
     scope: &Path,
-) -> tracedecay_code_index_retention::code_index_generations::DurableCodeTextArtifactDescriptorV1
-{
+) -> tracedecay_code_index_retention::code_index_generations::DurableCodeTextArtifactDescriptorV1 {
     serve_scope_text_with_hits(worktree, scope, "alpha").0
 }
 
@@ -2963,7 +2962,9 @@ fn serve_scope_text_with_hits(
     let mut scheduler = registry
         .open_worktree(test_project_id(), worktree, scope.to_path_buf())
         .expect("open worktree scheduler");
-    scheduler.reconcile_now().expect("adopt published generation");
+    scheduler
+        .reconcile_now()
+        .expect("adopt published generation");
     let latest = scheduler.latest_complete().expect("published generation");
     let mut passes = 0_usize;
     while !latest
@@ -3009,8 +3010,7 @@ fn serve_scope_text_with_hits(
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
         term,
         SanitizerRevision::new("sanitizer.shared-artifact.v1").expect("sanitizer"),
-        QueryNormalizationRevision::new("normalization.shared-artifact.v1")
-            .expect("normalization"),
+        QueryNormalizationRevision::new("normalization.shared-artifact.v1").expect("normalization"),
     )
     .expect("query view");
     let RetrieverOutcome::Complete(batch) = owners
@@ -3066,8 +3066,7 @@ fn active_pointer(scope: &Path) -> DurablePublicationPointerV1 {
 
 fn active_text_descriptor(
     scope: &Path,
-) -> tracedecay_code_index_retention::code_index_generations::DurableCodeTextArtifactDescriptorV1
-{
+) -> tracedecay_code_index_retention::code_index_generations::DurableCodeTextArtifactDescriptorV1 {
     let pointer = active_pointer(scope);
     pointer
         .generation_index
@@ -3080,7 +3079,13 @@ fn active_text_descriptor(
 fn completed_text_artifacts(root: &Path) -> BTreeSet<String> {
     std::fs::read_dir(root)
         .expect("read text artifact root")
-        .map(|entry| entry.expect("artifact entry").file_name().into_string().expect("utf-8"))
+        .map(|entry| {
+            entry
+                .expect("artifact entry")
+                .file_name()
+                .into_string()
+                .expect("utf-8")
+        })
         .filter(|name| name.starts_with("text-artifact-") && name.ends_with(".bin"))
         .collect()
 }
@@ -3105,7 +3110,10 @@ const CLONE_FIXTURE_SOURCE: &str = "pub fn alpha(value: u32) -> u32 { let a = va
 fn linked_worktrees_that_index_identical_trees_share_one_text_artifact() {
     let scopes = publish_linked_worktree_scopes(&[
         ("src/lib.rs", CLONE_FIXTURE_SOURCE),
-        ("src/other.rs", "pub fn other(value: u32) -> u32 { value + 1 }\n"),
+        (
+            "src/other.rs",
+            "pub fn other(value: u32) -> u32 { value + 1 }\n",
+        ),
     ]);
     let (first, first_hits) =
         serve_scope_text_with_hits(scopes._first.path(), &scopes.first_scope, "alpha");
@@ -3121,17 +3129,31 @@ fn linked_worktrees_that_index_identical_trees_share_one_text_artifact() {
     );
     assert_eq!(first.content_key, linked.content_key);
     assert!(!first_hits.is_empty());
-    assert_eq!(first_hits, linked_hits, "the adopted artifact serves identical results");
+    assert_eq!(
+        first_hits, linked_hits,
+        "the adopted artifact serves identical results"
+    );
     let shared_root = code_text_artifacts_root(&scopes.first_scope);
-    assert_eq!(shared_root, scopes.code_index_root.join("code-text-artifacts-v1"));
+    assert_eq!(
+        shared_root,
+        scopes.code_index_root.join("code-text-artifacts-v1")
+    );
     assert_eq!(code_text_artifacts_root(&scopes.linked_scope), shared_root);
     assert_ne!(
         first.generation_id, linked.generation_id,
         "each worktree seals its own generation"
     );
     assert_eq!(
-        (&first.artifact_file, &first.artifact_digest, first.artifact_size_bytes),
-        (&linked.artifact_file, &linked.artifact_digest, linked.artifact_size_bytes),
+        (
+            &first.artifact_file,
+            &first.artifact_digest,
+            first.artifact_size_bytes
+        ),
+        (
+            &linked.artifact_file,
+            &linked.artifact_digest,
+            linked.artifact_size_bytes
+        ),
         "identical trees seal byte-identical text artifacts"
     );
     assert_eq!(
@@ -3160,7 +3182,11 @@ fn a_file_that_diverges_in_one_worktree_is_never_served_to_its_sibling() {
     {
         let registry = CodeIndexSchedulerRegistryV1::new(1);
         let mut linked_scheduler = registry
-            .open_worktree(test_project_id(), &scopes.linked, scopes.linked_scope.clone())
+            .open_worktree(
+                test_project_id(),
+                &scopes.linked,
+                scopes.linked_scope.clone(),
+            )
             .expect("reopen linked scheduler");
         linked_scheduler.notify_path(scopes.linked.join("src/only_linked.rs"));
         published(
@@ -3255,10 +3281,7 @@ fn retiring_one_worktree_keeps_the_text_artifact_its_sibling_references() {
     // Collecting the linked scope leaves the artifact unnamed.
     std::fs::remove_dir_all(&scopes.linked_scope).expect("collect linked scope");
     retain(&scopes.first_scope);
-    assert!(
-        !shared.exists(),
-        "an artifact no scope names is collected"
-    );
+    assert!(!shared.exists(), "an artifact no scope names is collected");
 }
 
 #[test]

@@ -120,7 +120,8 @@ fn session_temporal_store_fingerprint(
     })
 }
 
-const REQUIRED_BASE_TABLES: &[&str] = &["observations", "retrieval_anchors", "sanitization_receipts"];
+const REQUIRED_BASE_TABLES: &[&str] =
+    &["observations", "retrieval_anchors", "sanitization_receipts"];
 
 const REQUIRED_FTS_SHADOW_TABLES: &[&str] = &[
     "session_occurrences_fts_docsize",

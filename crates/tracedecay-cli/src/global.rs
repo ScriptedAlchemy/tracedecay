@@ -449,7 +449,10 @@ mod gather_tests {
         }
 
         let out = gather_local_projects_from(&cwd);
-        assert!(out.is_empty(), "repo-local data dirs are not projects: {out:?}");
+        assert!(
+            out.is_empty(),
+            "repo-local data dirs are not projects: {out:?}"
+        );
     }
 
     #[test]

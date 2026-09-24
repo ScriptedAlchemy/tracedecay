@@ -290,7 +290,10 @@ pub async fn prepare_branch_tracking_in_layout(
                     ),
                 }
             })?;
-            (branch_meta::BranchMeta::new_for_dir(tracedecay_dir, &default), true)
+            (
+                branch_meta::BranchMeta::new_for_dir(tracedecay_dir, &default),
+                true,
+            )
         }
     };
 

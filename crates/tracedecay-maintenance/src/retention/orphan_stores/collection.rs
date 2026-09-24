@@ -701,11 +701,8 @@ pub(super) async fn check_store_durable_memory(
     if control.completion().is_some() {
         return DurableMemoryCheck::Interrupted;
     }
-    let inventory = match durable_database_inventory(
-        manifest_bytes,
-        graph_scope_relpaths,
-        control,
-    ) {
+    let inventory = match durable_database_inventory(manifest_bytes, graph_scope_relpaths, control)
+    {
         DurableDatabaseInventoryV1::Interrupted => return DurableMemoryCheck::Interrupted,
         DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
         DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
@@ -926,8 +923,7 @@ async fn collect_unregistered_finding(
         .join("projects")
         .join(&finding.project_dir_name);
     if expected != finding.data_root
-        || tracedecay_runtime_core::storage::validate_project_id(&finding.project_dir_name)
-            .is_err()
+        || tracedecay_runtime_core::storage::validate_project_id(&finding.project_dir_name).is_err()
     {
         return Ok(FindingStep::Refused(CollectionFailureKind::OutsideProfile));
     }
@@ -1015,9 +1011,7 @@ async fn collect_unregistered_finding(
         ))
         .await
     {
-        Ok(rows) => {
-            rows.map_err(|error| orphan_db_error("confirm unregistered store", error))?
-        }
+        Ok(rows) => rows.map_err(|error| orphan_db_error("confirm unregistered store", error))?,
         Err(completion) => return Ok(FindingStep::Interrupted(completion)),
     };
     let now_registered = match control.race(rows.next()).await {
@@ -1036,7 +1030,6 @@ async fn collect_unregistered_finding(
     }
     Ok(remove_step(store))
 }
-
 
 /// Inspects a manifestless unregistered directory without inventing a graph
 /// path. An exactly empty directory is provably free of durable rows. Any

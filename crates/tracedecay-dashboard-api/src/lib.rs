@@ -2786,7 +2786,11 @@ mod authority_tests {
                 .await;
                 projection_cold.push(started.elapsed());
                 projection_cold_rows.push(
-                    projection.scan.as_ref().expect("projection cold row count").vector_rows_read,
+                    projection
+                        .scan
+                        .as_ref()
+                        .expect("projection cold row count")
+                        .vector_rows_read,
                 );
                 assert_eq!(projection.scan.as_ref().unwrap().cache_state, "miss");
 
@@ -2810,7 +2814,11 @@ mod authority_tests {
                 };
                 similarity_cold.push(started.elapsed());
                 similarity_cold_rows.push(
-                    similarity.scan.as_ref().expect("similarity cold row count").vector_rows_read,
+                    similarity
+                        .scan
+                        .as_ref()
+                        .expect("similarity cold row count")
+                        .vector_rows_read,
                 );
                 assert_eq!(similarity.scan.as_ref().unwrap().cache_state, "miss");
                 if heartbeat.is_some() {
@@ -2835,7 +2843,11 @@ mod authority_tests {
                 .await;
                 projection_warm.push(started.elapsed());
                 projection_warm_rows.push(
-                    projection.scan.as_ref().expect("projection warm row count").vector_rows_read,
+                    projection
+                        .scan
+                        .as_ref()
+                        .expect("projection warm row count")
+                        .vector_rows_read,
                 );
                 assert_eq!(projection.scan.as_ref().unwrap().cache_state, "hit");
             }
@@ -2858,7 +2870,11 @@ mod authority_tests {
                         .await;
                         timings.push(started.elapsed());
                         rows.push(
-                            similarity.scan.as_ref().expect("similarity warm row count").vector_rows_read,
+                            similarity
+                                .scan
+                                .as_ref()
+                                .expect("similarity warm row count")
+                                .vector_rows_read,
                         );
                         assert_eq!(similarity.scan.as_ref().unwrap().cache_state, "hit");
                     }

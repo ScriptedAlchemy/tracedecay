@@ -1,7 +1,7 @@
+use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_contracts::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
 };
-use tracedecay_contracts::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_contracts::{
     application_catalog_contributions, application_handler_descriptors,
     callable_code_catalog_contribution, feedback_surface_catalog_contribution,

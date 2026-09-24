@@ -134,7 +134,8 @@ async fn published_summary_is_served_from_the_canonical_row_alone() {
         .hits;
     assert!(
         hits.iter()
-            .any(|hit| hit.kind == "summary_node" && hit.node_id.as_deref() == Some(&summary.node_id)),
+            .any(|hit| hit.kind == "summary_node"
+                && hit.node_id.as_deref() == Some(&summary.node_id)),
         "grep must find the canonical summary: {hits:?}"
     );
 

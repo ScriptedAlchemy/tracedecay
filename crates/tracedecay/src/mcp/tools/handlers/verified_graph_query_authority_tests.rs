@@ -158,11 +158,9 @@ async fn dispatch_on_graph_authority(
     match ApplicationSurfaceOperation::from_tool_name(tool_name)
         .filter(|operation| operation.is_graph_tool())
     {
-        Some(operation) => {
-            super::compute_graph_tool_for_owner(cg, operation, args, None, options)
-                .await
-                .map(drop)
-        }
+        Some(operation) => super::compute_graph_tool_for_owner(cg, operation, args, None, options)
+            .await
+            .map(drop),
         None => handle_tool_call_with_registry_options(cg, tool_name, args, None, None, options)
             .await
             .map(drop),

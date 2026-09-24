@@ -18,8 +18,7 @@ use tracedecay_api::doctor::{
 use tracedecay_contracts::doctor::{
     DOCTOR_FINDING_FAMILIES, DoctorCoverageCompletenessV1, DoctorEvidenceStateV1,
     DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
-    DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1,
-    DoctorStorageFindingKindV1,
+    DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1, DoctorStorageFindingKindV1,
 };
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
 
@@ -547,14 +546,17 @@ mod tests {
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unsupported);
         let statuses = &envelope.payload.storage_kind_statuses;
         assert_eq!(
-            statuses.iter().map(|status| status.kind).collect::<Vec<_>>(),
+            statuses
+                .iter()
+                .map(|status| status.kind)
+                .collect::<Vec<_>>(),
             STORAGE_KINDS
         );
         assert!(
-            statuses
-                .iter()
-                .all(|status| status.state == StorageFindingSourceStateV1::Unsupported
-                    && !status.reason.is_empty()),
+            statuses.iter().all(
+                |status| status.state == StorageFindingSourceStateV1::Unsupported
+                    && !status.reason.is_empty()
+            ),
             "an unadmitted canonical source must not report any producer as real: {statuses:?}"
         );
 

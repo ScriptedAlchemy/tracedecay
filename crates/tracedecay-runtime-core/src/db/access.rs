@@ -35,9 +35,7 @@ pub use lease::{enter_daemon_database_scope, probe_writer_owner};
 use owner_io::{
     authority_token, epoch_ms, publish_record_atomically, read_record_strict, writer_owner,
 };
-use path_layout::{
-    canonical_profile_root, database_profile_root, platform_identity_key,
-};
+use path_layout::{canonical_profile_root, database_profile_root, platform_identity_key};
 pub use tracedecay_private_fs::is_lock_contended;
 
 static PROCESS_LEASES: LazyLock<Mutex<HashMap<PathBuf, ProcessLease>>> =

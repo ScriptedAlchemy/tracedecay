@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use crate::handlers::graph::graph_tool_completion;
-use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use crate::decode_primitive_request;
+use crate::handlers::graph::graph_tool_completion;
 use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
@@ -170,5 +170,8 @@ pub async fn compute_todos(
         by_kind,
         markers,
     };
-    Ok(graph_tool_completion(GraphToolResultV1::Todos(result), touched))
+    Ok(graph_tool_completion(
+        GraphToolResultV1::Todos(result),
+        touched,
+    ))
 }

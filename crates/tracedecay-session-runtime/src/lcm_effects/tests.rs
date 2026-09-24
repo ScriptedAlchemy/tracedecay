@@ -1959,9 +1959,10 @@ fn mega_session_convergence_bounds_protection_and_compression_pages() {
                 .unwrap();
         }
 
-        let first = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
-            .await
-            .unwrap();
+        let first =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
         assert_eq!(first.sessions.len(), 1);
         assert_eq!(
             first.sessions[0].disposition,
@@ -1977,11 +1978,13 @@ fn mega_session_convergence_bounds_protection_and_compression_pages() {
                 <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
         );
 
-        let second = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
-            .await
-            .unwrap();
+        let second =
+            super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+                .await
+                .unwrap();
         assert!(
-            second.sessions[0].compression_rows_scanned <= tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
+            second.sessions[0].compression_rows_scanned
+                <= tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
         );
         assert!(
             second.sessions[0].compression_bytes_scanned

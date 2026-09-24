@@ -1942,15 +1942,9 @@ async fn load_condensation_candidates(
                       first_source_id IS NULL, first_source_id,
                       created_at, summary_id
              LIMIT ?3",
-            params![
-                provider,
-                session_id,
-                fan_in as i64,
-                incremental_max_depth
-            ],
+            params![provider, session_id, fan_in as i64, incremental_max_depth],
         )
-        .await
-        ?;
+        .await?;
     let mut nodes = Vec::new();
     while let Some(row) = rows.next().await? {
         nodes.push(LcmSummaryNode {

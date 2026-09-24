@@ -3,9 +3,8 @@ use std::ops::Deref;
 use rusqlite::{Savepoint, Statement, Transaction};
 use tracedecay_store::{
     DurabilityClassV1, OperationPriorityV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
-    StoreCommitReceiptV1,
-    StoreIncarnationV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    TransactionalOutboxEntryV1,
+    StoreCommitReceiptV1, StoreIncarnationV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
+    StoreShardIdV1, TransactionalOutboxEntryV1,
 };
 
 use super::LedgerError;

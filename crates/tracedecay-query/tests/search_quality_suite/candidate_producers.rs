@@ -30,16 +30,15 @@ use tracedecay_code_index::projection::{
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, CompactCandidate, ComponentRevision,
     EphemeralSanitizedQueryViewV1, ExactAdmissionProof, ExactAdmissionRuleRevision,
-    ExactAdmissionValidator, ExactFieldV1, ExactTechnicalTermKindV1,
-    FileOccurrenceId, FreshnessCompatibilityV1, ManifestDigest,
-    PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    QueryNormalizationRevision, RepositoryDirtyStateV1, RepositoryId, RetrievalBudget,
-    RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverCoverage,
-    RetrieverBatch, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1,
-    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace,
-    TemporalModeV1, UtcMicros, VectorWatermark,
+    ExactAdmissionValidator, ExactFieldV1, ExactTechnicalTermKindV1, FileOccurrenceId,
+    FreshnessCompatibilityV1, ManifestDigest, PolicyRevisionId, PrincipalId, PrivacyDomainId,
+    ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, QueryNormalizationRevision, RepositoryDirtyStateV1, RepositoryId,
+    RetrievalBudget, RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverBatch, RetrieverCoverage, RetrieverOutcome, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId,
+    SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, SourceFreshness,
+    SourceInstanceKey, SourceNamespace, TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -52,9 +51,9 @@ use tracedecay_query::retrieval::lexical::{
     CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
     CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
-    LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1, LexicalSpellingVariantV1,
-    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_FUZZY_TERM_EXPANSIONS_V1,
+    CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1,
+    LexicalLane, LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1,
+    LexicalSpellingVariantV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_FUZZY_TERM_EXPANSIONS_V1,
     MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
     VerifiedCodeLexicalArtifactV1,
 };
@@ -1185,9 +1184,12 @@ fn disk_artifact_resume_and_reopen_serve_lexical_results() {
             .expect("artifact lexical query"),
     );
     assert!(
-        artifact.evidence_by_occurrence.values().any(|evidence| evidence
-            .matched_phrases
-            .contains(&"return value".to_owned())),
+        artifact
+            .evidence_by_occurrence
+            .values()
+            .any(|evidence| evidence
+                .matched_phrases
+                .contains(&"return value".to_owned())),
         "the resumed artifact serves the source's phrase"
     );
 }
@@ -2081,8 +2083,8 @@ fn lexical_scan_cancellation_unwinds_the_artifact_before_completion() {
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("cancellable-lexical.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -2452,8 +2454,8 @@ fn disk_artifact_seals_one_ngram_list_per_distinct_key_without_staging() {
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("ngram-bitmap-shards.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
     builder
         .append_pages(&pages, &control)
         .expect("commit one durable source batch");
@@ -2511,9 +2513,12 @@ fn disk_artifact_seals_one_ngram_list_per_distinct_key_without_staging() {
             .expect("bitmap artifact lexical query"),
     );
     assert!(
-        served.evidence_by_occurrence.values().any(|evidence| evidence
-            .matched_phrases
-            .contains(&"return value".to_owned())),
+        served
+            .evidence_by_occurrence
+            .values()
+            .any(|evidence| evidence
+                .matched_phrases
+                .contains(&"return value".to_owned())),
         "the sealed n-gram lists serve the source's phrase"
     );
 }
@@ -2559,8 +2564,9 @@ fn content_addressed_reader_rejects_atomic_same_size_replacement() {
     let artifact_path = directory.path().join("content-addressed.sqlite");
     let replacement_path = directory.path().join("replacement.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
-        .expect("create artifact");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
+            .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -2699,8 +2705,9 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("open-revision.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
-        .expect("create artifact");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
+            .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -2833,8 +2840,9 @@ fn case_sensitive_quoted_literals_match_reopened_artifacts() {
         &control,
     )
     .expect("reopen artifact");
-    let authority =
-        || CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
+    let authority = || {
+        CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"))
+    };
     for (query, expected_matches) in [
         (r#""fooBarValue""#, true),
         (r#""FooBar""#, true),
@@ -2921,7 +2929,10 @@ fn annotation_uses_mint_no_lexical_artifact_documents() {
         (
             format!("src/annotated.rs::{name}"),
             fields.to_vec(),
-            terms.iter().map(|term| (*term).to_owned()).collect::<Vec<_>>(),
+            terms
+                .iter()
+                .map(|term| (*term).to_owned())
+                .collect::<Vec<_>>(),
         )
     };
     let body = [LexicalFieldV1::BodyText];
@@ -3039,8 +3050,9 @@ fn sealed_current_artifact_uses_compact_postings_and_reports_dbstat() {
     let artifact_path = directory.path().join("current-plans.sqlite");
     let control = ArtifactControl { cancelled: false };
     let started = Instant::now();
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
-        .expect("create artifact");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
+            .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -3233,8 +3245,9 @@ fn reader_rejects_current_artifact_missing_its_chunk_lookup_table() {
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("missing-chunk-lookup-index.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
-        .expect("create artifact");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
+            .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -4815,8 +4828,9 @@ fn disk_artifact_rejects_noncanonical_receipt_reservation_tail() {
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("noncanonical-receipt.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
-        .expect("create artifact");
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&artifact_path, fixture.metadata.clone())
+            .expect("create artifact");
     for page in &pages {
         builder
             .append_page(page, &control)
@@ -4923,7 +4937,9 @@ fn disk_artifact_seal_is_terminal_and_refuses_page_replay() {
         Err(CodeLexicalArtifactErrorV1::Contract(_))
     ));
     assert_eq!(
-        builder.sealed_receipt().expect("sealed receipt after rejected replay"),
+        builder
+            .sealed_receipt()
+            .expect("sealed receipt after rejected replay"),
         Some(verified.clone()),
         "a sealed artifact must reject an append without changing its seal"
     );
@@ -4943,8 +4959,8 @@ fn disk_artifact_preseal_gate_denies_external_derived_mutation() {
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("preseal-derived-mutation.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -5148,8 +5164,8 @@ fn disk_artifact_cancellation_rolls_back_import_append_and_reopen_verification()
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("cancelled-verification.sqlite");
     let control = ArtifactControl { cancelled: false };
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
     for page in pages
         .iter()
         .take_while(|page| page.page_ordinal() < import_page.page_ordinal())
@@ -5403,8 +5419,8 @@ fn disk_artifact_rows_advance_once_across_retry_replay_and_cancellation() {
     let control = ArtifactControl { cancelled: false };
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("once-advance.sqlite");
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
 
     let mut appended_chunks = 0u64;
     for page in &pages {
@@ -5691,8 +5707,8 @@ fn artifact_exact_reader_prefers_admitted_matches_over_denied_best() {
     let (pages, _) = drain_verified_pages(&fixture, 128);
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("denied-best.sqlite");
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -5777,8 +5793,8 @@ fn exact_candidate_scan_stops_before_the_next_batch_after_cancellation() {
     let (pages, _) = drain_verified_pages(&fixture, 128);
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let path = directory.path().join("cancel-exact.sqlite");
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&path, metadata.clone()).expect("create real artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+        .expect("create real artifact");
     for page in &pages {
         builder
             .append_page(page, &build_control)
@@ -5893,8 +5909,8 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
     let (pages, _) = drain_verified_pages(&fixture, 128);
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("top-k.sqlite");
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone()).expect("create artifact");
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&artifact_path, metadata.clone())
+        .expect("create artifact");
     for page in &pages {
         builder.append_page(page, &control).expect("append page");
     }
@@ -6147,8 +6163,15 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
     let lane = artifact.lane();
 
     let whole = complete(
-        lane.retrieve_lexical(&artifact.request("reserve_stock", &["reserve_stock"], &[], &[], 0, 8))
-            .expect("whole-term retrieval succeeds"),
+        lane.retrieve_lexical(&artifact.request(
+            "reserve_stock",
+            &["reserve_stock"],
+            &[],
+            &[],
+            0,
+            8,
+        ))
+        .expect("whole-term retrieval succeeds"),
     );
     assert_eq!(candidate_files(&whole.candidates), BTreeSet::from([0]));
     assert!(whole.evidence_by_occurrence.values().all(|evidence| {
@@ -6181,7 +6204,10 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
         lane.retrieve_lexical(&artifact.request("reserve", &[], &["reserve"], &[], 0, 8))
             .expect("subtoken retrieval succeeds"),
     );
-    assert_eq!(candidate_files(&subtokens.candidates), BTreeSet::from([0, 1]));
+    assert_eq!(
+        candidate_files(&subtokens.candidates),
+        BTreeSet::from([0, 1])
+    );
     assert!(subtokens.evidence_by_occurrence.values().all(|evidence| {
         evidence.matched_whole_terms.is_empty()
             && evidence.matched_subtokens == vec!["reserve".to_owned()]
@@ -6223,8 +6249,14 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     );
 
     let fuzzy = artifact.request("resreve_stock", &["resreve_stock"], &[], &[], 1, 8);
-    let first = complete(lane.retrieve_lexical(&fuzzy).expect("fuzzy retrieval succeeds"));
-    let second = complete(lane.retrieve_lexical(&fuzzy).expect("fuzzy replay succeeds"));
+    let first = complete(
+        lane.retrieve_lexical(&fuzzy)
+            .expect("fuzzy retrieval succeeds"),
+    );
+    let second = complete(
+        lane.retrieve_lexical(&fuzzy)
+            .expect("fuzzy replay succeeds"),
+    );
     assert_eq!(first, second);
     assert_eq!(candidate_files(&first.candidates), BTreeSet::from([1]));
     let evidence = &first.evidence_by_occurrence[&first.candidates[0].source_occurrence_id];
@@ -6265,8 +6297,14 @@ fn lexical_phrase_candidate_set_and_frequency_are_reused_without_drift() {
     ]);
     let lane = artifact.lane();
     let request = artifact.request(r#""reserve stock""#, &[], &[], &["reserve stock"], 0, 8);
-    let first = complete(lane.retrieve_lexical(&request).expect("phrase retrieval succeeds"));
-    let second = complete(lane.retrieve_lexical(&request).expect("phrase retrieval replays"));
+    let first = complete(
+        lane.retrieve_lexical(&request)
+            .expect("phrase retrieval succeeds"),
+    );
+    let second = complete(
+        lane.retrieve_lexical(&request)
+            .expect("phrase retrieval replays"),
+    );
 
     assert_eq!(first, second);
     assert_eq!(candidate_files(&first.candidates), BTreeSet::from([0, 1]));
@@ -6327,7 +6365,11 @@ fn lexical_artifact_reports_freshness_coverage_and_page_cutoff() {
     );
 
     assert_eq!(page.candidates.len(), 2);
-    assert!(page.coverage.eligible >= 3, "every file matches: {:?}", page.coverage);
+    assert!(
+        page.coverage.eligible >= 3,
+        "every file matches: {:?}",
+        page.coverage
+    );
     assert_eq!(page.coverage.examined, page.coverage.eligible);
     assert_eq!(page.coverage.capped, page.coverage.eligible - 2);
     assert!(!page.continuation.expect("continuation").exhausted);

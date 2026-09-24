@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
+use super::collection::{RegularFileSnapshot, read_regular_file};
 use super::fence::{
     StoreContentFence, StoreDirectoryFence, capture_store_content_fence,
     capture_store_content_fence_controlled, capture_store_directory_fence,
 };
-use super::collection::{RegularFileSnapshot, read_regular_file};
 use super::unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
     UnregisteredStoreSweepRequestV1, UnregisteredSweepCompletionV1, sweep_unregistered_store_page,

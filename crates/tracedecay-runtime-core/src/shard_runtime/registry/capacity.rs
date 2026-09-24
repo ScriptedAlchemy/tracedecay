@@ -138,8 +138,10 @@ impl StoreRuntimeRegistry {
         let Some(candidate) = candidate else {
             return Ok(CapacityReservation::Exhausted);
         };
-        Ok(Self::reserve_eviction(state, candidate)?
-            .map_or(CapacityReservation::Exhausted, CapacityReservation::Eviction))
+        Ok(Self::reserve_eviction(state, candidate)?.map_or(
+            CapacityReservation::Exhausted,
+            CapacityReservation::Eviction,
+        ))
     }
 
     /// Fences one exact `Ready` entry as `Evicting`; `None` when the entry is

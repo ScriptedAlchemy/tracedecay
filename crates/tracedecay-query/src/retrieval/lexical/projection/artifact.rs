@@ -11,8 +11,8 @@ pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 
 mod builder;
-mod clone_codec;
 mod clone_census;
+mod clone_codec;
 mod fingerprints;
 mod format;
 mod postings;
@@ -38,8 +38,9 @@ pub use fingerprints::{
     CloneSelectedBlockContainmentClassV1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
 };
 pub use format::{
-    CodeLexicalArtifactOccurrenceV1, code_lexical_artifact_content_key, CodeLexicalArtifactSectionDigestV1,
+    CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
     CodeLexicalImportMembershipWitnessV1, VerifiedCodeLexicalArtifactV1,
+    code_lexical_artifact_content_key,
 };
 pub use prepared::PreparedCodeLexicalArtifactPageV1;
 pub use reader::{

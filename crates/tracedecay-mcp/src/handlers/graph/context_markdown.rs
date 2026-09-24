@@ -286,7 +286,8 @@ mod tests {
             },
         );
         assert!(
-            uncovered.ends_with("\n### Test Coverage\n_No test files found covering these modules._\n"),
+            uncovered
+                .ends_with("\n### Test Coverage\n_No test files found covering these modules._\n"),
             "{uncovered}"
         );
     }

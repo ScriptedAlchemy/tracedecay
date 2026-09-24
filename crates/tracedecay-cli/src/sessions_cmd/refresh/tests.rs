@@ -16,8 +16,8 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, RetainedSurfaceExecutionContextV1, RetrievalEvidence, TemporalState,
     retained_receipts, retained_surface_application_operation,
 };
-use tracedecay_daemon_protocol::{RequestedOutputFormat, separate_application_tool_request};
 use tracedecay_daemon_protocol::decode_retained_request;
+use tracedecay_daemon_protocol::{RequestedOutputFormat, separate_application_tool_request};
 use tracedecay_domain::{
     ActorId, ComponentVersion, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };

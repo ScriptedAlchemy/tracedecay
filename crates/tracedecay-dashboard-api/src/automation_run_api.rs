@@ -206,9 +206,8 @@ pub async fn artifact_list(
             format!("automation run '{run_id}' not found"),
         )
         .into_response(),
-        Err(err) => {
-            internal_error(format!("Failed to load automation run artifacts: {err}")).into_response()
-        }
+        Err(err) => internal_error(format!("Failed to load automation run artifacts: {err}"))
+            .into_response(),
     }
 }
 
@@ -283,9 +282,11 @@ fn artifact_chain_summary(
         .iter()
         .map(|artifact| artifact.kind.clone())
         .collect();
-    let metadata_complete = EXPECTED_ARTIFACT_CHAIN_KINDS
-        .iter()
-        .all(|expected| present_kinds.iter().any(|present| present == expected.as_str()));
+    let metadata_complete = EXPECTED_ARTIFACT_CHAIN_KINDS.iter().all(|expected| {
+        present_kinds
+            .iter()
+            .any(|present| present == expected.as_str())
+    });
     AutomationRunArtifactChainV1 {
         expected_kinds: EXPECTED_ARTIFACT_CHAIN_KINDS.to_vec(),
         present_kinds,

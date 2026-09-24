@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::handlers::graph::graph_tool_completion;
-use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use crate::{decode_primitive_request, unique_file_paths};
 use serde_json::Value;
+use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     PortMatchedSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1, PortTargetOnlySymbolV1,
     PortUnmatchedSymbolV1,

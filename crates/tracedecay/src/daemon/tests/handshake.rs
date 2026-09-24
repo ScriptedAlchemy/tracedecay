@@ -14,7 +14,11 @@ pub(super) async fn daemon_round_trip(
     let (server_stream, client_stream) =
         tokio::net::UnixStream::pair().expect("daemon socket pair");
     let server = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
     });
     let (reader, mut writer) = client_stream.into_split();
     super::write_test_auth_preface(&mut writer).await;

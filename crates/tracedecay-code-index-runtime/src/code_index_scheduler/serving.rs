@@ -23,11 +23,10 @@ use tracedecay_code_extraction::{
 };
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationStoreLockV1, DurableCodeTextArtifactDescriptorV1, DurablePublicationPointerV1,
-    DurableSealedCodeGenerationIdentityV1, attach_verified_text_artifact_under_lock,
-    acquire_generation_segments_publication_lock, code_text_artifact_path,
+    DurableSealedCodeGenerationIdentityV1, acquire_generation_segments_publication_lock,
+    attach_verified_text_artifact_under_lock, code_text_artifact_path,
     code_text_artifact_staging_root, code_text_artifacts_root, find_shared_text_artifact,
-    try_acquire_code_generation_store_lock,
-    withdraw_verified_text_artifact_under_lock,
+    try_acquire_code_generation_store_lock, withdraw_verified_text_artifact_under_lock,
 };
 use tracedecay_contracts::{
     code_index_freshness::{
@@ -76,11 +75,10 @@ use crate::{
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
             CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
             CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-            CodeLexicalCloneIndexCensusV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
-            LexicalLane,
-            LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever,
-            PreparedCodeLexicalArtifactPageV1, code_lexical_artifact_build_memory_budget_for,
-            code_lexical_artifact_content_key,
+            CodeLexicalCloneIndexCensusV1, CodeLexicalCloneRouteV1,
+            CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
+            LexicalLaneRetriever, PreparedCodeLexicalArtifactPageV1,
+            code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
         },
         ports::{RETRIEVAL_CANDIDATE_BATCH_SIZE, RetrievalPortError},
     },
@@ -1359,10 +1357,11 @@ impl DaemonCodeTextArtifactStoreV1 {
             // The completed artifact is the project's: from the moment this
             // publication finds or places it until its descriptor is durable,
             // no scope's retention may collect it.
-            let _project_lock = acquire_generation_segments_publication_lock(&self.store_root, &|| {
-                checkpoint_text_artifact_control(control).is_err()
-            })
-            .map_err(text_artifact_unavailable)?;
+            let _project_lock =
+                acquire_generation_segments_publication_lock(&self.store_root, &|| {
+                    checkpoint_text_artifact_control(control).is_err()
+                })
+                .map_err(text_artifact_unavailable)?;
             let (artifact_sha256, artifact_size_bytes) = hotpath::measure_block!(
                 "query.artifact.store.state_digest",
                 sha256_private_file_and_size(staging_path, control)
@@ -2518,7 +2517,8 @@ impl LatestCodeTextGenerationV1 {
             return Ok(None);
         };
         hotpath::gauge!("query.artifact.shared_adoptions_total").inc(1u64);
-        let ready_progress = self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
+        let ready_progress =
+            self.ready_text_progress_snapshot(&reader, &sealed_identity, &source)?;
         self.install_artifact_owners(reader, reader_reservation)?;
         self.publish_text_progress_snapshot(ready_progress);
         Ok(Some(TextHeadOpenOutcomeV1::Served))

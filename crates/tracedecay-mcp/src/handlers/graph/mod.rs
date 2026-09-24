@@ -11,21 +11,21 @@ mod search_evidence;
 mod search_freshness;
 mod verified;
 
+pub(crate) use context_markdown::render_context;
 pub use dispatch::dispatch_tool;
 pub use navigation::{
     compute_impact, compute_node, handle_by_qualified_name, handle_derives, handle_signature,
 };
-pub(crate) use context_markdown::render_context;
 pub use search::{
     compute_context, compute_redundancy, compute_rename_preview, compute_similar,
     handle_find_exact_symbol, handle_search,
 };
 pub use verified::{
     GRAPH_RELATION_READ_LIMIT, VerifiedNeighbor, cost_to_expand_verified, graph_occurrence_id,
-    graph_symbol_corrupt, graph_symbol_end_line,
-    graph_symbol_location_value, graph_symbol_paths, graph_symbols_in_scope, line_for_byte_offset,
-    nodes_addressed_by_args, required_graph_file_path, required_graph_metadata,
-    single_graph_adjacency_batch, traverse_verified_neighbors,
+    graph_symbol_corrupt, graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths,
+    graph_symbols_in_scope, line_for_byte_offset, nodes_addressed_by_args,
+    required_graph_file_path, required_graph_metadata, single_graph_adjacency_batch,
+    traverse_verified_neighbors,
 };
 
 use tracedecay_contracts::retrieval::PrimitiveNotFoundV1;

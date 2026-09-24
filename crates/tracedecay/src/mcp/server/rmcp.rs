@@ -425,7 +425,9 @@ mod tests {
             .list_tools(None)
             .await
             .expect("RMCP tools/list");
-        fixture.assert_last_response_matches_raw_dispatch(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
 
         fixture
             .client
@@ -458,7 +460,9 @@ mod tests {
             )
             .await
             .expect_err("unknown tool must be a JSON-RPC error");
-        fixture.assert_last_response_matches_raw_dispatch(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
         assert_eq!(
             fixture.last_response()["error"]["code"],
             json!(-32603),
@@ -492,14 +496,18 @@ mod tests {
             .list_resources(None)
             .await
             .expect("RMCP resources/list");
-        fixture.assert_last_response_matches_raw_dispatch(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
 
         fixture
             .client
             .read_resource(ReadResourceRequestParams::new("tracedecay://schema"))
             .await
             .expect("RMCP resources/read");
-        fixture.assert_last_response_matches_raw_dispatch(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
 
         let unknown_resource = fixture
             .client
@@ -508,7 +516,9 @@ mod tests {
             ))
             .await
             .expect_err("an unknown resource URI must be a JSON-RPC error");
-        fixture.assert_last_response_matches_raw_dispatch(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
         assert_eq!(
             fixture.last_response()["error"]["code"],
             json!(-32602),
@@ -618,9 +628,14 @@ mod tests {
             ),
         ));
         let elapsed = fixture.client.call_tool(params).await;
-        fixture.assert_last_response_matches_raw_dispatch(false).await;
+        fixture
+            .assert_last_response_matches_raw_dispatch(false)
+            .await;
         assert!(
-            elapsed.is_err() || elapsed.as_ref().is_ok_and(|result| result.is_error == Some(true)),
+            elapsed.is_err()
+                || elapsed
+                    .as_ref()
+                    .is_ok_and(|result| result.is_error == Some(true)),
             "an elapsed caller deadline must not complete as a success: {:?}",
             fixture.last_response()
         );
@@ -670,10 +685,7 @@ mod tests {
         ] {
             let request: JsonRpcRequest =
                 serde_json::from_str(request_line).expect("raw request line");
-            let response = server
-                .handle_request(&request)
-                .await
-                .expect("raw response");
+            let response = server.handle_request(&request).await.expect("raw response");
             assert_eq!(
                 serde_json::to_string(&response).expect("serialize raw response"),
                 expected,

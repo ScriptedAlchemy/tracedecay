@@ -48,9 +48,7 @@ use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_sta
 use super::token_count::{
     MESSAGE_TOKENS_CTE, MessageTokens, counting_available, encoder_for_model,
 };
-use super::util::{
-    JsonQuery, i64_field, query_i64_result, query_rows, str_field,
-};
+use super::util::{JsonQuery, i64_field, query_i64_result, query_rows, str_field};
 use super::{DashboardState, savings_pricing, token_count};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::params;

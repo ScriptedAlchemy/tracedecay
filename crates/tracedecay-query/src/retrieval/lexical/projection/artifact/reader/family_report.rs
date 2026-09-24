@@ -218,10 +218,9 @@ impl CodeLexicalArtifactReaderV1 {
             let normalization_revision = u16::try_from(row.get::<_, i64>(1).map_err(sqlite_error)?)
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
             let digest = digest_from_key(&row.get::<_, Vec<u8>>(2).map_err(sqlite_error)?)?;
-            let representative = SymbolOccurrenceId::new(symbol_id_from_key(
-                row.get_ref(3).map_err(sqlite_error)?,
-            )?)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+            let representative =
+                SymbolOccurrenceId::new(symbol_id_from_key(row.get_ref(3).map_err(sqlite_error)?)?)
+                    .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
             let member_count = usize::try_from(row.get::<_, i64>(4).map_err(sqlite_error)?)
                 .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
             let reviewable_source_bytes =

@@ -482,8 +482,14 @@ fn per_session_totals_sum_own_deltas_and_flag_issue_sessions_without_zero_fill()
 
     let broken = &by_session[&("claude".to_owned(), "broken".to_owned())];
     assert_eq!(broken.usage_events, 0);
-    assert_eq!(broken.counters, AggregatedProviderUsageCountersV1::unknown());
-    assert!(!broken.complete, "an unreducible session is flagged, not zeroed");
+    assert_eq!(
+        broken.counters,
+        AggregatedProviderUsageCountersV1::unknown()
+    );
+    assert!(
+        !broken.complete,
+        "an unreducible session is flagged, not zeroed"
+    );
 
     assert_eq!(by_session.len(), 3);
     assert_eq!(aggregate.totals, totals(127, 18));

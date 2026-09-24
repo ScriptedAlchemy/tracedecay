@@ -94,8 +94,12 @@ fn assert_absent_producer(result: &Value) {
 
 fn assert_absent_producer_markdown(result: &Value) {
     assert_eq!(result["isError"], json!(true));
-    let request_id = assert_mcp_request_id(result["structuredContent"]["problem"]["request_id"].as_str());
-    assert_eq!(result["structuredContent"]["problem"], absent_producer_problem(&request_id));
+    let request_id =
+        assert_mcp_request_id(result["structuredContent"]["problem"]["request_id"].as_str());
+    assert_eq!(
+        result["structuredContent"]["problem"],
+        absent_producer_problem(&request_id)
+    );
     assert_eq!(
         extract_real_server_text(result),
         format!(

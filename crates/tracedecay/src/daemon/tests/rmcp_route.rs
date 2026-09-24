@@ -336,7 +336,11 @@ async fn unix_production_route_serves_initialize_and_stateless_requests_over_rmc
         tokio::net::UnixStream::pair().expect("production route socket pair");
     let engine = fixture.engine.clone();
     let initialized_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
     });
     let (reader, mut writer) = client_stream.into_split();
     super::write_test_auth_preface(&mut writer).await;
@@ -547,7 +551,10 @@ where
         .expect("write handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
     write_line(&mut writer, request).await;
-    writer.shutdown().await.expect("shutdown one-request client");
+    writer
+        .shutdown()
+        .await
+        .expect("shutdown one-request client");
     tokio::time::timeout(PHASE_TIMEOUT, read_to_eof(&mut reader))
         .await
         .expect("one-request responses timed out")
@@ -559,7 +566,11 @@ async fn unix_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Vec<Va
         tokio::net::UnixStream::pair().expect("one-request socket pair");
     let engine = fixture.engine.clone();
     let task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
     });
     let (reader, mut writer) = client_stream.into_split();
     super::write_test_auth_preface(&mut writer).await;
@@ -868,7 +879,11 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         tokio::net::UnixStream::pair().expect("selected target socket pair");
     let engine = fixture.engine.clone();
     let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
     });
     let (reader, mut writer) = client_stream.into_split();
     super::write_test_auth_preface(&mut writer).await;
@@ -963,7 +978,11 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         tokio::net::UnixStream::pair().expect("selector-owner cancellation socket pair");
     let engine = fixture.engine.clone();
     let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
     });
     let (reader, mut writer) = client_stream.into_split();
     super::write_test_auth_preface(&mut writer).await;
@@ -1097,7 +1116,11 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
         tokio::net::UnixStream::pair().expect("cancellation socket pair");
     let engine = fixture.engine.clone();
     let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(server_stream, engine)).await
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
     });
     let (reader, mut writer) = client_stream.into_split();
     super::write_test_auth_preface(&mut writer).await;

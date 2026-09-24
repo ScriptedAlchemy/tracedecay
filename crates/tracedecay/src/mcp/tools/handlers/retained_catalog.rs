@@ -215,10 +215,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     let requested_format = normalized.requested_format;
     let typed_request = hotpath::measure_block!(
         "mcp.retained.profile.decode",
-        tracedecay_daemon_protocol::decode_retained_request(
-            operation,
-            normalized.request
-        )
+        tracedecay_daemon_protocol::decode_retained_request(operation, normalized.request)
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("invalid retained application request for {tool_name}: {error}"),

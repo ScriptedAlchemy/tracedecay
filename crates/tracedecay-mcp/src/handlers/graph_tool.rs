@@ -98,10 +98,9 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::retrieval::{
         CodeGraphReadFreshnessV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1,
-        ContextResultV1, PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1,
-        PrimitiveLaneStatusV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1,
-        PrimitiveSearchFreshnessV1, PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1,
-        TodoMarkerV1, TodosResultV1,
+        ContextResultV1, PrimitiveFreshnessStateV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSearchFreshnessV1,
+        PrimitiveSymbolLocationV1, ServedCodeGraphGenerationV1, TodoMarkerV1, TodosResultV1,
     };
     use tracedecay_contracts::{ContextMemoryAnalyticsV1, InvocationAnalyticsV1};
     use tracedecay_domain::UtcMicros;
@@ -265,11 +264,18 @@ mod tests {
             }}))
         );
 
-        let as_json = render_graph_tool(None, &json!({"format": "json"}), completion(Some(analytics)))
-            .expect("json");
+        let as_json = render_graph_tool(
+            None,
+            &json!({"format": "json"}),
+            completion(Some(analytics)),
+        )
+        .expect("json");
         let payload: serde_json::Value =
             serde_json::from_str(&texts(&as_json)[0]).expect("json payload");
-        assert_eq!(payload["plan"]["extension_points"][0]["implementor_count"], 2);
+        assert_eq!(
+            payload["plan"]["extension_points"][0]["implementor_count"],
+            2
+        );
         assert!(payload.get("context_memory").is_none(), "{payload}");
         assert!(payload.get("analytics").is_none(), "{payload}");
     }
@@ -293,7 +299,10 @@ mod tests {
         assert_eq!(blocks.len(), 2, "{blocks:?}");
         assert_eq!(
             blocks[1],
-            format!("\ntracedecay_metrics: before=10 after={}", blocks[0].len() / 4)
+            format!(
+                "\ntracedecay_metrics: before=10 after={}",
+                blocks[0].len() / 4
+            )
         );
     }
 }

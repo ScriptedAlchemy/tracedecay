@@ -32,9 +32,8 @@ pub use read_coalescing::{
 };
 pub use rmcp::{
     RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
-    RmcpWorkDeliverySettlement, attach_stateless_request_context,
-    await_dispatch_with_cancellation, opens_rmcp_session, project_server_retired_error,
-    rmcp_response_result,
+    RmcpWorkDeliverySettlement, attach_stateless_request_context, await_dispatch_with_cancellation,
+    opens_rmcp_session, project_server_retired_error, rmcp_response_result,
 };
 pub use settlement::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest, DispatchFailure,

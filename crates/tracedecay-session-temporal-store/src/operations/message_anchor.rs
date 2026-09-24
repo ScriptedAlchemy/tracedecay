@@ -1155,10 +1155,15 @@ mod tests {
         let parent_json = anchor_for("summary.message-anchor.parent").await;
         let parent_anchor: tracedecay_domain::RetrievalAnchorRecord =
             serde_json::from_str(&parent_json).unwrap_or_else(|error| {
-                panic!("a summary of typed summaries must get a typed anchor: {error}: {parent_json}")
+                panic!(
+                    "a summary of typed summaries must get a typed anchor: {error}: {parent_json}"
+                )
             });
         assert_eq!(parent_anchor.owner(), leaf.owner());
-        assert_eq!(parent_anchor.source_observations(), leaf.source_observations());
+        assert_eq!(
+            parent_anchor.source_observations(),
+            leaf.source_observations()
+        );
         assert_ne!(parent_anchor.anchor_id(), leaf.anchor_id());
     }
 

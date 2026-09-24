@@ -318,16 +318,16 @@ fn validate_summary_source<'a>(
         })?;
     // A typed child anchor is owned by its source observations; an untyped
     // one by the publishing session, as its manifest records.
-    let anchor_owner_matches = match serde_json::from_str::<RetrievalAnchorRecord>(&node.anchor_json)
-    {
-        Ok(typed) => {
-            typed.anchor_id().as_str() == node.summary_anchor_id
-                && typed
-                    .owner_column_json()
-                    .is_ok_and(|owner| owner == node.anchor_owner_json)
-        }
-        Err(_) => node.anchor_owner_json == manifest.owner_json,
-    };
+    let anchor_owner_matches =
+        match serde_json::from_str::<RetrievalAnchorRecord>(&node.anchor_json) {
+            Ok(typed) => {
+                typed.anchor_id().as_str() == node.summary_anchor_id
+                    && typed
+                        .owner_column_json()
+                        .is_ok_and(|owner| owner == node.anchor_owner_json)
+            }
+            Err(_) => node.anchor_owner_json == manifest.owner_json,
+        };
     if manifest.session_id != draft.session_id
         || manifest.provider != draft.provider
         || manifest.summary_anchor_id != node.summary_anchor_id
@@ -655,8 +655,8 @@ async fn first_typed_source_anchor(
     conn: &impl crate::handle::SessionTemporalExec,
     sources: &[CanonicalSourceBinding],
 ) -> Result<Option<RetrievalAnchorRecord>, LcmError> {
-    let encoded_sources = serde_json::to_string(sources)
-        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let encoded_sources =
+        serde_json::to_string(sources).map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
             "SELECT source.key, anchor.anchor_json

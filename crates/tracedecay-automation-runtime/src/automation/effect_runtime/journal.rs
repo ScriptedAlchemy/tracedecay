@@ -238,7 +238,9 @@ pub enum ReservationResult {
     /// The run identity already has a valid durable record, but the newly
     /// prepared admission does not match the authority bound to that record.
     /// This is an idempotency conflict, not a journal I/O or shape failure.
-    Conflict { terminal: bool },
+    Conflict {
+        terminal: bool,
+    },
 }
 
 /// Process-local proof that an `Execute` admission still has a live owner.

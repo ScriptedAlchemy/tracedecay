@@ -530,7 +530,9 @@ fn parse_feedback_read_operation(operation: &str) -> Option<ApplicationSurfaceOp
 
 fn parse_public_feedback_operation(operation: &str) -> Option<ApplicationSurfaceOperation> {
     ApplicationSurfaceOperation::from_catalog_name(&format!("feedback_{operation}")).filter(
-        |operation| http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Feedback),
+        |operation| {
+            http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Feedback)
+        },
     )
 }
 

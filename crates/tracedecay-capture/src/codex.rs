@@ -508,7 +508,10 @@ fn append_codex_file_change_facts(
             content.insert("id".to_string(), id.clone());
         }
         if let Some(edited_at_micros) = edited_at_micros {
-            content.insert("edited_at_micros".to_string(), Value::from(edited_at_micros));
+            content.insert(
+                "edited_at_micros".to_string(),
+                Value::from(edited_at_micros),
+            );
         }
         if let Some(change_type) = change.get("type").and_then(Value::as_str) {
             content.insert(

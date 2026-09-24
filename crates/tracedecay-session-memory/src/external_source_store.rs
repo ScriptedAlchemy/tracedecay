@@ -24,9 +24,10 @@ use tracedecay_store::{
     ExternalSourceReadOperationV1, ExternalSourceReadResultV1, RepositoryOperationEnvelopeV1,
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
-    SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1, SourceCommitV1, SourceObjectMutationV1,
-    SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
-    SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit, build_source_projection,
+    SourceCommitApplyOutcomeV1, SourceCommitReceiptSummaryV1, SourceCommitV1,
+    SourceObjectMutationV1, SourceObjectTransitionV1, SourceObservationEvidenceV1,
+    SourcePendingProjectionV1, SourceProjectionCommitV1, SourceStoreStateV1, apply_source_commit,
+    build_source_projection,
 };
 
 use tracedecay_contracts::request_identity::{
@@ -430,7 +431,8 @@ impl RuntimeExternalSourceStore {
                     states.insert(binding_identity.clone(), Some(*state));
                 }
                 SourceCommitApplyOutcomeV1::ExactDuplicate(receipt) => {
-                    settled[slot] = Some((binding_identity, SourceCommitReceiptSummaryV1::of(&receipt)));
+                    settled[slot] =
+                        Some((binding_identity, SourceCommitReceiptSummaryV1::of(&receipt)));
                     continue;
                 }
             }

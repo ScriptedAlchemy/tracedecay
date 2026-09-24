@@ -152,7 +152,13 @@ pub struct MemoryScoreDistributionV1 {
 }
 
 impl MemoryScoreDistributionV1 {
-    fn observed(min: f64, max: f64, total_pairs: u64, sum: f64, bins: Vec<MemoryScoreBinV1>) -> Self {
+    fn observed(
+        min: f64,
+        max: f64,
+        total_pairs: u64,
+        sum: f64,
+        bins: Vec<MemoryScoreBinV1>,
+    ) -> Self {
         Self {
             bin_count: bins.len(),
             total_pairs,

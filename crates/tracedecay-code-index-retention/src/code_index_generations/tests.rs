@@ -166,9 +166,8 @@ fn durable_index_counts_text_bytes_and_never_evicts_the_active_text_head() {
     let mut text_head = indexed_generation(1, now - 3, 32, true);
     let text_head_id =
         CodeGenerationId::new(text_head.generation_id.clone()).expect("text-head generation id");
-    text_head.text_artifact = Some(
-        text_artifact(&text_head_id, 1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1).into(),
-    );
+    text_head.text_artifact =
+        Some(text_artifact(&text_head_id, 1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1).into());
     let mut entries = vec![
         indexed_generation(0, now - 4, 32, true),
         text_head.clone(),
@@ -477,7 +476,12 @@ fn single_pass_sweep_accounting_is_linear_on_thousands_of_shared_artifact_entrie
         let mut entry = indexed_generation(sequence, now - 1_000 + sequence as i64, 1, false);
         let owner = CodeGenerationId::new(entry.generation_id.clone()).expect("generation id");
         entry.text_artifact = Some(
-            text_artifact(&owner, sequence / 8, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2).into(),
+            text_artifact(
+                &owner,
+                sequence / 8,
+                MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2,
+            )
+            .into(),
         );
         entries.push(entry);
     }
@@ -712,7 +716,10 @@ fn verified_text_artifact_attachment_retires_history_before_enforcing_byte_bound
         updated.generation_index[0].generation_id,
         active.id.as_str()
     );
-    assert_eq!(updated.generation_index[0].text_artifact(), Some(&descriptor));
+    assert_eq!(
+        updated.generation_index[0].text_artifact(),
+        Some(&descriptor)
+    );
     assert_eq!(
         read_active_pointer(store.path()).expect("durable pointer"),
         updated

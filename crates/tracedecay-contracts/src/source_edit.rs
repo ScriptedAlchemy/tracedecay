@@ -12,12 +12,12 @@ use tracedecay_tool_catalog::{
 use crate::capability_manifest::{
     ApplicationCapabilityManifestInput, application_capability_manifest,
 };
+use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::source_edit_rollback::{source_edit_rollback_operation, source_edit_rollback_schema};
-use crate::current_bindings;
 
 /// `serde` `skip_serializing_if` predicate for default-off flags.
 #[allow(clippy::trivially_copy_pass_by_ref)]

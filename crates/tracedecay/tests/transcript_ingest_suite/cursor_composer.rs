@@ -303,7 +303,10 @@ async fn composer_completed_edit_records_edit_time_and_tool_call_id() {
     let tmp = TempDir::new().unwrap();
     let project = init_project(&tmp);
     let home = tmp.path().join("home");
-    let edited = project.join("src/auth/mod.rs").to_string_lossy().into_owned();
+    let edited = project
+        .join("src/auth/mod.rs")
+        .to_string_lossy()
+        .into_owned();
 
     let edit_bubble = serde_json::json!({
         "type": 2,

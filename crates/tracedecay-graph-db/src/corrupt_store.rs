@@ -408,10 +408,8 @@ mod tests {
         std::os::unix::fs::symlink(outside.path().join("wal"), wal_sidecar_path(&container))
             .unwrap();
 
-        recover_deterministically_corrupt_container(&container, "fault", &|| {
-            Err(corrupt("fault"))
-        })
-        .unwrap();
+        recover_deterministically_corrupt_container(&container, "fault", &|| Err(corrupt("fault")))
+            .unwrap();
 
         assert!(wal_sidecar_path(&container).symlink_metadata().is_err());
         assert_eq!(

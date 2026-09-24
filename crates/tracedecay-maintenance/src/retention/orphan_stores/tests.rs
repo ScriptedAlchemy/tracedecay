@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::fence::{capture_store_content_fence, capture_store_directory_fence};
 use super::collection::{
     DurableDatabaseInventoryV1, DurableMemoryCheck, check_store_durable_memory,
     durable_check_scratch_root, durable_database_inventory, open_verified_store,
 };
+use super::fence::{capture_store_content_fence, capture_store_directory_fence};
 use super::pages::walk_store_stats;
 use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;

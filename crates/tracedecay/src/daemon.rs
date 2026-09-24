@@ -241,10 +241,10 @@ mod connection_serving;
 pub use connection_serving::rmcp_benchmark;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
-#[cfg(not(unix))]
-use connection_serving::serve_windows_broker_client_with_class_and_invocation;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) use connection_serving::serve_routed_rmcp_connection;
+#[cfg(not(unix))]
+use connection_serving::serve_windows_broker_client_with_class_and_invocation;
 #[cfg(test)]
 use connection_serving::{
     await_project_owner_or_disconnect, serve_windows_broker_client,

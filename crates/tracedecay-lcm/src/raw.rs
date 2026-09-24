@@ -50,7 +50,11 @@ fn served_metadata(alias: &str) -> String {
 /// placeholder of a body stored outside the row. Lossless bodies load through
 /// [`load_raw_message_by_identity`].
 pub fn message_record_select_columns(alias: &str) -> String {
-    record_select_columns(alias, &format!("{alias}.index_text"), &served_metadata(alias))
+    record_select_columns(
+        alias,
+        &format!("{alias}.index_text"),
+        &served_metadata(alias),
+    )
 }
 
 /// Reads one message row as a [`SessionMessageRecord`] carrying its whole

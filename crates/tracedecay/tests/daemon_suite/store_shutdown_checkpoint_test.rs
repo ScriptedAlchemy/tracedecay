@@ -80,10 +80,7 @@ async fn init_until_open_phase(
 
 /// Joins the interrupted `init` and proves no daemon answers afterwards, so
 /// the store files are read after the last writer left.
-fn settle_interrupted_init(
-    init: std::thread::JoinHandle<std::io::Result<Output>>,
-    socket: &Path,
-) {
+fn settle_interrupted_init(init: std::thread::JoinHandle<std::io::Result<Output>>, socket: &Path) {
     init.join()
         .expect("init thread")
         .expect("interrupted init ran");

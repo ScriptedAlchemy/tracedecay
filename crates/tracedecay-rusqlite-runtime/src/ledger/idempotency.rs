@@ -153,12 +153,18 @@ fn decode_row(
         StoreOperationIdV1::new(row.get::<_, String>(1)?).map_err(|_| corrupt("operation_id"))?;
     let transaction_id = RuntimeTransactionIdV1::new(row.get::<_, String>(2)?)
         .map_err(|_| corrupt("transaction_id"))?;
-    let commit_sequence = u64::try_from(row.get::<_, i64>(3)?)
-        .map_err(|_| corrupt("commit_sequence"))?;
-    let durability: DurabilityClassV1 =
-        decode_json(&row.get::<_, String>(4)?, IDEMPOTENCY_TABLE, "durability_json")?;
-    let priority: OperationPriorityV1 =
-        decode_json(&row.get::<_, String>(5)?, IDEMPOTENCY_TABLE, "priority_json")?;
+    let commit_sequence =
+        u64::try_from(row.get::<_, i64>(3)?).map_err(|_| corrupt("commit_sequence"))?;
+    let durability: DurabilityClassV1 = decode_json(
+        &row.get::<_, String>(4)?,
+        IDEMPOTENCY_TABLE,
+        "durability_json",
+    )?;
+    let priority: OperationPriorityV1 = decode_json(
+        &row.get::<_, String>(5)?,
+        IDEMPOTENCY_TABLE,
+        "priority_json",
+    )?;
     let receipt = StoreCommitReceiptV1 {
         operation_id,
         idempotency: IdempotencyIdentityV1 {

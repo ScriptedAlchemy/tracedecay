@@ -541,7 +541,10 @@ fn assert_no_corrupt_copy(root: &std::path::Path) {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.contains(".corrupt-"))
         .collect();
-    assert!(copies.is_empty(), "corrupt store copies were kept: {copies:?}");
+    assert!(
+        copies.is_empty(),
+        "corrupt store copies were kept: {copies:?}"
+    );
 }
 
 /// GitHub issue #763: a deterministic corruption verdict on the durable

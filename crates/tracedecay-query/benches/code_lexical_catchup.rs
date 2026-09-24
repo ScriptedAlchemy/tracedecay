@@ -33,8 +33,8 @@ use tracedecay_domain::{
     SourceNamespace, UtcMicros,
 };
 use tracedecay_query::retrieval::lexical::{
-    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
-    CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, VerifiedCodeLexicalArtifactV1,
+    CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalCloneRouteV1,
+    CodeLexicalProjectionMetadataV1, VerifiedCodeLexicalArtifactV1,
 };
 
 const FIXTURE_FILE_COUNT: usize = 48;

@@ -99,12 +99,12 @@ async fn admitted_graph_query_for_operation(
     // Every graph-backed tool funnels through this open, so this is the
     // single point that reports the served generation, and a
     // serve-old-while-rebuilding seat, back to the dispatch boundary.
-    options
-        .served_code_graph
-        .record(tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1 {
+    options.served_code_graph.record(
+        tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1 {
             generation: query.generation().as_str().to_owned(),
             freshness: query.freshness(),
-        });
+        },
+    );
     Ok(query)
 }
 

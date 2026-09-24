@@ -22,7 +22,9 @@ pub const MAX_MANAGED_SKILL_BODY_BYTES: usize = 256 * 1024;
 /// by TraceDecay automation.
 pub const MATERIALIZED_SKILL_MANAGED_BY: &str = "tracedecay-automation";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillInstallTarget {
     Cursor,

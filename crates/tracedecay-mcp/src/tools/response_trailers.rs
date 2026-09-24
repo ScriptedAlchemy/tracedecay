@@ -152,7 +152,10 @@ mod tests {
     use super::*;
 
     fn text_result(text: &str, touched: Vec<String>) -> ToolResult {
-        ToolResult::new(json!({"content": [{"type": "text", "text": text}]}), touched)
+        ToolResult::new(
+            json!({"content": [{"type": "text", "text": text}]}),
+            touched,
+        )
     }
 
     fn block(result: &ToolResult, index: usize) -> Option<&str> {

@@ -51,9 +51,8 @@ use tracedecay_domain::{
     ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
     QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
     RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverBatch,
-    RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SingleRootScopeV1, SnapshotFileDispositionV1,
     TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::native_git::NativeHistoricalBlobReaderV1;
@@ -73,9 +72,8 @@ use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
     CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneEvidence, LexicalLaneRequest,
-    LexicalLaneRetriever,
-    LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1, lexical_query_parts,
-    merge_lexical_routes,
+    LexicalLaneRetriever, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
+    lexical_query_parts, merge_lexical_routes,
 };
 use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, RETRIEVAL_CANDIDATE_BATCH_SIZE};
 use tracedecay_query::search_quality::candidate_output::{
@@ -268,7 +266,8 @@ fn seal_lexical_artifact(
     generation: &CodeIndexPublishedGenerationV1,
     metadata: &CodeLexicalProjectionMetadataV1,
 ) -> Result<(TempDir, CodeLexicalArtifactReaderV1), CandidateOutputError> {
-    let contract = |error: &dyn std::fmt::Display| CandidateOutputError::Contract(error.to_string());
+    let contract =
+        |error: &dyn std::fmt::Display| CandidateOutputError::Contract(error.to_string());
     let mut segments = BTreeMap::new();
     let mut evidence_pack = Vec::new();
     let manifest = generation
@@ -293,8 +292,8 @@ fn seal_lexical_artifact(
             Ok(())
         })
         .map_err(|error| contract(&error))?;
-    let state_digest =
-        ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest)).map_err(|error| contract(&error))?;
+    let state_digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&manifest))
+        .map_err(|error| contract(&error))?;
     let segments = Arc::new(segments);
     let mut source = VerifiedSealedLexicalPageSourceV1::open_partitioned_sealed(
         &manifest,
@@ -315,10 +314,13 @@ fn seal_lexical_artifact(
     .map_err(|error| contract(&error))?;
     let directory = tempfile::tempdir().map_err(|error| contract(&error))?;
     let path = directory.path().join("lexical-artifact.sqlite");
-    let mut builder =
-        CodeLexicalArtifactBuilderV1::create(&path, metadata.clone()).map_err(|error| contract(&error))?;
+    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, metadata.clone())
+        .map_err(|error| contract(&error))?;
     let receipt = loop {
-        match source.next_page(&ActiveControl).map_err(|error| contract(&error))? {
+        match source
+            .next_page(&ActiveControl)
+            .map_err(|error| contract(&error))?
+        {
             VerifiedSealedLexicalPageReadV1::Page(page) => {
                 builder
                     .append_page(&page, &ActiveControl)

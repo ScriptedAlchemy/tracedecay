@@ -12,9 +12,7 @@ use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ManifestDigest, RetrieverCoverage, SymbolOccurrenceId, canonical_sha256};
 
 use super::clone_codec::{CloneOccurrenceRouteV1, routed_clone_body_row};
-use super::format::{
-    VerifiedCodeLexicalArtifactV1, contract_number, decode_fingerprint_postings,
-};
+use super::format::{VerifiedCodeLexicalArtifactV1, contract_number, decode_fingerprint_postings};
 use super::reader::{CloneArtifactCursorPositionV1, CloneArtifactCursorV1, CloneArtifactPageV1};
 use super::{CodeLexicalArtifactErrorV1, sqlite_error};
 

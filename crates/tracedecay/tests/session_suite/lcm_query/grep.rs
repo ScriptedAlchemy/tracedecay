@@ -480,7 +480,8 @@ async fn one_stored_body_serves_search_grep_and_expand_redacted() {
         for column in columns {
             // Generated retrieval columns derive from `content`; they are not
             // stored copies.
-            if table == "lcm_raw_messages" && matches!(column.as_str(), "snippet_text" | "index_text")
+            if table == "lcm_raw_messages"
+                && matches!(column.as_str(), "snippet_text" | "index_text")
             {
                 continue;
             }
@@ -579,7 +580,11 @@ async fn one_stored_body_serves_search_grep_and_expand_redacted() {
         })
         .await
         .unwrap();
-    assert!(expanded.content.starts_with("orchard ledger rotation uses "));
+    assert!(
+        expanded
+            .content
+            .starts_with("orchard ledger rotation uses ")
+    );
     assert!(expanded.content.ends_with(" for the nightly job"));
     assert!(!expanded.content.contains(&secret));
 }

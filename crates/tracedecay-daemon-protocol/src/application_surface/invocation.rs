@@ -351,16 +351,14 @@ fn daemon_invocation_request(
                 cancellation,
             )
         }
-        ApplicationSurfaceRequest::GraphTool(arguments) => {
-            DaemonInvocationRequest::graph_tool(
-                request_id,
-                operation,
-                arguments,
-                observed_at,
-                deadline,
-                cancellation,
-            )
-        }
+        ApplicationSurfaceRequest::GraphTool(arguments) => DaemonInvocationRequest::graph_tool(
+            request_id,
+            operation,
+            arguments,
+            observed_at,
+            deadline,
+            cancellation,
+        ),
     }
 }
 

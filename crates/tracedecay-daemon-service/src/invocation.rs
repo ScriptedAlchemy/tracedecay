@@ -181,13 +181,13 @@ mod observability_producer;
 mod observatory;
 mod primitive;
 pub use primitive::callable_code_request_context;
+mod graph_tool;
 mod recovery_schedule;
 mod registrars;
 mod retained;
 mod source_edit;
 #[cfg(test)]
 mod tests;
-mod graph_tool;
 mod types;
 mod work;
 mod work_attempt_exec;
@@ -199,6 +199,11 @@ use configuration::*;
 use feedback::*;
 use git::*;
 use github_stack_signal::execute_github_stack_signal_expand;
+use graph_tool::execute_graph_tool;
+pub use graph_tool::{
+    DaemonGraphToolOwnerRegistrationError, GraphToolFuture, GraphToolInvocationV1,
+    ProjectGraphToolPortV1, RegisteredGraphToolOwnerV1,
+};
 use handoff::*;
 use invocation_observability::{
     emit_invocation_observation, feedback_observation_operation, invocation_observation_subject,
@@ -216,11 +221,6 @@ use primitive::*;
 use retained::*;
 use source_edit::{
     execute_source_edit, execute_source_edit_reconcile, execute_source_edit_rollback,
-};
-use graph_tool::execute_graph_tool;
-pub use graph_tool::{
-    DaemonGraphToolOwnerRegistrationError, GraphToolFuture, GraphToolInvocationV1,
-    ProjectGraphToolPortV1, RegisteredGraphToolOwnerV1,
 };
 use tracedecay_contracts::now_micros;
 use types::*;

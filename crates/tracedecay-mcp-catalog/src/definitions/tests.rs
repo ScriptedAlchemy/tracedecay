@@ -208,9 +208,11 @@ fn lcm_history_reads_accept_an_as_of_cutoff() {
 
         let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(name, arguments)
             .expect("the shared CLI/MCP adapter accepts the arguments");
-        let request =
-            tracedecay_daemon_protocol::parse_application_surface_request(operation, adapted.request)
-                .expect("the typed LCM request accepts an as_of cutoff");
+        let request = tracedecay_daemon_protocol::parse_application_surface_request(
+            operation,
+            adapted.request,
+        )
+        .expect("the typed LCM request accepts an as_of cutoff");
         let temporal_mode = match request {
             ApplicationSurfaceRequest::Retained(RetainedSurfaceRequestV1::LcmLoadSession(
                 request,

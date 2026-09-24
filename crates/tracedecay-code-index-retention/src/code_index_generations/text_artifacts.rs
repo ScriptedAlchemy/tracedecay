@@ -27,12 +27,12 @@ use super::{
     MAX_TRANSACTION_BYTES, TEXT_ARTIFACT_QUARANTINE_DIRECTORY, TEXT_ARTIFACT_RECEIPT_SCHEMA,
     TEXT_ARTIFACT_RECEIPTS_DIRECTORY, TEXT_ARTIFACT_TRANSACTION_FILE,
     TEXT_ARTIFACT_TRANSACTION_SCHEMA, code_text_artifact_staging_root, code_text_artifacts_root,
-    durable_generation_index_digest,
-    generation_file_digest, observe_cancel, open_file_sha256_hex_cancellable,
-    path_still_names_open_file, read_active_pointer, read_optional_active_pointer,
-    regular_file_exists, remove_empty_stage_root, retain_bounded_generation_index_with_text_head,
-    sha256_file_component, storage, sync_directory, validate_durable_generation_index,
-    validate_sealed_generation_identity, validate_text_artifact_descriptor,
+    durable_generation_index_digest, generation_file_digest, observe_cancel,
+    open_file_sha256_hex_cancellable, path_still_names_open_file, read_active_pointer,
+    read_optional_active_pointer, regular_file_exists, remove_empty_stage_root,
+    retain_bounded_generation_index_with_text_head, sha256_file_component, storage, sync_directory,
+    validate_durable_generation_index, validate_sealed_generation_identity,
+    validate_text_artifact_descriptor,
 };
 
 pub(super) const TEXT_ARTIFACT_TRANSACTION_JOURNAL: BoundedJournalSpec<
@@ -110,28 +110,24 @@ fn mutate_verified_text_artifact_under_lock(
         ));
     }
     match mutation {
-        VerifiedTextArtifactMutationV1::Attach { descriptor, .. } => {
-            match entry.text_artifact() {
-                Some(existing) if existing == &descriptor => return Ok(pointer),
-                Some(_) => {
-                    return Err(CodeGenerationRetentionErrorV1::Conflict(
-                        "sealed generation already names a different text artifact".to_owned(),
-                    ));
-                }
-                None => entry.text_artifact = Some(descriptor.into()),
+        VerifiedTextArtifactMutationV1::Attach { descriptor, .. } => match entry.text_artifact() {
+            Some(existing) if existing == &descriptor => return Ok(pointer),
+            Some(_) => {
+                return Err(CodeGenerationRetentionErrorV1::Conflict(
+                    "sealed generation already names a different text artifact".to_owned(),
+                ));
             }
-        }
-        VerifiedTextArtifactMutationV1::Withdraw { expected } => {
-            match entry.text_artifact() {
-                Some(existing) if existing == expected => entry.text_artifact = None,
-                Some(_) => {
-                    return Err(CodeGenerationRetentionErrorV1::Conflict(
-                        "sealed generation names a newer text artifact".to_owned(),
-                    ));
-                }
-                None => return Ok(pointer),
+            None => entry.text_artifact = Some(descriptor.into()),
+        },
+        VerifiedTextArtifactMutationV1::Withdraw { expected } => match entry.text_artifact() {
+            Some(existing) if existing == expected => entry.text_artifact = None,
+            Some(_) => {
+                return Err(CodeGenerationRetentionErrorV1::Conflict(
+                    "sealed generation names a newer text artifact".to_owned(),
+                ));
             }
-        }
+            None => return Ok(pointer),
+        },
     }
     if retain_text_head {
         let active_generation_id = pointer.generation_id.clone();
@@ -411,9 +407,7 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
                 // The active build's staging family is the builder's
                 // property; any other staging database or sidecar is crash
                 // debris.
-                (false, Some(source_digest), _)
-                    if Some(source_digest) == active_staging_source =>
-                {
+                (false, Some(source_digest), _) if Some(source_digest) == active_staging_source => {
                     None
                 }
                 (false, Some(_), _) => Some(CodeTextArtifactRetentionCandidateV1 {

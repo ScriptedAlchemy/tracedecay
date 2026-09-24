@@ -501,15 +501,16 @@ fn canonical_message_metadata_for(
         CanonicalRendering::Current => host_tool_use_id(envelope),
         // Released rows carried the first subagent dispatch id of a Cursor
         // transcript record, including the capture fallback.
-        CanonicalRendering::ShippedRelease => normalizer
-            .and_then(|_| envelope.facts().iter().find_map(|fact| match fact {
+        CanonicalRendering::ShippedRelease => normalizer.and_then(|_| {
+            envelope.facts().iter().find_map(|fact| match fact {
                 CanonicalObservationFactV1::ToolInvocation {
                     invocation_id,
                     name,
                     ..
                 } if is_subagent_dispatch_tool(name) => Some(invocation_id.as_str()),
                 _ => None,
-            })),
+            })
+        }),
     };
     if let Some(tool_use_id) = tool_use_id {
         metadata.insert(
@@ -1436,7 +1437,11 @@ mod tests {
                 arguments: json!({}),
             }]);
             assert_eq!(host_tool_use_id(&fallback), None, "{synthesized}");
-            assert!(canonical_message_metadata(&fallback, None).unwrap().is_none());
+            assert!(
+                canonical_message_metadata(&fallback, None)
+                    .unwrap()
+                    .is_none()
+            );
         }
 
         // The subagent dispatch binds a fork even when it is not first.
@@ -1510,16 +1515,17 @@ mod tests {
             "each recorded key is copied; absent keys stay absent"
         );
 
-        let projection =
-            derive_canonical_projection(&observation_without_native_record_id(&provider_envelope(
-                "claude",
-                edits.facts().to_vec(),
-            )))
-            .unwrap();
+        let projection = derive_canonical_projection(&observation_without_native_record_id(
+            &provider_envelope("claude", edits.facts().to_vec()),
+        ))
+        .unwrap();
         let output = projection.messages().next().unwrap();
         let session_metadata: serde_json::Value =
             serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
-        assert_eq!(session_metadata["edited_files"][1]["path"], "/work/src/new.rs");
+        assert_eq!(
+            session_metadata["edited_files"][1]["path"],
+            "/work/src/new.rs"
+        );
         assert!(
             output.message().metadata_json.is_none(),
             "the rollup is session evidence, not message metadata: {:?}",

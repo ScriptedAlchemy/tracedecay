@@ -40,7 +40,9 @@ pub async fn list(
     let receipt_state = match params.state.as_deref() {
         Some(value) => match AutomaticFactState::parse(value) {
             Ok(state) => Some(state),
-            Err(err) => return json_error(StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+            Err(err) => {
+                return json_error(StatusCode::BAD_REQUEST, err.to_string()).into_response();
+            }
         },
         None => None,
     };

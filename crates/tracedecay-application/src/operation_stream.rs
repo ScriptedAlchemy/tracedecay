@@ -1930,7 +1930,10 @@ mod tests {
         assert!(
             matches!(
                 history.front().map(|event| (event.sequence, &event.kind)),
-                Some((0, StreamEventKind::Item(OperationEventItem::Accepted { .. })))
+                Some((
+                    0,
+                    StreamEventKind::Item(OperationEventItem::Accepted { .. })
+                ))
             ),
             "the accepted record must precede the first result: {history:?}"
         );

@@ -21,10 +21,11 @@ pub use tracedecay_host_integration::{
     HostBundleArtifactV1, HostBundleError, HostBundleInstallReceiptV1, HostBundleLifecycleOpV1,
     HostBundleManifestV1, HostBundleReceiptArtifactV1, HostBundleVerificationAdapterV1,
     HostCapabilityRecordV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1,
-    HostCapabilityV1, HostComponentSetReceiptV1, HostComponentV1, HostEditStopConformanceEvidenceV1, HostFeedbackBoundaryEvidenceV1,
-    HostFeedbackBoundaryV1, HostKindV1, HostNativeFixtureEvidenceV1, HostRegistrationEvidenceV1,
-    HostRegistrationRouteV1, MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS,
-    MAX_MANIFEST_ARTIFACTS, MAX_RELATIVE_PATH_BYTES, stock_host_capabilities, validate_identifier,
+    HostCapabilityV1, HostComponentSetReceiptV1, HostComponentV1,
+    HostEditStopConformanceEvidenceV1, HostFeedbackBoundaryEvidenceV1, HostFeedbackBoundaryV1,
+    HostKindV1, HostNativeFixtureEvidenceV1, HostRegistrationEvidenceV1, HostRegistrationRouteV1,
+    MAX_ARTIFACT_CONTENT_BYTES, MAX_HOST_COMPONENTS, MAX_MANIFEST_ARTIFACTS,
+    MAX_RELATIVE_PATH_BYTES, stock_host_capabilities, validate_identifier,
     validate_relative_install_path,
 };
 use tracedecay_host_integration::{

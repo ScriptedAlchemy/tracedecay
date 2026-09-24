@@ -62,11 +62,11 @@ pub use application_surface::{
     ApplicationSurfaceAdapterError, ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
     ApplicationToolRequest, FeedbackSurfaceRequest, adapt_application_tool_request,
     application_delivery_route, application_outcome_value, application_response,
-    application_surface_cancellation_policy,
-    application_surface_feedback_is_observable, application_surface_feedback_operation,
-    decode_retained_request, invoke_application_surface, is_source_edit_operation,
-    parse_application_surface_invocation_payload, parse_application_surface_request,
-    parse_source_edit_arguments, separate_application_tool_request,
+    application_surface_cancellation_policy, application_surface_feedback_is_observable,
+    application_surface_feedback_operation, decode_retained_request, invoke_application_surface,
+    is_source_edit_operation, parse_application_surface_invocation_payload,
+    parse_application_surface_request, parse_source_edit_arguments,
+    separate_application_tool_request,
 };
 pub use client::{
     AdapterInvocation, BindingResolution, BindingResolver, BoundInvocation, CanonicalInvocation,

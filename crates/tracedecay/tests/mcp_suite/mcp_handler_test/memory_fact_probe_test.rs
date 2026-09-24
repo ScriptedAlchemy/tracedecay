@@ -408,7 +408,10 @@ fn assert_probe_hits(payload: &Value, expected: &[(&str, &str, &[&str], u64)]) {
 
 fn assert_invalid_request(result: &Value) {
     assert_eq!(result["isError"], true, "{result}");
-    assert_eq!(result["structuredContent"]["problem"]["kind"], "invalid_request", "{result}");
+    assert_eq!(
+        result["structuredContent"]["problem"]["kind"], "invalid_request",
+        "{result}"
+    );
     assert_eq!(
         result["structuredContent"]["problem"]["code"],
         "application.retained.invalid-request"

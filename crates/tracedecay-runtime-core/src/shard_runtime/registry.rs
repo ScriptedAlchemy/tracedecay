@@ -46,9 +46,9 @@ pub use attachment::{
     PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot,
     PublishedShardRuntime,
 };
-pub use capacity::StoreRuntimeRegistryConfig;
 #[cfg(test)]
 pub(crate) use capacity::MAX_PROJECT_CODE_OPEN_RUNTIMES;
+pub use capacity::StoreRuntimeRegistryConfig;
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
 pub use graph::{

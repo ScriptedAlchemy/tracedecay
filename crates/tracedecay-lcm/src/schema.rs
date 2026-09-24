@@ -166,28 +166,20 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
                 insert_current = object_type == "trigger"
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterinsertonlcm_raw_messagesbegin")
-                    && sql.contains(
-                        RAW_FTS_INSERT_NEW,
-                    );
+                    && sql.contains(RAW_FTS_INSERT_NEW);
             }
             "lcm_raw_messages_fts_delete" => {
                 delete_current = object_type == "trigger"
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterdeleteonlcm_raw_messagesbegin")
-                    && sql.contains(
-                        RAW_FTS_DELETE_OLD,
-                    );
+                    && sql.contains(RAW_FTS_DELETE_OLD);
             }
             "lcm_raw_messages_fts_update" => {
                 update_current = object_type == "trigger"
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterupdateonlcm_raw_messagesbegin")
-                    && sql.contains(
-                        RAW_FTS_DELETE_OLD,
-                    )
-                    && sql.contains(
-                        RAW_FTS_INSERT_NEW,
-                    );
+                    && sql.contains(RAW_FTS_DELETE_OLD)
+                    && sql.contains(RAW_FTS_INSERT_NEW);
             }
             _ => {}
         }

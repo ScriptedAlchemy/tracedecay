@@ -762,7 +762,10 @@ fn detected_install_continues_past_a_failing_host_and_reports_it() {
         !output.status.success(),
         "a failed host must fail the pass\nstderr:\n{stderr}"
     );
-    assert!(stderr.contains("agent install failed for: kimi"), "{stderr}");
+    assert!(
+        stderr.contains("agent install failed for: kimi"),
+        "{stderr}"
+    );
     assert!(
         home_path.join(".vibe/config.toml").is_file(),
         "Vibe is detected after Kimi and must still be installed\nstderr:\n{stderr}"

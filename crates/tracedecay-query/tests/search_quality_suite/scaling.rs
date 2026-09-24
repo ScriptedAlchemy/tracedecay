@@ -1,7 +1,11 @@
 use tracedecay_domain::{RetrievalFailure, RetrieverOutcome};
-use tracedecay_query::retrieval::lexical::{LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1};
+use tracedecay_query::retrieval::lexical::{
+    LexicalLaneRetriever, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+};
 
-use crate::candidate_producers::{complete, real_lexical_source_fixture_from_sources, sealed_artifact};
+use crate::candidate_producers::{
+    complete, real_lexical_source_fixture_from_sources, sealed_artifact,
+};
 
 /// A term shared by more documents than the lane may hydrate per request
 /// generates no candidates of its own once a rarer term is present: only the
@@ -19,7 +23,9 @@ fn common_term_candidates_are_bounded_by_the_rarest_source() {
                 let source = (0..functions_per_file)
                     .map(|function| {
                         if file == files / 2 && function == 0 {
-                            format!("pub fn function_{function}() {{ let needle = shared_flag; }}\n")
+                            format!(
+                                "pub fn function_{function}() {{ let needle = shared_flag; }}\n"
+                            )
                         } else {
                             format!("pub fn function_{function}() {{ let shared_flag = true; }}\n")
                         }

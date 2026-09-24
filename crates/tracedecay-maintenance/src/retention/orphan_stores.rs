@@ -32,11 +32,11 @@ pub use fence::{
     StoreDirectoryFence, StoreFileIdentity, StoreRootIdentity,
 };
 pub use unregistered_page::UnregisteredSweepCompletionV1;
+pub(super) use unregistered_page::read_project_directory_page;
 pub use unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
     UnregisteredStoreSweepRequestV1, sweep_unregistered_store_page,
 };
-pub(super) use unregistered_page::read_project_directory_page;
 
 /// One profile-sharded store observed on disk, paired with the registry
 /// identity that points at it. This is the pure input to classification so the
@@ -341,6 +341,13 @@ pub enum CollectionCompletionV1 {
     DeadlineExceeded,
 }
 
+pub use collection::execute_registered_collection;
+pub(crate) use collection::{CollectionControl, execute_unregistered_collection_controlled};
+#[cfg(test)]
+pub(crate) use collection::{
+    execute_registered_collection_controlled, execute_unregistered_collection,
+    unbounded_collection_control,
+};
 pub use pages::{
     OrphanSweepReport, StoreCensusPageV1, UnregisteredCollectionPlan, UnregisteredStoreFinding,
     build_store_census, build_store_census_page, plan_unregistered_collection,
@@ -351,13 +358,6 @@ pub(crate) use pages::{census_unregistered_project_dirs, sweep_orphan_stores};
 pub(crate) use pages::{
     dir_size_bytes, dir_size_bytes_controlled, manifest_names_abandoned_root,
     newest_mtime_secs_controlled,
-};
-pub use collection::execute_registered_collection;
-pub(crate) use collection::{CollectionControl, execute_unregistered_collection_controlled};
-#[cfg(test)]
-pub(crate) use collection::{
-    execute_registered_collection_controlled, execute_unregistered_collection,
-    unbounded_collection_control,
 };
 
 #[cfg(test)]

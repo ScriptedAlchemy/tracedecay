@@ -1099,10 +1099,7 @@ fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
 #[cfg(windows)]
 fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
     tracedecay_private_fs::make_private_directory(path).map_err(|error| {
-        ProfileBackupError::unavailable(format!(
-            "restrict directory '{}': {error}",
-            path.display()
-        ))
+        ProfileBackupError::unavailable(format!("restrict directory '{}': {error}", path.display()))
     })
 }
 

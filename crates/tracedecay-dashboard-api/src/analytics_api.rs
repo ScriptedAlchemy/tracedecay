@@ -798,12 +798,13 @@ pub async fn subagent_tree(
 ) -> Json<DashboardEnvelopeV1<Option<AnalyticsSubagentTreePayloadV1>>> {
     hotpath::future!(
         async move {
-            let usage_scope = state
-                .resolved_scope
-                .as_ref()
-                .map(|scope| ObservationScopeV1::Project {
-                    project_id: scope.project_id.clone(),
-                });
+            let usage_scope =
+                state
+                    .resolved_scope
+                    .as_ref()
+                    .map(|scope| ObservationScopeV1::Project {
+                        project_id: scope.project_id.clone(),
+                    });
             match subagent_tree_reading(
                 &state.host_io,
                 state.lcm_db.as_deref(),
@@ -1527,7 +1528,12 @@ mod tests {
         );
     }
 
-    fn usage_delta(sequence: u64, session_id: &str, input: u64, output: u64) -> ProviderUsageDeltaV1 {
+    fn usage_delta(
+        sequence: u64,
+        session_id: &str,
+        input: u64,
+        output: u64,
+    ) -> ProviderUsageDeltaV1 {
         ProviderUsageDeltaV1 {
             observation_id: format!("sha256:{sequence:064x}"),
             receipt_id: format!("receipt:{sequence}"),
@@ -1613,7 +1619,10 @@ mod tests {
         // and still not zero-filled.
         let broken = usage("child.broken").expect("broken child usage");
         assert_eq!(broken.usage_events, 0);
-        assert_eq!(broken.counters, AggregatedProviderUsageCountersV1::unknown());
+        assert_eq!(
+            broken.counters,
+            AggregatedProviderUsageCountersV1::unknown()
+        );
         assert!(!broken.complete);
     }
 

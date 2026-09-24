@@ -348,7 +348,10 @@ fn append_tool_use_result_facts(
             edit.insert("edited_at_micros".to_owned(), Value::from(edited_at_micros));
         }
         if let Some(change_type) = tool_use_result.get("type").and_then(Value::as_str) {
-            edit.insert("change_type".to_owned(), Value::String(change_type.to_owned()));
+            edit.insert(
+                "change_type".to_owned(),
+                Value::String(change_type.to_owned()),
+            );
         }
         if let Some(hunks) = tool_use_result
             .get("structuredPatch")

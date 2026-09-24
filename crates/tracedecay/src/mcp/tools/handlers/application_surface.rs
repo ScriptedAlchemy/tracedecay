@@ -7,18 +7,18 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId};
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1;
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationToolRequest, parse_application_surface_request,
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
-use tracedecay_mcp::tools::response_trailers::append_code_graph_freshness;
 use tracedecay_mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
 };
+use tracedecay_mcp::tools::response_trailers::append_code_graph_freshness;
 use tracedecay_project::project::TraceDecay;
 
 pub(super) fn request_id() -> Result<RequestId> {
@@ -537,19 +537,24 @@ pub async fn execute_graph_tool_surface(
         return Err(TraceDecayError::project_route(
             "application_surface_invalid_response",
             false,
-            format!("{} returned a non-result outcome", operation.mcp_tool_name()),
+            format!(
+                "{} returned a non-result outcome",
+                operation.mcp_tool_name()
+            ),
         ));
     };
-    let result = tracedecay_contracts::graph_tool::GraphToolResultV1::from_result_value(
-        operation, value,
-    )
-    .map_err(|error| {
-        TraceDecayError::project_route(
-            "application_surface_invalid_response",
-            false,
-            format!("{} returned an invalid result: {error}", operation.mcp_tool_name()),
-        )
-    })?;
+    let result =
+        tracedecay_contracts::graph_tool::GraphToolResultV1::from_result_value(operation, value)
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "application_surface_invalid_response",
+                    false,
+                    format!(
+                        "{} returned an invalid result: {error}",
+                        operation.mcp_tool_name()
+                    ),
+                )
+            })?;
     Ok(tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
         result,
         touched_files: envelope.touched_files,
@@ -563,10 +568,10 @@ pub async fn execute_graph_tool_surface(
 fn graph_tool_problem_error(
     problem: &tracedecay_contracts::ApplicationProblemRecord,
 ) -> TraceDecayError {
-    let message = problem
-        .diagnostic
-        .as_ref()
-        .map_or_else(|| problem.message.clone(), |diagnostic| diagnostic.message.clone());
+    let message = problem.diagnostic.as_ref().map_or_else(
+        || problem.message.clone(),
+        |diagnostic| diagnostic.message.clone(),
+    );
     match problem.kind {
         ApplicationProblemKind::InvalidRequest => TraceDecayError::Config { message },
         _ => TraceDecayError::project_route(problem.code.clone(), problem.retryable, message),
@@ -728,11 +733,9 @@ mod tests {
                 rebuild_in_flight: true,
             },
         );
-        let served = served_code_graph_temporal(
-            ApplicationSurfaceOperation::CodeSymbolSearch,
-            &temporal,
-        )
-        .expect("stale page metadata");
+        let served =
+            served_code_graph_temporal(ApplicationSurfaceOperation::CodeSymbolSearch, &temporal)
+                .expect("stale page metadata");
         let mut rendered = super::super::text_tool_result("{}");
         super::append_code_graph_freshness(&mut rendered, &served);
         let trailer = rendered

@@ -23,9 +23,9 @@ use tracedecay_daemon_protocol::{
     DAEMON_INVOCATION_PROTOCOL, DaemonAuthPreface, DaemonEndpoint, DaemonInvocationPayload,
     DaemonInvocationRequest, DaemonInvocationResponse,
 };
-use tracedecay_domain::{FactCategoryV1, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{FactCategoryV1, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_hooks::{HookEventV2, HookSpoolConfigV1, HookSpoolV1};
 use tracedecay_runtime_core::storage::{
     EnrollmentMarker, StorageMode, default_profile_project_id, pin_fixture_repository_identity,

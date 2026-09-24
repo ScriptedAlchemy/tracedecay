@@ -218,8 +218,14 @@ fn run_inner(
             if operation.is_graph_tool() {
                 let project_path =
                     DaemonToolDispatch::project_scoped(explicit_project, tool_name).project_path;
-                return dispatch_cli_graph_tool(operation, tool_args, project_path, raw_json, deadline)
-                    .await;
+                return dispatch_cli_graph_tool(
+                    operation,
+                    tool_args,
+                    project_path,
+                    raw_json,
+                    deadline,
+                )
+                .await;
             }
             if tracedecay_daemon_protocol::is_source_edit_operation(operation) {
                 let project_path =
@@ -711,11 +717,12 @@ async fn dispatch_cli_graph_tool(
         )
         .await;
         let mounting = outcome.as_ref().err().is_some_and(|error| {
-            error
-                .project_route_context()
-                .is_some_and(|(code, _, _)| code == tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE)
+            error.project_route_context().is_some_and(|(code, _, _)| {
+                code == tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+            })
         });
-        if !mounting || deadline.saturating_duration_since(Instant::now()) <= GRAPH_TOOL_RESEND_DELAY
+        if !mounting
+            || deadline.saturating_duration_since(Instant::now()) <= GRAPH_TOOL_RESEND_DELAY
         {
             break outcome?;
         }

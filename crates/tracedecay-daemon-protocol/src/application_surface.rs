@@ -16,9 +16,9 @@ pub use source_edit::{is_source_edit_operation, parse_source_edit_arguments};
 
 pub use invocation::{
     application_delivery_route, application_outcome_value, application_response,
-    application_surface_cancellation_policy,
-    application_surface_feedback_is_observable, application_surface_feedback_operation,
-    invoke_application_surface, parse_application_surface_invocation_payload,
+    application_surface_cancellation_policy, application_surface_feedback_is_observable,
+    application_surface_feedback_operation, invoke_application_surface,
+    parse_application_surface_invocation_payload,
 };
 
 use serde::{Deserialize, Serialize};
@@ -877,9 +877,10 @@ pub fn parse_application_surface_request(
         | ApplicationSurfaceOperation::LcmDescribe
         | ApplicationSurfaceOperation::LcmExpand
         | ApplicationSurfaceOperation::LcmExpandQuery => {
-            let retained = RetainedSurfaceOperation::from_application(operation).ok_or_else(|| {
-                ApplicationSurfaceAdapterError::invalid_request("operation is not retained")
-            })?;
+            let retained =
+                RetainedSurfaceOperation::from_application(operation).ok_or_else(|| {
+                    ApplicationSurfaceAdapterError::invalid_request("operation is not retained")
+                })?;
             decode_retained_request(retained, value)
                 .map(ApplicationSurfaceRequest::Retained)
                 .map_err(ApplicationSurfaceAdapterError::invalid_request)

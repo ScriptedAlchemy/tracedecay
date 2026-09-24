@@ -4,9 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1, PayloadDigestV1};
 use tracedecay_store::{
     EDITED_FILES_KEY, ObservationProjection, ProjectionCheckpoint, ProjectionStoreError,
-    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, SessionMessageRecord,
-    SessionRecord, message_output_digest,
+    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    SessionMessageProjection, SessionMessageRecord, SessionRecord, message_output_digest,
 };
 
 use tracedecay_lcm::raw::stored_message_record_select_columns;

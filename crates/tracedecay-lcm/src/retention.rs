@@ -440,10 +440,7 @@ async fn run_session_retention_inner(
     if mode.is_apply() {
         // Consume the staged GC/reporting meta cards: record the last run so a
         // scheduler and Doctor can report retention backlog without a rescan.
-        let acted = report
-            .dropped
-            .acted
-            .saturating_add(report.offloaded.acted);
+        let acted = report.dropped.acted.saturating_add(report.offloaded.acted);
         let transaction = store
             .begin_memory_write_transaction("begin session retention metadata", authorize)
             .await?;

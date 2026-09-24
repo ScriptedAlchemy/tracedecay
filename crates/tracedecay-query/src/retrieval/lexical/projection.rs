@@ -9,7 +9,8 @@ use tracedecay_domain::{
     ExactAdmissionProof, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
     FileOccurrenceId, FixedPointScore, LanguageDescriptorRevision, LogicalEvidenceId,
     ManifestDigest, ProjectId, RepositoryId, RetrievalAnchorId, RetrieverKind, ScoreDomainId,
-    SourceFreshness, SourceOccurrenceId, WorktreeId, exact_search_canonical, split_subtokens, technical_tokens, validate_code_logical_path,
+    SourceFreshness, SourceOccurrenceId, WorktreeId, exact_search_canonical, split_subtokens,
+    technical_tokens, validate_code_logical_path,
 };
 
 use super::{
@@ -41,8 +42,7 @@ pub use artifact::{
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
     CodeLexicalArtifactFinalizationPhaseV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalArtifactSectionDigestV1,
-    CodeLexicalCloneIndexCensusV1,
+    CodeLexicalArtifactSectionDigestV1, CodeLexicalCloneIndexCensusV1,
     CodeLexicalImportMembershipWitnessV1, MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
     MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1, PreparedCodeLexicalArtifactBatchV1,
     PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,

@@ -800,7 +800,11 @@ where
             .and_then(|result| result.remove("problem"));
         let mut result = rmcp_response_result::<CallToolResult>(response)?;
         if let Some(problem) = problem {
-            match result.structured_content.as_mut().and_then(Value::as_object_mut) {
+            match result
+                .structured_content
+                .as_mut()
+                .and_then(Value::as_object_mut)
+            {
                 Some(structured) => {
                     structured.insert("problem".to_owned(), problem);
                 }

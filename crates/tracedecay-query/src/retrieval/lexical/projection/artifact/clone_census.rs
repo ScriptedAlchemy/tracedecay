@@ -54,15 +54,16 @@ fn validate_stored_clone_payloads(
 ) -> Result<HashMap<i64, IncompleteRenameCoverageV1>, CodeLexicalArtifactErrorV1> {
     let mut incomplete_rename = HashMap::new();
     let mut statement = connection
-        .prepare("SELECT ordinal, payload_digest, payload FROM clone_body_payloads ORDER BY ordinal")
+        .prepare(
+            "SELECT ordinal, payload_digest, payload FROM clone_body_payloads ORDER BY ordinal",
+        )
         .map_err(sqlite_error)?;
     let mut rows = statement.query([]).map_err(sqlite_error)?;
     while let Some(row) = rows.next().map_err(sqlite_error)? {
         let ordinal: i64 = row.get(0).map_err(sqlite_error)?;
         let digest: Vec<u8> = row.get(1).map_err(sqlite_error)?;
         let payload_bytes: Vec<u8> = row.get(2).map_err(sqlite_error)?;
-        let payload =
-            decode_clone_payload(&payload_bytes, digest_from_key(&digest)?.as_str())?;
+        let payload = decode_clone_payload(&payload_bytes, digest_from_key(&digest)?.as_str())?;
         match payload.rename_coverage {
             CloneBodyRenameStatusV1::Complete => {}
             CloneBodyRenameStatusV1::Partial => {

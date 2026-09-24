@@ -47,10 +47,10 @@ mod host_admission_test;
 #[path = "../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;
 pub mod mcp;
+mod runtime_ports;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::too_many_lines)]
 pub mod test_support;
-mod runtime_ports;
 pub use runtime_ports::{hook_runtime, register_runtime_ports, session_review_port};
 mod serve;
 // Session-temporal harness lives under `benches/`; the lib only paths it in

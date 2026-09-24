@@ -7,9 +7,9 @@ use super::{
 use crate::LanguageExtractor;
 use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::parsed_extraction::{
-    ParsedExtractionArtifactV1, ParsedExtractionDisposition,
-    ParsedExtractionResetReason, ParsedExtractionScope, ParsedTraversalMetrics,
-    merge_changed_extraction, superseded_previous_nodes,
+    ParsedExtractionArtifactV1, ParsedExtractionDisposition, ParsedExtractionResetReason,
+    ParsedExtractionScope, ParsedTraversalMetrics, merge_changed_extraction,
+    superseded_previous_nodes,
 };
 
 impl RetainedParseDocument {

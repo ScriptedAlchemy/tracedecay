@@ -92,8 +92,9 @@ impl CloneOccurrenceRouteV1 {
         let payload_digest = stored
             .payload_digest
             .ok_or_else(|| corrupt("occurrence is missing its payload"))?;
-        let corrupt =
-            |error: tracedecay_domain::DomainError| CodeLexicalArtifactErrorV1::Corrupt(error.to_string());
+        let corrupt = |error: tracedecay_domain::DomainError| {
+            CodeLexicalArtifactErrorV1::Corrupt(error.to_string())
+        };
         let body_span = SourceSpan {
             start_byte: u64::try_from(stored.body_start).map_err(contract_number)?,
             end_byte: u64::try_from(stored.body_end).map_err(contract_number)?,
@@ -324,7 +325,11 @@ pub(super) fn decode_clone_payload(
     stored: &[u8],
     expected_digest: &str,
 ) -> Result<CloneBodyPayloadV1, CodeLexicalArtifactErrorV1> {
-    let inflated = inflate_bytes(CLONE_PAYLOAD_DEFLATE, stored, CLONE_PAYLOAD_MAX_INFLATED_BYTES)?;
+    let inflated = inflate_bytes(
+        CLONE_PAYLOAD_DEFLATE,
+        stored,
+        CLONE_PAYLOAD_MAX_INFLATED_BYTES,
+    )?;
     let mut bytes = inflated.as_slice();
     let language = take_string(&mut bytes)?;
     let symbol_kind = take_string(&mut bytes)?;
@@ -620,7 +625,11 @@ mod tests {
             },
         ];
         let divergent = vec![token("call", None), token("identifier", Some("$0"))];
-        for payload in [payload(Some(aligned)), payload(Some(divergent)), payload(None)] {
+        for payload in [
+            payload(Some(aligned)),
+            payload(Some(divergent)),
+            payload(None),
+        ] {
             let (stored, inflated) = encode_clone_payload(&payload).expect("encode");
             assert!(inflated > 0);
             let decoded =

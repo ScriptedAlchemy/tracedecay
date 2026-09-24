@@ -470,8 +470,7 @@ impl CodeLexicalArtifactReaderV1 {
                 }
                 if stored_metadata_bytes != content_metadata_bytes(authority)? {
                     return Err(CodeLexicalArtifactErrorV1::Incompatible(
-                        "lexical artifact content does not match the opening projection"
-                            .to_owned(),
+                        "lexical artifact content does not match the opening projection".to_owned(),
                     ));
                 }
                 let metadata = authority.clone();
@@ -3409,7 +3408,10 @@ mod tests {
     }
 
     fn normalized(ngrams: &[u32]) -> Vec<(i64, u32)> {
-        ngrams.iter().map(|ngram| (NGRAM_NORMALIZED, *ngram)).collect()
+        ngrams
+            .iter()
+            .map(|ngram| (NGRAM_NORMALIZED, *ngram))
+            .collect()
     }
 
     #[test]

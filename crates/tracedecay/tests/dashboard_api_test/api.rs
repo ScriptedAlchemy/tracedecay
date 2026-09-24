@@ -402,7 +402,8 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "bins should adapt to the observed score range"
         );
         assert_eq!(
-            bins[bins.len() - 1]["end"], distribution["max_score"],
+            bins[bins.len() - 1]["end"],
+            distribution["max_score"],
             "bins should adapt to the observed score range"
         );
         let occupied_bins = bins

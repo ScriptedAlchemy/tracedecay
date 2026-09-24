@@ -649,7 +649,9 @@ async fn socket_client_requires_user_storage_scope_without_project() {
     prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
 
     let (reader, mut writer) = client.into_split();
     super::write_test_auth_preface(&mut writer).await;
@@ -724,7 +726,9 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
     );
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
     let (reader, mut writer) = client.into_split();
     super::write_test_auth_preface(&mut writer).await;
     let handshake = DaemonHandshake {
@@ -799,7 +803,9 @@ async fn projectless_tools_list_advertises_registry_tools() {
     );
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
     let (reader, mut writer) = client.into_split();
     super::write_test_auth_preface(&mut writer).await;
     let handshake = DaemonHandshake {
@@ -924,7 +930,9 @@ async fn user_session_read_bypasses_unregistered_project_route() {
     std::fs::create_dir_all(&unregistered_project).expect("unregistered project directory");
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
 
     let (reader, mut writer) = client.into_split();
     super::write_test_auth_preface(&mut writer).await;
@@ -1000,7 +1008,9 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
     );
     prewarm_test_profile_runtime(&engine.store_administration).await;
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
 
     let (reader, mut writer) = client.into_split();
     super::write_test_auth_preface(&mut writer).await;
@@ -1135,7 +1145,9 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let engine_for_test = engine.clone();
-    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(server, engine)));
+    let server_task = tokio::spawn(Box::pin(super::serve_authenticated_test_client(
+        server, engine,
+    )));
     let (reader, mut writer) = client.into_split();
     super::write_test_auth_preface(&mut writer).await;
     writer

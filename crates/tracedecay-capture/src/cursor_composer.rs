@@ -187,7 +187,10 @@ fn normalize_composer_bubble_record(
                 content.insert("name".to_string(), name.clone());
             }
             if let Some(edited_at_micros) = composer_created_at_micros(native.get("createdAt")) {
-                content.insert("edited_at_micros".to_string(), Value::from(edited_at_micros));
+                content.insert(
+                    "edited_at_micros".to_string(),
+                    Value::from(edited_at_micros),
+                );
             }
             facts.push(CanonicalObservationFactV1::Git {
                 evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
@@ -654,7 +657,10 @@ fn composer_created_at_secs(value: Option<&Value>) -> Option<i64> {
 /// edit/write/patch/replace tools). Read-only tools name their target under
 /// other keys and never match.
 fn composer_edit_tool_path(tool: &Value) -> Option<String> {
-    let name = tool.get("name").and_then(Value::as_str)?.to_ascii_lowercase();
+    let name = tool
+        .get("name")
+        .and_then(Value::as_str)?
+        .to_ascii_lowercase();
     if !["edit", "write", "patch", "replace", "delete"]
         .iter()
         .any(|needle| name.contains(needle))

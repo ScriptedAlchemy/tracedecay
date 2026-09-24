@@ -29,6 +29,7 @@ use tracedecay_domain::{
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
 
+use super::clone_codec::{digest_from_key, digest_key};
 use super::format::{
     BASE_SECTION_NAMES, CodeLexicalArtifactSectionDigestV1, PostingListDecoderV1,
     PostingListEncoderV1, RECEIPT_RESERVATION_BYTES, SECTION_NAMES, SERVING_INDEX_STEP_COUNT_V11,
@@ -46,7 +47,6 @@ use super::prepared::{
     PreparedCloneBodyV1, PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1,
     prepare_page as prepare_page_values,
 };
-use super::clone_codec::{digest_from_key, digest_key};
 use super::row_codec::{
     ConnectionRowDictionaryV1, decode_artifact_row, decode_row_block, stored_chunk_key,
     stored_symbol_key,
@@ -790,12 +790,13 @@ impl PersistedFinalizationKeyV1 {
                     | FinalizationSectionV1::CloneBodyPayloads
             ) | (Self::Text(_), FinalizationSectionV1::Vocabulary)
                 | (
-                Self::ClonePosting { .. },
-                FinalizationSectionV1::CloneExactPostings
-            ) | (
-                Self::Fingerprint { .. },
-                FinalizationSectionV1::CloneFingerprintPostings
-            )
+                    Self::ClonePosting { .. },
+                    FinalizationSectionV1::CloneExactPostings
+                )
+                | (
+                    Self::Fingerprint { .. },
+                    FinalizationSectionV1::CloneFingerprintPostings
+                )
         )
     }
 }
@@ -3641,7 +3642,9 @@ fn append_prepared_clone_fingerprints(
             continue;
         };
         let occurrence: i64 = ordinal
-            .query_row([stored_symbol_key(&body.symbol_occurrence_id)], |row| row.get(0))
+            .query_row([stored_symbol_key(&body.symbol_occurrence_id)], |row| {
+                row.get(0)
+            })
             .map_err(sqlite_error)?;
         for position in &stream.positions {
             insert.push([
@@ -6035,7 +6038,9 @@ fn progress(
         Some(state) => state.terminal_cursor,
         None => {
             let tail: Option<(i64, Vec<u8>)> = connection
-                .query_row(PROGRESS_TAIL_QUERY, [], |row| Ok((row.get(0)?, row.get(1)?)))
+                .query_row(PROGRESS_TAIL_QUERY, [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
                 .optional()
                 .map_err(sqlite_error)?;
             match tail {

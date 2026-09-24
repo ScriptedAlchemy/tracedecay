@@ -1938,7 +1938,11 @@ async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
         current,
     )
     .unwrap();
-    assert!(!serde_json::to_string(&rendered.value).unwrap().contains("code_graph_freshness"));
+    assert!(
+        !serde_json::to_string(&rendered.value)
+            .unwrap()
+            .contains("code_graph_freshness")
+    );
 
     cg.close();
 }

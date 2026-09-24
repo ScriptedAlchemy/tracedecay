@@ -491,8 +491,8 @@ async fn tombstone_residual_placeholders(
             changed += 1;
         }
         let placeholder_text: Option<String> = row.get(7)?;
-        let new_placeholder = placeholder_text
-            .map(|text| gc::tombstone_placeholder_in_text(&text, payload_ref));
+        let new_placeholder =
+            placeholder_text.map(|text| gc::tombstone_placeholder_in_text(&text, payload_ref));
         let new_metadata = metadata_json.map(|text| {
             let tombstoned = gc::tombstone_placeholder_in_text(&text, payload_ref);
             if tombstoned != text {

@@ -17,16 +17,16 @@ use tracedecay_contracts::surface_contracts::{
 };
 use tracedecay_contracts::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    AuthorityReceipt, CallableCodeAuthorizationFuture,
-    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryFuture,
-    CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
-    CodeImplementationsRequest, CodeQueryPage, CodeQueryScope, CodeRelationRequest,
-    CodeSignatureRequest, CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRecord,
-    ExactOccurrenceRequest, LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageCursor,
-    PageRequest, PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection,
-    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
-    SourceMetadataRecord, SourceMetadataRequest, callable_code_catalog_contribution,
-    callable_code_handler_descriptors, callable_code_operations,
+    AuthorityReceipt, CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort,
+    CallableCodeOperationKind, CallableCodeQueryFuture, CallableCodeQueryPort,
+    CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest,
+    CodeQueryPage, CodeQueryScope, CodeRelationRequest, CodeSignatureRequest,
+    CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRecord, ExactOccurrenceRequest,
+    LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageCursor, PageRequest,
+    PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection, RetrievalOrder,
+    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRecord,
+    SourceMetadataRequest, callable_code_catalog_contribution, callable_code_handler_descriptors,
+    callable_code_operations,
 };
 use tracedecay_domain::{
     CodeGenerationId, EphemeralSanitizedQueryViewV1, FactId, PublicRetrieverStatus,
@@ -718,10 +718,9 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
                 format!("binding.{surface_name}.{surface_operation}.v1")
             );
             let expected_operation = match (kind, surface) {
-                (
-                    CallableCodeOperationKind::Callees,
-                    BindingSurface::Cli | BindingSurface::Mcp,
-                ) => "callees",
+                (CallableCodeOperationKind::Callees, BindingSurface::Cli | BindingSurface::Mcp) => {
+                    "callees"
+                }
                 _ => *surface_operation,
             };
             assert_eq!(binding.operation().as_str(), expected_operation);

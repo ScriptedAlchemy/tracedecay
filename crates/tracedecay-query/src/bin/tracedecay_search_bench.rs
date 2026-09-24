@@ -65,8 +65,8 @@ use tracedecay_query::retrieval::exact::{
 };
 use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeLexicalArtifactBuilderV1,
-    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
+    CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1,
+    CodeLexicalProjectionMetadataV1, LexicalLane, LexicalLaneRequest, LexicalLaneRetriever,
     MAX_FUZZY_TERM_EXPANSIONS_V1, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;

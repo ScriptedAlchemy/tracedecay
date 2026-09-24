@@ -178,7 +178,10 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
         .await
         .unwrap()
         .expect("session message should exist");
-    assert_eq!(stored.text, content, "the session row is the one lossless copy");
+    assert_eq!(
+        stored.text, content,
+        "the session row is the one lossless copy"
+    );
 
     let raw = db
         .lcm_load_raw_message_for_test("fake", "fake-message-1")

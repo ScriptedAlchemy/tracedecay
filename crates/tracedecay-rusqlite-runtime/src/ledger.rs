@@ -24,8 +24,8 @@ pub(crate) use idempotency::{LedgerDisposition, lookup_receipt};
 pub(crate) use inbox::lookup as lookup_inbox;
 #[cfg(test)]
 pub(crate) use outbox::outbox_entry;
-pub(crate) use schema::initialize_schema;
 pub use schema::RUNTIME_LEDGER_SCHEMA;
+pub(crate) use schema::initialize_schema;
 
 #[cfg(test)]
 mod tests;

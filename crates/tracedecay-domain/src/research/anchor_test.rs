@@ -360,7 +360,12 @@ fn stored_anchor_omits_derivable_authorization_and_default_coverage() {
     .unwrap();
     let derived = RetrievalAnchorRecord::new(parts).unwrap();
     let encoded = serde_json::to_value(&derived).unwrap();
-    for omitted in ["coverage", "aliases", "projection_watermark", "source_anchors"] {
+    for omitted in [
+        "coverage",
+        "aliases",
+        "projection_watermark",
+        "source_anchors",
+    ] {
         assert!(encoded.get(omitted).is_none(), "{omitted}: {encoded}");
     }
     assert_eq!(

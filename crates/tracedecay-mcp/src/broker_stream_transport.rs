@@ -528,9 +528,8 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     // connection has nothing left to deliver, and a client
                     // that reads until daemon EOF, a cancelling client does,
                     // needs this side to close first.
-                    let settled = Self::wait_for_accepted_requests_settled(Arc::clone(
-                        &self.active_requests,
-                    ));
+                    let settled =
+                        Self::wait_for_accepted_requests_settled(Arc::clone(&self.active_requests));
                     let peer_full_close = self.peer_fully_closed_after_eof();
                     tokio::select! {
                         () = peer_full_close => {
@@ -556,7 +555,9 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
             // refused frame is answered here rather than registered as an
             // accepted request that EOF would wait on.
             let decoded = match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(value) => crate::jsonrpc::decode_envelope(&value).map(|message| (value, message)),
+                Ok(value) => {
+                    crate::jsonrpc::decode_envelope(&value).map(|message| (value, message))
+                }
                 Err(error) => Err(JsonRpcDecodeError::Parse(error)),
             };
             match decoded {

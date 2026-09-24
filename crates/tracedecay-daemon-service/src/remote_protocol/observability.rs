@@ -213,14 +213,12 @@ fn remote_query_response_observation(
             },
             ApplicationOutcome::Preview(_)
             | ApplicationOutcome::Effect(_)
-            | ApplicationOutcome::Result(_) => {
-                unavailable_observation(
-                    operation_ref,
-                    expected_shards,
-                    ObservedTernaryV1::Unknown,
-                    "remote_query_result_kind_unavailable",
-                )
-            }
+            | ApplicationOutcome::Result(_) => unavailable_observation(
+                operation_ref,
+                expected_shards,
+                ObservedTernaryV1::Unknown,
+                "remote_query_result_kind_unavailable",
+            ),
         },
         Err(problem) => unavailable_observation(
             operation_ref,

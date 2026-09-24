@@ -5,8 +5,8 @@ use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV
 use tracedecay_domain::errors::Result;
 
 use super::{
-    handle_by_qualified_name, handle_derives, handle_find_exact_symbol,
-    handle_search, handle_signature,
+    handle_by_qualified_name, handle_derives, handle_find_exact_symbol, handle_search,
+    handle_signature,
 };
 use crate::ToolResult;
 use crate::handlers::ast_grep::handle_ast_grep_search;

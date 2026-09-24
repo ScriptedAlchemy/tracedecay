@@ -5,14 +5,14 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::agents::host_bundle::{
-    ClineFamilyAdmissionV1, HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
-    HostBundleError, HostBundleInstallReceiptV1, HostBundleLifecycleOpV1,
-    HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1,
-    HostBundleWriterV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1,
-    HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
-    HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostComponentV1, HostKindV1,
-    HostRegistrationRouteV1, cline_family_evidence,
-    dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
+    ClineFamilyAdmissionV1, ClineFamilyProviderV1, HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+    HostBundleComponentDoctorStateV1, HostBundleError, HostBundleInstallReceiptV1,
+    HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1,
+    HostBundleRegistrationStateV1, HostBundleWriterV1, HostCapabilityStateV1,
+    HostCapabilityUnavailableReasonV1, HostCapabilityV1, HostComponentSetExecutionRequestV1,
+    HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1,
+    HostComponentSetTransactionV1, HostComponentV1, HostKindV1, HostRegistrationRouteV1,
+    cline_family_evidence, dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
     supported_host_edit_stop_conformance_evidence,

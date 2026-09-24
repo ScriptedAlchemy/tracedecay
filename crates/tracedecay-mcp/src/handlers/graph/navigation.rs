@@ -14,8 +14,8 @@ use crate::{ToolResult, decode_primitive_request, generic_tool_result, text_tool
 use super::{
     GRAPH_RELATION_READ_LIMIT, cost_to_expand_verified, graph_occurrence_id, graph_symbol_corrupt,
     graph_symbol_end_line, graph_symbol_location_value, graph_symbol_paths, graph_tool_completion,
-    node_not_found_result, nodes_addressed_by_args, require_positive_depth, required_graph_file_path,
-    required_graph_metadata, user_line,
+    node_not_found_result, nodes_addressed_by_args, require_positive_depth,
+    required_graph_file_path, required_graph_metadata, user_line,
 };
 
 #[hotpath::measure(label = "mcp.graph.impact.total")]
@@ -73,7 +73,10 @@ pub async fn compute_impact(
 }
 
 #[hotpath::measure(label = "mcp.graph.node.total")]
-pub async fn compute_node(graph: &VerifiedGraphQuery, args: Value) -> Result<GraphToolCompletionV1> {
+pub async fn compute_node(
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<GraphToolCompletionV1> {
     let request: NodeSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_node")?;
     let occurrence = graph_occurrence_id(&request.node_id)?;
     let node = hotpath::measure_block!("mcp.graph.node.graph", graph.symbol_summary(&occurrence)?);
@@ -114,27 +117,27 @@ pub async fn compute_node(graph: &VerifiedGraphQuery, args: Value) -> Result<Gra
             }
             let line_count = end_line - metadata.start_line + 1;
             let details = NodeDetailsV1 {
-                    id: n.occurrence.as_str().to_owned(),
-                    name: metadata.simple_name.clone(),
-                    kind: metadata.kind.clone(),
-                    qualified_name: metadata.qualified_name.clone(),
-                    file: file_path.to_owned(),
-                    start_line: user_line(metadata.start_line),
-                    end_line: user_line(end_line),
-                    signature: metadata.signature.clone(),
-                    docstring: metadata.docstring.clone(),
-                    is_async: metadata.is_async,
-                    derives: metadata.derives.clone(),
-                    visibility: metadata.visibility.clone(),
-                    branches: complexity.map(|complexity| complexity.branches),
-                    loops: complexity.map(|complexity| complexity.loops),
-                    max_nesting: complexity.map(|complexity| complexity.max_nesting),
-                    cyclomatic_complexity,
-                    complexity_analysis: metadata.complexity_analysis,
-                    cost_to_expand: NodeExpansionCostV1 {
-                        body: u64::from(line_count) * 20,
-                        full_file: file_size_bytes / 4,
-                    },
+                id: n.occurrence.as_str().to_owned(),
+                name: metadata.simple_name.clone(),
+                kind: metadata.kind.clone(),
+                qualified_name: metadata.qualified_name.clone(),
+                file: file_path.to_owned(),
+                start_line: user_line(metadata.start_line),
+                end_line: user_line(end_line),
+                signature: metadata.signature.clone(),
+                docstring: metadata.docstring.clone(),
+                is_async: metadata.is_async,
+                derives: metadata.derives.clone(),
+                visibility: metadata.visibility.clone(),
+                branches: complexity.map(|complexity| complexity.branches),
+                loops: complexity.map(|complexity| complexity.loops),
+                max_nesting: complexity.map(|complexity| complexity.max_nesting),
+                cyclomatic_complexity,
+                complexity_analysis: metadata.complexity_analysis,
+                cost_to_expand: NodeExpansionCostV1 {
+                    body: u64::from(line_count) * 20,
+                    full_file: file_size_bytes / 4,
+                },
                 unavailable_fields: unavailable_fields.into_iter().map(str::to_owned).collect(),
             };
             Ok(graph_tool_completion(

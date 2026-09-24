@@ -142,7 +142,11 @@ async fn make_projection_durable(
     conn.execute(
         "INSERT INTO session_summary_availability(session_id, generation, summary_id, availability)
          VALUES (?1, ?2, ?3, 'available')",
-        params![SESSION, crate::test_support::FIXTURE_GENERATION, node_id.as_str()],
+        params![
+            SESSION,
+            crate::test_support::FIXTURE_GENERATION,
+            node_id.as_str()
+        ],
     )
     .await
     .map_err(|err| format!("insert summary availability: {err}"))?;
@@ -475,7 +479,11 @@ async fn drop_removes_the_single_content_copy_and_its_index() -> Result<(), Stri
         live,
         "the row without durable lineage is retained"
     );
-    assert_eq!(indexed(conn).await?, 1, "the dropped row left the FTS index");
+    assert_eq!(
+        indexed(conn).await?,
+        1,
+        "the dropped row left the FTS index"
+    );
     Ok(())
 }
 

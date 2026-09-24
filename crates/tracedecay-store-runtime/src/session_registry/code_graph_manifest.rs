@@ -506,8 +506,7 @@ fn decode_verified_seal_with_bundle_barrier(
         if let Some(interruption) = interruption {
             return Err(interruption);
         }
-        decoded
-            .map_err(|error| classify_sealed_generation_decode_error(error, &expected_digest))?
+        decoded.map_err(|error| classify_sealed_generation_decode_error(error, &expected_digest))?
     };
     (check)()?;
     let final_file_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {

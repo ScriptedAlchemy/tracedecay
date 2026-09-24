@@ -525,7 +525,8 @@ mod tests {
         for (index, operation) in ApplicationSurfaceOperation::ALL
             .into_iter()
             .filter(|operation| {
-                http_application_owner_kind(*operation) == Some(HttpApplicationOwnerKind::Configuration)
+                http_application_owner_kind(*operation)
+                    == Some(HttpApplicationOwnerKind::Configuration)
             })
             .enumerate()
         {

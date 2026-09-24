@@ -198,7 +198,10 @@ fn open_refuses_a_group_writable_existing_root_without_rewriting_it() {
         Err(HookSpoolError::UnsafePath)
     ));
     let mode = fs::metadata(&root.0).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o770, "a refused root keeps the mode it was found with");
+    assert_eq!(
+        mode, 0o770,
+        "a refused root keeps the mode it was found with"
+    );
 }
 
 #[test]

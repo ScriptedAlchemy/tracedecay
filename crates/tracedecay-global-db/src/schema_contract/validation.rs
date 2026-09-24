@@ -7,8 +7,7 @@ use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEX_DESCENDING_COLUMNS, INDEX_EXPRESSION_COLUMN, INDEXES, Index,
     REGISTRY_TABLE_NAMES, SESSION_RELATION_RECEIPTS_RECOVERY_DUE_INDEX,
-    SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY, TABLES,
-    Table,
+    SESSION_RELATION_RECEIPTS_WITHOUT_RECOVERY, TABLES, Table,
 };
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,

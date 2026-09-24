@@ -87,8 +87,8 @@ use tracedecay_query::retrieval::lexical::{
     CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CloneExactArtifactMemberV1,
     CodeLexicalArtifactBuilderV1, CodeLexicalArtifactFinalizationStepV1,
     CodeLexicalArtifactReaderV1, CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1,
-    MAX_CLONE_EXACT_PAGE_MEMBERS_V1,
-    MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1, VerifiedCodeLexicalArtifactV1,
+    MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
+    VerifiedCodeLexicalArtifactV1,
 };
 
 /// Bumped whenever the workload shape changes, so a profile comparison

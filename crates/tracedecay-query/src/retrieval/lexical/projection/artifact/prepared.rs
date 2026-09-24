@@ -15,8 +15,8 @@ use super::super::{
 use super::clone_codec::{encode_clone_eligibility, encode_clone_payload};
 use super::format::{
     ArtifactRowV1, BASE_SECTION_NAMES, PageBaseSectionReceiptBuilderV1, contract_number,
-    encode_exact_field, encode_field, encode_ngram_bitmap,
-    encode_page_base_sections_receipt, hash_bytes, ngram_page_digest,
+    encode_exact_field, encode_field, encode_ngram_bitmap, encode_page_base_sections_receipt,
+    hash_bytes, ngram_page_digest,
 };
 use super::postings::{
     NGRAM_NORMALIZED, NGRAM_RAW_OVERRIDE, document_ngrams, ngram_is_case_sensitive,

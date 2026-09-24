@@ -555,10 +555,7 @@ mod tests {
         .to_string();
 
         let binding = initialize_binding(&frame).expect("initialize binding");
-        assert_eq!(
-            binding.project_root,
-            canonical_root_identity(root.path())
-        );
+        assert_eq!(binding.project_root, canonical_root_identity(root.path()));
         let forwarded: Value =
             serde_json::from_str(&binding.frame).expect("forwarded initialize frame");
         assert_eq!(forwarded["params"]["rootUri"], binding.canonical_root_uri);

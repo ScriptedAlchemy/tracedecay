@@ -389,8 +389,7 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fresh_graph_activation_never_delays_the_published_text_owner() {
     let (fixture, admission) =
-        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-beside-text", |_| {})
-            .await;
+        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-beside-text", |_| {}).await;
     let scope = fixture
         .registry
         .serving_code_scope(&fixture.project)
