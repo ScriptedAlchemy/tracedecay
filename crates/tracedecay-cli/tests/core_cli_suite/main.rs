@@ -22,7 +22,6 @@ mod gain_test;
 mod monitor_test;
 // Mounted for cli_non_interactive_test, which exercises the compiled
 // host-CLI fixture provisioner.
-#[cfg(unix)]
 #[path = "../../build-support/provision_host_cli_fixture.rs"]
 mod provision_host_cli_fixture;
 mod source_provenance_test;
