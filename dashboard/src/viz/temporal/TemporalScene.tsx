@@ -127,6 +127,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const [palette, setPalette] = useState<TemporalPalette | null>(null);
   const [layer, setLayer] = useState<SceneLayer>('canvas');
   const [hover, setHover] = useState<string | null>(null);
+  const [cursorId, setCursorId] = useState<string | null>(null);
 
   const { viewport, height } = model;
   const width = viewport.width;
@@ -186,6 +187,22 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
     return counts;
   }, [lanes]);
   const hoverLaneId = hover === null ? null : model.nodes.find((node) => node.id === hover)?.laneId ?? null;
+  /** Keyboard order: lanes top to bottom, then time within a lane. */
+  const eventOrder = useMemo(() => {
+    const rowOf = new Map(lanes.map((lane) => [lane.id, lane.row]));
+    return [...model.nodes].sort(
+      (a, b) => (rowOf.get(a.laneId) ?? 0) - (rowOf.get(b.laneId) ?? 0) || a.x - b.x || a.id.localeCompare(b.id),
+    );
+  }, [model.nodes, lanes]);
+  const cursorIndex = (() => {
+    const at = cursorId === null ? -1 : eventOrder.findIndex((node) => node.id === cursorId);
+    if (at >= 0) return at;
+    const selected = eventOrder.findIndex((node) => node.selected);
+    return selected >= 0 ? selected : eventOrder.length > 0 ? 0 : -1;
+  })();
+  const cursorNode = cursorIndex >= 0 ? eventOrder[cursorIndex]! : null;
+  const eventPosition = useMemo(() => new Map(eventOrder.map((node, index) => [node.id, index])), [eventOrder]);
+  const eventDomId = (node: SceneNode): string => `${clipId}-event-${eventPosition.get(node.id) ?? 0}`;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -335,6 +352,55 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const leaveNode = (): void => {
     setHover(null);
     onInspect?.(null);
+  };
+
+  /** The nearest event in the next or previous lane that has any, by x. */
+  const acrossLanes = (from: SceneNode, direction: 1 | -1): SceneNode | null => {
+    const rows = [...new Set(eventOrder.map((node) => node.laneId))];
+    const target = rows[rows.indexOf(from.laneId) + direction];
+    if (target === undefined) return null;
+    const candidates = eventOrder.filter((node) => node.laneId === target);
+    return candidates.reduce((best, node) => (Math.abs(node.x - from.x) < Math.abs(best.x - from.x) ? node : best));
+  };
+  const onOverlayKey = (event: KeyboardEvent<SVGSVGElement>): void => {
+    if (cursorNode === null) return;
+    let next: SceneNode | null = null;
+    switch (event.key) {
+      case 'ArrowRight':
+        next = eventOrder[Math.min(eventOrder.length - 1, cursorIndex + 1)]!;
+        break;
+      case 'ArrowLeft':
+        next = eventOrder[Math.max(0, cursorIndex - 1)]!;
+        break;
+      case 'ArrowDown':
+        next = acrossLanes(cursorNode, 1);
+        break;
+      case 'ArrowUp':
+        next = acrossLanes(cursorNode, -1);
+        break;
+      case 'Home':
+        next = eventOrder[0]!;
+        break;
+      case 'End':
+        next = eventOrder[eventOrder.length - 1]!;
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        onSelectEvent(cursorNode.id);
+        return;
+      default:
+        return;
+    }
+    event.preventDefault();
+    if (next === null) return;
+    setCursorId(next.id);
+    enterNode(next);
+    // Focus follows the cursor when it already sits on a glyph; from the
+    // overlay itself, aria-activedescendant carries it.
+    if (event.target !== event.currentTarget) {
+      (document.getElementById(eventDomId(next)) as SVGGElement | null)?.focus();
+    }
   };
   const laneGroupStyle = (laneId: string) => ({
     opacity: hoverLaneId !== null && hoverLaneId !== laneId ? 0.55 : 1,
@@ -507,13 +573,20 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
   const renderNode = (node: SceneNode): JSX.Element => {
     const halfHit = Math.max(1, node.halfHit);
     const title = `${glyphLabel(node.kind)} · ${node.label}${node.detail ? ` · ${node.detail}` : ''} · ${node.grade}${node.xBasis === 'sequence' ? ' · recorded order, timestamp unrecorded' : ''}`;
-    const select = (): void => onSelectEvent(node.id);
+    const select = (): void => {
+      setCursorId(node.id);
+      onSelectEvent(node.id);
+    };
     return (
       <g
         key={node.id}
+        id={eventDomId(node)}
         role="button"
-        tabIndex={0}
+        // One tab stop for the whole scene: the overlay owns it and arrow
+        // keys walk the glyphs, so the hit band stays clear of neighbours.
+        tabIndex={-1}
         data-event={node.id}
+        data-event-current={node === cursorNode || undefined}
         data-lane={node.laneId}
         data-kind={node.kind}
         data-grade={node.grade}
@@ -526,11 +599,15 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         onKeyDown={(event) => {
           if (isActivation(event)) {
             event.preventDefault();
+            event.stopPropagation();
             select();
           }
         }}
         onMouseEnter={() => enterNode(node)}
-        onFocus={() => enterNode(node)}
+        onFocus={() => {
+          setCursorId(node.id);
+          enterNode(node);
+        }}
         onMouseLeave={leaveNode}
         onBlur={leaveNode}
       >
@@ -642,6 +719,11 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         <span className="td-value text-3xs" data-window-readout>
           {formatMoment(window.start)} – {formatMoment(window.end)}
         </span>
+        {cursorNode ? (
+          <span className="td-value ml-2 text-3xs text-text-muted" data-event-position>
+            event {cursorIndex + 1} of {eventOrder.length}
+          </span>
+        ) : null}
       </div>
       <div className="relative" data-scene-field>
         <canvas
@@ -662,9 +744,16 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         <svg
           ref={overlayRef}
           role="group"
-          aria-label="Temporal execution overlay"
+          aria-label="Temporal execution overlay. Arrow keys move between events, Home and End jump to the first and last, Enter selects."
+          aria-activedescendant={cursorNode ? eventDomId(cursorNode) : undefined}
+          tabIndex={eventOrder.length > 0 ? 0 : -1}
           data-scene-layer="overlay"
-          className="relative block touch-none select-none"
+          onKeyDown={onOverlayKey}
+          onBlur={(event) => {
+            const next = event.relatedTarget;
+            if (!(next instanceof Node) || !event.currentTarget.contains(next)) leaveNode();
+          }}
+          className="relative block touch-none select-none outline-none [&:focus-visible_[data-event-current]>.td-focus-ring]:opacity-100"
           width="100%"
           viewBox={`0 0 ${width} ${height}`}
         >

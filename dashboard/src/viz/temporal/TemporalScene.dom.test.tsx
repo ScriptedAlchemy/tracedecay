@@ -207,6 +207,29 @@ describe('TemporalScene', () => {
       expect(onSelectEvent).toHaveBeenCalledTimes(2);
     });
 
+    it('walks the glyphs from one scene tab stop with arrows, Home, End and Enter', () => {
+      const { container, model, onSelectEvent } = renderScene();
+      const overlay = container.querySelector('svg[data-scene-layer="overlay"]')!;
+      expect(overlay.getAttribute('tabindex')).toBe('0');
+      for (const glyph of container.querySelectorAll('[data-event]')) expect(glyph.getAttribute('tabindex')).toBe('-1');
+      const position = () => container.querySelector('[data-event-position]')?.textContent;
+      const current = () => container.querySelector('[data-event-current]')!;
+      const total = model.nodes.length;
+      expect(position()).toBe(`event 1 of ${total}`);
+      fireEvent.keyDown(overlay, { key: 'ArrowRight' });
+      expect(position()).toBe(`event 2 of ${total}`);
+      expect(overlay.getAttribute('aria-activedescendant')).toBe(current().id);
+      fireEvent.keyDown(overlay, { key: 'End' });
+      expect(position()).toBe(`event ${total} of ${total}`);
+      fireEvent.keyDown(overlay, { key: 'ArrowRight' });
+      expect(position()).toBe(`event ${total} of ${total}`);
+      fireEvent.keyDown(overlay, { key: 'Home' });
+      expect(position()).toBe(`event 1 of ${total}`);
+      const first = current().getAttribute('data-event');
+      fireEvent.keyDown(overlay, { key: 'Enter' });
+      expect(onSelectEvent).toHaveBeenLastCalledWith(first);
+    });
+
     it('declares a sequence-placed node as recorded order', () => {
       const { container } = renderScene();
       const sequenced = container.querySelector('[data-event="n-msg"]')!;
