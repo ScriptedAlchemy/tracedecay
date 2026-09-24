@@ -16,12 +16,14 @@
  *
  * Determinism: fixtures never call `Math.random`; array shapes derive from the
  * row index, so the parse-gate test and screenshots are stable across runs.
- * Wall-clock (`nowSecs` / `nowMicros`) is the only time source, matching the
- * pre-existing fixtures.
+ * `nowSecs` / `nowMicros` are the only time source: the wall clock, unless
+ * `TD_FIXTURE_NOW_MS` pins one. The visual audit pins it, together with the
+ * page clock, so its captures are pixel-stable between runs.
  */
 
-const nowSecs = Math.floor(Date.now() / 1000);
-const nowMicros = Date.now() * 1000;
+const nowMs = Number(globalThis.process?.env?.['TD_FIXTURE_NOW_MS']) || Date.now();
+const nowSecs = Math.floor(nowMs / 1000);
+const nowMicros = nowMs * 1000;
 const DAY = 86_400;
 
 const PLAN26_OBSERVATORY_METRICS = [
