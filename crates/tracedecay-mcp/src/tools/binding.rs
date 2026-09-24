@@ -169,9 +169,9 @@ fn application_surface_branch_sensitivity(
         | NativeIntegrationApprove
         | NativeIntegrationApply
         | NativeIntegrationStatus
-        | NativeIntegrationCancel => BranchSensitivity::Independent,
+        | NativeIntegrationCancel
         // Retained memory, session, and workflow authority.
-        ApplicationSurfaceOperation::FactStoreCurate
+        | ApplicationSurfaceOperation::FactStoreCurate
         | ApplicationSurfaceOperation::FactStoreAdd
         | ApplicationSurfaceOperation::FactStoreSearch
         | ApplicationSurfaceOperation::FactStoreProbe

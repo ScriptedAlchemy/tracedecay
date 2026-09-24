@@ -1,6 +1,7 @@
 //! Project-route selection, tool-dispatch assembly, and identical-read sharing.
 
 use super::*;
+use crate::mcp::tools::handlers::ServedCodeGraphSlot;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 
 use tracedecay_mcp::server::{ReadFlightClaim, tool_allows_identical_read_coalescing};
@@ -345,7 +346,7 @@ impl McpServer {
                 generation_census_reader: self.generation_census_reader(),
                 retained_project_server_resolver: self.retained_project_server_resolver.clone(),
                 session_sync_service: session_sync_service.as_deref(),
-                served_code_graph: Default::default(),
+                served_code_graph: ServedCodeGraphSlot::default(),
                 session_authorities: tracedecay_mcp::handlers::SessionAuthorities::new(
                     self.project_session_db.as_ref(),
                     self.profile_session_db.as_ref(),

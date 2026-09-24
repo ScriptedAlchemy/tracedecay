@@ -124,12 +124,12 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
         .await
         .expect("pre-index store reopen");
     let raw_indexes = table_index_names(&reopened, "lcm_raw_messages").await;
-    for index in ["idx_lcm_raw_lossy_ingest"] {
-        assert!(
-            raw_indexes.iter().any(|name| name == index),
-            "short-lived convergence did not build {index}; raw message indexes: {raw_indexes:?}"
-        );
-    }
+    assert!(
+        raw_indexes
+            .iter()
+            .any(|name| name == "idx_lcm_raw_lossy_ingest"),
+        "short-lived convergence did not build idx_lcm_raw_lossy_ingest; raw message indexes: {raw_indexes:?}"
+    );
     let payload_indexes = table_index_names(&reopened, "lcm_external_payloads").await;
     assert!(
         payload_indexes

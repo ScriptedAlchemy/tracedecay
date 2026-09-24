@@ -1318,6 +1318,12 @@ fn publish_corpus_with_scale(
     })
 }
 
+/// A published generation and the corpus document behind each file path.
+type ScopeGeneration = (
+    Arc<CodeIndexPublishedGenerationV1>,
+    BTreeMap<String, CorpusDocumentV1>,
+);
+
 /// Publish one generation over `documents` (each copied `copies` times) with
 /// the daemon's production code-index owner, returning it with the corpus
 /// document each file occurrence came from. `None` when no document is in an
@@ -1328,13 +1334,7 @@ fn publish_scope_generation(
     scope_key: &[String],
     documents: &[&CorpusDocumentV1],
     copies: usize,
-) -> Result<
-    Option<(
-        Arc<CodeIndexPublishedGenerationV1>,
-        BTreeMap<String, CorpusDocumentV1>,
-    )>,
-    CandidateOutputError,
-> {
+) -> Result<Option<ScopeGeneration>, CandidateOutputError> {
     let language_registry = StaticLanguageRegistry::new();
     let mut files = Vec::new();
     let mut captured = Vec::new();

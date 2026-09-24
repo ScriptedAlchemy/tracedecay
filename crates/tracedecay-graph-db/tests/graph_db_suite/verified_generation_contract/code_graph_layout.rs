@@ -7,90 +7,13 @@
 //! N is then reclaimed through the ordinary `retire_replay` path, never
 //! through the head-retirement escape hatch.
 
-use rusqlite::Savepoint;
 use tracedecay_graph_db::{
     SupersededReplayRetirement, VerifiedGraphCommit, code_graph_shard_namespace,
     is_code_graph_shard_namespace,
 };
-use tracedecay_rusqlite_runtime::{
-    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
-    exact_sql::ExactSqlHandle,
-    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
-    repository::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage},
-};
-use tracedecay_store::{
-    AdmissionConfigV1, CodeShardScopeV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1,
-    RuntimeReadRequestV1, StorageRuntimeErrorV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
-    canonical_store_locator_digest,
-};
+use tracedecay_store::{CodeShardScopeV1, StoreShardScopeV1};
 
 use super::*;
-
-struct NoPublicationWrites;
-
-impl StorageOperationExecutor for NoPublicationWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoPublicationReads;
-
-impl ReaderQueryExecutor for NoPublicationReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        unreachable!("exact SQL graph publication queries bypass product reads")
-    }
-}
-
-struct ExactPublicationAuthority {
-    _writer: PersistentWriter,
-    _readers: ReaderPool<NoPublicationReads>,
-    storage: GraphPublicationExactSqlStorage,
-}
-
-impl ExactPublicationAuthority {
-    fn new(root: &std::path::Path, binding: &tracedecay_store::StoreRuntimeBindingV1) -> Self {
-        let path = root.join("graph-publication-authority.sqlite3");
-        drop(rusqlite::Connection::open(&path).unwrap());
-        let path = path.canonicalize().unwrap();
-        let locator = VerifiedStoreLocatorV1::new(
-            binding.shard_id.clone(),
-            binding.incarnation,
-            canonical_store_locator_digest(&path).unwrap(),
-        );
-        let writer = PersistentWriter::start(
-            ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
-            AdmissionConfigV1::default(),
-            NoPublicationWrites,
-        )
-        .unwrap();
-        let readers = ReaderPool::start(
-            ExistingReaderLocator::new(binding.clone(), locator, path).unwrap(),
-            AdmissionConfigV1::default().readers,
-            NoPublicationReads,
-        )
-        .unwrap();
-        let handle = ExactSqlHandle::attach(&writer, &readers).unwrap();
-        handle
-            .execute_batch(GRAPH_PUBLICATION_SCHEMA_V1.to_owned())
-            .unwrap();
-        let storage = GraphPublicationExactSqlStorage::from_authorized_handle(handle).unwrap();
-        Self {
-            _writer: writer,
-            _readers: readers,
-            storage,
-        }
-    }
-}
 
 fn code_shard(worktree: &str) -> StoreShardIdV1 {
     StoreShardIdV1::new(

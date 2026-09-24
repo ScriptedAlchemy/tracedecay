@@ -869,7 +869,7 @@ where
         plan,
     };
     Ok(GraphToolCompletionV1 {
-        result: GraphToolResultV1::Context(result),
+        result: GraphToolResultV1::Context(Box::new(result)),
         touched_files,
         code_graph: None,
         analytics: Some(analytics),

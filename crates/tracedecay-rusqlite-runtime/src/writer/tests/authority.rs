@@ -54,47 +54,45 @@ fn queued_anchor_writes_recheck_authority_before_sql_dispatch() {
         .unwrap(),
     ));
 
-    for (label, payload, digest_byte) in [("retrieval_anchor", anchor, 'r')] {
-        let database = TestDatabase::new();
-        let request = project_fixture_request(
-            &format!("operation.authority.{label}"),
-            &format!("key.authority.{label}"),
-            digest_byte,
-            payload,
-        );
-        let applied = Arc::new(AtomicU64::new(0));
-        let writer = start(&database, &request, Arc::clone(&applied));
-        let authority = Arc::new(RevokeAfterAdmissionAuthority {
-            admitted: AtomicBool::new(false),
-        });
-        let probe = Arc::new(Probe::new(&request, None));
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
+    let database = TestDatabase::new();
+    let request = project_fixture_request(
+        "operation.authority.retrieval_anchor",
+        "key.authority.retrieval_anchor",
+        'r',
+        anchor,
+    );
+    let applied = Arc::new(AtomicU64::new(0));
+    let writer = start(&database, &request, Arc::clone(&applied));
+    let authority = Arc::new(RevokeAfterAdmissionAuthority {
+        admitted: AtomicBool::new(false),
+    });
+    let probe = Arc::new(Probe::new(&request, None));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
 
-        let outcome = runtime
-            .block_on(writer.submit_authorized(request, probe, authority))
-            .unwrap();
+    let outcome = runtime
+        .block_on(writer.submit_authorized(request, probe, authority))
+        .unwrap();
 
-        assert_eq!(
-            outcome,
-            RuntimeSubmitOutcomeV1::Unavailable {
-                reason: UnavailableReasonV1::MissingAuthority,
-            },
-            "{label} write bypassed the actor authority recheck"
-        );
-        assert_eq!(applied.load(Ordering::SeqCst), 0);
-        let table_count: i64 = Connection::open(&database.0)
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'writer_test'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(table_count, 0);
-        writer.shutdown_and_join().unwrap();
-    }
+    assert_eq!(
+        outcome,
+        RuntimeSubmitOutcomeV1::Unavailable {
+            reason: UnavailableReasonV1::MissingAuthority,
+        },
+        "retrieval anchor write bypassed the actor authority recheck"
+    );
+    assert_eq!(applied.load(Ordering::SeqCst), 0);
+    let table_count: i64 = Connection::open(&database.0)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'writer_test'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(table_count, 0);
+    writer.shutdown_and_join().unwrap();
 }
 
 #[test]

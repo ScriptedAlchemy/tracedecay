@@ -169,14 +169,6 @@ pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> 
     }
 }
 
-fn tracedecay_home_dir() -> tracedecay_domain::errors::Result<PathBuf> {
-    tracedecay_agent_hosts::agents::home_dir().ok_or_else(|| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: "could not determine home directory".to_string(),
-        }
-    })
-}
-
 pub(crate) fn tracedecay_bin_on_path() -> tracedecay_domain::errors::Result<String> {
     tracedecay_agent_hosts::agents::which_tracedecay().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {

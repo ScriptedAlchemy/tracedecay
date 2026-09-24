@@ -445,10 +445,8 @@ mod tests {
     fn rewrite_while_held(path: &Path, bytes: &[u8]) -> bool {
         const ERROR_SHARING_VIOLATION: i32 = 32;
         match fs::write(path, bytes) {
-            Ok(()) => {
-                assert!(!cfg!(windows), "a held payload must exclude writers");
-                true
-            }
+            Ok(()) if !cfg!(windows) => true,
+            Ok(()) => panic!("a held payload must exclude writers"),
             Err(error) => {
                 assert!(
                     cfg!(windows) && error.raw_os_error() == Some(ERROR_SHARING_VIOLATION),

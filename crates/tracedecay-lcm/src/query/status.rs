@@ -1482,13 +1482,12 @@ mod tests {
         for (provider, session_id) in scopes {
             let (sql, values) = status_counts_query(provider, session_id);
             let counts_plan = status_plan_lines(&conn, &sql, values).await;
-            for partial_index in ["idx_lcm_raw_lossy_ingest"] {
-                assert!(
-                    counts_plan.iter().any(|line| line.contains(partial_index)),
-                    "status counts no longer substitute {partial_index} for {provider:?}/{session_id:?}; plan:\n{}",
-                    counts_plan.join("\n")
-                );
-            }
+            let partial_index = "idx_lcm_raw_lossy_ingest";
+            assert!(
+                counts_plan.iter().any(|line| line.contains(partial_index)),
+                "status counts no longer substitute {partial_index} for {provider:?}/{session_id:?}; plan:\n{}",
+                counts_plan.join("\n")
+            );
         }
     }
 

@@ -4696,7 +4696,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         )
         .await
         .expect("cursor key runtime");
-    let cursor_keys = SessionTemporalAccess::new(&*cursor_runtime.profile_database())
+    let cursor_keys = SessionTemporalAccess::new(cursor_runtime.profile_database())
         .load_session_cursor_key_provider_result()
         .await
         .expect("cursor keys");

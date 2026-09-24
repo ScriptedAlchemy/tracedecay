@@ -233,7 +233,7 @@ mod tests {
             }),
         };
         let completion = |analytics| GraphToolCompletionV1 {
-            result: GraphToolResultV1::Context(plan_context()),
+            result: GraphToolResultV1::Context(Box::new(plan_context())),
             touched_files: Vec::new(),
             code_graph: None,
             analytics,

@@ -112,7 +112,7 @@ fn with_stateless_request_context(line: String) -> String {
 }
 
 #[cfg(all(unix, any(test, feature = "test-transport")))]
-async fn connected_broker_pair() -> Result<(BrokerStream, tokio::net::UnixStream)> {
+fn connected_broker_pair() -> Result<(BrokerStream, tokio::net::UnixStream)> {
     let (daemon, client) = tokio::net::UnixStream::pair()?;
     Ok((BrokerStream::Unix(daemon), client))
 }
@@ -172,6 +172,9 @@ impl McpServer {
                 None => return Ok(()),
             }
         };
+        #[cfg(unix)]
+        let (daemon_side, client_side) = connected_broker_pair()?;
+        #[cfg(not(unix))]
         let (daemon_side, client_side) = connected_broker_pair().await?;
         let serving = crate::daemon::serve_routed_rmcp_connection(
             server,

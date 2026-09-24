@@ -652,12 +652,11 @@ struct GuardedHandshakeTransport<T: rmcp::transport::Transport<RoleServer>> {
     /// `rmcp` polls `receive` inside `select!`, so a ping answer is written
     /// from here rather than from a receive future that may be dropped
     /// mid-write.
-    pending_ping_answer: Option<
-        std::pin::Pin<
-            Box<dyn std::future::Future<Output = std::result::Result<(), T::Error>> + Send>,
-        >,
-    >,
+    pending_ping_answer: Option<PendingPingAnswer<T::Error>>,
 }
+
+type PendingPingAnswer<E> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), E>> + Send>>;
 
 impl<T> rmcp::transport::Transport<RoleServer> for GuardedHandshakeTransport<T>
 where

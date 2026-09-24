@@ -404,7 +404,7 @@ pub(super) async fn execute_describe(
     evidence_outcome(
         context,
         RetainedSurfaceOperation::LcmDescribe,
-        RetainedSurfaceResultV1::LcmDescribe(result),
+        RetainedSurfaceResultV1::LcmDescribe(Box::new(result)),
     )
 }
 

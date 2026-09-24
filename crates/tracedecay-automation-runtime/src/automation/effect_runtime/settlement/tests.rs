@@ -838,7 +838,7 @@ fn reserved_read_removes_an_orphan_terminal_sidecar() {
     // replaying or re-executing.
     assert!(matches!(
         reserve_or_replay_blocking(&path, admitted).expect("orphan cleanup enters recovery"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
     assert!(!sidecar.exists());
 }
@@ -1453,7 +1453,7 @@ fn foreign_external_reservation_closes_indeterminate_without_a_second_execution(
 
     let mut reopened = original.clone();
     reopened.process_run_id = "process.external-journal.reopened".to_owned();
-    let ReservationResult::Recover { .. } =
+    let ReservationResult::Recover =
         reserve_or_replay_blocking(&path, reopened.clone()).expect("recover external reservation")
     else {
         panic!("foreign external reservation must recover")
@@ -1682,7 +1682,7 @@ fn abandoned_same_process_reservation_enters_recovery_without_reexecution() {
 
     assert!(matches!(
         reserve_or_replay_blocking(&path, original).expect("recover dropped authority"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
 }
 
@@ -1720,7 +1720,7 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
     drop(claim);
     assert!(matches!(
         reserve_or_replay_blocking(&path, original.clone()).expect("direct recover"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
 
     super::discard_direct_recovery_unbound_spools(temp.path(), &path, &original)
@@ -1810,7 +1810,7 @@ fn foreign_reservation_recovery_persists_exact_partial_terminal() {
     reopened.process_run_id = "process.memory-journal.reopened".to_owned();
     assert!(matches!(
         reserve_or_replay_blocking(&path, reopened.clone()).expect("recover"),
-        ReservationResult::Recover { .. }
+        ReservationResult::Recover
     ));
     let partial = partial_terminal(&original);
     let stored = persist_recovered_terminal_blocking(&path, &reopened, partial.clone(), None)

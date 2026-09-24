@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde::Serialize;
 use serde_json::Value;
 use tracedecay_contracts::{
@@ -458,16 +460,16 @@ fn push_symbol_entry(item: &Value, rendered: &mut String) -> Option<()> {
     let symbol = item.get("symbol").unwrap_or(item);
     rendered.push_str(&symbol_line(symbol)?);
     if let Some(depth) = item.get("depth").and_then(Value::as_u64) {
-        rendered.push_str(&format!(" depth={depth}"));
+        write!(rendered, " depth={depth}").ok()?;
     }
     if item.get("dispatch_via_trait").and_then(Value::as_bool) == Some(true)
         && let Some(from) = item.get("dispatch_from").and_then(Value::as_str)
     {
-        rendered.push_str(&format!(" via trait {from}"));
+        write!(rendered, " via trait {from}").ok()?;
     }
     rendered.push('\n');
     if let Some(signature) = symbol.get("signature").and_then(Value::as_str) {
-        rendered.push_str(&format!("  {signature}\n"));
+        writeln!(rendered, "  {signature}").ok()?;
     }
     for line in item
         .get("body")
@@ -475,7 +477,7 @@ fn push_symbol_entry(item: &Value, rendered: &mut String) -> Option<()> {
         .into_iter()
         .flat_map(str::lines)
     {
-        rendered.push_str(&format!("  | {line}\n"));
+        writeln!(rendered, "  | {line}").ok()?;
     }
     Some(())
 }
@@ -488,10 +490,10 @@ fn push_page_trailer(payload: &Value, rendered: &mut String) -> Option<()> {
         .flatten()
     {
         let reason = gap.get("reason").and_then(Value::as_str)?;
-        rendered.push_str(&format!("support gap: {reason}\n"));
+        writeln!(rendered, "support gap: {reason}").ok()?;
     }
     if let Some(cursor) = payload.get("next_cursor").and_then(Value::as_str) {
-        rendered.push_str(&format!("next_cursor: {cursor}\n"));
+        writeln!(rendered, "next_cursor: {cursor}").ok()?;
     }
     Some(())
 }
@@ -506,11 +508,11 @@ fn push_hierarchy_subtree(
     let node_id = symbol.get("node_id").and_then(Value::as_str)?;
     let line = symbol_line(symbol)?;
     if depth == 0 {
-        rendered.push_str(&format!("{line}\n"));
+        writeln!(rendered, "{line}").ok()?;
     } else {
         let relation = item.get("edge_kind").and_then(Value::as_str)?;
         let pad = "  ".repeat(depth - 1);
-        rendered.push_str(&format!("{pad}|- {relation} {line}\n"));
+        writeln!(rendered, "{pad}|- {relation} {line}").ok()?;
     }
     for child in items.iter().filter(|child| {
         child.get("parent_node_id").and_then(Value::as_str) == Some(node_id)

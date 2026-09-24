@@ -442,7 +442,7 @@ mod tests {
                 &snapshot,
                 &RetrievalAnchorReadOperationV1::Derivatives {
                     anchor_id: source.clone(),
-                    owner: owner().into(),
+                    owner: owner(),
                 },
             )
             .unwrap();
@@ -455,7 +455,7 @@ mod tests {
                 &snapshot,
                 &RetrievalAnchorReadOperationV1::Tombstone {
                     anchor_id: source,
-                    owner: owner().into(),
+                    owner: owner(),
                 },
             )
             .unwrap();
@@ -469,7 +469,7 @@ mod tests {
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::AnchorById {
                         anchor_id: anchor("retrieval.source.fixture"),
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
                 .unwrap(),
@@ -592,7 +592,7 @@ mod tests {
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::Derivatives {
                         anchor_id: source,
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
                 .unwrap(),
@@ -613,7 +613,7 @@ mod tests {
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::AnchorById {
                         anchor_id: source,
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
                 .is_err()
@@ -658,7 +658,7 @@ mod tests {
                     &snapshot,
                     &RetrievalAnchorReadOperationV1::CurrentDisposition {
                         anchor_id: source,
-                        owner: owner().into(),
+                        owner: owner(),
                     },
                 )
                 .is_err()

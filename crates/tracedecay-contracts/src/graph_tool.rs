@@ -14,7 +14,7 @@ use crate::retrieval::{
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "operation", content = "result", rename_all = "snake_case")]
 pub enum GraphToolResultV1 {
-    Context(ContextResultV1),
+    Context(Box<ContextResultV1>),
     Node(NodeResultV1),
     Impact(ImpactResultV1),
     Similar(SimilarResultV1),

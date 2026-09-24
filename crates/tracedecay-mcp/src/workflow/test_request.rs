@@ -12,7 +12,7 @@ pub const MAX_TESTS_HARD_CAP: usize = 500;
 /// into an unbounded daemon job by selecting an arbitrarily distant deadline.
 pub const MAX_TEST_TIMEOUT_SECS: u64 = DEFAULT_TEST_TIMEOUT_SECS;
 
-fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> ToolResult {
+fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> Box<ToolResult> {
     let value = json!({
         "passed": 0,
         "failed": 0,
@@ -24,10 +24,10 @@ fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> Too
         }
     });
     let text = render::finalize(None, args, &value, || render::generic_md(&value));
-    ToolResult::new(
+    Box::new(ToolResult::new(
         json!({ "content": [{ "type": "text", "text": text }] }),
         Vec::new(),
-    )
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub enum TestProfile {
 }
 
 impl TestProfile {
-    fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
+    fn parse(args: &Value) -> std::result::Result<Self, Box<ToolResult>> {
         match args.get("profile") {
             None => Ok(Self::Debug),
             Some(Value::String(profile)) if profile == "debug" => Ok(Self::Debug),
@@ -62,7 +62,7 @@ pub struct RunAffectedArgs {
 
 impl RunAffectedArgs {
     #[hotpath::measure(label = "mcp.workflow.affected_tests.request_build")]
-    pub fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
+    pub fn parse(args: &Value) -> std::result::Result<Self, Box<ToolResult>> {
         let explicit_paths = match args.get("changed_paths") {
             Some(Value::Array(paths)) => {
                 let mut parsed = Vec::with_capacity(paths.len());
@@ -125,7 +125,7 @@ fn bounded_positive_u64(
     field: &str,
     default: u64,
     maximum: u64,
-) -> std::result::Result<u64, ToolResult> {
+) -> std::result::Result<u64, Box<ToolResult>> {
     let Some(value) = args.get(field) else {
         return Ok(default);
     };

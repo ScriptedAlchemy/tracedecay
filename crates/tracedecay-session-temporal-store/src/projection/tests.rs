@@ -2088,7 +2088,7 @@ async fn explicit_discovery_visits_only_output_effects_past_frontier() {
     assert_eq!(filtered, 1, "one output-producing effect is pending");
 
     let pending = SessionTemporalAccess::new(
-        &*runtime
+        runtime
             .registered_database(HostAdmissionScope::Profile)
             .expect("profile registered database"),
     )

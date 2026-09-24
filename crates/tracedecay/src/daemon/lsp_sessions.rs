@@ -164,39 +164,13 @@ async fn authorize_lsp_workspace_for_uris(
         ) {
             admits_active_project = true;
         }
-        let mut candidates = Vec::new();
-        for graph in &graphs {
-            if !tracedecay_runtime_core::path_safety::same_canonical_path(
-                graph.project_root(),
-                &requested_path,
-            ) {
-                continue;
-            }
-            let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {
-                continue;
-            };
-            let Ok(project_id) = tracedecay_domain::ProjectId::new(raw_project_id.to_owned())
-            else {
-                continue;
-            };
-            candidates.push(project_id);
-        }
-        candidates.sort();
-        candidates.dedup();
-        let [project_id] = candidates.as_slice() else {
-            return lsp_workspace_refused(
-                if candidates.is_empty() {
-                    "root_has_no_mounted_project"
-                } else {
-                    "root_has_ambiguous_mounted_projects"
-                },
-                &requested_path,
-            );
+        let project_id = match mounted_project_for_root(&graphs, &requested_path) {
+            Ok(project_id) => project_id,
+            Err(reason_code) => return lsp_workspace_refused(reason_code, &requested_path),
         };
-        let Ok(selector) = tracedecay_contracts::RegisteredRootSelectorV1::new(
-            project_id.clone(),
-            requested_path.clone(),
-        ) else {
+        let Ok(selector) =
+            tracedecay_contracts::RegisteredRootSelectorV1::new(project_id, requested_path.clone())
+        else {
             return lsp_workspace_refused("root_selector_invalid", &requested_path);
         };
         selectors.push(selector);
@@ -241,6 +215,37 @@ async fn authorize_lsp_workspace_for_uris(
         return lsp_workspace_refused("workspace_authorization_refused", project_path);
     }
     authorized
+}
+
+/// The one mounted project rooted at `requested_path`, or the refusal code
+/// when none or several are.
+fn mounted_project_for_root(
+    graphs: &[Arc<tracedecay_project::project::TraceDecay>],
+    requested_path: &Path,
+) -> std::result::Result<tracedecay_domain::ProjectId, &'static str> {
+    let mut candidates = Vec::new();
+    for graph in graphs {
+        if !tracedecay_runtime_core::path_safety::same_canonical_path(
+            graph.project_root(),
+            requested_path,
+        ) {
+            continue;
+        }
+        let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {
+            continue;
+        };
+        let Ok(project_id) = tracedecay_domain::ProjectId::new(raw_project_id.to_owned()) else {
+            continue;
+        };
+        candidates.push(project_id);
+    }
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [project_id] => Ok(project_id.clone()),
+        [] => Err("root_has_no_mounted_project"),
+        _ => Err("root_has_ambiguous_mounted_projects"),
+    }
 }
 
 /// Every refusal above reaches the client as the same non-diagnostic
