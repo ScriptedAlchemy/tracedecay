@@ -9,7 +9,7 @@ use tracedecay_contracts::{
 
 #[tokio::test]
 async fn callers_report_unsupported_temporary_receivers_without_inventing_edges() {
-    let (fixture, _root) = graph_query_fixture_with_sources(|project| {
+    let fixture = graph_query_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(
             project.join("src/walk.rs"),
