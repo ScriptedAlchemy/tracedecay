@@ -647,14 +647,16 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
 
     impl CodeIndexExecutionControlV1 for PauseAfterExistingArtifactRead {
         fn is_cancelled(&self) -> bool {
-            // One short staging file and one short existing artifact each
-            // checkpoint before open and after their single bounded read. The
-            // fourth checkpoint is therefore after the destination's bytes
-            // were verified but before publication can attach its descriptor.
+            // Publication checkpoints once before the store lock and once
+            // while taking the project's shared segment lock; then one short
+            // staging file and one short existing artifact each checkpoint
+            // before open and after their single bounded read. The sixth
+            // checkpoint is therefore after the destination's bytes were
+            // verified but before publication can attach its descriptor.
             if self
                 .checkpoints
                 .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
-                == 3
+                == 5
             {
                 let mut state = self.state.lock().expect("publication pause state");
                 state.0 = true;
@@ -687,10 +689,24 @@ fn text_artifact_publication_serializes_pointer_attachment_with_retention() {
         .expect("sealed generation identity");
     let sealed_hex =
         sha256_hex_suffix(sealed_identity.digest.as_str()).expect("sealed SHA-256 digest");
-    let artifacts_root = store.path().join("code-text-artifacts-v1");
-    tracedecay_private_fs::create_private_directory(&artifacts_root)
-        .expect("create private artifacts root");
-    let staging = artifacts_root.join(format!(".text-artifact-{sealed_hex}.staging"));
+    // Staging stays with the scope that builds it; the completed artifact is
+    // the project's, beside its shared generation segments. A store root that
+    // is not a scope hash is a project of its own, so both live under it.
+    let ensure_private_root =
+        |path: &Path| match tracedecay_private_fs::create_private_directory(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            result => result.expect("create private root"),
+        };
+    let staging_root = code_text_artifact_staging_root(store.path());
+    assert_eq!(
+        staging_root,
+        store.path().join("code-text-artifact-staging-v1")
+    );
+    ensure_private_root(&staging_root);
+    let artifacts_root = code_text_artifacts_root(store.path());
+    assert_eq!(artifacts_root, store.path().join("code-text-artifacts-v1"));
+    ensure_private_root(&artifacts_root);
+    let staging = staging_root.join(format!(".text-artifact-{sealed_hex}.staging"));
     let artifact_bytes = b"already content-addressed artifact";
     let mut staging_file =
         tracedecay_private_fs::create_private_file(&staging).expect("create private staging file");
