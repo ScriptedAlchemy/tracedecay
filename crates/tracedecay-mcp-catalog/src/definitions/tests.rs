@@ -1,4 +1,6 @@
 use super::*;
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1;
+use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 
 #[test]
 fn work_and_workflow_advertise_every_executable_request_schema() {
@@ -149,51 +151,90 @@ fn handle_gated_feedback_reads_are_advertised_with_their_request_handle() {
     }
 }
 
+/// An argument object built from the published LCM schema must decode, through
+/// the shared CLI/MCP adapter, to the same `as_of` cutoff on the typed request.
 #[test]
-fn lcm_compatibility_definitions_expose_only_opaque_continuation_cursors() {
-    let load = def_lcm_load_session();
-    let grep = def_lcm_grep();
-
-    for definition in [&load, &grep] {
-        let properties = definition.input_schema["properties"]
-            .as_object()
-            .expect("LCM properties");
-        assert_eq!(properties["cursor"]["type"], "string");
-        let kinds: Vec<&Value> = properties["temporal_mode"]["oneOf"]
+fn lcm_history_reads_accept_an_as_of_cutoff() {
+    let cutoff = json!({ "kind": "as_of", "cutoff": 1_700_000_000_000_000_i64 });
+    for (definition, operation, arguments) in [
+        (
+            def_lcm_load_session(),
+            ApplicationSurfaceOperation::LcmLoadSession,
+            json!({ "session_id": "session-a", "temporal_mode": cutoff }),
+        ),
+        (
+            def_lcm_grep(),
+            ApplicationSurfaceOperation::LcmGrep,
+            json!({ "query": "retention", "temporal_mode": cutoff }),
+        ),
+    ] {
+        let name = definition.name.as_str();
+        let schema = &definition.input_schema;
+        let properties = schema["properties"].as_object().expect("properties");
+        let supplied = arguments.as_object().expect("argument object");
+        assert!(
+            supplied.keys().all(|key| properties.contains_key(key)),
+            "{name} advertises every supplied argument"
+        );
+        assert!(
+            schema["required"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|key| key.as_str().is_some_and(|key| supplied.contains_key(key))),
+            "{name} requires only supplied arguments"
+        );
+        let as_of = properties["temporal_mode"]["oneOf"]
             .as_array()
             .expect("temporal mode variants")
             .iter()
-            .map(|variant| &variant["properties"]["kind"]["const"])
-            .collect();
+            .find(|variant| variant["properties"]["kind"]["const"] == "as_of")
+            .expect("advertised as_of variant");
+        let mut advertised_fields = as_of["required"]
+            .as_array()
+            .expect("as_of required fields")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        advertised_fields.sort_unstable();
+        let mut supplied_fields = cutoff
+            .as_object()
+            .expect("cutoff object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        supplied_fields.sort_unstable();
+        assert_eq!(advertised_fields, supplied_fields, "{name}");
+
+        let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(name, arguments)
+            .expect("the shared CLI/MCP adapter accepts the arguments");
+        let request =
+            tracedecay_daemon_protocol::parse_application_surface_request(operation, adapted.request)
+                .expect("the typed LCM request accepts an as_of cutoff");
+        let temporal_mode = match request {
+            ApplicationSurfaceRequest::Retained(RetainedSurfaceRequestV1::LcmLoadSession(
+                request,
+            )) => request.temporal_mode,
+            ApplicationSurfaceRequest::Retained(RetainedSurfaceRequestV1::LcmGrep(request)) => {
+                request.temporal_mode
+            }
+            other => panic!("{name} decoded to {other:?}"),
+        };
         assert_eq!(
-            kinds,
-            [
-                &json!("current"),
-                &json!("as_of"),
-                &json!("evolution"),
-                &json!("forensic")
-            ]
+            serde_json::to_value(temporal_mode).expect("temporal mode serializes"),
+            cutoff,
+            "{name}"
         );
-        assert_eq!(
-            properties["temporal_mode"]["oneOf"][1]["required"],
-            json!(["kind", "cutoff"])
-        );
-        assert!(properties.get("as_of_micros").is_none());
     }
 
+    let legacy = tracedecay_daemon_protocol::parse_application_surface_request(
+        ApplicationSurfaceOperation::LcmLoadSession,
+        json!({ "session_id": "session-a", "as_of_micros": 1_700_000_000_000_000_i64 }),
+    )
+    .expect_err("the retired microsecond cutoff argument is refused");
     assert!(
-        load.input_schema["properties"]
-            .get("after_store_id")
-            .is_none(),
-        "legacy offset pagination must not remain public"
-    );
-    assert_eq!(
-        grep.input_schema["properties"]["include_summaries"]["default"],
-        false
-    );
-    assert_eq!(
-        grep.input_schema["properties"]["sort"]["default"],
-        "relevance"
+        legacy.to_string().contains("unknown field `as_of_micros`"),
+        "{legacy}"
     );
 }
 
