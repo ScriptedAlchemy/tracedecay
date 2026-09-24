@@ -171,7 +171,7 @@ function ReliefField({
         {READINGS.map(([term, value]) => (
           <span key={term} className="inline-flex items-baseline gap-1.5">
             <span className="td-legend">{term}</span>
-            <span className="td-value text-text-secondary">{value}</span>
+            <span className="text-text-secondary">{value}</span>
           </span>
         ))}
         <StateKey />

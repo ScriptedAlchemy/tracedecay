@@ -93,7 +93,7 @@ export function AttentionLegend({
 }) {
   const present = [...new Set(sources)].sort();
   return (
-    <ul aria-label="Attention legend" className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-3xs text-text-muted">
+    <ul aria-label="Attention legend" className="flex flex-wrap items-center gap-x-4 gap-y-1 text-3xs text-text-muted">
       <li className="flex items-center gap-1.5 text-alert">
         <svg aria-hidden width="10" height="10" viewBox="-5 -5 10 10">
           <path d="M 0 -4 L 4 3 L -4 3 Z" fill="currentColor" />
@@ -105,7 +105,7 @@ export function AttentionLegend({
       ) : (
         present.map((source) => (
           <li key={source} className="text-text-secondary">
-            {attentionCode(source)} = {source.replaceAll('_', ' ')}
+            <span className="td-value">{attentionCode(source)}</span> = {source.replaceAll('_', ' ')}
           </li>
         ))
       )}

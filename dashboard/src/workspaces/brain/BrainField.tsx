@@ -239,7 +239,7 @@ export function FieldLegend({ scene }: { scene: FieldScene }) {
       <span className="inline-flex items-center gap-1.5">
         <span aria-hidden className="h-2 w-3 bg-alert" />
         <span className="td-legend">amber</span>
-        <span className="td-value text-3xs text-text-secondary">
+        <span className="text-3xs text-text-secondary">
           {registry
             ? 'admitted activity on the exact touched project and one drawn hop, 4.2 s half-life'
             : 'none: no symbol-level activity is supplied, so nothing here blooms'}
@@ -248,7 +248,7 @@ export function FieldLegend({ scene }: { scene: FieldScene }) {
       <span className="inline-flex items-center gap-1.5">
         <span aria-hidden className="size-2.5 rounded-full border-2 border-accent" />
         <span className="td-legend">cyan</span>
-        <span className="td-value text-3xs text-text-secondary">inspection and focus, never activity</span>
+        <span className="text-3xs text-text-secondary">inspection and focus, never activity</span>
       </span>
     </span>
   );
@@ -319,7 +319,7 @@ function LegendItem({ label, value }: { label: string; value: string }) {
   return (
     <span className="inline-flex items-baseline gap-1.5">
       <span className="td-legend">{label}</span>
-      <span className="td-value text-3xs text-text-secondary">{value}</span>
+      <span className="text-3xs text-text-secondary">{value}</span>
     </span>
   );
 }
