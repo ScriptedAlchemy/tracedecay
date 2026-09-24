@@ -84,7 +84,7 @@ export function InboxWorkspace({
       ) : location.layout === 'table' ? (
         <InboxTable context={context} rows={rows} related={related} />
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 max-lg:auto-rows-max max-lg:overflow-y-auto lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_20rem]">
+        <div className="grid flex-1 grid-cols-1 max-lg:flex-none max-lg:auto-rows-max lg:min-h-0 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_20rem]">
           <div className="flex min-h-0 flex-col border-r border-edge-subtle bg-surface-1">
             <PullRequestQueue
               context={context}
@@ -117,7 +117,7 @@ export function InboxWorkspace({
 function InboxFilters({ context }: { context: DeliveryContext }) {
   const { inbox, location, navigate } = context;
   const select =
-    'h-9 border border-edge-subtle bg-surface-0 px-2 text-xs normal-case tracking-normal text-text-primary';
+    'h-[var(--touch-target-min)] border border-edge-subtle bg-surface-0 px-2 text-xs normal-case tracking-normal text-text-primary';
   return (
     <div className="flex flex-wrap items-end gap-3 border-b border-edge-subtle bg-surface-1 px-3 py-2">
       <label className="flex min-w-44 flex-col gap-1 text-3xs uppercase tracking-wider text-text-muted">
@@ -241,7 +241,7 @@ function ProjectStrip({ context }: { context: DeliveryContext }) {
           type="button"
           aria-pressed={location.project === project.project_id}
           className={cn(
-            'flex items-center gap-2 border border-transparent px-2 py-1 text-3xs hover:border-edge-subtle',
+            'flex min-h-[var(--touch-target-min)] items-center gap-2 border border-transparent px-2 py-1 text-3xs hover:border-edge-subtle',
             location.project === project.project_id && 'border-edge-strong bg-surface-2',
           )}
           onClick={() =>

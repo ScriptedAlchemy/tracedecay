@@ -127,7 +127,7 @@ export function BrainPage() {
           <>
             <div className="flex flex-wrap items-end gap-3">
               <label className="text-2xs">Search project registry
-                <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 w-full border border-edge-subtle bg-surface-0 p-2 text-xs sm:w-72" />
+                <input type="search" value={registryFilter} onChange={(event) => setRegistryFilter(event.target.value)} className="mt-1 min-h-[var(--touch-target-min)] w-full border border-edge-subtle bg-surface-0 p-2 text-xs sm:w-72" />
               </label>
               {query ? <p className="text-2xs text-text-muted">{matchingGroups.reduce((count, group) => count + group.projects.length, 0)} matching projects</p> : null}
               {/* The counts that are the same on every row, said once. */}

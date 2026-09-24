@@ -132,7 +132,7 @@ function CorrelationUnavailable({ context, reason }: { context: DeliveryContext;
       <p className="pb-4 text-center">
         <button
           type="button"
-          className="inline-flex min-h-9 items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2"
+          className="inline-flex min-h-[var(--touch-target-min)] items-center border border-edge-strong px-3 text-xs text-text-primary hover:bg-surface-2"
           onClick={() => context.navigate({ mode: 'inbox' })}
         >
           Back to inbox

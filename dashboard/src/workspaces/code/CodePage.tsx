@@ -445,7 +445,7 @@ function CortexLens({
           <div
             role="tablist"
             aria-label="Ledger reading"
-            className="flex h-8 shrink-0 items-center gap-1 border-b border-edge-subtle bg-surface-1 px-1"
+            className="flex shrink-0 items-center gap-1 border-b border-edge-subtle bg-surface-1 px-1"
           >
             <LedgerTabButton
               tab="symbols"
@@ -527,7 +527,7 @@ function LedgerTabButton({
       }}
       title={note}
       className={cn(
-        'flex h-full items-center gap-2 border-b-2 px-3 text-2xs uppercase tracking-[0.12em]',
+        'flex min-h-[var(--touch-target-min)] items-center gap-2 border-b-2 px-3 text-2xs uppercase tracking-[0.12em]',
         'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         selected
           ? 'border-accent text-text-primary'

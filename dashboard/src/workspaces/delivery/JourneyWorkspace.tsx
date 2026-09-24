@@ -75,7 +75,7 @@ function JourneyBody({
   const project = projectFor(context.inbox, row.project_id);
   const title = row.pull_request.identity?.title ?? row.pull_request.label;
   const servedLanes = model.lanes.filter((lane) => laneServes(lane.state)).length;
-  const control = 'td-hit inline-flex min-h-9 items-center border px-3 text-xs text-text-primary hover:bg-surface-2';
+  const control = 'td-hit inline-flex items-center border px-3 text-xs text-text-primary hover:bg-surface-2';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
