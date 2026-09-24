@@ -1,30 +1,25 @@
 /**
- * The Cortex relief field.
+ * Cortex renderer A, the relief field.
  *
- * Symbols sit inside the hull of the directory that holds their file;
- * directories are packed so that those sharing drawn relations sit together.
- * Under each hull lies a relief whose height is the density of drawn relation
- * endpoints among THAT directory's own symbols, a Gaussian sum weighted by the
- * relations each carries, sampled and drawn only inside its hull. Two packed
- * directories therefore never share a ridge: every rise is coupling measured
- * inside one directory. Contours sit at one printed interval shared by every
- * hull, so heights compare across directories; the hillshade is the same
- * surface lit from the upper left.
+ * Symbols sit inside the module (directory) that holds their file; modules are
+ * packed so that directories sharing drawn relations sit together. Under them
+ * lies a relief whose height is the density of drawn relation endpoints, a
+ * Gaussian sum over every symbol weighted by the drawn edges it carries, so
+ * a ridge is a place where the slice's coupling is dense and nothing else.
+ * Contours are drawn at a fixed, printed interval of that density; the
+ * hillshade is the same surface lit from the upper left.
  *
- * Relations inside a directory are straight hairlines. Relations between
- * directories are aggregated per directory pair into one trunk between gates
- * on the facing hull boundaries; a trunk's width and brightness are its
- * measured relation count, which is also printed on it.
+ * Relations inside a module are straight hairlines. Relations between modules
+ * are bundled through a gate on each module's boundary facing the other, so a
+ * trunk's brightness is the number of relations it carries.
  *
- * Labels are a hierarchy: directory names and hub symbols (served degree at
- * or above the slice's 90th percentile at Fit, 75th from 1.4x) in the display
- * face; every other symbol only on hover, focus, selection or past 2x zoom. A label that
- * collides is dropped, never overprinted; the ledger names every symbol.
+ * Semantic zoom: at Fit only module names and hub symbols are labelled; past
+ * 1.5x every symbol that fits is; past 2.5x every relation is drawn at full
+ * weight with its kind's line style.
  */
 import {
   anchorsAround,
   degreeRadius,
-  displayFont,
   drawHaloLabel,
   drawStateMarks,
   drawSymbolBody,
@@ -44,7 +39,7 @@ import {
 const S = 24;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 /** Gaussian kernel of the relief, in world units. */
-export const RELIEF_SIGMA = S * 1.1;
+export const RELIEF_SIGMA = S * 1.6;
 const CELL = S / 3;
 
 export interface ReliefModule {
@@ -72,25 +67,15 @@ export interface ReliefSurface {
   readonly cell: number;
   readonly values: Float32Array;
   readonly max: number;
+  readonly interval: number;
   readonly contours: readonly ContourLevel[];
-}
-
-/** Relations between one pair of directories, drawn as one trunk. */
-export interface ReliefTrunk {
-  readonly a: ReliefModule;
-  readonly b: ReliefModule;
-  readonly count: number;
 }
 
 export interface ReliefLayout {
   readonly positions: ReadonlyMap<string, { x: number; y: number }>;
   readonly moduleOf: ReadonlyMap<string, ReliefModule>;
   readonly modules: readonly ReliefModule[];
-  /** One relief per directory, from its own members only. */
-  readonly surfaces: ReadonlyMap<ReliefModule, ReliefSurface>;
-  /** The contour interval every hull shares. */
-  readonly interval: number;
-  readonly trunks: readonly ReliefTrunk[];
+  readonly surface: ReliefSurface;
   readonly bounds: Bounds;
 }
 
@@ -304,7 +289,7 @@ export function reliefSurface(
   bounds: Bounds,
   sigma: number = RELIEF_SIGMA,
   cell: number = CELL,
-): Omit<ReliefSurface, 'contours'> {
+): Omit<ReliefSurface, 'contours' | 'interval'> {
   const cols = Math.max(2, Math.ceil((bounds.x1 - bounds.x0) / cell) + 1);
   const rows = Math.max(2, Math.ceil((bounds.y1 - bounds.y0) / cell) + 1);
   const values = new Float32Array(cols * rows);
@@ -427,66 +412,26 @@ export function reliefLayout(scene: CortexScene, aspect = 2): ReliefLayout {
       y1 = Math.max(y1, p.y);
     }
   }
-  // The frame is the hulls plus room for the directory label above each.
-  const bounds = { x0: x0 - S * 0.3, y0: y0 - S * 0.9, x1: x1 + S * 0.3, y1: y1 + S * 0.3 };
+  const margin = S * 0.6;
+  const bounds = { x0: x0 - margin, y0: y0 - margin, x1: x1 + margin, y1: y1 + margin };
 
   const incident = new Map<string, number>();
-  const pairs = new Map<string, ReliefTrunk & { count: number }>();
   for (const edge of scene.edges) {
     incident.set(edge.source, (incident.get(edge.source) ?? 0) + 1);
     incident.set(edge.target, (incident.get(edge.target) ?? 0) + 1);
-    const a = moduleOf.get(edge.source)!;
-    const b = moduleOf.get(edge.target)!;
-    if (a === b) continue;
-    const [first, second] = a.module < b.module ? [a, b] : [b, a];
-    const key = `${first.module}\u0000${second.module}`;
-    const trunk = pairs.get(key) ?? { a: first, b: second, count: 0 };
-    trunk.count += 1;
-    pairs.set(key, trunk);
   }
-
-  const bases = new Map<ReliefModule, Omit<ReliefSurface, 'contours'>>();
-  let max = 0;
-  groups.forEach((group, g) => {
-    const module = modules[g]!;
-    let hx0 = Infinity;
-    let hy0 = Infinity;
-    let hx1 = -Infinity;
-    let hy1 = -Infinity;
-    for (const p of module.hull) {
-      hx0 = Math.min(hx0, p.x);
-      hy0 = Math.min(hy0, p.y);
-      hx1 = Math.max(hx1, p.x);
-      hy1 = Math.max(hy1, p.y);
-    }
-    const base = reliefSurface(
-      group.members.map((member) => ({
-        ...positions.get(member.id)!,
-        weight: incident.get(member.id) ?? 0,
-      })),
-      { x0: hx0, y0: hy0, x1: hx1, y1: hy1 },
-    );
-    bases.set(module, base);
-    max = Math.max(max, base.max);
-  });
-  const interval = contourInterval(max);
-  const surfaces = new Map<ReliefModule, ReliefSurface>();
-  for (const [module, base] of bases) {
-    const contours: ContourLevel[] = [];
-    for (let n = 1; n * interval < base.max; n += 1) {
-      contours.push({ level: n * interval, index: n % 5 === 0, segments: contourSegments(base, n * interval) });
-    }
-    surfaces.set(module, { ...base, contours });
+  // The surface runs 3σ past the frame so no kernel tail is cut at its edge.
+  const tail = RELIEF_SIGMA * 3;
+  const base = reliefSurface(
+    scene.nodes.map((node) => ({ ...positions.get(node.id)!, weight: incident.get(node.id) ?? 0 })),
+    { x0: bounds.x0 - tail, y0: bounds.y0 - tail, x1: bounds.x1 + tail, y1: bounds.y1 + tail },
+  );
+  const interval = contourInterval(base.max);
+  const contours: ContourLevel[] = [];
+  for (let n = 1; n * interval < base.max; n += 1) {
+    contours.push({ level: n * interval, index: n % 5 === 0, segments: contourSegments(base, n * interval) });
   }
-  return {
-    positions,
-    moduleOf,
-    modules,
-    surfaces,
-    interval,
-    trunks: [...pairs.values()].sort((p, q) => q.count - p.count),
-    bounds,
-  };
+  return { positions, moduleOf, modules, surface: { ...base, interval, contours }, bounds };
 }
 
 /* ---- paint --------------------------------------------------------------- */
@@ -590,195 +535,73 @@ const EDGE_DASH: Record<string, number[]> = {
   contains: [1.5, 3],
 };
 
-function zoomOf(frame: { camera: { k: number }; fitK: number }): number {
-  return frame.camera.k / frame.fitK;
+function zoomScale(frame: PaintFrame): number {
+  return Math.min(1.8, Math.max(0.8, Math.sqrt(frame.camera.k / frame.fitK)));
 }
 
 function screenRadius(scene: CortexScene, id: string, frame: { camera: { k: number }; fitK: number }) {
   const node = scene.byId.get(id);
-  const z = Math.min(1.8, Math.max(0.8, Math.sqrt(zoomOf(frame))));
-  // The ceiling shrinks as the slice grows, so 250 bodies do not fuse.
-  const ceiling = scene.nodes.length > 120 ? 7 : 9.5;
-  return degreeRadius(node?.degree ?? null, scene.maxDegree, { min: 2.4, max: ceiling }) * z;
+  const z = Math.min(1.8, Math.max(0.8, Math.sqrt(frame.camera.k / frame.fitK)));
+  return degreeRadius(node?.degree ?? null, scene.maxDegree, { min: 2.6, max: 9.5 }) * z;
 }
 
-function hullPath(ctx: CanvasRenderingContext2D, module: ReliefModule, frame: PaintFrame): void {
-  ctx.beginPath();
-  module.hull.forEach((p, i) => {
-    const q = project(frame.camera, p.x, p.y);
-    if (i === 0) ctx.moveTo(q.x, q.y);
-    else ctx.lineTo(q.x, q.y);
-  });
-  ctx.closePath();
-}
-
-/** Each directory's own relief, clipped to its hull. */
 function drawRelief(layout: ReliefLayout, frame: PaintFrame): void {
   const { ctx, camera, palette } = frame;
-  for (const module of layout.modules) {
-    const surface = layout.surfaces.get(module)!;
+  const { surface } = layout;
+  const shade = shading(surface);
+  const origin = project(camera, surface.x0 - surface.cell / 2, surface.y0 - surface.cell / 2);
+  const w = surface.cols * surface.cell * camera.k;
+  const h = surface.rows * surface.cell * camera.k;
+  if (shade) {
     ctx.save();
-    hullPath(ctx, module, frame);
-    ctx.clip();
-    const shade = shading(surface);
-    if (shade) {
-      const origin = project(camera, surface.x0 - surface.cell / 2, surface.y0 - surface.cell / 2);
-      const w = surface.cols * surface.cell * camera.k;
-      const h = surface.rows * surface.cell * camera.k;
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      const tint = colouredMask(shade.tint, palette.edge);
-      const light = colouredMask(shade.light, palette.text);
-      const shadow = colouredMask(shade.shadow, '#000');
-      // The tint is scaled to the shared interval's range, so a low hull
-      // reads low next to a high one.
-      ctx.globalAlpha = 0.36 * Math.min(1, surface.max / Math.max(layout.interval * 3, 1e-6));
-      if (tint) ctx.drawImage(tint, origin.x, origin.y, w, h);
-      ctx.globalAlpha = 0.2;
-      if (light) ctx.drawImage(light, origin.x, origin.y, w, h);
-      ctx.globalAlpha = 0.45;
-      if (shadow) ctx.drawImage(shadow, origin.x, origin.y, w, h);
-    }
-    ctx.lineCap = 'round';
-    ctx.strokeStyle = palette.edge;
-    for (const contour of surface.contours) {
-      ctx.globalAlpha = contour.index ? 0.8 : 0.42;
-      ctx.lineWidth = contour.index ? 1.2 : 0.7;
-      ctx.beginPath();
-      const s = contour.segments;
-      for (let i = 0; i < s.length; i += 4) {
-        ctx.moveTo(s[i]! * camera.k + camera.tx, s[i + 1]! * camera.k + camera.ty);
-        ctx.lineTo(s[i + 2]! * camera.k + camera.tx, s[i + 3]! * camera.k + camera.ty);
-      }
-      ctx.stroke();
-    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    const tint = colouredMask(shade.tint, palette.edge);
+    const light = colouredMask(shade.light, palette.text);
+    const shadow = colouredMask(shade.shadow, '#000');
+    ctx.globalAlpha = 0.34;
+    if (tint) ctx.drawImage(tint, origin.x, origin.y, w, h);
+    ctx.globalAlpha = 0.24;
+    if (light) ctx.drawImage(light, origin.x, origin.y, w, h);
+    ctx.globalAlpha = 0.5;
+    if (shadow) ctx.drawImage(shadow, origin.x, origin.y, w, h);
     ctx.restore();
-    ctx.save();
-    hullPath(ctx, module, frame);
-    ctx.globalAlpha = 0.95;
+  }
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = palette.edge;
+  for (const contour of surface.contours) {
+    ctx.globalAlpha = contour.index ? 0.75 : 0.4;
+    ctx.lineWidth = contour.index ? 1.2 : 0.7;
+    ctx.beginPath();
+    const s = contour.segments;
+    for (let i = 0; i < s.length; i += 4) {
+      ctx.moveTo(s[i]! * camera.k + camera.tx, s[i + 1]! * camera.k + camera.ty);
+      ctx.lineTo(s[i + 2]! * camera.k + camera.tx, s[i + 3]! * camera.k + camera.ty);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawModules(layout: ReliefLayout, frame: PaintFrame): LabelCandidate[] {
+  const { ctx, camera, palette } = frame;
+  const boxes: LabelCandidate[] = [];
+  ctx.save();
+  for (const module of layout.modules) {
+    ctx.beginPath();
+    module.hull.forEach((p, i) => {
+      const q = project(camera, p.x, p.y);
+      if (i === 0) ctx.moveTo(q.x, q.y);
+      else ctx.lineTo(q.x, q.y);
+    });
+    ctx.closePath();
+    ctx.globalAlpha = 0.9;
     ctx.strokeStyle = palette.dim;
     ctx.lineWidth = 1;
     ctx.stroke();
-    ctx.restore();
-  }
-}
-
-function gate(from: ReliefModule, to: ReliefModule): { x: number; y: number } {
-  const dx = to.cx - from.cx;
-  const dy = to.cy - from.cy;
-  const d = Math.max(1e-3, Math.hypot(dx, dy));
-  return { x: from.cx + (dx / d) * from.radius * 0.85, y: from.cy + (dy / d) * from.radius * 0.85 };
-}
-
-/**
- * Relations. Inside a directory: a hairline per relation. Across: one trunk
- * per directory pair whose width and brightness are its relation count, fed
- * by a faint fibre from each symbol to its gate.
- */
-function drawRelations(layout: ReliefLayout, scene: CortexScene, frame: PaintFrame): LabelCandidate[] {
-  const { ctx, camera, palette, emphasis } = frame;
-  const z = zoomOf(frame);
-  const lifted = liftedBySelection(frame);
-  const quiet = Math.min(1, Math.sqrt(120 / Math.max(120, scene.edges.length)));
-  const counts: LabelCandidate[] = [];
-  ctx.save();
-  ctx.lineCap = 'round';
-  for (const edge of scene.edges) {
-    const a = layout.positions.get(edge.source)!;
-    const b = layout.positions.get(edge.target)!;
-    const ma = layout.moduleOf.get(edge.source)!;
-    const mb = layout.moduleOf.get(edge.target)!;
-    const lit = emphasis !== null && emphasis.has(edge.source) && emphasis.has(edge.target);
-    const dimmed = emphasis !== null && !lit;
-    ctx.strokeStyle = lit ? (lifted ? palette.accent : palette.text) : palette.edge;
-    ctx.globalAlpha = dimmed ? 0.05 : lit ? 0.75 : (z >= 2.5 ? 0.55 : 0.3) * quiet;
-    ctx.lineWidth = lit ? 1.3 : 0.8;
-    ctx.setLineDash(z >= 2.5 || lit ? (EDGE_DASH[edge.kind] ?? []) : []);
-    const p0 = project(camera, a.x, a.y);
-    const p3 = project(camera, b.x, b.y);
-    ctx.beginPath();
-    ctx.moveTo(p0.x, p0.y);
-    if (ma === mb) {
-      ctx.lineTo(p3.x, p3.y);
-    } else {
-      const g1 = project(camera, gate(ma, mb).x, gate(ma, mb).y);
-      const g2 = project(camera, gate(mb, ma).x, gate(mb, ma).y);
-      if (lit) {
-        ctx.bezierCurveTo(g1.x, g1.y, g2.x, g2.y, p3.x, p3.y);
-      } else {
-        // A fibre to each gate; the trunk between gates is drawn once below.
-        ctx.lineTo(g1.x, g1.y);
-        ctx.moveTo(p3.x, p3.y);
-        ctx.lineTo(g2.x, g2.y);
-      }
-    }
-    ctx.stroke();
-  }
-  ctx.setLineDash([]);
-  const busiest = layout.trunks[0]?.count ?? 1;
-  for (const trunk of layout.trunks) {
-    const g1 = project(camera, gate(trunk.a, trunk.b).x, gate(trunk.a, trunk.b).y);
-    const g2 = project(camera, gate(trunk.b, trunk.a).x, gate(trunk.b, trunk.a).y);
-    const share = trunk.count / busiest;
-    ctx.strokeStyle = palette.edge;
-    ctx.globalAlpha = (emphasis !== null ? 0.25 : 1) * (0.3 + 0.6 * Math.sqrt(share));
-    ctx.lineWidth = 1 + 4 * Math.sqrt(share);
-    ctx.beginPath();
-    ctx.moveTo(g1.x, g1.y);
-    ctx.lineTo(g2.x, g2.y);
-    ctx.stroke();
-    ctx.strokeStyle = palette.text;
-    ctx.globalAlpha *= 0.35 * share;
-    ctx.lineWidth = Math.max(0.6, ctx.lineWidth * 0.35);
-    ctx.stroke();
-    const text = `${trunk.count}`;
-    ctx.font = monoFont(10, 500);
-    const width = ctx.measureText(text).width + 6;
-    counts.push({ id: `trunk:${trunk.a.module}>${trunk.b.module}:${text}`, x: (g1.x + g2.x) / 2 - width / 2, y: (g1.y + g2.y) / 2 - 7, width, height: 14 });
   }
   ctx.restore();
-  return counts;
-}
-
-/** Selection lifts its neighbourhood only while nothing is hovered or focused. */
-function liftedBySelection(frame: PaintFrame): boolean {
-  return frame.selected !== null && frame.hovered === null && frame.cursor === null;
-}
-
-function drawSymbols(layout: ReliefLayout, scene: CortexScene, frame: PaintFrame, trunkCounts: LabelCandidate[]): void {
-  const { ctx, camera, palette, emphasis } = frame;
-  const z = zoomOf(frame);
-  // At Fit only the top tenth by degree; from 1.4x the top quarter.
-  const hub = hubDegree(scene, z >= 1.4 ? 0.75 : 0.9);
-  const lifted = liftedBySelection(frame);
-  const obstacles: LabelCandidate[] = [];
-
-  if (lifted && frame.selected !== null) {
-    const world = layout.positions.get(frame.selected);
-    if (world) {
-      // One restrained halo: the selection's neighbourhood is lit, not glowing.
-      const p = project(camera, world.x, world.y);
-      const r = screenRadius(scene, frame.selected, frame) * 5;
-      const halo = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-      halo.addColorStop(0, palette.accent);
-      halo.addColorStop(1, 'transparent');
-      ctx.save();
-      ctx.globalAlpha = 0.16;
-      ctx.fillStyle = halo;
-      ctx.fillRect(p.x - r, p.y - r, 2 * r, 2 * r);
-      ctx.restore();
-    }
-  }
-
-  const labels: {
-    positions: LabelCandidate[];
-    priority: number;
-    strong: boolean;
-    text: string;
-    font: string;
-    alpha: number;
-    color: string;
-  }[] = [];
   for (const module of layout.modules) {
     let top = module.hull[0]!;
     for (const p of module.hull) if (p.y < top.y) top = p;
@@ -787,22 +610,73 @@ function drawSymbols(layout: ReliefLayout, scene: CortexScene, frame: PaintFrame
     const text = `${module.module} · ${module.count}`;
     ctx.font = monoFont(10, 500);
     const width = ctx.measureText(text).width;
-    labels.push({
-      positions: [{ id: `module:${module.module}`, x: at.x - width / 2, y: at.y - 16, width, height: 14 }],
-      priority: 2e6 + module.count,
-      strong: true,
-      text,
+    drawHaloLabel(ctx, text, at.x, at.y - 8, {
       font: monoFont(10, 500),
-      alpha: emphasis !== null ? 0.45 : 0.9,
       color: palette.muted,
+      halo: palette.substrate,
+      align: 'center',
     });
+    boxes.push({ id: `module:${module.module}`, x: at.x - width / 2, y: at.y - 15, width, height: 14 });
   }
+  return boxes;
+}
+
+function drawEdges(layout: ReliefLayout, scene: CortexScene, frame: PaintFrame): void {
+  const { ctx, camera, palette, emphasis } = frame;
+  const z = camera.k / frame.fitK;
+  const full = z >= 2.5;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.globalCompositeOperation = 'lighter';
+  for (const edge of scene.edges) {
+    const a = layout.positions.get(edge.source)!;
+    const b = layout.positions.get(edge.target)!;
+    const ma = layout.moduleOf.get(edge.source)!;
+    const mb = layout.moduleOf.get(edge.target)!;
+    const lit = emphasis !== null && emphasis.has(edge.source) && emphasis.has(edge.target);
+    const dimmed = emphasis !== null && !lit;
+    ctx.strokeStyle = lit ? palette.text : palette.edge;
+    ctx.globalAlpha = dimmed ? 0.05 : lit ? 0.85 : full ? 0.6 : ma === mb ? 0.34 : 0.3;
+    ctx.lineWidth = lit ? 1.4 : full ? 1.1 : 0.8;
+    ctx.setLineDash(EDGE_DASH[edge.kind] ?? []);
+    const p0 = project(camera, a.x, a.y);
+    const p3 = project(camera, b.x, b.y);
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    if (ma === mb) {
+      ctx.lineTo(p3.x, p3.y);
+    } else {
+      const dx = mb.cx - ma.cx;
+      const dy = mb.cy - ma.cy;
+      const d = Math.max(1e-3, Math.hypot(dx, dy));
+      const g1 = project(camera, ma.cx + (dx / d) * ma.radius * 0.8, ma.cy + (dy / d) * ma.radius * 0.8);
+      const g2 = project(camera, mb.cx - (dx / d) * mb.radius * 0.8, mb.cy - (dy / d) * mb.radius * 0.8);
+      ctx.bezierCurveTo(g1.x, g1.y, g2.x, g2.y, p3.x, p3.y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawSymbols(
+  layout: ReliefLayout,
+  scene: CortexScene,
+  frame: PaintFrame,
+  moduleBoxes: LabelCandidate[],
+): void {
+  const { ctx, camera, palette, emphasis } = frame;
+  const z = camera.k / frame.fitK;
+  const scale = zoomScale(frame);
+  const hub = hubDegree(scene);
+  const obstacles: LabelCandidate[] = [...moduleBoxes];
+  const candidates: { positions: LabelCandidate[]; priority: number; dimmed: boolean; text: string }[] = [];
+  ctx.font = monoFont(11);
   for (const node of scene.nodes) {
     const world = layout.positions.get(node.id)!;
     const p = project(camera, world.x, world.y);
-    const r = screenRadius(scene, node.id, frame);
+    const r = degreeRadius(node.degree, scene.maxDegree, { min: 2.6, max: 9.5 }) * scale;
     const dimmed = emphasis !== null && !emphasis.has(node.id);
-    drawSymbolBody(ctx, node, p.x, p.y, r, { alpha: dimmed ? 0.18 : 1, palette });
+    drawSymbolBody(ctx, node, p.x, p.y, r, { alpha: dimmed ? 0.22 : 1, palette });
     drawStateMarks(
       ctx,
       p.x,
@@ -810,81 +684,71 @@ function drawSymbols(layout: ReliefLayout, scene: CortexScene, frame: PaintFrame
       r,
       {
         selected: frame.selected === node.id,
+        hovered: frame.hovered === node.id,
         cursor: frame.cursor === node.id,
         heat: frame.heat(node.id),
       },
       palette,
     );
     obstacles.push({ id: node.id, x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r });
-    const marked = frame.selected === node.id || frame.hovered === node.id || frame.cursor === node.id;
-    const isHub = (node.degree ?? -1) >= hub;
-    const inFocus = emphasis?.has(node.id) ?? false;
-    if (!marked && !isHub && !inFocus && z < 2) continue;
-    const display = marked || (isHub && !dimmed);
-    const font = display ? displayFont(marked ? 13 : 12, marked ? 700 : 600) : monoFont(10);
-    ctx.font = font;
+    const marked =
+      frame.selected === node.id || frame.hovered === node.id || frame.cursor === node.id;
+    const eligible =
+      marked || (z >= 1.5 ? true : (node.degree ?? -1) >= hub) || (emphasis?.has(node.id) ?? false);
+    if (!eligible) continue;
     const width = ctx.measureText(node.label).width;
-    labels.push({
-      positions: anchorsAround(node.id, p.x, p.y, r, width, display ? 15 : 12),
-      priority: (marked ? 1e6 : 0) + (inFocus ? 1e4 : 0) + (isHub ? 1e3 : 0) + (node.degree ?? 0),
-      strong: display,
+    candidates.push({
+      positions: anchorsAround(node.id, p.x, p.y, r, width, 14),
+      priority: (marked ? 1e6 : 0) + (emphasis?.has(node.id) ? 1e4 : 0) + (node.degree ?? 0),
+      dimmed,
       text: node.label,
-      font,
-      alpha: dimmed ? 0.3 : display ? 1 : 0.78,
-      color: display ? palette.text : palette.muted,
     });
   }
-  labels.push(
-    ...trunkCounts.map((box) => ({
-      positions: [box],
-      priority: -1,
-      strong: false,
-      text: box.id.slice(box.id.lastIndexOf(':') + 1),
-      font: monoFont(10, 500),
-      alpha: emphasis !== null ? 0.35 : 0.85,
+  candidates.sort((a, b) => b.priority - a.priority);
+  const kept = new Map(
+    placeLabels(
+      candidates.map((c) => c.positions),
+      obstacles,
+    ).map((box) => [box.id, box]),
+  );
+  for (const { positions, dimmed, text } of candidates) {
+    const candidate = kept.get(positions[0]!.id);
+    if (!candidate) continue;
+    const strong = frame.selected === candidate.id || frame.hovered === candidate.id;
+    drawHaloLabel(ctx, text, candidate.x, candidate.y + 7, {
+      font: monoFont(11, strong ? 600 : 400),
       color: palette.text,
-    })),
-  );
-  labels.sort((a, b) => b.priority - a.priority);
-  // Directory names, hubs and marked symbols are culled only against each
-  // other; leaf labels must also clear every body, so they never cover one.
-  const strong = labels.filter((label) => label.strong);
-  const leaves = labels.filter((label) => !label.strong);
-  const keptStrong = placeLabels(strong.map((label) => label.positions));
-  const keptLeaves = placeLabels(
-    leaves.map((label) => label.positions),
-    [...obstacles, ...keptStrong],
-  );
-  const kept = new Map([...keptStrong, ...keptLeaves].map((box) => [box.id, box]));
-  for (const label of labels) {
-    const box = kept.get(label.positions[0]!.id);
-    if (!box) continue;
-    drawHaloLabel(ctx, label.text, box.x, box.y + box.height / 2, {
-      font: label.font,
-      color: label.color,
       halo: palette.substrate,
-      alpha: label.alpha,
+      alpha: dimmed ? 0.35 : strong ? 1 : 0.82,
     });
   }
 }
 
 export const reliefPainter: CortexPainter<ReliefLayout> = {
   name: 'relief field',
-  fitPad: 20,
+  relayoutOnResize: false,
+  fitPad: 40,
   layout: (scene, box) => reliefLayout(scene, box.width / Math.max(1, box.height)),
   bounds: (layout) => layout.bounds,
   position: (layout, id) => layout.positions.get(id) ?? null,
   hitRadius: (_layout, scene, id, frame) => screenRadius(scene, id, frame),
   draw(layout, scene, frame) {
     drawRelief(layout, frame);
-    const trunkCounts = drawRelations(layout, scene, frame);
-    drawSymbols(layout, scene, frame, trunkCounts);
+    const moduleBoxes = drawModules(layout, frame);
+    drawEdges(layout, scene, frame);
+    drawSymbols(layout, scene, frame, moduleBoxes);
+    const { surface } = layout;
     drawHaloLabel(
       frame.ctx,
-      `contour interval ${layout.interval} endpoint${layout.interval === 1 ? '' : 's'} · index every 5th · per directory · σ ${Math.round(RELIEF_SIGMA)} u`,
+      `contour interval ${surface.interval} endpoint${surface.interval === 1 ? '' : 's'} · index every 5th · σ ${Math.round(RELIEF_SIGMA)} u`,
       frame.width / 2,
       frame.height - 12,
-      { font: monoFont(10), color: frame.palette.muted, halo: frame.palette.substrate, align: 'center' },
+      {
+        font: monoFont(10),
+        color: frame.palette.muted,
+        halo: frame.palette.substrate,
+        align: 'center',
+      },
     );
   },
 };

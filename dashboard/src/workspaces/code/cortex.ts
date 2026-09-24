@@ -16,6 +16,7 @@ import type {
 } from '../../contracts/generated.ts';
 import type { Diagnostic, DiagnosticsSnapshot } from '../../data/query/codeDiagnostics.ts';
 import { directoryOf } from './cortexRelief.ts';
+import type { CortexRender } from './cortexScene.ts';
 
 /* ---- register strip ------------------------------------------------------ */
 
@@ -66,16 +67,27 @@ export function densityReading(totals: GraphTotalsV1): RegisterReading {
   };
 }
 
+/** The layout rule each renderer actually draws by, for the register. */
+const DRAWING_RULE: Record<CortexRender, { value: string; note: string }> = {
+  current: { value: 'force-directed', note: 'ForceAtlas2, settled once' },
+  luminous: { value: 'force-directed', note: 'ForceAtlas2, settled once' },
+  relief: { value: 'module-packed', note: 'directories packed by shared relations' },
+  plate: { value: 'stratified', note: 'depth bands × directory columns' },
+};
+
 /**
  * The seven cells of the register, in order. Nodes, edges and files are the
  * served totals; modules and density derive from them; layout and rank name
  * the drawing rule the field beneath actually uses, which is a property of the
  * renderer and not of the read.
  */
-export function cortexRegister(payload: {
-  totals: GraphTotalsV1;
-  nodes_by_kind: readonly GraphKindCountV1[];
-}): RegisterCell[] {
+export function cortexRegister(
+  payload: {
+    totals: GraphTotalsV1;
+    nodes_by_kind: readonly GraphKindCountV1[];
+  },
+  render: CortexRender = 'current',
+): RegisterCell[] {
   const { totals } = payload;
   return [
     {
@@ -106,11 +118,7 @@ export function cortexRegister(payload: {
     { label: 'density', reading: densityReading(totals) },
     {
       label: 'layout',
-      reading: {
-        kind: 'measured',
-        value: 'module-packed',
-        note: 'directories packed by shared relations',
-      },
+      reading: { kind: 'measured', ...DRAWING_RULE[render] },
     },
     {
       label: 'rank',

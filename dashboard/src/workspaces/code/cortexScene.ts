@@ -1,16 +1,34 @@
 /**
- * The renderer-independent core of the Cortex field: the drawn slice as a
- * scene, the one degree scale and kind marks, the camera, and the label
- * collision pass. The relief painter and the canvas wiring both build on it.
+ * The shared, renderer-independent core of the Cortex field's canvas
+ * renderers: which renderer the URL asks for, the drawn slice as a scene, the
+ * one degree scale and kind styling every renderer uses, the camera, and the
+ * label collision pass.
  *
- * Everything the field draws is derived here from the served slice and
+ * Everything a canvas renderer draws is derived here from the served slice and
  * nothing else. A node the wire gave no degree keeps `degree: null` all the
  * way to the paint, where it is drawn at the minimum size with a dashed
  * outline, so an absent measurement never reads as a small one.
  */
 import type { GraphEdgeV1, GraphNodeV1 } from '../../contracts/generated.ts';
-import { kindColor } from '../../viz/graph/kindColor.ts';
 import { directoryOf } from './cortexRelief.ts';
+
+/* ---- renderer selection -------------------------------------------------- */
+
+export const CORTEX_RENDERS = ['current', 'relief', 'luminous', 'plate'] as const;
+export type CortexRender = (typeof CORTEX_RENDERS)[number];
+
+/** `?render=` picks a renderer; anything else keeps the shipped Sigma field. */
+export function readCortexRender(params: URLSearchParams): CortexRender {
+  const requested = params.get('render');
+  switch (requested) {
+    case 'relief':
+    case 'luminous':
+    case 'plate':
+      return requested;
+    default:
+      return 'current';
+  }
+}
 
 /* ---- scene --------------------------------------------------------------- */
 
@@ -141,45 +159,56 @@ export function degreeRadius(
   return range.min + (range.max - range.min) * Math.sqrt(Math.min(1, degree / maxDegree));
 }
 
-/** The served degree at a percentile of the slice: the "hub" cut for labels. */
-export function hubDegree(scene: CortexScene, percentile = 0.75): number {
+/** The 75th-percentile served degree: the renderers' "hub" cut for labels. */
+export function hubDegree(scene: CortexScene): number {
   const degrees = scene.nodes
     .flatMap((node) => (node.degree == null ? [] : [node.degree]))
     .sort((a, b) => a - b);
   if (degrees.length === 0) return Infinity;
-  return degrees[Math.floor((degrees.length - 1) * percentile)]!;
+  return degrees[Math.floor((degrees.length - 1) * 0.75)]!;
 }
 
-/* ---- kind marks ---------------------------------------------------------- */
+/* ---- kind styling -------------------------------------------------------- */
 
 export type KindShape = 'circle' | 'square' | 'diamond' | 'ring';
 
 /**
- * Kind is carried by hue AND shape. The hue is the app's shared kind ramp
- * (`kindColor`), so the field and the ledger's spine agree; that ramp shares
- * the cool band with the signal cyan and runs up to near-white, so the shape
- * is what keeps two kinds apart at small sizes and selection never relies on
- * hue at all.
+ * Kind is carried by hue AND shape, so it survives monochrome. The hues sit
+ * off the reserved bands: not cyan (selection and signal), not amber
+ * (measured activity), not red (refusal), and at low chroma so no kind reads
+ * as a state.
  */
-const KIND_SHAPE: Readonly<Record<string, KindShape>> = {
-  function: 'circle',
-  method: 'circle',
-  field: 'circle',
-  constant: 'circle',
-  variable: 'circle',
-  struct: 'square',
-  class: 'square',
-  enum: 'square',
-  type: 'square',
-  trait: 'diamond',
-  interface: 'diamond',
-  impl: 'diamond',
-  module: 'ring',
-  file: 'ring',
+const KIND_STYLE: Record<string, { hue: number; chroma: number; shape: KindShape }> = {
+  function: { hue: 252, chroma: 0.1, shape: 'circle' },
+  method: { hue: 276, chroma: 0.095, shape: 'circle' },
+  struct: { hue: 162, chroma: 0.07, shape: 'square' },
+  enum: { hue: 130, chroma: 0.07, shape: 'square' },
+  class: { hue: 162, chroma: 0.07, shape: 'square' },
+  interface: { hue: 345, chroma: 0.09, shape: 'diamond' },
+  trait: { hue: 345, chroma: 0.09, shape: 'diamond' },
+  impl: { hue: 322, chroma: 0.075, shape: 'diamond' },
+  module: { hue: 250, chroma: 0.02, shape: 'ring' },
+  field: { hue: 236, chroma: 0.045, shape: 'circle' },
 };
 
-export function kindShape(kind: string): KindShape {
-  return KIND_SHAPE[kind.toLowerCase()] ?? 'circle';
+function hashKind(kind: string): number {
+  let hash = 0;
+  for (let index = 0; index < kind.length; index += 1) {
+    hash = (hash * 31 + kind.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+export function kindStyle(kind: string): { hue: number; chroma: number; shape: KindShape } {
+  const known = KIND_STYLE[kind];
+  if (known) return known;
+  // An unlisted kind lands in the blue-to-rose band, never on a reserved hue.
+  return { hue: 228 + (hashKind(kind) % 130), chroma: 0.07, shape: 'circle' };
+}
+
+export function kindColorAt(kind: string, lightness: number, alpha = 1): string {
+  const { hue, chroma } = kindStyle(kind);
+  return `oklch(${lightness} ${chroma} ${hue} / ${alpha})`;
 }
 
 /* ---- camera -------------------------------------------------------------- */
@@ -263,16 +292,17 @@ export interface PaintFrame {
 
 /**
  * A renderer is a pure layout plus a paint. The layout is in world units and
- * is recomputed only when the slice changes; the paint reads the frame and
- * decides nothing.
+ * is recomputed only when the slice changes (or the box, for a renderer whose
+ * geometry is the box); the paint reads the frame and decides nothing.
  */
 export interface CortexPainter<L> {
   readonly name: string;
+  readonly relayoutOnResize: boolean;
   /** Padding the Fit camera leaves, in screen px. */
   readonly fitPad: number;
   layout(scene: CortexScene, box: { width: number; height: number }): L | Promise<L>;
   bounds(layout: L): Bounds;
-  /** World position of a drawn symbol. */
+  /** World position of a drawn symbol; null when the renderer folded it. */
   position(layout: L, id: string): { x: number; y: number } | null;
   /** Screen-space radius a pointer must land within to hit the symbol. */
   hitRadius(layout: L, scene: CortexScene, id: string, frame: { camera: Camera; fitK: number }): number;
@@ -315,20 +345,16 @@ export function traceKindMark(
   }
 }
 
-/**
- * A symbol body: kind hue and shape over a substrate keyline, so the ramp's
- * near-white kinds still separate from each other and from the relief.
- * Absent degree is a dashed outline, never a filled small body.
- */
+/** A symbol body: kind hue and shape; absent degree is a dashed outline. */
 export function drawSymbolBody(
   ctx: CanvasRenderingContext2D,
   node: SceneNode,
   x: number,
   y: number,
   r: number,
-  options: { alpha: number; palette: ScenePalette },
+  options: { alpha: number; lightness?: number; palette: ScenePalette },
 ): void {
-  const shape = kindShape(node.kind);
+  const { shape } = kindStyle(node.kind);
   ctx.save();
   ctx.globalAlpha = options.alpha;
   traceKindMark(ctx, shape, x, y, r);
@@ -338,35 +364,28 @@ export function drawSymbolBody(
     ctx.lineWidth = 1;
     ctx.stroke();
   } else if (shape === 'ring') {
-    ctx.strokeStyle = options.palette.substrate;
-    ctx.lineWidth = Math.max(1, r * 0.35) + 2;
-    ctx.stroke();
-    ctx.strokeStyle = kindColor(node.kind, false);
+    ctx.strokeStyle = kindColorAt(node.kind, options.lightness ?? 0.8);
     ctx.lineWidth = Math.max(1, r * 0.35);
     ctx.stroke();
   } else {
-    ctx.strokeStyle = options.palette.substrate;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.fillStyle = kindColor(node.kind, false);
+    ctx.fillStyle = kindColorAt(node.kind, options.lightness ?? 0.76);
     ctx.fill();
   }
   ctx.restore();
 }
 
 /**
- * Keyboard cursor and selection. Selection is a 2px cyan ring and the
- * inspector's gutter, never a hue change, because kinds share the cyan band;
- * hover draws no mark of its own, it only dims what is unrelated. The
- * keyboard cursor is a 2px cyan bracket. A search strike is a cyan hairline
- * whose opacity is the decaying heat.
+ * Hover, keyboard cursor and selection, drawn the same way by every renderer.
+ * Hover is one ink hairline; selection is a cyan ring plus a gutter bar, so it
+ * stays identifiable without glow; the keyboard cursor is a 2px cyan bracket.
+ * A search strike is a cyan halo whose opacity is the decaying heat.
  */
 export function drawStateMarks(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   r: number,
-  state: { selected: boolean; cursor: boolean; heat: number },
+  state: { selected: boolean; hovered: boolean; cursor: boolean; heat: number },
   palette: ScenePalette,
 ): void {
   ctx.save();
@@ -379,18 +398,24 @@ export function drawStateMarks(
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
+  if (state.hovered) {
+    ctx.strokeStyle = palette.text;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3.5, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   if (state.selected) {
-    ctx.strokeStyle = palette.substrate;
-    ctx.lineWidth = 4;
+    ctx.strokeStyle = palette.accent;
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(x, y, r + 4, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.strokeStyle = palette.accent;
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    ctx.fillStyle = palette.accent;
+    ctx.fillRect(x - r - 11, y - r - 1, 2, 2 * r + 2);
   }
   if (state.cursor) {
-    const s = r + 8;
+    const s = r + 7;
     const arm = Math.max(4, s * 0.45);
     ctx.strokeStyle = palette.accent;
     ctx.lineWidth = 2;
@@ -408,11 +433,6 @@ export function drawStateMarks(
     ctx.stroke();
   }
   ctx.restore();
-}
-
-/** Engraved display face for hub labels. */
-export function displayFont(size: number, weight = 600): string {
-  return `${weight} ${size}px "Archivo Variable", "Archivo", "IBM Plex Sans Variable", sans-serif`;
 }
 
 export function monoFont(size: number, weight = 400): string {

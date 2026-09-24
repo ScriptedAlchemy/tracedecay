@@ -96,14 +96,24 @@ describe('the register strip', () => {
       'rank',
     ]);
     expect(cells[0]?.reading).toMatchObject({ value: '12,873', note: '12,873 symbols indexed' });
-    // The field packs directories and sizes by degree; the register must not
-    // promise a force layout or an eigenvector rank the renderer does not run.
-    expect(cells[5]?.reading).toEqual({
-      kind: 'measured',
-      value: 'module-packed',
-      note: 'directories packed by shared relations',
-    });
+    // The field is force-settled and sized by degree; the register must not
+    // promise eigenvector rank the renderer does not compute.
+    expect(cells[5]?.reading).toMatchObject({ value: 'force-directed' });
     expect(cells[6]?.reading).toMatchObject({ value: 'degree' });
+  });
+
+  it('names the layout rule of whichever renderer draws the field', () => {
+    const payload = {
+      totals: { nodes: 12_873, edges: 41_206, files: 642 },
+      nodes_by_kind: [{ kind: 'module', count: 393 }],
+    };
+    expect(cortexRegister(payload, 'plate')[5]?.reading).toEqual({
+      kind: 'measured',
+      value: 'stratified',
+      note: 'depth bands × directory columns',
+    });
+    expect(cortexRegister(payload, 'relief')[5]?.reading).toMatchObject({ value: 'module-packed' });
+    expect(cortexRegister(payload, 'luminous')[5]?.reading).toMatchObject({ value: 'force-directed' });
   });
 });
 
