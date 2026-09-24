@@ -6,11 +6,11 @@ import {
   anchorsAround,
   degreeRadius,
   fitCamera,
+  hubDegree,
   keyboardOrder,
   neighbourhood,
   placeLabels,
   project,
-  readCortexRender,
   sceneFromSlice,
   unproject,
   zoomAt,
@@ -23,16 +23,6 @@ function node(id: string, degree: number | null, file: string | null, name = id)
 function edge(source: string, target: string, kind = 'calls'): GraphEdgeV1 {
   return { source, target, kind, line: 1 } as GraphEdgeV1;
 }
-
-describe('readCortexRender', () => {
-  it('keeps the shipped field unless a known renderer is asked for', () => {
-    expect(readCortexRender(new URLSearchParams(''))).toBe('current');
-    expect(readCortexRender(new URLSearchParams('render=plate'))).toBe('plate');
-    expect(readCortexRender(new URLSearchParams('render=relief'))).toBe('relief');
-    expect(readCortexRender(new URLSearchParams('render=luminous'))).toBe('luminous');
-    expect(readCortexRender(new URLSearchParams('render=webgl'))).toBe('current');
-  });
-});
 
 describe('sceneFromSlice', () => {
   const scene = sceneFromSlice(
@@ -70,6 +60,18 @@ describe('degreeRadius', () => {
     expect(degreeRadius(0, 16, range)).toBe(2);
     expect(degreeRadius(4, 16, range)).toBe(6);
     expect(degreeRadius(16, 16, range)).toBe(10);
+  });
+});
+
+describe('hubDegree', () => {
+  it('cuts hubs at a percentile of served degree, ignoring absent degree', () => {
+    const scene = sceneFromSlice(
+      [...Array.from({ length: 10 }, (_, i) => node(`n${i}`, i + 1, 'src/a.rs')), node('x', null, null)],
+      [],
+    );
+    expect(hubDegree(scene)).toBe(7);
+    expect(hubDegree(scene, 0.9)).toBe(9);
+    expect(hubDegree(sceneFromSlice([node('x', null, null)], []))).toBe(Infinity);
   });
 });
 

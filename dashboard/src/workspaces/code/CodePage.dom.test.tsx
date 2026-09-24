@@ -6,10 +6,6 @@ import { MemoryRouter } from 'react-router';
 import { CodePage } from './CodePage.tsx';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 
-vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
-  GraphCanvas: () => <div data-testid="graph-canvas" />,
-}));
-
 /**
  * Zeros this page measured, against reads it never got.
  *

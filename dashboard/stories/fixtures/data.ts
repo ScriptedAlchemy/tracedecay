@@ -1104,6 +1104,101 @@ function buildBaseGraph(): BaseGraph {
 
 const BASE_GRAPH = buildBaseGraph();
 
+/** Directories the wide slice's extra symbols live in, with their files. */
+const WIDE_DIRECTORIES = [
+  ['src/storage/sqlite', ['pool.rs', 'migrate.rs', 'pragma.rs']],
+  ['src/query/plan', ['planner.rs', 'ranker.rs']],
+  ['src/capture/hooks', ['ingest.rs', 'outcome.rs', 'refusal.rs']],
+  ['src/application/services', ['retrieval.rs', 'memory.rs']],
+  ['src/domain/identity', ['project.rs', 'worktree.rs']],
+  ['src/runtime/shard', ['registry.rs', 'close.rs']],
+  ['dashboard/src/viz/graph', ['layout.ts', 'activation.ts']],
+  ['dashboard/src/data/query', ['envelope.ts', 'structure.ts']],
+] as const;
+
+/**
+ * The slice an explicit `limit_nodes` asks for: the 40 base symbols, exactly
+ * as the default slice serves them, plus 210 more in their own directories.
+ * The extras never touch a base symbol, so every base degree (an index total,
+ * not a slice count) and every neighbours read stays what it always was.
+ */
+function buildWideGraph(): BaseGraph {
+  const EXTRA = 210;
+  let seed = 11;
+  const rand = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32;
+  const ids = Array.from({ length: EXTRA }, (_, i) => `sym-${40 + i}`);
+  // Contiguous blocks, so each directory holds a mix of kinds.
+  const cluster = (i: number) => Math.floor((i * WIDE_DIRECTORIES.length) / EXTRA);
+  const edges: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  const addEdge = (a: number, b: number, kind: string) => {
+    const key = `${a}→${b}→${kind}`;
+    if (a === b || seen.has(key)) return;
+    seen.add(key);
+    edges.push({
+      source: ids[a],
+      target: ids[b],
+      kind,
+      line: 12 + ((a * 13 + b) % 400),
+      source_name: null,
+      target_name: null,
+    });
+  };
+  const members = WIDE_DIRECTORIES.map((_, c) => ids.flatMap((_, i) => (cluster(i) === c ? [i] : [])));
+  for (const group of members) {
+    // Two hubs per directory, a chain of tails, and a sprinkling of pairs.
+    for (const hub of group.slice(0, 2)) {
+      for (const leaf of group.slice(2)) if (rand() < 0.45) addEdge(hub, leaf, 'calls');
+    }
+    for (let i = 2; i + 1 < group.length; i += 2) addEdge(group[i]!, group[i + 1]!, 'references');
+    for (let i = 0; i < group.length; i += 1) {
+      if (rand() < 0.3) addEdge(group[i]!, group[Math.floor(rand() * group.length)]!, 'calls');
+    }
+    addEdge(group[0]!, group[1]!, 'contains');
+  }
+  // Cross-directory traffic, heavier between neighbouring layers.
+  while (edges.length < 400) {
+    const from = Math.floor(rand() * WIDE_DIRECTORIES.length);
+    const to = (from + 1 + Math.floor(rand() * rand() * (WIDE_DIRECTORIES.length - 1))) % WIDE_DIRECTORIES.length;
+    const a = members[from]![Math.floor(rand() * members[from]!.length)]!;
+    const b = members[to]![Math.floor(rand() * Math.min(6, members[to]!.length))]!;
+    addEdge(a, b, rand() < 0.7 ? 'calls' : 'references');
+  }
+
+  const degreeById = new Map<string, number>(BASE_GRAPH.degreeById);
+  const adjacency = new Map<string, Set<string>>(BASE_GRAPH.adjacency);
+  for (const id of ids) {
+    degreeById.set(id, 0);
+    adjacency.set(id, new Set());
+  }
+  for (const edge of edges) {
+    const s = edge['source'] as string;
+    const t = edge['target'] as string;
+    degreeById.set(s, degreeById.get(s)! + 1);
+    degreeById.set(t, degreeById.get(t)! + 1);
+    adjacency.get(s)!.add(t);
+    adjacency.get(t)!.add(s);
+  }
+  const extras = ids.map((id, i) => {
+    const [directory, files] = WIDE_DIRECTORIES[cluster(i)]!;
+    const file = `${directory}/${files[i % files.length]}`;
+    const node = graphNode(40 + i, 'sym', degreeById.get(id)!);
+    return {
+      ...node,
+      file_path: file,
+      qualified_name: `${file.replace(/[/.]/g, '::')}::${node['name'] as string}`,
+    };
+  });
+  return {
+    nodes: [...BASE_GRAPH.nodes, ...extras],
+    edges: [...BASE_GRAPH.edges, ...edges],
+    degreeById,
+    adjacency,
+  };
+}
+
+const WIDE_GRAPH = buildWideGraph();
+
 /* ---- GET /api/plugins/graph/node/{id}/neighbors -------------------------
  *
  * Wire-true against `graph_service.rs::neighbors_payload`, which composes
@@ -1247,7 +1342,27 @@ function neighborsPayload(nodeId: string, limit: number): Record<string, unknown
 // 500)` in graph_api.rs: the defaults are 80 and 120, not 40. The Code
 // workspace now prints these limits in the canvas caption, so a wrong number
 // here would be a wrong number on screen.
-function subgraphPayload(nodeId: string | null): Record<string, unknown> {
+function subgraphPayload(
+  nodeId: string | null,
+  limits: { nodes: number; edges: number } | null = null,
+): Record<string, unknown> {
+  if (!nodeId && limits) {
+    // `coerce_limit(limit, default, max)`: the wide slice is 250 symbols, so
+    // a request at the ceiling is served whole and a smaller one is cut.
+    const nodes = WIDE_GRAPH.nodes.slice(0, limits.nodes);
+    const keep = new Set(nodes.map((n) => n['id'] as string));
+    const among = WIDE_GRAPH.edges.filter(
+      (e) => keep.has(e['source'] as string) && keep.has(e['target'] as string),
+    );
+    return {
+      seed_id: null,
+      mode: 'default',
+      nodes,
+      edges: among.slice(0, limits.edges),
+      capped: { nodes: WIDE_GRAPH.nodes.length > limits.nodes, edges: among.length > limits.edges },
+      limits,
+    };
+  }
   if (!nodeId) {
     return {
       seed_id: null,
@@ -1258,7 +1373,9 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
       limits: { nodes: 80, edges: 120 },
     };
   }
-  const neighbors = BASE_GRAPH.adjacency.get(nodeId);
+  // The wide graph's adjacency is the base one plus the extras, which never
+  // touch a base symbol, so a base seed resolves exactly as it always did.
+  const neighbors = WIDE_GRAPH.adjacency.get(nodeId);
   if (!neighbors) {
     return {
       seed_id: null,
@@ -1270,8 +1387,8 @@ function subgraphPayload(nodeId: string | null): Record<string, unknown> {
     };
   }
   const keep = new Set<string>([nodeId, ...neighbors]);
-  const nodes = BASE_GRAPH.nodes.filter((n) => keep.has(n['id'] as string));
-  const edges = BASE_GRAPH.edges.filter(
+  const nodes = WIDE_GRAPH.nodes.filter((n) => keep.has(n['id'] as string));
+  const edges = WIDE_GRAPH.edges.filter(
     (e) => keep.has(e['source'] as string) && keep.has(e['target'] as string),
   );
   return {
@@ -5441,8 +5558,17 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   const lcmSession = /^\/api\/plugins\/hermes-lcm\/session\/([^/]+)$/.exec(pathname);
   if (lcmSession) return envelope(loomChainPayload(decodeURIComponent(lcmSession[1]!)));
   if (pathname === '/api/plugins/graph/subgraph') {
-    const nodeId = new URLSearchParams(search).get('node_id');
-    return envelope(subgraphPayload(nodeId));
+    const params = new URLSearchParams(search);
+    const nodeId = params.get('node_id');
+    const limitNodes = params.get('limit_nodes');
+    const limits =
+      limitNodes === null
+        ? null
+        : {
+            nodes: Math.min(250, Math.max(1, Number(limitNodes) || 80)),
+            edges: Math.min(500, Math.max(1, Number(params.get('limit_edges')) || 120)),
+          };
+    return envelope(subgraphPayload(nodeId, limits));
   }
   // Range-keyed: the daemon attributes the requested window, so the fixture
   // does too, or the range control would appear to do nothing.

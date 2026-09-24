@@ -1,8 +1,8 @@
 /**
- * The Cortex renderer switch and the canvas renderers' shared contract:
- * the shipped Sigma field stays the default, a canvas renderer that cannot
- * draw says so while the ledger keeps every symbol, and the keyboard walks
- * the field by degree, inspecting without pinning until Enter.
+ * The Cortex field's canvas contract: it asks the daemon for its full slice
+ * budget, a browser that cannot draw is told so while the ledger keeps every
+ * symbol, and the keyboard walks the field by degree, inspecting without
+ * pinning until Enter.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -12,11 +12,6 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { CodePage } from './CodePage.tsx';
 import { useStatusRegistersStore } from '../../data/shell/statusRegisters.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
-
-vi.mock('../../viz/graph/GraphCanvas.tsx', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../viz/graph/GraphCanvas.tsx')>()),
-  GraphCanvas: () => <div data-testid="graph-canvas" />,
-}));
 
 function serve() {
   return vi.fn(async (input: RequestInfo | URL) => {
@@ -61,21 +56,25 @@ afterEach(() => {
   useStatusRegistersStore.setState({ owners: new Map() });
 });
 
-describe('renderer switch', () => {
-  it('keeps the shipped Sigma field when no renderer is asked for', async () => {
-    vi.stubGlobal('fetch', serve());
+describe('the relief field', () => {
+  it('asks for the daemon ceiling of 250 symbols and 500 relations', async () => {
+    const fetchMock = serve();
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
     renderCode('/code');
-    expect(await screen.findByTestId('graph-canvas')).toBeTruthy();
-    expect(screen.queryByRole('group', { name: /Code cortex/ })).toBeNull();
+    await screen.findByText(/this browser gave no 2D canvas/);
+    const reads = fetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/subgraph'));
+    expect(reads).toEqual(['/api/plugins/graph/subgraph?limit_nodes=250&limit_edges=500']);
   });
 
   it('prints a typed state, not a blank field, when the browser gives no 2D canvas', async () => {
     vi.stubGlobal('fetch', serve());
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
-    renderCode('/code?render=plate');
-    const state = await screen.findByText(/this browser gave no 2D canvas, so the 40-symbol field/);
+    renderCode('/code');
+    const state = await screen.findByText(/this browser gave no 2D canvas, so the 250-symbol field/);
     expect(state.closest('[data-state]')?.getAttribute('data-state')).toBe('unavailable');
-    expect(screen.queryByTestId('graph-canvas')).toBeNull();
     const ledger = screen.getByRole('region', { name: 'Symbol ledger' });
     await waitFor(() => expect(within(ledger).getAllByRole('button').length).toBeGreaterThan(0));
   });
@@ -98,28 +97,24 @@ describe('canvas field keyboard', () => {
       bottom: 400,
       toJSON: () => ({}),
     } as DOMRect);
-    renderCode('/code?render=relief');
+    renderCode('/code');
     const field = await screen.findByRole('group', { name: /Code cortex/ });
     await waitFor(() => expect(field.getAttribute('data-layout')).toBe('ready'));
 
     field.focus();
     const user = userEvent.setup();
     await user.keyboard('{ArrowRight}');
-    expect(
-      await screen.findByText(
-        'subgraph_payload, function, degree 16, src/dashboard. 1 of 40. Enter pins.',
-      ),
-    ).toBeTruthy();
-    const inspector = screen.getByRole('complementary', { name: 'Inspector' });
-    await waitFor(() => expect(within(inspector).getAllByText('subgraph_payload').length).toBeGreaterThan(0));
-    expect(screen.getByTestId('url').textContent).toBe('/code?render=relief');
+    expect(await screen.findByText(FIRST)).toBeTruthy();
+    expect(screen.getByTestId('url').textContent).toBe('/code');
 
     await user.keyboard('{ArrowRight}');
-    expect(
-      await screen.findByText('resolve_scope, method, degree 15, src/dashboard. 2 of 40. Enter pins.'),
-    ).toBeTruthy();
+    expect(await screen.findByText(SECOND)).toBeTruthy();
 
     await user.keyboard('{Enter}');
-    await waitFor(() => expect(screen.getByTestId('url').textContent).toBe('/code?render=relief&symbol=sym-1'));
+    await waitFor(() => expect(screen.getByTestId('url').textContent).toBe(`/code?symbol=${SECOND_ID}`));
   });
 });
+
+const FIRST = 'ProjectRegistry, struct, degree 21, src/domain/identity. 1 of 250. Enter pins.';
+const SECOND = 'rank_candidates, method, degree 18, dashboard/src/data/query. 2 of 250. Enter pins.';
+const SECOND_ID = 'sym-225';

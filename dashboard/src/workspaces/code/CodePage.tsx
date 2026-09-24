@@ -56,6 +56,11 @@ const TraceView = lazy(() =>
 
 const BASE = '/api/plugins/graph';
 
+/** The subgraph route's own ceilings (`coerce_limit` in graph_api.rs). The
+ * field aggregates by directory, so it asks for the most the daemon serves
+ * rather than the 80/120 default. */
+const SLICE_LIMITS = 'limit_nodes=250&limit_edges=500';
+
 /** What the inspector is previewing, if anything: a row the pointer or focus
  * is on. The row itself rides along when the source had one, so a caller
  * listed in the inspector, a symbol the drawn slice may not contain, can be
@@ -112,7 +117,7 @@ export function CodePage() {
   const focusId = location.focusId;
   const subgraph = useEnvelope(
     ['graph', 'subgraph', focusId ?? ''],
-    `${BASE}/subgraph${focusId ? `?node_id=${encodeURIComponent(focusId)}` : ''}`,
+    `${BASE}/subgraph?${SLICE_LIMITS}${focusId ? `&node_id=${encodeURIComponent(focusId)}` : ''}`,
     GraphSubgraphPayloadV1Schema,
   );
   const subgraphPayload = envelopePayload(subgraph.data);
@@ -133,25 +138,6 @@ export function CodePage() {
     },
     [location.focusId, resolvedFocus, searchParams, setSearchParams],
   );
-  const canvasNodes = useMemo(() => {
-    const payload = envelopePayload(subgraph.data);
-    if (!payload) return [];
-    return payload.nodes.map((node) => ({
-      id: node.id,
-      label: node.name ?? node.qualified_name ?? node.id,
-      kind: node.kind,
-      degree: node.degree ?? undefined,
-    }));
-  }, [subgraph.data]);
-  const canvasEdges = useMemo(() => {
-    const payload = envelopePayload(subgraph.data);
-    if (!payload) return [];
-    return payload.edges.map((edge) => ({
-      source: edge.source,
-      target: edge.target,
-      kind: edge.kind,
-    }));
-  }, [subgraph.data]);
   const activation = useActivationField(3200);
   // Search results strike their nodes: querying the graph makes it fire.
   useEffect(() => {
@@ -341,8 +327,6 @@ export function CodePage() {
               <CortexField
                 pending={subgraph.isPending}
                 result={subgraph.data}
-                nodes={canvasNodes}
-                edges={canvasEdges}
                 selectedId={resolvedFocus?.id ?? null}
                 inspectedId={inspection?.id ?? highlight}
                 onSelect={selectFromCanvas}
