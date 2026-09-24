@@ -215,18 +215,9 @@ fn test_glsl_function_docstrings() {
         .iter()
         .find(|n| n.name == "fresnelSchlick")
         .unwrap();
-    assert!(
-        fresnel.docstring.is_some(),
-        "fresnelSchlick should have a docstring"
-    );
-    assert!(
-        fresnel
-            .docstring
-            .as_ref()
-            .unwrap()
-            .contains("Fresnel-Schlick"),
-        "docstring: {:?}",
-        fresnel.docstring
+    assert_eq!(
+        fresnel.docstring.as_deref(),
+        Some("Compute the Fresnel-Schlick approximation.")
     );
 }
 

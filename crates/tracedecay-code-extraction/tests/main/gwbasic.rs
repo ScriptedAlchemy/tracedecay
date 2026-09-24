@@ -94,6 +94,20 @@ fn test_gwbasic_subroutine_complexity() {
 
     let validate_fn = result
         .nodes
+
+#[test]
+fn test_gwbasic_let_name_keeps_underscores() {
+    let result = GwBasicExtractor
+        .extract_artifact("names.gw", "10 LET MAX_RETRIES = 3\n20 LET MR = 1\n")
+        .result;
+    let consts: Vec<&str> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(consts, ["MAX_RETRIES", "MR"]);
+}
         .iter()
         .find(|n| n.kind == NodeKind::Function && n.name == "VALIDATE_CONFIGURATION")
         .expect("VALIDATE_CONFIGURATION function not found");

@@ -87,6 +87,20 @@ fn test_msbasic2_subroutine_signatures() {
     let result = extract_fixture();
 
     // Subroutine signatures should contain the GOSUB target line number.
+
+#[test]
+fn test_msbasic2_let_name_keeps_underscores() {
+    let result = MsBasic2Extractor
+        .extract_artifact("names.bas", "10 LET MAX_RETRIES = 3\n20 LET MR = 1\n")
+        .result;
+    let consts: Vec<&str> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Const)
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(consts, ["MAX_RETRIES", "MR"]);
+}
     let log_fn = result
         .nodes
         .iter()

@@ -12,7 +12,7 @@ use tree_sitter::{Node as TsNode, Tree};
 use crate::basic_common::{
     BasicLine, derive_function_name, find_subroutine_ranges, for_each_top_level_line,
 };
-use crate::common::{ExtractionState, local_node_id};
+use crate::common::{ExtractionState, basic_identifier_text, local_node_id};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     ComplexityAnalysisV1, Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef,
@@ -179,7 +179,7 @@ impl GwBasicExtractor {
             let Some(fn_name_node) = find_direct_child_by_kind(def_fn, "user_function") else {
                 continue;
             };
-            let fn_name = state.node_text(fn_name_node);
+            let fn_name = basic_identifier_text(state.source, fn_name_node);
 
             let start_line = basic_line.node.start_position().row as u32;
             let end_line = basic_line.node.end_position().row as u32;
@@ -275,7 +275,7 @@ impl GwBasicExtractor {
         let Some(id_node) = find_direct_child_by_kind(var_node, "identifier") else {
             return;
         };
-        let name = state.node_text(id_node);
+        let name = basic_identifier_text(state.source, id_node);
 
         let start_line = basic_line.node.start_position().row as u32;
         let end_line = basic_line.node.end_position().row as u32;

@@ -783,3 +783,16 @@ typedef int (*compare_fn)(const void *, const void *);
     assert_eq!(typedefs.len(), 1, "typedef nodes: {:?}", typedefs);
     assert_eq!(typedefs[0].name, "compare_fn");
 }
+
+#[test]
+fn test_cpp_docstring_needs_an_adjacent_own_line_comment() {
+    let source = "// Section banner\n\nint detached() { return 0; }\nint x = 1; // trailing note\nint trailing() { return 0; }\n/// Adjacent doc.\nint documented() { return 0; }\n";
+    let result = CppExtractor.extract_artifact("docs.cpp", source).result;
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let docs: Vec<(&str, &str)> = result
+        .nodes
+        .iter()
+        .filter_map(|n| Some((n.name.as_str(), n.docstring.as_deref()?)))
+        .collect();
+    assert_eq!(docs, [("documented", "Adjacent doc.")]);
+}

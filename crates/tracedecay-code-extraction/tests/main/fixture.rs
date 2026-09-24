@@ -573,6 +573,8 @@ fn test_fixture_cpp() {
         ["area", "perimeter"]
     );
     assert_eq!(kind_names(&result, NodeKind::Enum), ["Color"]);
+    // `} // namespace geom` trails code two lines above, so it documents nothing.
+    assert_eq!(docstring_of(&result, NodeKind::Enum, "Color"), None);
     assert_eq!(kind_names(&result, NodeKind::Union), ["Number"]);
     assert_eq!(kind_names(&result, NodeKind::Typedef), ["EntityId"]);
     assert_eq!(
@@ -3093,15 +3095,10 @@ fn test_fixture_qbasic() {
     let connect_fn = fns.iter().find(|f| f.name == "ConnectServer").unwrap();
     assert!(connect_fn.loops >= 1, "ConnectServer should have >= 1 loop");
 
-    // CONST nodes
-    let consts: Vec<_> = result
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Const)
-        .collect();
-    // ponytail: the grammar currently splits `MAX_RETRIES`/`DEFAULT_PORT`
-    // identifiers, so CONST names are not pinned until that tokenization is fixed.
-    assert_eq!(consts.len(), 2, "expected the 2 CONST statements");
+    assert_eq!(
+        kind_names(&result, NodeKind::Const),
+        ["MAX_RETRIES", "DEFAULT_PORT"]
+    );
 
     assert_eq!(
         ref_names(&result, EdgeKind::Calls),

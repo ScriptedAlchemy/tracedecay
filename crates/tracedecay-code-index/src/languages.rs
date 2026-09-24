@@ -219,12 +219,17 @@ impl StaticLanguageRegistry {
             // callee. Only re-extraction removes the poisoned record. Rust v13
             // retains unresolved receiver-call evidence at the parser's member
             // token; re-extracting Rust does not perturb other languages' rows.
-            let extractor_revision = if language == "rust" {
-                13
-            } else if matches!(language.as_str(), "typescript" | "protobuf" | "sql") {
-                6
-            } else {
-                5
+            // The C-comment docstring languages moved one revision when a
+            // docstring stopped absorbing trailing or blank-line-detached
+            // comments and `///` lost its stray `/`; QBasic dialects moved when
+            // CONST names stopped losing their text before an underscore.
+            let extractor_revision = match language.as_str() {
+                "rust" => 13,
+                "protobuf" => 7,
+                "typescript" | "sql" => 6,
+                "c" | "cpp" | "metal" | "objc" | "go" | "glsl" | "pascal" | "qbasic"
+                | "quickbasic" => 6,
+                _ => 5,
             };
             let descriptor = LanguageDescriptorV1 {
                 language: LanguageId::new(language.clone())

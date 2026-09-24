@@ -188,3 +188,22 @@ fn test_qbasic_dim_shared_fields() {
         "logMsg field not found"
     );
 }
+
+#[test]
+fn test_qbasic_names_keep_underscores() {
+    let source = "CONST MAX_RETRIES = 3\nCONST DEFAULT_PORT = 8080\n";
+    let result = QBasicExtractor.extract_artifact("names.qb", source).result;
+    let named: Vec<(&NodeKind, &str)> = result
+        .nodes
+        .iter()
+        .filter(|n| n.kind != NodeKind::File)
+        .map(|n| (&n.kind, n.name.as_str()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (&NodeKind::Const, "MAX_RETRIES"),
+            (&NodeKind::Const, "DEFAULT_PORT")
+        ]
+    );
+}
