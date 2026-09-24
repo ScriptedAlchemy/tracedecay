@@ -81,8 +81,6 @@ pub(crate) use host_config_io::{
     record_host_config_observation_bytes, update_json_config_transactionally,
     update_toml_config_transactionally,
 };
-// Host adapters under this module reach these through `super::` / `crate::agents::`.
-use host_config_io::render_json_config;
 #[cfg(test)]
 use host_config_io::{
     TestHostConfigWritePauseController, pause_next_host_config_write_after_validation,

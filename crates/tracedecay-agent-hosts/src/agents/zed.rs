@@ -280,7 +280,9 @@ fn install_mcp_if_selected(
         );
         Ok((
             (),
-            TextFileMutation::Write(super::render_json_config(config, &settings)?),
+            TextFileMutation::Write(
+                JsonConfigDialect::Jsonc.render_edit(config, existing, &settings)?,
+            ),
         ))
     })?;
     Ok(())
@@ -314,7 +316,9 @@ fn uninstall_mcp_if_selected(components: &[HostComponentV1], config: &Path) -> R
         }
         Ok((
             (),
-            TextFileMutation::Write(super::render_json_config(config, &settings)?),
+            TextFileMutation::Write(
+                JsonConfigDialect::Jsonc.render_edit(config, existing, &settings)?,
+            ),
         ))
     })
 }
@@ -334,16 +338,16 @@ mod tests {
     }
 
     #[test]
-    fn zed_lifecycle_preserves_peers_and_keeps_no_copy() {
+    fn zed_lifecycle_restores_operator_bytes_and_keeps_no_copy() {
         let home = tempfile::tempdir().unwrap();
         let config = zed_settings_path(home.path());
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         let original = br#"{
-  // operator comment cannot survive serde rendering
-  "context_servers": {
-    "foreign": {"command": "foreign-mcp"}
-  },
-  "theme": "dark"
+    // operator comment
+    "theme": "dark", /* inline */
+    "context_servers": {
+        "foreign": {"command": "foreign-mcp",},
+    },
 }
 "#;
         std::fs::write(&config, original).unwrap();
@@ -354,6 +358,12 @@ mod tests {
             .activate_deployed_host_component_registration(&components, &install)
             .unwrap();
 
+        let installed_text = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            installed_text
+                .starts_with("{\n    // operator comment\n    \"theme\": \"dark\", /* inline */\n"),
+            "{installed_text}"
+        );
         let installed = load_jsonc_file(&config);
         assert_eq!(
             installed["context_servers"]["foreign"]["command"],
@@ -373,13 +383,7 @@ mod tests {
             .deactivate_deployed_host_component_registration(&components, &install)
             .unwrap();
 
-        let uninstalled = load_jsonc_file(&config);
-        assert!(uninstalled["context_servers"].get("tracedecay").is_none());
-        assert_eq!(
-            uninstalled["context_servers"]["foreign"]["command"],
-            "foreign-mcp"
-        );
-        assert_eq!(uninstalled["theme"], "dark");
+        assert_eq!(std::fs::read(&config).unwrap(), original);
         let siblings: Vec<_> = std::fs::read_dir(config.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -11,7 +11,7 @@ use tracedecay_agent_hosts::agents::host_bundle::{
     latest_host_component_set_receipt_at,
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
-use tracedecay_agent_hosts::agents::{load_jsonc_file_strict, parse_jsonc};
+use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
 
 #[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
 mod native_plugin_fixture;
@@ -62,9 +62,9 @@ const ZED_SETTINGS_RELATIVE: &str = ".config/zed/settings.json";
 const ZED_CONFIGS: &[(&str, &[u8])] = &[(
     ZED_SETTINGS_RELATIVE,
     br#"{
-  // operator comment
-  "context_servers": {"foreign": {"command": "foreign-bin"}},
-  "theme": "dark"
+  // operator comment survives the byte-exact uninstall
+  "context_servers": {"foreign": {"command": "foreign-bin"},},
+  "theme": "dark", /* inline */
 }
 "#,
 )];
@@ -171,18 +171,7 @@ const ROO_CONFIGS: &[(&str, &[u8])] = &[(
 )];
 const KILO_CONFIGS: &[(&str, &[u8])] = &[(
     ".config/kilo/kilo.jsonc",
-    br#"{
-  "mcp": {
-    "foreign": {
-      "command": [
-        "foreign-bin"
-      ],
-      "type": "local"
-    }
-  },
-  "theme": "dark"
-}
-"#,
+    b"{\n\t// operator comment\n\t\"theme\": \"dark\",\n\t\"mcp\": {\n\t\t\"foreign\": {\"type\": \"local\", \"command\": [\"foreign-bin\"]},\n\t},\n}\n",
 )];
 
 fn host_case(host: HostKindV1) -> HostCase {
@@ -469,45 +458,6 @@ fn assert_seeded_bytes(cli: &IsolatedCli, originals: &BTreeMap<PathBuf, Vec<u8>>
             "native host file changed: {}",
             relative.display()
         );
-    }
-}
-
-/// Uninstall strips only TraceDecay's entries from the JSON host configs it
-/// rewrote. No copy of the operator's original is kept, so those keep every
-/// operator value but not its formatting; every other seeded file stays
-/// byte-exact.
-fn assert_seeded_values_after_uninstall(
-    case: HostCase,
-    cli: &IsolatedCli,
-    originals: &BTreeMap<PathBuf, Vec<u8>>,
-) {
-    for (relative, expected) in originals {
-        let path = cli.home.path().join(relative);
-        let rewritten_json_config = case
-            .configs
-            .iter()
-            .any(|(config, _)| Path::new(config) == relative)
-            && matches!(
-                relative
-                    .extension()
-                    .and_then(|extension| extension.to_str()),
-                Some("json" | "jsonc")
-            );
-        if rewritten_json_config {
-            assert_eq!(
-                load_jsonc_file_strict(&path).unwrap(),
-                parse_jsonc(std::str::from_utf8(expected).unwrap()),
-                "uninstall changed an operator value in {}",
-                relative.display()
-            );
-        } else {
-            assert_eq!(
-                fs::read(&path).unwrap(),
-                *expected,
-                "native host file changed: {}",
-                relative.display()
-            );
-        }
     }
 }
 
@@ -869,7 +819,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             "uninstall",
             cli.run(&["uninstall", "--agent", case.id]),
         );
-        assert_seeded_values_after_uninstall(case, &cli, &originals);
+        assert_seeded_bytes(&cli, &originals);
         let uninstall_receipt = latest_receipt(&cli, case.host);
         assert!(
             uninstall_receipt

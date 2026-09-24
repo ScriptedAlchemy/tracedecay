@@ -3,7 +3,6 @@
 //! durable write intents, host file metadata capture, and the binary and
 //! host-directory probes installers embed into generated config.
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +13,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::text_file_transaction::{self, TextFileMutation, update_text_file_transactionally};
 
+mod json_edit;
 #[cfg(test)]
 mod tests;
 
@@ -39,6 +39,10 @@ pub enum JsonConfigDialect {
 }
 
 impl JsonConfigDialect {
+    fn parse_options(self) -> jsonc_parser::ParseOptions {
+        json_edit::parse_options(self == Self::Jsonc)
+    }
+
     /// Strict parse of already-observed config contents for a write path.
     /// Missing or blank content is a fresh `{}`; anything unparseable is a
     /// typed error so a transform never runs against fabricated state.
@@ -46,17 +50,42 @@ impl JsonConfigDialect {
         if contents.trim().is_empty() {
             return Ok(serde_json::json!({}));
         }
-        let (dialect_label, parseable) = match self {
-            Self::Json => ("JSON", Cow::Borrowed(contents)),
-            Self::Jsonc => ("JSONC", Cow::Owned(strip_jsonc_comments(contents))),
+        let parsed = match self {
+            Self::Json => serde_json::from_str(contents).map_err(|e| e.to_string()),
+            Self::Jsonc => json_edit::parse_json_text(contents, &self.parse_options()),
         };
-        serde_json::from_str(&parseable).map_err(|e| TraceDecayError::Config {
+        parsed.map_err(|e| TraceDecayError::Config {
             message: format!(
-                "cannot parse {} as {dialect_label}: {e}\n  \
+                "cannot parse {} as {}: {e}\n  \
                  Hint: fix the JSON syntax manually and re-run the command,\n  \
                  or delete the file to start fresh",
-                path.display()
+                path.display(),
+                match self {
+                    Self::Json => "JSON",
+                    Self::Jsonc => "JSONC",
+                }
             ),
+        })
+    }
+
+    /// Replacement text for a config whose observed contents are `existing`
+    /// and whose intended value is `value`. Only members whose values differ
+    /// are rewritten; the operator's comments, key order and formatting
+    /// around them are kept byte-for-byte, so removing what an install added
+    /// restores the original file exactly. Blank contents are a fresh file.
+    pub(super) fn render_edit(
+        self,
+        path: &Path,
+        existing: &str,
+        value: &serde_json::Value,
+    ) -> Result<String> {
+        if existing.trim().is_empty() {
+            return render_json_config(path, value);
+        }
+        json_edit::edit_json_text(existing, value, &self.parse_options()).map_err(|e| {
+            TraceDecayError::Config {
+                message: format!("cannot update {}: {e}", path.display()),
+            }
         })
     }
 }
@@ -101,9 +130,9 @@ pub fn safe_write_json_file(path: &Path, value: &serde_json::Value) -> Result<()
     safe_write_bytes_file(path, content.as_bytes())
 }
 
-/// Serialize a JSON config value for publication: pretty-printed, re-parse
+/// Serialize a JSON config value for a fresh file: pretty-printed, re-parse
 /// validated, trailing newline.
-pub(super) fn render_json_config(path: &Path, value: &serde_json::Value) -> Result<String> {
+fn render_json_config(path: &Path, value: &serde_json::Value) -> Result<String> {
     let pretty = serde_json::to_string_pretty(value).map_err(|e| TraceDecayError::Config {
         message: format!("failed to serialize JSON for {}: {e}", path.display()),
     })?;
@@ -145,7 +174,7 @@ pub(crate) fn update_json_config_transactionally<T>(
         let mutation = match mutation {
             JsonConfigMutation::Unchanged => TextFileMutation::Unchanged,
             JsonConfigMutation::Write(value) => {
-                TextFileMutation::Write(render_json_config(path, &value)?)
+                TextFileMutation::Write(dialect.render_edit(path, existing, &value)?)
             }
             JsonConfigMutation::Remove => TextFileMutation::Remove,
         };
@@ -889,104 +918,11 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Strip `//` line comments, `/* */` block comments, and trailing commas
-/// before `}` / `]` from a JSONC string, then parse with `serde_json`.
-/// Falls back to `serde_json::json!({})` on any parse failure.
+/// Parse a JSONC string (comments and trailing commas allowed), falling back
+/// to `serde_json::json!({})` on any parse failure. Read-only paths only.
 pub fn parse_jsonc(input: &str) -> serde_json::Value {
-    let stripped = strip_jsonc_comments(input);
-    serde_json::from_str(&stripped).unwrap_or_else(|_| serde_json::json!({}))
-}
-
-/// Internal helper: removes JSONC comments and trailing commas.
-pub(super) fn strip_jsonc_comments(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    let mut in_string = false;
-
-    while i < len {
-        // Handle string literals (skip comment stripping inside strings).
-        if in_string {
-            if chars[i] == '\\' && i + 1 < len {
-                out.push(chars[i]);
-                out.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if chars[i] == '"' {
-                in_string = false;
-            }
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-
-        // Start of string.
-        if chars[i] == '"' {
-            in_string = true;
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-
-        // Line comment `//`.
-        if chars[i] == '/' && i + 1 < len && chars[i + 1] == '/' {
-            // Skip until newline.
-            while i < len && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Block comment `/* ... */`.
-        if chars[i] == '/' && i + 1 < len && chars[i + 1] == '*' {
-            i += 2;
-            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i += 2; // consume `*/`
-            continue;
-        }
-
-        out.push(chars[i]);
-        i += 1;
-    }
-
-    // Remove trailing commas before `}` or `]`.
-    // Simple regex-free approach: repeatedly collapse ", <whitespace> }" patterns.
-    remove_trailing_commas(&out)
-}
-
-/// Removes trailing commas that appear immediately before `}` or `]` (with
-/// optional whitespace/newlines in between).
-fn remove_trailing_commas(input: &str) -> String {
-    // We scan for comma, optional whitespace, then `}` or `]`.
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut out = Vec::with_capacity(len);
-    let mut i = 0;
-
-    while i < len {
-        if bytes[i] == b',' {
-            // Peek ahead past whitespace.
-            let mut j = i + 1;
-            while j < len
-                && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n' || bytes[j] == b'\r')
-            {
-                j += 1;
-            }
-            if j < len && (bytes[j] == b'}' || bytes[j] == b']') {
-                // Skip the comma; whitespace will be included normally.
-                i += 1;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-
-    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+    json_edit::parse_json_text(input, &JsonConfigDialect::Jsonc.parse_options())
+        .unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// Read a file and parse it as JSONC. Falls back to `json!({})` if the file

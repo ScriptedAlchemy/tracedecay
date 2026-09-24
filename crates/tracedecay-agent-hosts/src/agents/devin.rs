@@ -279,7 +279,11 @@ fn install_mcp_if_selected(
             });
             Ok((
                 (),
-                TextFileMutation::Write(super::render_json_config(config_path, &settings)?),
+                TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
+                    config_path,
+                    existing,
+                    &settings,
+                )?),
             ))
         })?;
         eprintln!(
@@ -312,7 +316,11 @@ fn uninstall_mcp_if_selected(
             }
             Ok((
                 true,
-                TextFileMutation::Write(super::render_json_config(config_path, &settings)?),
+                TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
+                    config_path,
+                    existing,
+                    &settings,
+                )?),
             ))
         })?;
         if removed {

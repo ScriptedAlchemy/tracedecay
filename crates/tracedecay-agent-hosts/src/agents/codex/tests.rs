@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::safe_write_json_file;
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
 /// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`

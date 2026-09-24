@@ -607,3 +607,123 @@ mod local_install_safety_tests {
         assert_eq!(std::fs::read(&config).unwrap(), b"foreign create");
     }
 }
+
+/// Install and uninstall edit only TraceDecay's member of an operator config,
+/// so the operator's bytes survive both without any copy being kept.
+#[allow(clippy::unwrap_used)]
+mod format_preserving_edit_tests {
+    use super::*;
+    use crate::agents::{McpUninstallPolicy, install_mcp_server_entry, uninstall_mcp_server_entry};
+
+    const PRUNE: McpUninstallPolicy = McpUninstallPolicy {
+        prune_empty_root: true,
+        remove_empty_file: true,
+    };
+
+    fn entry(binary: &str) -> serde_json::Value {
+        serde_json::json!({"command": binary, "args": ["serve"]})
+    }
+
+    /// Install, reinstall with a moved binary, then uninstall `original`,
+    /// asserting the operator's bytes at every step.
+    fn assert_lifecycle_preserves_bytes(
+        file_name: &str,
+        dialect: JsonConfigDialect,
+        original: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, original).unwrap();
+
+        install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/a/tracedecay"),
+            "test",
+            dialect,
+        )
+        .unwrap();
+        let installed = std::fs::read_to_string(&path).unwrap();
+        let mut parsed = dialect.parse_for_edit(&path, &installed).unwrap();
+        let servers = parsed["mcpServers"].as_object_mut().unwrap();
+        assert_eq!(
+            servers.remove("tracedecay"),
+            Some(entry("/opt/a/tracedecay"))
+        );
+        if servers.is_empty() {
+            parsed.as_object_mut().unwrap().remove("mcpServers");
+        }
+        assert_eq!(parsed, dialect.parse_for_edit(&path, original).unwrap());
+
+        install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/b/tracedecay"),
+            "test",
+            dialect,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            installed.replace("/opt/a/tracedecay", "/opt/b/tracedecay"),
+            "a reinstall rewrote more than the moved command"
+        );
+
+        uninstall_mcp_server_entry(&path, "mcpServers", dialect, PRUNE).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(file_name)]);
+    }
+
+    #[test]
+    fn json_lifecycle_restores_indentation_key_order_and_line_endings() {
+        assert_lifecycle_preserves_bytes(
+            "mcp.json",
+            JsonConfigDialect::Json,
+            "{\r\n    \"zeta\": true,\r\n    \"mcpServers\": {\r\n        \"foreign\": {\"command\": \"foreign-bin\", \"args\": []}\r\n    },\r\n    \"alpha\": [1, 2]\r\n}",
+        );
+        assert_lifecycle_preserves_bytes(
+            "minified.json",
+            JsonConfigDialect::Json,
+            r#"{"zeta":1,"mcpServers":{"foreign":{"command":"foreign-bin"}}}"#,
+        );
+    }
+
+    #[test]
+    fn jsonc_lifecycle_restores_comments_and_trailing_commas() {
+        assert_lifecycle_preserves_bytes(
+            "settings.json",
+            JsonConfigDialect::Jsonc,
+            "// operator header\n{\n\t\"theme\": \"dark\", // same-line note\n\t/* servers */\n\t\"mcpServers\": {\n\t\t\"foreign\": {\"command\": \"foreign-bin\",},\n\t},\n\t\"alpha\": [1, 2,],\n}\n",
+        );
+        // The root key TraceDecay creates is pruned again on uninstall.
+        assert_lifecycle_preserves_bytes(
+            "absent-root.json",
+            JsonConfigDialect::Jsonc,
+            "{\n  // keep me\n  \"theme\": \"dark\" // tail\n}\n",
+        );
+    }
+
+    #[test]
+    fn edit_refuses_a_config_it_cannot_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = "{\n  // a comment is not JSON\n  \"a\": 1\n}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error = install_mcp_server_entry(
+            &path,
+            "mcpServers",
+            entry("/opt/a/tracedecay"),
+            "test",
+            JsonConfigDialect::Json,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot parse"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+}

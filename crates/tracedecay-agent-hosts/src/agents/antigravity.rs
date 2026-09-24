@@ -253,9 +253,9 @@ fn add_registration(config: &Path, existing: &str, binary: &str) -> Result<TextF
         "env": {},
         "transport": "stdio",
     });
-    Ok(TextFileMutation::Write(super::render_json_config(
-        config, &settings,
-    )?))
+    Ok(TextFileMutation::Write(
+        JsonConfigDialect::Json.render_edit(config, existing, &settings)?,
+    ))
 }
 
 fn install_mcp_if_selected(components: &[HostComponentV1], ctx: &InstallContext) -> Result<()> {
@@ -295,9 +295,9 @@ fn remove_registration(config: &Path, existing: &str) -> Result<TextFileMutation
     if root.is_empty() {
         return Ok(TextFileMutation::Remove);
     }
-    Ok(TextFileMutation::Write(super::render_json_config(
-        config, &settings,
-    )?))
+    Ok(TextFileMutation::Write(
+        JsonConfigDialect::Json.render_edit(config, existing, &settings)?,
+    ))
 }
 
 fn uninstall_mcp_if_selected(components: &[HostComponentV1], home: &Path) -> Result<()> {

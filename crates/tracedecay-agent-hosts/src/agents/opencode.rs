@@ -22,8 +22,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
-    TextFileMutation, load_json_file, render_json_config, safe_write_text_file,
-    update_text_file_transactionally,
+    TextFileMutation, load_json_file, safe_write_text_file, update_text_file_transactionally,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -647,7 +646,11 @@ fn install_registration_entries(
         )?;
         Ok((
             (),
-            TextFileMutation::Write(render_json_config(config_path, &config)?),
+            TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
+                config_path,
+                existing,
+                &config,
+            )?),
         ))
     })?;
     eprintln!(
@@ -894,7 +897,11 @@ fn strip_registration_entries(
     } else {
         Ok((
             OpenCodeRegistrationRemoval::Rewritten,
-            TextFileMutation::Write(render_json_config(config_path, &config)?),
+            TextFileMutation::Write(JsonConfigDialect::Json.render_edit(
+                config_path,
+                existing,
+                &config,
+            )?),
         ))
     }
 }

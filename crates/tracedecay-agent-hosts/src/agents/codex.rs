@@ -39,8 +39,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, InstallScope,
-    TextFileMutation, load_json_file, load_json_file_strict, load_toml_file, safe_write_json_file,
-    safe_write_text_file, update_toml_config_transactionally,
+    JsonConfigDialect, JsonConfigMutation, TextFileMutation, load_json_file, load_json_file_strict,
+    load_toml_file, safe_write_text_file, update_json_config_transactionally,
+    update_toml_config_transactionally,
 };
 
 /// The prefix every Codex activation key for this plugin starts with.
@@ -1643,76 +1644,85 @@ fn install_codex_marketplace_entry(
     display_name: &str,
     source_path: &str,
 ) -> Result<()> {
-    let mut marketplace = load_json_file_strict(marketplace_path)?;
-    if !marketplace.is_object() {
-        marketplace = json!({});
-    }
-    let existing_name = marketplace.get("name").and_then(|value| value.as_str());
-    if let Some(existing_name) = existing_name {
-        validate_codex_marketplace_name(existing_name)?;
-    }
-    let has_tracedecay_entry = marketplace
-        .get("plugins")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|plugins| {
-            plugins.iter().any(|entry| {
-                entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
-            })
-        });
-    let should_write_identity =
-        existing_name.is_none() || (existing_name == Some("caveman-home") && has_tracedecay_entry);
-    if should_write_identity {
-        marketplace["name"] = json!(marketplace_name);
-    }
-    if !marketplace
-        .get("interface")
-        .is_some_and(serde_json::Value::is_object)
-    {
-        marketplace["interface"] = json!({});
-    }
-    if should_write_identity
-        || marketplace["interface"]
-            .get("displayName")
-            .and_then(|value| value.as_str())
-            .is_none()
-    {
-        marketplace["interface"]["displayName"] = json!(display_name);
-    }
-    if !marketplace
-        .get("plugins")
-        .is_some_and(serde_json::Value::is_array)
-    {
-        marketplace["plugins"] = json!([]);
-    }
-    let Some(plugins) = marketplace["plugins"].as_array_mut() else {
-        return Err(TraceDecayError::Config {
-            message: "failed to normalize Codex marketplace plugins to an array".to_string(),
-        });
-    };
-    plugins.retain(|entry| {
-        !matches!(
-            entry.get("name").and_then(|value| value.as_str()),
-            Some("tracedecay")
-        )
-    });
-    plugins.push(json!({
-        "name": "tracedecay",
-        "source": {
-            "source": "local",
-            "path": source_path,
+    let effective_marketplace_name = update_json_config_transactionally(
+        marketplace_path,
+        JsonConfigDialect::Json,
+        |mut marketplace| {
+            if !marketplace.is_object() {
+                marketplace = json!({});
+            }
+            let existing_name = marketplace.get("name").and_then(|value| value.as_str());
+            if let Some(existing_name) = existing_name {
+                validate_codex_marketplace_name(existing_name)?;
+            }
+            let has_tracedecay_entry = marketplace
+                .get("plugins")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|plugins| {
+                    plugins.iter().any(|entry| {
+                        entry.get("name").and_then(|value| value.as_str()) == Some("tracedecay")
+                    })
+                });
+            let should_write_identity = existing_name.is_none()
+                || (existing_name == Some("caveman-home") && has_tracedecay_entry);
+            if should_write_identity {
+                marketplace["name"] = json!(marketplace_name);
+            }
+            if !marketplace
+                .get("interface")
+                .is_some_and(serde_json::Value::is_object)
+            {
+                marketplace["interface"] = json!({});
+            }
+            if should_write_identity
+                || marketplace["interface"]
+                    .get("displayName")
+                    .and_then(|value| value.as_str())
+                    .is_none()
+            {
+                marketplace["interface"]["displayName"] = json!(display_name);
+            }
+            if !marketplace
+                .get("plugins")
+                .is_some_and(serde_json::Value::is_array)
+            {
+                marketplace["plugins"] = json!([]);
+            }
+            let Some(plugins) = marketplace["plugins"].as_array_mut() else {
+                return Err(TraceDecayError::Config {
+                    message: "failed to normalize Codex marketplace plugins to an array"
+                        .to_string(),
+                });
+            };
+            plugins.retain(|entry| {
+                !matches!(
+                    entry.get("name").and_then(|value| value.as_str()),
+                    Some("tracedecay")
+                )
+            });
+            plugins.push(json!({
+                "name": "tracedecay",
+                "source": {
+                    "source": "local",
+                    "path": source_path,
+                },
+                "policy": {
+                    "installation": "AVAILABLE",
+                    "authentication": "ON_INSTALL",
+                },
+                "category": "Productivity",
+            }));
+            let effective_marketplace_name = marketplace
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(marketplace_name)
+                .to_string();
+            Ok((
+                effective_marketplace_name,
+                JsonConfigMutation::Write(marketplace),
+            ))
         },
-        "policy": {
-            "installation": "AVAILABLE",
-            "authentication": "ON_INSTALL",
-        },
-        "category": "Productivity",
-    }));
-    let effective_marketplace_name = marketplace
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(marketplace_name)
-        .to_string();
-    safe_write_json_file(marketplace_path, &marketplace)?;
+    )?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Added tracedecay to Codex {effective_marketplace_name} marketplace at {}",
         marketplace_path.display()
@@ -1857,24 +1867,32 @@ fn remove_codex_marketplace_entry_at(marketplace_path: &Path, label: &str) -> Re
     if !marketplace_path.exists() {
         return Ok(());
     }
-    let mut marketplace = load_json_file_strict(marketplace_path)?;
-    let Some(plugins) = marketplace
-        .get_mut("plugins")
-        .and_then(|value| value.as_array_mut())
-    else {
-        return Ok(());
-    };
-    let before = plugins.len();
-    plugins.retain(|entry| {
-        !matches!(
-            entry.get("name").and_then(|value| value.as_str()),
-            Some("tracedecay")
-        )
-    });
-    if plugins.len() == before {
+    let removed = update_json_config_transactionally(
+        marketplace_path,
+        JsonConfigDialect::Json,
+        |mut marketplace| {
+            let Some(plugins) = marketplace
+                .get_mut("plugins")
+                .and_then(|value| value.as_array_mut())
+            else {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            };
+            let before = plugins.len();
+            plugins.retain(|entry| {
+                !matches!(
+                    entry.get("name").and_then(|value| value.as_str()),
+                    Some("tracedecay")
+                )
+            });
+            if plugins.len() == before {
+                return Ok((false, JsonConfigMutation::Unchanged));
+            }
+            Ok((true, JsonConfigMutation::Write(marketplace)))
+        },
+    )?;
+    if !removed {
         return Ok(());
     }
-    safe_write_json_file(marketplace_path, &marketplace)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Removed tracedecay from Codex {label} marketplace at {}",
         marketplace_path.display()
