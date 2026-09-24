@@ -1316,20 +1316,10 @@ fn sweep_unreferenced_generation_segments(
     apply: bool,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(bool, u64, bool), CodeGenerationRetentionErrorV1> {
-    let retired_scope_segments = retired_scope_segment_directories(store_root)?;
-    if apply {
-        for directory in &retired_scope_segments {
-            std::fs::remove_dir_all(directory).map_err(storage)?;
-        }
-    } else if !retired_scope_segments.is_empty() {
-        return Ok((true, 0, false));
-    }
     let segments_root = code_generation_segments_root(store_root);
     let entries = match std::fs::read_dir(&segments_root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((!retired_scope_segments.is_empty(), 0, false));
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((false, 0, false)),
         Err(error) => return Err(storage(error)),
     };
     let mut live_segments = BTreeSet::new();
@@ -1436,7 +1426,7 @@ fn sweep_unreferenced_generation_segments(
         mark_root(pool_root, true)?;
     }
 
-    let mut found = !retired_scope_segments.is_empty();
+    let mut found = false;
     let mut reclaimed = 0_u64;
     let mut reclaimed_segments = 0_usize;
     for entry in entries {
@@ -1540,32 +1530,6 @@ fn segment_manifest_directories(
     Ok(directories)
 }
 
-/// Per-scope segment directories from before segments moved to the project.
-/// No manifest this build reads names them, so the sweep removes them whole.
-fn retired_scope_segment_directories(
-    store_root: &Path,
-) -> Result<Vec<PathBuf>, CodeGenerationRetentionErrorV1> {
-    if !shares_project_generation_segments(store_root) {
-        return Ok(Vec::new());
-    }
-    let mut directories = Vec::new();
-    for scope in segment_scope_roots(store_root)? {
-        let directory = scope.join(GENERATION_SEGMENTS_DIRECTORY);
-        match directory.symlink_metadata() {
-            Ok(metadata) if metadata.file_type().is_dir() => directories.push(directory),
-            Ok(_) => {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "retired scope segment path '{}' is not a directory",
-                    directory.display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(storage(error)),
-        }
-    }
-    Ok(directories)
-}
-
 fn replay_generation_file_digest(file_name: &str) -> Option<&str> {
     generation_file_digest(file_name).or_else(|| {
         let (digest, suffix) = file_name
@@ -1587,9 +1551,6 @@ fn store_may_hold_generation_segments(
     store_root: &Path,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<bool, CodeGenerationRetentionErrorV1> {
-    if !retired_scope_segment_directories(store_root)?.is_empty() {
-        return Ok(true);
-    }
     let mut entries = match std::fs::read_dir(code_generation_segments_root(store_root)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),

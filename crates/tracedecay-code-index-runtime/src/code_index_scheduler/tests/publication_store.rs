@@ -2887,11 +2887,6 @@ fn retiring_one_worktree_keeps_the_segments_its_sibling_still_names() {
             .expect("publish linked-only file"),
     );
     drop(linked_scheduler);
-    // A scope directory left behind by the per-scope layout is collected.
-    let retired_segments = scopes.first_scope.join("code-generation-segments-v1");
-    std::fs::create_dir_all(&retired_segments).expect("retired per-scope segment directory");
-    std::fs::write(retired_segments.join("segment-retired.json"), b"retired")
-        .expect("retired per-scope segment");
 
     let segments_root = code_generation_segments_root(&scopes.first_scope);
     let first = active_segment_digests(&scopes.first_scope);
@@ -2917,10 +2912,6 @@ fn retiring_one_worktree_keeps_the_segments_its_sibling_still_names() {
             "a sweep from one scope must keep what a sibling scope names"
         );
     }
-    assert!(
-        !retired_segments.exists(),
-        "a per-scope segment directory from the retired layout is removed"
-    );
 
     // Collecting the linked scope strands only what it alone named.
     std::fs::remove_dir_all(&scopes.linked_scope).expect("collect linked scope");
