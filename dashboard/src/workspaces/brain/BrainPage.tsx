@@ -159,7 +159,7 @@ export function BrainPage() {
             {/* The field is the page; readouts, the inspector and the exact
               * registry list sit in the rail beside it. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-              <section aria-label="Registry field" className="flex min-h-[70vw] flex-1 flex-col p-3 md:min-h-[60vh] lg:min-h-0">
+              <section aria-label="Registry field" className="flex min-h-[70vw] flex-1 flex-col p-3 max-md:min-h-min md:min-h-[60vh] lg:min-h-0">
                 <RegistryFieldCanvas groups={groups} repository={viewedRepository} inspectedId={inspectedId} onInspect={setInspectedId} />
               </section>
               <aside aria-label="Registry readouts" className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-96 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0">

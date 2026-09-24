@@ -504,8 +504,17 @@ export function drawColumns(
   }
   context.setLineDash([]);
   // Narrow columns keep the bound and the count; the column name is the
-  // first thing dropped, never the measurement.
+  // first thing dropped. Columns too narrow for their bounds print no header
+  // at all rather than overprinting; the registry readout beside the field
+  // prints the same bounds and counts.
   const spacing = camera.scale;
+  context.letterSpacing = '0.16em';
+  const widest = Math.max(...columns.map((column) => context.measureText(column.bound.toUpperCase()).width));
+  context.letterSpacing = '0px';
+  if (spacing < widest + 8) {
+    context.restore();
+    return;
+  }
   columns.forEach((column, index) => {
     const [x] = toScreen(camera, index, 0);
     if (x < -80 || x > width + 80) return;
