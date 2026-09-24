@@ -1081,7 +1081,34 @@ fn published_generation_serves_current_conservative_test_attribution() {
         join.test_watermark.snapshot_digest,
         generation.manifest().snapshot_digest
     );
-    assert!(!join.records.is_empty());
+    // Every callable in a test file is a test; neither fixture callable calls
+    // another fixture symbol, so each covers only itself.
+    let occurrence_of = |qualified_name: &str| {
+        generation
+            .symbols()
+            .symbols
+            .iter()
+            .find(|symbol| symbol.qualified_name == qualified_name)
+            .unwrap_or_else(|| panic!("fixture symbol {qualified_name}"))
+            .occurrence
+            .clone()
+    };
+    let alpha = occurrence_of("tests/production.rs::alpha");
+    let get = occurrence_of("tests/production.rs::Holder::get");
+    let attributed = join
+        .records
+        .iter()
+        .map(|record| {
+            (
+                record.attribution.test_occurrence.clone(),
+                record.attribution.covered_occurrences.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        attributed,
+        BTreeMap::from([(alpha.clone(), vec![alpha]), (get.clone(), vec![get])])
+    );
     assert!(join.records.iter().all(|record| {
         record.attribution.evidence_class
             == TestAttributionEvidenceClassV1::ConservativeDependencyCandidates
@@ -2271,8 +2298,23 @@ fn verified_sealed_lexical_page_retained_bytes_include_real_owned_capacities() {
         VerifiedSealedLexicalPageReadV1::Page(page) => page,
         VerifiedSealedLexicalPageReadV1::Complete(_) => panic!("fixture must emit a page"),
     };
-    assert!(!page.chunks().is_empty());
-    assert!(!page.imports().is_empty());
+    assert!(
+        page.chunks()
+            .iter()
+            .all(|chunk| chunk.chunk().anchor.file_occurrence_id.as_str()
+                == "file.lexical-import-capacity"),
+        "every chunk belongs to the fixture file"
+    );
+    assert!(
+        page.symbol_displays()
+            .iter()
+            .flatten()
+            .any(|display| display.qualified_name() == "src/imports.ts::render"),
+        "the page carries the fixture function under its logical path"
+    );
+    assert_eq!(page.imports().len(), 1);
+    assert_eq!(page.imports()[0].module_specifier, "widget-kit");
+    assert_eq!(page.imports()[0].logical_path, "src/imports.ts");
 
     let vector_and_module_capacity_floor = page
         .chunk_capacity()
