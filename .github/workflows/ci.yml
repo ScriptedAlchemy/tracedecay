@@ -17,6 +17,10 @@ on:
         description: "Also run hotpath parity"
         type: boolean
         default: false
+      run_full_nextest:
+        description: "Also run the full Linux search and transport selections"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,8 +62,9 @@ jobs:
   # pull_request workflow before evaluating job conditions, and automation
   # applied every opt-in label to 173 PRs; only removing the trigger prevents
   # that volume from occupying the account FIFO. A dispatch runs the Linux
-  # lane and may add OS, host, or perf work through explicit inputs. A master
-  # push runs the Linux lane only so release jobs retain runner slots.
+  # lane and may add OS, host, perf, or full-workspace work through explicit
+  # inputs. A master push runs the Linux lane only so release jobs retain
+  # runner slots.
   scope-gate:
     name: Scope gate
     runs-on: ubuntu-latest
@@ -708,6 +713,94 @@ jobs:
             exit 1
           fi
           echo "All Linux partitions and the hotpath parity gate passed."
+
+  # Optional cross-test isolation proof. The partition lane cannot expose
+  # authorities leaked between targets that it runs in separate jobs. Keep
+  # the evaluator and transport resolutions separate: the transport surface
+  # includes a generation-scale cancellation journey whose bounded receipts
+  # assume it is not competing with the entire workspace. Each compatible
+  # selection still shares one nextest process across all of its targets.
+  # Keep this off ordinary pushes and run it after the normal Linux verdict so
+  # its extra compilation and eight concurrent tests do not crowd that lane.
+  linux-full-nextest:
+    name: Test Linux full selection isolation
+    needs: linux-test
+    if: ${{ !cancelled() && needs.linux-test.result != 'skipped' && github.event_name == 'workflow_dispatch' && inputs.run_full_nextest }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify pinned Rust toolchain and analyzer
+        run: |
+          rustup show active-toolchain
+          rustup which rust-analyzer
+          rust-analyzer --version
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # Build the evaluator selection and the executables its journeys spawn
+      # with the same feature set and perf resolution nextest uses below.
+      - name: Build full evaluator selection and support executables
+        run: cargo build --workspace --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/search-eval
+
+      - name: Run full evaluator selection
+        run: |
+          set +e
+          cargo test-ci --locked --no-tests=fail
+          status=$?
+          set -e
+          if [ -f target/nextest/ci/junit.xml ]; then
+            mv target/nextest/ci/junit.xml target/nextest/ci/full-evaluator.xml
+          fi
+          exit "$status"
+
+      # Transport-only modules live inside otherwise ordinary root targets, so
+      # run every root library, binary, and integration target in one process.
+      # The evaluator selection above already covers the remaining workspace
+      # crates without implicitly linking evaluator code into this resolution.
+      - name: Build full transport selection and support executables
+        id: transport_build
+        if: ${{ always() && !cancelled() }}
+        run: cargo build -p tracedecay -p tracedecay-cli --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport
+
+      - name: Run full transport selection
+        if: ${{ always() && !cancelled() && steps.transport_build.outcome == 'success' }}
+        run: |
+          set +e
+          cargo nextest run -p tracedecay -p tracedecay-cli --bins --tests --profile ci --cargo-profile perf --locked --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport --no-tests=fail
+          status=$?
+          set -e
+          if [ -f target/nextest/ci/junit.xml ]; then
+            mv target/nextest/ci/junit.xml target/nextest/ci/full-transport.xml
+          fi
+          exit "$status"
+
+      - name: Upload full-selection nextest reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-Linux-full-selections
+          path: target/nextest/ci/full-*.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
   windows-build:
     name: Build Windows tests
