@@ -1,7 +1,7 @@
 /**
  * The FACT LEDGER: the exact, keyboard-operable reading of the loaded slice.
  *
- * The constellation above it is a picture of the same rows; this is the
+ * The provenance cameras above it are a picture of the same rows; this is the
  * authority a reader can traverse, sort, and select from. A row under the
  * pointer or under focus is inspected (the inspector previews it); a row
  * clicked or activated is selected (the inspector loads its canonical detail

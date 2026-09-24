@@ -134,15 +134,22 @@ function ProjectionBody({ data }: { data: MemoryProjectionPayloadV1 }) {
     () => ({
       xAxis: {
         type: "value",
-        axisLabel: { show: false },
+        name: "PC1 · unitless",
+        nameLocation: "middle",
+        nameGap: 22,
+        nameTextStyle: { fontSize: 10 },
+        axisLabel: { fontSize: 10, formatter: (value: number) => value.toFixed(1) },
         axisTick: { show: false },
       },
       yAxis: {
         type: "value",
-        axisLabel: { show: false },
+        name: "PC2 · unitless",
+        nameLocation: "end",
+        nameTextStyle: { fontSize: 10 },
+        axisLabel: { fontSize: 10, formatter: (value: number) => value.toFixed(1) },
         axisTick: { show: false },
       },
-      grid: { left: 6, right: 6, top: 8, bottom: 6, containLabel: true },
+      grid: { left: 8, right: 12, top: 24, bottom: 22, containLabel: true },
       series: [
         {
           type: "scatter",
@@ -154,19 +161,26 @@ function ProjectionBody({ data }: { data: MemoryProjectionPayloadV1 }) {
     [reading.points],
   );
   if (data.error !== "") {
-    return (
-      <p role="status" className="text-2xs leading-relaxed text-state-error">
-        the projection could not be computed: {data.error}
-      </p>
-    );
+    return <StateChip kind="error" detail={`the projection could not be computed: ${data.error}`} />;
   }
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-2xs leading-relaxed text-text-secondary">
+      {reading.projected ? (
+        <StateChip
+          kind={coverageComplete ? "ready" : "partial"}
+          detail={
+            coverageComplete
+              ? `pca · ${reading.points.length.toLocaleString()} projected`
+              : `pca · ${data.coverage.completeness}${data.coverage.omission_reasons.length > 0 ? ` · ${data.coverage.omission_reasons.join(", ")}` : ""}`
+          }
+          className="self-start"
+        />
+      ) : null}
+      <p className="text-body leading-relaxed text-text-secondary">
         {reading.note}
       </p>
       {coverageComplete ? null : (
-        <p role="status" className="text-3xs leading-relaxed text-state-partial">
+        <p role="status" className="text-body leading-relaxed text-state-partial">
           Projection coverage is {data.coverage.completeness}; examined{" "}
           {data.coverage.examined.toLocaleString()} under a limit of{" "}
           {data.coverage.limit.toLocaleString()}
@@ -182,7 +196,7 @@ function ProjectionBody({ data }: { data: MemoryProjectionPayloadV1 }) {
             height={260}
             option={option}
           />
-          <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-edge-subtle pt-2 text-2xs sm:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-1 border-t border-edge-subtle pt-2 sm:grid-cols-4">
             <Figure
               label="projected"
               value={reading.points.length.toLocaleString()}
@@ -209,11 +223,14 @@ function ProjectionBody({ data }: { data: MemoryProjectionPayloadV1 }) {
            * reading of the same data rather than a decoration of it. */}
           <ul
             aria-label="Projected facts by category"
-            className="flex flex-wrap gap-x-3 gap-y-0.5 text-3xs text-text-muted"
+            className="flex flex-wrap items-baseline gap-x-4 gap-y-1"
           >
             {reading.categories.map((row) => (
-              <li key={row.category}>
-                {row.category} · {row.count.toLocaleString()}
+              <li key={row.category} className="flex items-baseline gap-1.5">
+                <span className="td-legend">{row.category}</span>
+                <span className="td-value text-xs" data-cell="numeric">
+                  {row.count.toLocaleString()}
+                </span>
               </li>
             ))}
           </ul>
@@ -237,18 +254,23 @@ function ProjectionBody({ data }: { data: MemoryProjectionPayloadV1 }) {
 function SimilarityBody({ data }: { data: MemorySimilarityPayloadV1 }) {
   const reading = similarityReading(data);
   if (data.error !== "") {
-    return (
-      <p role="status" className="text-2xs leading-relaxed text-state-error">
-        similarity could not be computed: {data.error}
-      </p>
-    );
+    return <StateChip kind="error" detail={`similarity could not be computed: ${data.error}`} />;
   }
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-2xs leading-relaxed text-text-secondary">
+      <StateChip
+        kind={reading.capped === null ? "partial" : "ready"}
+        detail={
+          reading.capped === null
+            ? `${reading.returned.toLocaleString()} ${reading.returned === 1 ? "pair fills" : "pairs fill"} the limit · list may be truncated`
+            : `${reading.returned.toLocaleString()} ${reading.returned === 1 ? "pair" : "pairs"} · list ended below the limit`
+        }
+        className="self-start"
+      />
+      <p className="text-body leading-relaxed text-text-secondary">
         {reading.denominators}
       </p>
-      <p className="text-3xs leading-relaxed text-text-muted">
+      <p className="text-body leading-relaxed text-text-muted">
         Global distribution over all{" "}
         {data.score_distribution.total_pairs.toLocaleString()} scored pairs;
         these statistics are not limited to the threshold-matching list below.
@@ -273,7 +295,7 @@ function SimilarityBody({ data }: { data: MemorySimilarityPayloadV1 }) {
         />
       </div>
       {reading.capped === null ? (
-        <p role="status" className="text-3xs leading-relaxed text-state-partial">
+        <p role="status" className="text-body leading-relaxed text-state-partial">
           Threshold-list coverage is unknown: {reading.returned.toLocaleString()}{" "}
           {reading.returned === 1 ? "pair" : "pairs"} returned at or above{" "}
           {data.min_similarity.toFixed(2)}, filling this request's limit of{" "}
@@ -281,7 +303,7 @@ function SimilarityBody({ data }: { data: MemorySimilarityPayloadV1 }) {
           exact fit from a truncated list.
         </p>
       ) : (
-        <p className="text-3xs leading-relaxed text-text-muted">
+        <p className="text-body leading-relaxed text-text-muted">
           Threshold-list coverage is bounded: {reading.returned.toLocaleString()}{" "}
           {reading.returned === 1 ? "pair" : "pairs"} returned at or above{" "}
           {data.min_similarity.toFixed(2)}; the response ended before this
@@ -289,7 +311,7 @@ function SimilarityBody({ data }: { data: MemorySimilarityPayloadV1 }) {
         </p>
       )}
       {reading.returned === 0 ? (
-        <p className="text-2xs leading-relaxed text-text-muted">
+        <p className="text-body leading-relaxed text-text-muted">
           no pair was returned at or above {data.min_similarity.toFixed(2)}
         </p>
       ) : (
@@ -307,34 +329,33 @@ function SimilarityBody({ data }: { data: MemorySimilarityPayloadV1 }) {
               key={JSON.stringify([pair.a_id, pair.b_id])}
               className="flex flex-col gap-1 border-l-2 border-edge-subtle pl-2"
             >
-              <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
-                <span className="td-value" data-cell="numeric">
-                  {pair.a_id} ↔ {pair.b_id}
-                </span>
-                <span className="td-value" data-cell="numeric">
+              <p className="flex flex-wrap items-baseline gap-x-3">
+                <span className="td-value text-xs text-text-primary" data-cell="numeric">
                   {pair.similarity.toFixed(4)}
                 </span>
-                <span className="text-text-secondary">
-                  {pair.classification}
-                </span>
-                <span>
+                <span className="td-legend">{pair.classification.replaceAll("_", " ")}</span>
+                <span className="td-legend">
                   {pair.a_category}
                   {pair.a_category === pair.b_category
                     ? ""
                     : ` · ${pair.b_category}`}
                 </span>
+                <span className="td-value text-xs text-text-muted" data-cell="numeric">
+                  <span title={pair.a_id}>{identityTail(pair.a_id)}</span> ↔{" "}
+                  <span title={pair.b_id}>{identityTail(pair.b_id)}</span>
+                </span>
               </p>
-              <p className="text-2xs leading-relaxed text-text-secondary">
+              <p className="text-body leading-relaxed text-text-secondary">
                 {pair.a_content}
               </p>
-              <p className="text-2xs leading-relaxed text-text-secondary">
+              <p className="text-body leading-relaxed text-text-secondary">
                 {pair.b_content}
               </p>
             </li>
           ))}
         </ol>
       )}
-      <p className="text-3xs leading-relaxed text-text-muted">
+      <p className="text-body leading-relaxed text-text-muted">
         a scored pair is a measurement, not a proposal, the Curation view
         reports the daemon's automatic post-validation outcomes and explicit
         policy-owned run control
@@ -343,11 +364,18 @@ function SimilarityBody({ data }: { data: MemorySimilarityPayloadV1 }) {
   );
 }
 
+/** A canonical fact id is two 64-character digests; the pair row prints the
+ * head and the tail, enough to tell two apart, and keeps the whole id in the
+ * title. */
+function identityTail(id: string): string {
+  return id.length > 20 ? `${id.slice(0, 7)}…${id.slice(-6)}` : id;
+}
+
 function Figure({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-2">
       <dt className="td-legend">{label}</dt>
-      <dd className="td-value text-2xs" data-cell="numeric">
+      <dd className="td-value text-xs" data-cell="numeric">
         {value}
       </dd>
     </div>

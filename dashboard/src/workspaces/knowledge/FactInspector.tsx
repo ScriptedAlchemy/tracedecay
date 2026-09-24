@@ -58,7 +58,7 @@ export function FactInspector({
   /** The canonical detail read. Only issued for a selected fact. */
   detail: EnvelopeResult<MemoryFactDetailPayloadV1> | undefined;
   detailPending: boolean;
-  /** Relations touching this fact in the drawn constellation; `null` when the
+  /** Relations touching this fact in the drawn memory graph; `null` when the
    * fact is not among the drawn roots. */
   relations: number | null;
   graphRead: MemoryReadStatusV1 | undefined;

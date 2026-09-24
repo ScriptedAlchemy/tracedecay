@@ -477,6 +477,35 @@ describe("Memory geometry", () => {
     ).toBeTruthy();
   });
 
+  it("states each geometry read as a typed chip and prints pair identities by head and tail", async () => {
+    const longA = `fact.${"a".repeat(64)}.${"0".repeat(58)}000011`;
+    const longB = `fact.${"b".repeat(64)}.${"0".repeat(58)}000012`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/projection")) {
+          return json({
+            ...PROJECTION,
+            coverage: { completeness: "bounded", examined: 400, limit: 400, omission_reasons: ["request_limit_reached"] },
+          });
+        }
+        if (url.includes("/similarity")) {
+          return json({ ...SIMILARITY, limit: 5, pairs: [{ ...SIMILARITY.pairs[0]!, a_id: longA, b_id: longB }] });
+        }
+        return json(OVERVIEW_ENVELOPE);
+      }),
+    );
+    renderPage("/knowledge?view=geometry");
+    const projection = await screen.findByText("· pca · bounded · request_limit_reached");
+    expect(projection.closest("[data-state]")?.getAttribute("data-state")).toBe("partial");
+    const similarity = await screen.findByText("· 1 pair · list ended below the limit");
+    expect(similarity.closest("[data-state]")?.getAttribute("data-state")).toBe("ready");
+    expect(screen.getByTitle(longA).textContent).toBe("fact.aa…000011");
+    expect(screen.getByTitle(longB).textContent).toBe("fact.bb…000012");
+    expect(screen.getByText("likely duplicate").className).toBe("td-legend");
+  });
+
   it("names the pair list so it is reachable by keyboard", async () => {
     stubRoutes();
     renderPage("/knowledge?view=geometry");
