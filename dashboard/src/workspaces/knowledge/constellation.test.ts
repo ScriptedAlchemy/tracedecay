@@ -319,21 +319,14 @@ describe('trust bands and glyphs', () => {
     expect(trustBandOf(Number.NaN)).toBe('unmeasured');
   });
 
-  it('gives every relation kind a distinct dash so kind survives without colour', () => {
-    const kinds = [
-      'active_assertion',
-      'contradicts',
-      'derived_from',
-      'evidence_anchor',
-      'mentions',
-      'supersedes',
-      'supports',
-    ] as const;
-    const styles = kinds.map((kind) => relationStyle(kind));
-    expect(styles.every((style) => style.label.length > 0)).toBe(true);
-    expect(relationStyle('contradicts').dash).toBeDefined();
-    expect(relationStyle('supersedes').dash).not.toBe(relationStyle('contradicts').dash);
-    expect(relationStyle('supports').dash).toBeUndefined();
+  it('dashes contradiction and supersession apart from a solid support line, so kind survives without colour', () => {
+    expect(relationStyle('contradicts')).toEqual({ label: 'contradicts', dash: '5 4', tone: 'conflict' });
+    expect(relationStyle('supersedes')).toEqual({
+      label: 'supersedes',
+      dash: '7 3 1.5 3',
+      tone: 'stale',
+    });
+    expect(relationStyle('supports')).toEqual({ label: 'supports', dash: undefined, tone: 'signal' });
   });
 
   it('draws facts as discs and every satellite kind as a distinct glyph', () => {

@@ -89,7 +89,11 @@ describe('buildTraceModel', () => {
     // or drops the row. Neither is acceptable: recursion is measured.
     const built = model();
     const recursive = built.nodes.filter((node) => node.selfCalls > 0);
-    expect(recursive.length).toBeGreaterThan(0);
+    expect(recursive.map((node) => [node.id, node.selfCalls])).toEqual([
+      ['sym-24', 4],
+      ['sym-19', 2],
+      ['sym-8', 7],
+    ]);
     for (const node of recursive) {
       expect(built.channels.some((c) => c.a === node.id && c.b === node.id)).toBe(false);
     }

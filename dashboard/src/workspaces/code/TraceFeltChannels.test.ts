@@ -9,32 +9,28 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import type { SensoryChannelState } from '../../viz/trace/types.ts';
 import { channelState } from './TraceFeltChannels.tsx';
 
-const INERT: readonly SensoryChannelState[] = ['not-on-this-wire', 'coarser-scope'];
-
 describe('channelState', () => {
-
-  it('says which kind of absence, because they are different claims', () => {
+  it('prints each inert channel as its own kind of absence, in the unknown ink', () => {
     // "No field on this payload carried it" and "it exists, but only at a
     // coarser scope than this field draws" call for different next actions, so
-    // they are not allowed to collapse into one word.
-    expect(channelState('not-on-this-wire').label).toBe('not on this wire');
-    expect(channelState('coarser-scope').label).toBe('coarser scope');
-    expect(channelState('not-on-this-wire').label).not.toBe(
-      channelState('coarser-scope').label,
-    );
+    // they are not allowed to collapse into one word. The unknown ink is the
+    // same one `Reading` prints an absent measurement in.
+    expect(channelState('not-on-this-wire')).toEqual({
+      label: 'not on this wire',
+      tone: 'text-state-unknown',
+    });
+    expect(channelState('coarser-scope')).toEqual({
+      label: 'coarser scope',
+      tone: 'text-state-unknown',
+    });
   });
 
-  it('never lets an inert channel read as measured', () => {
-    for (const state of INERT) {
-      const printed = channelState(state);
-      expect(printed.label).not.toBe('measured');
-      expect(printed.label.length).toBeGreaterThan(0);
-      // The unknown ink is the same one `Reading` prints an absent measurement
-      // in, so an inert channel looks like the absence it is on both plates.
-      expect(printed.tone).toBe('text-state-unknown');
-    }
+  it('keeps the measured vocabulary and ink for a driven channel', () => {
+    expect(channelState('measured')).toEqual({
+      label: 'measured',
+      tone: 'text-text-secondary',
+    });
   });
 });

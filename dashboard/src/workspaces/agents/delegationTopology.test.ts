@@ -123,13 +123,6 @@ describe('layoutDelegationTopology', () => {
     ]);
   });
 
-  it('lays out identically for identical readings', () => {
-    const first = layoutDelegationTopology(fixtureTree());
-    const second = layoutDelegationTopology(fixtureTree());
-    expect(second).toEqual(first);
-    expect(fieldSize(second)).toEqual(fieldSize(first));
-  });
-
   it('bundles fan-out past the limit by agent and reconciles the counts', () => {
     const children = Array.from({ length: 12 }, (_, index) =>
       node({

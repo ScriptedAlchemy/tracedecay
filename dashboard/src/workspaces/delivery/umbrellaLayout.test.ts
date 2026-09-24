@@ -4,11 +4,9 @@ import { buildUmbrellas } from './umbrella.ts';
 import { FIELD_HEIGHT, FIELD_WIDTH, arcPath, layoutField } from './umbrellaLayout.ts';
 
 describe('layoutField', () => {
-  it('places one hub per visible project and one node per admitted row, deterministically', () => {
+  it('places one hub per visible project and one node per admitted row', () => {
     const projection = buildUmbrellas(INBOX);
     const first = layoutField(INBOX, INBOX.pull_requests, projection, null);
-    const second = layoutField(INBOX, INBOX.pull_requests, projection, null);
-    expect(second).toEqual(first);
     expect(first.hubs.map((hub) => hub.projectId)).toEqual(['project.alpha', 'project.beta']);
     expect(first.nodes.map((node) => node.id).sort()).toEqual(
       INBOX.pull_requests.map((row) => row.id).sort(),

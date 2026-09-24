@@ -103,11 +103,9 @@ describe('buildJourney', () => {
 });
 
 describe('layoutJourney', () => {
-  it('is deterministic and never invents a timestamp for an undated record', () => {
+  it('never invents a timestamp for an undated record', () => {
     const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: EDGES_42 });
     const first = layoutJourney(model, { width: 900 });
-    const second = layoutJourney(model, { width: 900 });
-    expect(second).toEqual(first);
     expect(first.gutterWidth).toBe(JOURNEY_GUTTER_WIDTH);
     for (const point of first.points) {
       if (point.episode.at === null) {

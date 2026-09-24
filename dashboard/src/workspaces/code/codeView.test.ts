@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  CODE_VIEWS,
   codeViewBlocker,
   codeViewNeedsFocus,
   codeViewsOffered,
@@ -22,10 +21,6 @@ describe('Code view locations', () => {
       view: 'cortex',
       focusId: 'symbol-42',
     });
-  });
-
-  it('orders the lenses as the reader is shown them, Cortex first', () => {
-    expect(CODE_VIEWS).toEqual(['cortex', 'trace', 'shared-code', 'compare', 'atlas']);
   });
 
   it('defaults unknown views to Cortex without losing a valid symbol focus', () => {

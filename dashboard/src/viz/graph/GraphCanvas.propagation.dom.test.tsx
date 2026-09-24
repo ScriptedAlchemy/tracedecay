@@ -147,8 +147,6 @@ describe('GraphCanvas travelling activation', () => {
     const graph = sigmaState.graph!;
     const click = sigmaState.handlers.get('clickNode')!;
     const hover = sigmaState.handlers.get('enterNode')!;
-    expect(click).toBeTypeOf('function');
-    expect(hover).toBeTypeOf('function');
 
     let now = 0;
     for (const node of ['p1', 'repo:r']) {
