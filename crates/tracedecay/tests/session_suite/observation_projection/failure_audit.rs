@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queue() {
     for (stage, trigger) in [
-        ("message", "BEFORE INSERT ON session_messages"),
+        ("message", "BEFORE INSERT ON lcm_raw_messages"),
         (
             "provenance",
             "BEFORE INSERT ON observation_projection_provenance",
@@ -786,7 +786,7 @@ async fn projected_message_update_invalidates_audit_and_fails_reopen() {
     let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
-            "UPDATE session_messages SET text = 'tampered projection body'
+            "UPDATE lcm_raw_messages SET content = 'tampered projection body'
              WHERE provider = 'claude' AND message_id = 'message-audit-update'",
             (),
         )
@@ -833,7 +833,7 @@ async fn projected_message_delete_is_restored_from_the_immutable_projection() {
     let raw_conn = rusqlite::Connection::open(database_path).unwrap();
     raw_conn
         .execute(
-            "DELETE FROM session_messages
+            "DELETE FROM lcm_raw_messages
              WHERE provider = 'claude' AND message_id = 'message-audit-delete'",
             (),
         )

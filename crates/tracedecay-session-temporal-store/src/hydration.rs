@@ -42,6 +42,12 @@ const MAX_SUMMARY_SOURCE_RELATIONS: usize = 256;
 const PAYLOAD_PROOF_WINDOW_BYTES: usize = 64 * 1024;
 /// The occurrence's source observation envelope. Message rows store only the
 /// metadata the envelope lacks, so the record's full metadata joins it back.
+/// Stored message metadata without the raw authority's ingest-protection
+/// receipts, which are storage bookkeeping rather than message metadata.
+const SERVED_MESSAGE_METADATA_COLUMN: &str = "CASE WHEN json_valid(message.metadata_json)
+      THEN NULLIF(json_remove(message.metadata_json, '$.ingest_protection'), '{}')
+      ELSE message.metadata_json END";
+
 const OCCURRENCE_ENVELOPE_COLUMN: &str =
     "(SELECT json_extract(observation.observation_json, '$.payload')
    FROM observations AS observation
@@ -507,12 +513,12 @@ pub(super) async fn session_message_from_hydrated_bytes(
                         source.provider, occurrence.session_id,
                         message.timestamp, message.kind, message.model,
                         message.tool_names, message.source_path, message.source_offset,
-                        message.metadata_json, message.role, message.session_id,
+                        {SERVED_MESSAGE_METADATA_COLUMN}, message.role, message.session_id,
                         {OCCURRENCE_ENVELOPE_COLUMN}
                  FROM session_occurrences AS occurrence
                  JOIN sessions AS source
                    ON source.session_id = occurrence.session_id
-                 LEFT JOIN session_messages AS message
+                 LEFT JOIN lcm_raw_messages AS message
                    ON message.provider = source.provider
                   AND message.message_id = occurrence.message_id
                   AND message.session_id = occurrence.session_id
@@ -542,7 +548,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
                         source.provider, occurrence.session_id,
                         message.timestamp, message.kind, message.model,
                         message.tool_names, message.source_path, message.source_offset,
-                        message.metadata_json, message.role, message.session_id,
+                        {SERVED_MESSAGE_METADATA_COLUMN}, message.role, message.session_id,
                         {OCCURRENCE_ENVELOPE_COLUMN}
                  FROM session_occurrences AS occurrence
                  JOIN session_temporal_generations AS generation
@@ -551,7 +557,7 @@ pub(super) async fn session_message_from_hydrated_bytes(
                   AND generation.state = 'active'
                  JOIN sessions AS source
                    ON source.session_id = occurrence.session_id
-                 LEFT JOIN session_messages AS message
+                 LEFT JOIN lcm_raw_messages AS message
                    ON message.provider = source.provider
                   AND message.message_id = occurrence.message_id
                   AND message.session_id = occurrence.session_id

@@ -3,6 +3,7 @@ use std::path::Path;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
+use tracedecay_lcm::raw::stored_message_record_select_columns;
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeResponse, LcmError, LcmExpandQueryRequest,
     LcmExpandQueryResponse, LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport,
@@ -37,22 +38,17 @@ async fn require_current_protection_input(
     conn: &(impl QueryExecutor + ?Sized),
     expected: &RawProtectionInput,
 ) -> Result<(), LcmError> {
+    let sql = format!(
+        "SELECT {},
+                role, ordinal, timestamp, content_hash, storage_kind, payload_ref, metadata_json
+         FROM lcm_raw_messages AS raw
+         WHERE store_id = ?1 AND provider = ?2 AND session_id = ?3 AND message_id = ?4
+         LIMIT 1",
+        stored_message_record_select_columns("raw")
+    );
     let mut rows = conn
         .query(
-            "SELECT message.provider, message.message_id, message.session_id,
-                    message.role, message.timestamp, message.ordinal, message.text,
-                    message.kind, message.model, message.tool_names, message.source_path,
-                    message.source_offset, message.metadata_json,
-                    raw.role, raw.ordinal, raw.timestamp, raw.content_hash,
-                    raw.storage_kind, raw.payload_ref, raw.metadata_json
-             FROM lcm_raw_messages AS raw
-             JOIN session_messages AS message
-               ON message.provider = raw.provider
-              AND message.message_id = raw.message_id
-              AND message.session_id = raw.session_id
-             WHERE raw.store_id = ?1 AND raw.provider = ?2
-               AND raw.session_id = ?3 AND raw.message_id = ?4
-             LIMIT 1",
+            &sql,
             params![
                 expected.store_id,
                 expected.message.provider.as_str(),
@@ -66,21 +62,7 @@ async fn require_current_protection_input(
             store_id: expected.store_id,
         });
     };
-    let actual_message = SessionMessageRecord {
-        provider: row.get(0)?,
-        message_id: row.get(1)?,
-        session_id: row.get(2)?,
-        role: row.get(3)?,
-        timestamp: row.get(4)?,
-        ordinal: row.get(5)?,
-        text: row.get(6)?,
-        kind: row.get(7)?,
-        model: row.get(8)?,
-        tool_names: row.get(9)?,
-        source_path: row.get(10)?,
-        source_offset: row.get(11)?,
-        metadata_json: row.get(12)?,
-    };
+    let actual_message = message_record_from_row(&row)?;
     let actual_raw_revision = RawProtectionRevision {
         role: row.get(13)?,
         ordinal: row.get(14)?,
@@ -96,6 +78,26 @@ async fn require_current_protection_input(
         });
     }
     Ok(())
+}
+
+fn message_record_from_row(
+    row: &tracedecay_runtime_core::db::engine::Row,
+) -> Result<SessionMessageRecord, LcmError> {
+    Ok(SessionMessageRecord {
+        provider: row.get(0)?,
+        message_id: row.get(1)?,
+        session_id: row.get(2)?,
+        role: row.get(3)?,
+        timestamp: row.get(4)?,
+        ordinal: row.get(5)?,
+        text: row.get(6)?,
+        kind: row.get(7)?,
+        model: row.get(8)?,
+        tool_names: row.get(9)?,
+        source_path: row.get(10)?,
+        source_offset: row.get(11)?,
+        metadata_json: row.get(12)?,
+    })
 }
 
 async fn require_current_raw_protection_revision(
@@ -369,13 +371,10 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     /// ingest-protection shape before an LCM read or compression consumes
     /// them.
     ///
-    /// The observation projection lands `lcm_raw_messages` rows without a
-    /// sanitization receipt and deliberately preserves protected payloads on
-    /// replay, so this pass is the second phase of that design: each
-    /// unreceipted row is re-ingested from its canonical `session_messages`
-    /// projection through the privacy firewall, binding the receipt the
-    /// verified raw loads require. Already-protected rows are left untouched,
-    /// making the pass idempotent and bounded to one session.
+    /// Each unreceipted inline row is re-ingested from its own stored body
+    /// through the privacy firewall, binding the receipt the verified raw
+    /// loads require. Already-protected rows are left untouched, making the
+    /// pass idempotent and bounded to one session.
     #[hotpath::skip]
     pub async fn lcm_protect_session_raw_messages(
         &self,
@@ -430,28 +429,24 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             .map(|row| row.get::<i64>(0))
             .transpose()?;
         drop(generation_rows);
+        let sql = format!(
+            "SELECT {},
+                    role, ordinal, timestamp, content_hash, storage_kind, payload_ref,
+                    metadata_json, store_id,
+                    CASE WHEN json_extract(
+                        metadata_json,
+                        '$.ingest_protection.sanitization_receipt'
+                    ) IS NULL THEN 1 ELSE 0 END,
+                    COALESCE(length(CAST(content AS BLOB)), 0)
+             FROM lcm_raw_messages AS raw
+             WHERE provider = ?1 AND session_id = ?2 AND store_id > ?3
+             ORDER BY store_id
+             LIMIT ?4",
+            stored_message_record_select_columns("raw")
+        );
         let mut rows = QueryExecutor::query(
             &snapshot,
-            "SELECT raw.store_id,
-                        CASE WHEN json_extract(
-                            raw.metadata_json,
-                            '$.ingest_protection.sanitization_receipt'
-                        ) IS NULL THEN 1 ELSE 0 END,
-                        COALESCE(length(CAST(message.text AS BLOB)), 0),
-                        message.provider, message.message_id, message.session_id, message.role,
-                        message.timestamp, message.ordinal, message.text, message.kind,
-                        message.model, message.tool_names, message.source_path,
-                        message.source_offset, message.metadata_json,
-                        raw.role, raw.ordinal, raw.timestamp, raw.content_hash,
-                        raw.storage_kind, raw.payload_ref, raw.metadata_json
-                 FROM lcm_raw_messages AS raw
-                 LEFT JOIN session_messages AS message
-                   ON raw.provider = message.provider
-                  AND raw.message_id = message.message_id
-                 WHERE raw.provider = ?1 AND raw.session_id = ?2
-                   AND raw.store_id > ?3
-                 ORDER BY raw.store_id
-                 LIMIT ?4",
+            &sql,
             params![
                 provider,
                 session_id,
@@ -469,9 +464,9 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         let mut frontier_store_id = after_store_id;
         let mut byte_limited = false;
         while let Some(row) = rows.next().await? {
-            let store_id: i64 = row.get(0)?;
-            let needs_protection = row.get::<i64>(1)? != 0;
-            let row_bytes = u64::try_from(row.get::<i64>(2)?).map_err(|error| {
+            let store_id: i64 = row.get(20)?;
+            let needs_protection = row.get::<i64>(21)? != 0;
+            let row_bytes = u64::try_from(row.get::<i64>(22)?).map_err(|error| {
                 LcmError::Db(format!("invalid LCM protection row byte count: {error}"))
             })?;
             if bytes_scanned.saturating_add(row_bytes) > page_max_bytes {
@@ -485,66 +480,30 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
             bytes_scanned = bytes_scanned.saturating_add(row_bytes);
             frontier_store_id = store_id;
             let raw_revision = RawProtectionRevision {
-                role: row.get(16)?,
-                ordinal: row.get(17)?,
-                timestamp: row.get(18)?,
-                content_hash: row.get(19)?,
-                storage_kind: row.get(20)?,
-                payload_ref: row.get(21)?,
-                metadata_json: row.get(22)?,
+                role: row.get(13)?,
+                ordinal: row.get(14)?,
+                timestamp: row.get(15)?,
+                content_hash: row.get(16)?,
+                storage_kind: row.get(17)?,
+                payload_ref: row.get(18)?,
+                metadata_json: row.get(19)?,
             };
             scanned_revisions.push((store_id, raw_revision.clone()));
             if !needs_protection {
                 continue;
             }
-            let message = SessionMessageRecord {
-                provider: row.get::<Option<String>>(3)?.ok_or_else(|| {
-                    LcmError::SummarySourceUnavailable {
-                        source_id: store_id.to_string(),
-                        reason: "canonical_session_message_missing".to_string(),
-                    }
-                })?,
-                message_id: row.get::<Option<String>>(4)?.ok_or_else(|| {
-                    LcmError::SummarySourceUnavailable {
-                        source_id: store_id.to_string(),
-                        reason: "canonical_session_message_missing".to_string(),
-                    }
-                })?,
-                session_id: row.get::<Option<String>>(5)?.ok_or_else(|| {
-                    LcmError::SummarySourceUnavailable {
-                        source_id: store_id.to_string(),
-                        reason: "canonical_session_message_missing".to_string(),
-                    }
-                })?,
-                role: row.get::<Option<String>>(6)?.ok_or_else(|| {
-                    LcmError::SummarySourceUnavailable {
-                        source_id: store_id.to_string(),
-                        reason: "canonical_session_message_missing".to_string(),
-                    }
-                })?,
-                timestamp: row.get(7)?,
-                ordinal: row.get::<Option<i64>>(8)?.ok_or_else(|| {
-                    LcmError::SummarySourceUnavailable {
-                        source_id: store_id.to_string(),
-                        reason: "canonical_session_message_missing".to_string(),
-                    }
-                })?,
-                text: row.get::<Option<String>>(9)?.ok_or_else(|| {
-                    LcmError::SummarySourceUnavailable {
-                        source_id: store_id.to_string(),
-                        reason: "canonical_session_message_missing".to_string(),
-                    }
-                })?,
-                kind: row.get(10)?,
-                model: row.get(11)?,
-                tool_names: row.get(12)?,
-                source_path: row.get(13)?,
-                source_offset: row.get(14)?,
-                metadata_json: row.get(15)?,
-            };
+            // An unreceipted row is re-ingested from its own stored body. A
+            // body stored outside the row leaves only its placeholder here,
+            // which is not the message and must not be re-ingested as one.
+            if raw_revision.storage_kind != "inline" {
+                return Err(LcmError::SummarySourceUnavailable {
+                    source_id: store_id.to_string(),
+                    reason: "external_body_without_receipt".to_string(),
+                });
+            }
             unprotected.push(RawProtectionInput {
                 store_id,
-                message,
+                message: message_record_from_row(&row)?,
                 raw_revision,
             });
         }

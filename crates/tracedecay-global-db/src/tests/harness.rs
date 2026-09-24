@@ -810,7 +810,7 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: &str,
         transcript_path: &std::path::Path,
-    ) -> tracedecay_domain::errors::Result<(i64, i64, i64, i64, i64, i64, i64)> {
+    ) -> tracedecay_domain::errors::Result<(i64, i64, i64, i64, i64, i64)> {
         let snapshot = self
             .session_database_for_test(scope)?
             .read_snapshot()
@@ -819,8 +819,6 @@ impl HostAdmissionTestRuntimeV1 {
             .query(
                 "SELECT
                     (SELECT COUNT(*) FROM sessions
-                     WHERE provider = ?1 AND session_id = ?2),
-                    (SELECT COUNT(*) FROM session_messages
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages
                      WHERE provider = ?1 AND session_id = ?2),
@@ -855,7 +853,6 @@ impl HostAdmissionTestRuntimeV1 {
             row.get(3)?,
             row.get(4)?,
             row.get(5)?,
-            row.get(6)?,
         ))
     }
 
@@ -871,7 +868,7 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         let deleted = transaction
             .execute(
-                "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
                 tracedecay_runtime_core::db::engine::params![provider, message_id],
             )
             .await?;

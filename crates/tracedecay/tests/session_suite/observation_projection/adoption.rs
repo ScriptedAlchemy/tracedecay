@@ -1,4 +1,34 @@
 use super::*;
+use tracedecay_store::SessionMessageRecord;
+
+/// Stores a pre-existing message row exactly as the projector would store
+/// `message`, the shape a matching row takes whoever wrote it.
+fn insert_stored_message(conn: &rusqlite::Connection, message: SessionMessageRecord) {
+    let stored = tracedecay_lcm::raw::projection_stored_message(&message).unwrap();
+    conn.execute(
+        "INSERT INTO lcm_raw_messages
+            (provider, message_id, session_id, role, timestamp, ordinal, content, content_hash,
+             storage_kind, kind, model, tool_names, source_path, source_offset, metadata_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'inline', ?9, ?10, ?11, ?12, ?13, ?14)",
+        rusqlite::params![
+            stored.provider,
+            stored.message_id,
+            stored.session_id,
+            stored.role,
+            stored.timestamp,
+            stored.ordinal,
+            stored.text,
+            tracedecay_lcm::retrieval_content::projected_content_hash(&stored.text),
+            stored.kind,
+            stored.model,
+            stored.tool_names,
+            stored.source_path,
+            stored.source_offset,
+            stored.metadata_json,
+        ],
+    )
+    .unwrap();
+}
 
 #[tokio::test]
 async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
@@ -34,28 +64,24 @@ async fn exact_v1_message_is_adopted_and_richer_session_survives_rebuild() {
         "source_generation": GENERATION,
     }))
     .unwrap();
-    conn.execute(
-        "INSERT INTO session_messages
-            (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-             tool_names, source_path, source_offset, metadata_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        rusqlite::params![
-            "claude",
-            "message-v1",
-            "session-v1",
-            "assistant",
-            1_750_000_000_i64,
-            0_i64,
-            serde_json::to_string(&json!([{"type": "text", "text": "v1 parity canary"}])).unwrap(),
-            "message",
-            "claude-sonnet-4",
-            Option::<String>::None,
-            "claude:session-v1",
-            0_i64,
-            metadata_json,
-        ],
-    )
-    .unwrap();
+    insert_stored_message(
+        &conn,
+        SessionMessageRecord {
+            provider: "claude".to_owned(),
+            message_id: "message-v1".to_owned(),
+            session_id: "session-v1".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(1_750_000_000),
+            ordinal: 0,
+            text: serde_json::to_string(&json!([{"type": "text", "text": "v1 parity canary"}])).unwrap(),
+            kind: Some("message".to_owned()),
+            model: Some("claude-sonnet-4".to_owned()),
+            tool_names: None,
+            source_path: Some("claude:session-v1".to_owned()),
+            source_offset: Some(0),
+            metadata_json: Some(metadata_json),
+        },
+    );
     drop(conn);
 
     store
@@ -146,29 +172,25 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
         "source_generation": GENERATION,
     }))
     .unwrap();
-    conn.execute(
-        "INSERT INTO session_messages
-            (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-             tool_names, source_path, source_offset, metadata_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        rusqlite::params![
-            "claude",
-            "message-adopted-rollover",
-            "session-adopted-rollover",
-            "assistant",
-            1_750_000_000_i64,
-            0_i64,
-            serde_json::to_string(&json!([{"type": "text", "text": "adopted original canary"}]))
+    insert_stored_message(
+        &conn,
+        SessionMessageRecord {
+            provider: "claude".to_owned(),
+            message_id: "message-adopted-rollover".to_owned(),
+            session_id: "session-adopted-rollover".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(1_750_000_000),
+            ordinal: 0,
+            text: serde_json::to_string(&json!([{"type": "text", "text": "adopted original canary"}]))
                 .unwrap(),
-            "message",
-            "claude-sonnet-4",
-            Option::<String>::None,
-            "claude:session-adopted-rollover",
-            0_i64,
-            metadata_json,
-        ],
-    )
-    .unwrap();
+            kind: Some("message".to_owned()),
+            model: Some("claude-sonnet-4".to_owned()),
+            tool_names: None,
+            source_path: Some("claude:session-adopted-rollover".to_owned()),
+            source_offset: Some(0),
+            metadata_json: Some(metadata_json),
+        },
+    );
     drop(conn);
 
     drain_projection_queue(&store).await;

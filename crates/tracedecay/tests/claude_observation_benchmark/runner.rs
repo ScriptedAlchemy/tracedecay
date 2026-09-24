@@ -216,7 +216,7 @@ impl Fixture {
         let mut rows = snapshot
             .query(
                 "SELECT
-                    (SELECT COUNT(*) FROM session_messages WHERE provider = 'claude'),
+                    (SELECT COUNT(*) FROM lcm_raw_messages WHERE provider = 'claude'),
                     COUNT(*),
                     COALESCE(SUM(message_created), 0)
                  FROM observation_projection_provenance

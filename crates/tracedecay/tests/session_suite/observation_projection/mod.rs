@@ -380,17 +380,18 @@ async fn search_session_messages(
     let mut statement = conn
         .prepare(
             "SELECT message.message_id, message.role, message.timestamp, message.ordinal,
-                    message.text, message.kind, message.model, message.tool_names,
-                    message.source_path, message.source_offset
-             FROM session_messages_fts
-             JOIN session_messages AS message ON message.rowid = session_messages_fts.rowid
+                    COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                    message.model, message.tool_names, message.source_path,
+                    message.source_offset
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages AS message ON message.store_id = lcm_raw_messages_fts.rowid
              JOIN sessions AS session
                ON session.provider = message.provider
               AND session.session_id = message.session_id
-             WHERE session_messages_fts MATCH ?1
+             WHERE lcm_raw_messages_fts MATCH ?1
                AND message.provider = 'claude'
                AND session.project_key = 'user'
-             ORDER BY bm25(session_messages_fts)
+             ORDER BY bm25(lcm_raw_messages_fts)
              LIMIT ?2",
         )
         .unwrap();
@@ -517,7 +518,7 @@ async fn audited_projection_fixture(session_id: &str, message_id: &str) -> TempD
 async fn projection_counts(tmp: &TempDir) -> (i64, i64, i64, i64, i64, i64) {
     (
         table_count(tmp, "sessions").await,
-        table_count(tmp, "session_messages").await,
+        table_count(tmp, "lcm_raw_messages").await,
         table_count(tmp, "observation_projection_provenance").await,
         table_count(tmp, "observation_projection_checkpoints").await,
         table_count(tmp, "observation_projection_dispositions").await,
@@ -583,7 +584,10 @@ async fn all_projected_message_texts(tmp: &TempDir) -> Vec<String> {
 
 async fn projected_message_texts_where(tmp: &TempDir, predicate: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
-    let sql = format!("SELECT text FROM session_messages {predicate} ORDER BY message_id");
+    let sql = format!(
+        "SELECT COALESCE(content, placeholder_text, '') FROM lcm_raw_messages {predicate}
+         ORDER BY message_id"
+    );
     let mut statement = conn.prepare(&sql).unwrap();
     statement
         .query_map((), |row| row.get(0))

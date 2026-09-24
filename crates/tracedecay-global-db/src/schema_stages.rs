@@ -224,68 +224,11 @@ const TRANSCRIPT_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_sessions_active_project_path
         ON sessions(project_path, provider, session_id)
         WHERE ended_at IS NULL;
-    CREATE TABLE IF NOT EXISTS session_messages (
-        provider TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        timestamp INTEGER,
-        ordinal INTEGER NOT NULL,
-        text TEXT NOT NULL,
-        kind TEXT,
-        model TEXT,
-        tool_names TEXT,
-        source_path TEXT,
-        source_offset INTEGER,
-        metadata_json TEXT,
-        PRIMARY KEY(provider, message_id),
-        FOREIGN KEY(provider, session_id)
-            REFERENCES sessions(provider, session_id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_session_messages_session
-        ON session_messages(provider, session_id, ordinal);
-    CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp
-        ON session_messages(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_session_messages_source
-        ON session_messages(source_path);
-    CREATE INDEX IF NOT EXISTS idx_session_messages_session_activity_v2
-        ON session_messages(
-            provider, session_id, timestamp, ordinal, message_id, kind, tool_names
-        );
     CREATE TABLE IF NOT EXISTS session_backfill_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
-        text, role, kind, model, tool_names,
-        content='session_messages', content_rowid='rowid'
-    );
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
-        AFTER INSERT ON session_messages BEGIN
-            INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
-            VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
-        END;
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
-        AFTER DELETE ON session_messages BEGIN
-            INSERT INTO session_messages_fts(
-                session_messages_fts, rowid, text, role, kind, model, tool_names
-            )
-            VALUES (
-                'delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names
-            );
-        END;
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
-        AFTER UPDATE ON session_messages BEGIN
-            INSERT INTO session_messages_fts(
-                session_messages_fts, rowid, text, role, kind, model, tool_names
-            )
-            VALUES (
-                'delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names
-            );
-            INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
-            VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
-        END;
 ";
 
 const DELIVERY_SETTLEMENT_SCHEMA: &str = "

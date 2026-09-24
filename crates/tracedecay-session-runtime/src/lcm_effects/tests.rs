@@ -318,7 +318,7 @@ async fn preflight_reads_canonical_state_without_creating_or_ingesting_a_session
     assert!(response.replay_messages.is_empty());
 
     let snapshot = db.read_snapshot().await.unwrap();
-    for table in ["sessions", "session_messages", "lcm_raw_messages"] {
+    for table in ["sessions", "lcm_raw_messages"] {
         let mut rows = snapshot
             .query(&format!("SELECT COUNT(*) FROM {table}"), ())
             .await
@@ -1838,58 +1838,72 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     );
 }
 
-#[tokio::test]
-async fn mega_session_convergence_bounds_protection_and_compression_pages() {
-    const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
-    let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-mega").await;
-    let db = harness.registered.clone();
-    let storage_root = db.db_path().parent().unwrap();
-    let session_id = "mega-convergence-session";
-    assert!(db.upsert_session(&session("cursor", session_id)).await);
-    for ordinal in 1..=RAW_ROWS {
-        let mut record = message(session_id, ordinal);
-        record.message_id = format!("{session_id}-message-{ordinal}");
-        record.text = format!("{ordinal:04}:{}", "bounded retained context ".repeat(32));
-        db.lcm_ingest_raw_message(storage_root, &record)
+#[test]
+fn mega_session_convergence_bounds_protection_and_compression_pages() {
+    run_with_test_env_lock(async {
+        // Summarization must never reach the operator's installed agent CLI.
+        let temporary = tempfile::tempdir().unwrap();
+        let missing_bin = temporary.path().join("cursor-agent-absent");
+        let missing_bin_env = missing_bin.to_string_lossy().into_owned();
+        let workspace_env = temporary.path().to_string_lossy().into_owned();
+        let _env = TestEnvironment::set([
+            ("TRACEDECAY_CURSOR_AGENT_BIN", missing_bin_env.as_str()),
+            (
+                "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
+                workspace_env.as_str(),
+            ),
+        ]);
+        const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
+        let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-mega").await;
+        let db = harness.registered.clone();
+        let storage_root = db.db_path().parent().unwrap();
+        let session_id = "mega-convergence-session";
+        assert!(db.upsert_session(&session("cursor", session_id)).await);
+        for ordinal in 1..=RAW_ROWS {
+            let mut record = message(session_id, ordinal);
+            record.message_id = format!("{session_id}-message-{ordinal}");
+            record.text = format!("{ordinal:04}:{}", "bounded retained context ".repeat(32));
+            db.lcm_ingest_raw_message(storage_root, &record)
+                .await
+                .unwrap();
+        }
+
+        let first = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
             .await
             .unwrap();
-    }
+        assert_eq!(first.sessions.len(), 1);
+        assert_eq!(
+            first.sessions[0].disposition,
+            super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Preparing
+        );
+        assert_eq!(
+            first.sessions[0].protection_rows_scanned,
+            tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
+        );
+        assert_eq!(first.sessions[0].compression_rows_scanned, 0);
+        assert!(
+            first.sessions[0].protection_bytes_scanned
+                <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
+        );
 
-    let first = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
-        .await
-        .unwrap();
-    assert_eq!(first.sessions.len(), 1);
-    assert_eq!(
-        first.sessions[0].disposition,
-        super::super::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Preparing
-    );
-    assert_eq!(
-        first.sessions[0].protection_rows_scanned,
-        tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
-    );
-    assert_eq!(first.sessions[0].compression_rows_scanned, 0);
-    assert!(
-        first.sessions[0].protection_bytes_scanned
-            <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
-    );
-
-    let second = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
-        .await
-        .unwrap();
-    assert!(
-        second.sessions[0].compression_rows_scanned <= tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
-    );
-    assert!(
-        second.sessions[0].compression_bytes_scanned
-            <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
-    );
-    assert_eq!(
-        db.lcm_status("cursor", Some(session_id))
+        let second = super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
             .await
-            .unwrap()
-            .raw_message_count,
-        RAW_ROWS
-    );
+            .unwrap();
+        assert!(
+            second.sessions[0].compression_rows_scanned <= tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize
+        );
+        assert!(
+            second.sessions[0].compression_bytes_scanned
+                <= tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64
+        );
+        assert_eq!(
+            db.lcm_status("cursor", Some(session_id))
+                .await
+                .unwrap()
+                .raw_message_count,
+            RAW_ROWS
+        );
+    });
 }
 
 #[cfg(unix)]
@@ -2624,27 +2638,10 @@ async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
         record.text = format!("{ordinal:04}:{body}");
         transaction
             .execute(
-                "INSERT INTO session_messages (
-                        provider, message_id, session_id, role, timestamp, ordinal, text
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    record.provider.as_str(),
-                    record.message_id.as_str(),
-                    record.session_id.as_str(),
-                    record.role.as_str(),
-                    record.timestamp,
-                    record.ordinal,
-                    record.text.as_str(),
-                ],
-            )
-            .await
-            .unwrap();
-        transaction
-            .execute(
                 "INSERT INTO lcm_raw_messages (
                         provider, message_id, session_id, role, ordinal, timestamp,
                         content, content_hash, storage_kind, metadata_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?2, 'inline', '{}')",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?2, 'inline', '{}')",
                 params![
                     record.provider.as_str(),
                     record.message_id.as_str(),
@@ -2652,6 +2649,7 @@ async fn large_byte_session_stops_each_retained_pass_at_the_existing_budget() {
                     record.role.as_str(),
                     record.ordinal,
                     record.timestamp,
+                    record.text.as_str(),
                 ],
             )
             .await
@@ -2704,26 +2702,17 @@ fn concurrent_raw_revision_cannot_be_overwritten_by_staged_protection() {
             let text = format!("source-a-{ordinal}:{}", "x".repeat(768 * 1024));
             transaction
                 .execute(
-                    "INSERT INTO session_messages (
-                            provider, message_id, session_id, role, timestamp, ordinal, text, kind
-                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, ?4, 'tool_result')",
+                    "INSERT INTO lcm_raw_messages (
+                            provider, message_id, session_id, role, ordinal, timestamp,
+                            content, content_hash, storage_kind, metadata_json, kind
+                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, ?4, ?1,
+                                   'inline', '{}', 'tool_result')",
                     params![
                         format!("barrier-message-{ordinal}"),
                         session_id,
                         ordinal,
                         text
                     ],
-                )
-                .await
-                .unwrap();
-            transaction
-                .execute(
-                    "INSERT INTO lcm_raw_messages (
-                            provider, message_id, session_id, role, ordinal, timestamp,
-                            content, content_hash, storage_kind, metadata_json
-                         ) VALUES ('cursor', ?1, ?2, 'tool', ?3, ?3, '', ?1,
-                                   'inline', '{}')",
-                    params![format!("barrier-message-{ordinal}"), session_id, ordinal],
                 )
                 .await
                 .unwrap();
@@ -3019,9 +3008,10 @@ async fn insert_summary_evidence(
     let transaction = db.begin_write_transaction().await.unwrap();
     transaction
         .execute(
-            "INSERT INTO session_messages (
-                     provider, message_id, session_id, role, ordinal, text, kind, metadata_json
-                 ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?6, ?7)",
+            "INSERT INTO lcm_raw_messages (
+                     provider, message_id, session_id, role, ordinal, content, content_hash,
+                     storage_kind, kind, metadata_json
+                 ) VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?2, 'inline', ?6, ?7)",
             tracedecay_runtime_core::db::engine::params![
                 provider,
                 message_id,

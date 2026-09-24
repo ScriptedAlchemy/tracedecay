@@ -69,19 +69,6 @@ async fn ensure_gc_test_schema(conn: &Connection) -> Result<(), String> {
             title TEXT,
             started_at INTEGER,
             PRIMARY KEY(provider, session_id)
-        );
-        CREATE TABLE IF NOT EXISTS session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id),
-            FOREIGN KEY(provider, session_id)
-                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
         );",
     )
     .await

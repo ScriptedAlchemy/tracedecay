@@ -650,11 +650,11 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
 
     for message in messages {
         // Production ingest persists every message as a canonical durable
-        // observation (which projects the session_messages row itself) plus
-        // the raw LCM payload row; the session-temporal refresh discovers
-        // sessions ONLY from the observation effects, so the fixture walks
-        // the same two writes instead of raw session_messages upserts the
-        // temporal projection would never see.
+        // observation (which projects the message row itself) plus the raw
+        // LCM payload row; the session-temporal refresh discovers sessions
+        // ONLY from the observation effects, so the fixture walks the same
+        // two writes instead of raw message upserts the temporal projection
+        // would never see.
         runtime
             .lcm_ingest_raw_message_for_test(HostAdmissionScope::Project, &message)
             .await

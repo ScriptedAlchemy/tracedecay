@@ -668,7 +668,7 @@ type ProjectedSessionRow = (
     Option<String>,
 );
 
-/// Projected `session_messages` row captured verbatim from a clean drain.
+/// Projected message row captured verbatim from a clean drain.
 type ProjectedMessageRow = (
     String,
     String,
@@ -683,6 +683,7 @@ type ProjectedMessageRow = (
     Option<String>,
     Option<i64>,
     Option<String>,
+    String,
 );
 
 async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<ProvenanceRow> {
@@ -1328,9 +1329,10 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO session_messages
-                (provider, message_id, session_id, role, ordinal, text)
-             VALUES (?1, ?2, ?3, 'assistant', 0, 'stale era output')",
+            "INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, ordinal, content, content_hash,
+                 storage_kind)
+             VALUES (?1, ?2, ?3, 'assistant', 0, 'stale era output', 'h', 'inline')",
             params![COLLISION_PROVIDER, "stale-era-output", session_id.as_str()],
         )
         .await
@@ -1399,7 +1401,7 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
         0
     );
     assert_eq!(table_count(&runtime, "observation_workflow_facts").await, 0);
-    assert_eq!(table_count(&runtime, "session_messages").await, 1);
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
     assert_eq!(table_count(&runtime, "sessions").await, 1);
     // The retained observation row itself stays immutable.
     let stored = store
@@ -1443,7 +1445,7 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
 }
 
 /// A provenance binding that names a different output but has no backing
-/// `session_messages` row is corrupt authority, not an existing-output
+/// message row is corrupt authority, not an existing-output
 /// collision. It must stay a hard `ProvenanceCollision`: the checkpoint and
 /// queue remain in place and the ghost provenance row is not deleted.
 #[tokio::test]
@@ -1500,7 +1502,7 @@ async fn drain_keeps_ghost_provenance_binding_a_hard_error() {
     transaction.commit().await.unwrap();
     let stale_rows = provenance_rows(&runtime).await;
     assert_eq!(stale_rows.len(), 1);
-    assert_eq!(table_count(&runtime, "session_messages").await, 0);
+    assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 0);
 
     let error = store
         .project_observation(observation.observation_id())
@@ -3539,9 +3541,9 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
     drop(rows);
     let mut rows = scratch_snapshot
         .query(
-            "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind,
-                    model, tool_names, source_path, source_offset, metadata_json
-             FROM session_messages",
+            "SELECT provider, message_id, session_id, role, timestamp, ordinal, content, kind,
+                    model, tool_names, source_path, source_offset, metadata_json, content_hash
+             FROM lcm_raw_messages",
             (),
         )
         .await
@@ -3561,6 +3563,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         message_row.get(10).unwrap(),
         message_row.get(11).unwrap(),
         message_row.get(12).unwrap(),
+        message_row.get(13).unwrap(),
     );
     drop(rows);
 
@@ -3623,10 +3626,11 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO session_messages
-                (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-                 tool_names, source_path, source_offset, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO lcm_raw_messages
+                (provider, message_id, session_id, role, timestamp, ordinal, content, kind, model,
+                 tool_names, source_path, source_offset, metadata_json, content_hash,
+                 storage_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'inline')",
             params![
                 projected_message.0.as_str(),
                 projected_message.1.as_str(),
@@ -3641,6 +3645,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
                 projected_message.10.as_deref(),
                 projected_message.11,
                 projected_message.12.as_deref(),
+                projected_message.13.as_str(),
             ],
         )
         .await

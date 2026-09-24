@@ -173,7 +173,6 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 0);
     assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 0);
-    assert_eq!(table_count(&tmp, "session_messages_fts").await, 0);
 
     let rebuilt_full = rebuild_projection_to_completion(&store, 3).await;
     assert_eq!(rebuilt_full.projected_rows(), 3);
@@ -181,7 +180,6 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     assert_eq!(projection_counts(&tmp).await, (1, 3, 3, 1, 0, 0));
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
     assert_eq!(table_count(&tmp, "lcm_raw_messages_fts").await, 3);
-    assert_eq!(table_count(&tmp, "session_messages_fts").await, 3);
     assert_eq!(
         projected_message_texts(&tmp).await,
         incrementally_projected_texts
@@ -434,14 +432,14 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
     add_other_projector_owner(&tmp, candidate.observation_id()).await;
 
     rebuild_projection_to_completion(&store, 0).await;
-    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2
     );
 
     rebuild_projection_to_completion(&store, 1).await;
-    assert_eq!(table_count(&tmp, "session_messages").await, 1);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2

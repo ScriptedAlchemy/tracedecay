@@ -41,7 +41,7 @@ async fn claude_updates_with_one_native_message_id_drain_without_collisions() {
     hits.sort();
     assert_eq!(hits, ["row.first", "row.second"]);
     assert_eq!(table_count(&tmp, "sessions").await, 1);
-    assert_eq!(table_count(&tmp, "session_messages").await, 2);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 2);
     assert_eq!(
         table_count(&tmp, "observation_projection_dispositions").await,
         0

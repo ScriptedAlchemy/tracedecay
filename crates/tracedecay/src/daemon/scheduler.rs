@@ -1488,19 +1488,15 @@ fn finish_global_retention(
 fn global_table_retention_config(
     config: &tracedecay_configuration::RetentionConfig,
 ) -> tracedecay_maintenance::retention::RetentionConfig {
-    let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
-        (
-            config.session_lcm.dedupe_projected_after_days,
-            config.session_lcm.drop_after_days,
-        )
+    let lcm_raw_messages_days = if config.session_lcm.enabled {
+        config.session_lcm.drop_after_days
     } else {
-        (None, None)
+        None
     };
     tracedecay_maintenance::retention::RetentionConfig {
         // The root retention tree has no analytics-event window. Disabling
         // this legacy table is the only mapping that does not invent policy.
         analytics_events_days: None,
-        session_messages_days,
         lcm_raw_messages_days,
     }
 }
@@ -1647,7 +1643,7 @@ mod global_retention_tests {
             .execute_batch(
                 "CREATE TABLE retention_delete_receipts (deleted_message_id TEXT NOT NULL);
                  CREATE TRIGGER retention_delete_receipt
-                 AFTER DELETE ON session_messages BEGIN
+                 AFTER DELETE ON lcm_raw_messages BEGIN
                     INSERT INTO retention_delete_receipts(deleted_message_id)
                     VALUES (OLD.message_id);
                  END;
@@ -1696,8 +1692,7 @@ mod global_retention_tests {
     fn global_retention_config() -> tracedecay_configuration::RetentionConfig {
         let mut config = tracedecay_configuration::RetentionConfig::default();
         config.session_lcm.enabled = true;
-        config.session_lcm.dedupe_projected_after_days = Some(1);
-        config.session_lcm.drop_after_days = None;
+        config.session_lcm.drop_after_days = Some(1);
         config.session_lcm.offload_after_days = None;
         config
     }
@@ -1843,7 +1838,7 @@ mod global_retention_tests {
             .expect("open registered writer for retention fault")
             .execute_batch(
                 "CREATE TRIGGER fail_global_retention_prune
-                 BEFORE DELETE ON session_messages
+                 BEFORE DELETE ON lcm_raw_messages
                  WHEN OLD.message_id = 'retention-message'
                  BEGIN
                     SELECT RAISE(ABORT, 'forced global retention prune failure');

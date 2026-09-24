@@ -36,8 +36,8 @@ const OBSERVATION_TABLES: &[&str] = &[
     "observation_projection_provenance",
     "observation_projection_checkpoints",
     "sessions",
-    "session_messages",
-    "session_messages_fts",
+    "lcm_raw_messages",
+    "lcm_raw_messages_fts",
 ];
 
 fn source(session_id: &str) -> ObservationSourceIdentityV1 {
@@ -130,11 +130,12 @@ async fn durable_text(runtime: &HostAdmissionTestRuntimeV1) -> Vec<String> {
                  FROM projection_queue
              UNION ALL SELECT provider || session_id || project_key || project_path ||
                  COALESCE(title, '') || COALESCE(metadata_json, '') FROM sessions
-             UNION ALL SELECT provider || message_id || session_id || role || text ||
+             UNION ALL SELECT provider || message_id || session_id || role ||
+                 COALESCE(content, placeholder_text, '') ||
                  COALESCE(kind, '') || COALESCE(model, '') || COALESCE(tool_names, '') ||
-                 COALESCE(metadata_json, '') FROM session_messages
-             UNION ALL SELECT text || role || COALESCE(kind, '') || COALESCE(model, '') ||
-                 COALESCE(tool_names, '') FROM session_messages_fts",
+                 COALESCE(metadata_json, '') FROM lcm_raw_messages
+             UNION ALL SELECT index_text || role || COALESCE(kind, '') || COALESCE(model, '') ||
+                 COALESCE(tool_names, '') FROM lcm_raw_messages_fts",
         )
         .unwrap();
     statement

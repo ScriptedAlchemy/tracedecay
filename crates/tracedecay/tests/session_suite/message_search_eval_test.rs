@@ -9,7 +9,7 @@
 //!
 //! The corpus is seeded into a real per-test global store and every query runs
 //! the production `search_session_messages` path (bm25 over
-//! `session_messages_fts`), not a reimplementation. Where current master ranks
+//! `lcm_raw_messages_fts`), not a reimplementation. Where current master ranks
 //! a case worse than the ranking we ultimately want, the case is marked
 //! `expected_current_failure: true`: the test asserts the DOCUMENTED current
 //! outcome (keeping the suite green today) while printing the aspirational one,

@@ -906,7 +906,7 @@ pub(super) async fn session_activity_rows(
                     s.started_at, s.ended_at,
                     MIN(m.timestamp), MAX(m.timestamp)
              FROM sessions s
-             LEFT JOIN session_messages m
+             LEFT JOIN lcm_raw_messages m
                     ON m.provider = s.provider AND m.session_id = s.session_id
              GROUP BY s.provider, s.session_id
              ORDER BY COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) DESC
@@ -943,7 +943,7 @@ pub(super) async fn session_activity_page_after(
                     s.rowid,
                     COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)
              FROM sessions s
-             LEFT JOIN session_messages m
+             LEFT JOIN lcm_raw_messages m
                     ON m.provider = s.provider AND m.session_id = s.session_id
              GROUP BY s.rowid, s.provider, s.session_id
              HAVING COALESCE(MAX(m.timestamp), s.ended_at, s.started_at) > ?1

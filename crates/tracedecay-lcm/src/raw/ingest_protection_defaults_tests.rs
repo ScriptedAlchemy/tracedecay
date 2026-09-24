@@ -16,7 +16,12 @@ const RAW_MESSAGE_TEST_SCHEMA: &str = "CREATE TABLE lcm_raw_messages (
     placeholder_text TEXT,
     snippet_text TEXT NOT NULL DEFAULT '',
     index_text TEXT NOT NULL DEFAULT '',
-    metadata_json TEXT
+    metadata_json TEXT,
+    kind TEXT,
+    model TEXT,
+    tool_names TEXT,
+    source_path TEXT,
+    source_offset INTEGER
 );";
 
 #[tokio::test]
@@ -134,6 +139,11 @@ async fn predecessor_range_skips_policy_anchor_roles() {
             payload_ref TEXT,
             placeholder_text TEXT,
             metadata_json TEXT,
+            kind TEXT,
+            model TEXT,
+            tool_names TEXT,
+            source_path TEXT,
+            source_offset INTEGER,
             UNIQUE(provider, message_id)
         );
         CREATE TABLE lcm_raw_predecessor_ranges (

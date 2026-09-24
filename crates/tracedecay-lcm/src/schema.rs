@@ -16,9 +16,12 @@ use super::util;
 /// [`crate::retrieval_content::derived_text_for_index`] from `content`, or
 /// from `placeholder_text` when the body lives outside the row. Version 11
 /// admits deleting cursor advances the durable cursor strictly supersedes, so
-/// each cursor commit prunes them in place. Older stores require a profile
-/// reset.
-pub const LCM_SCHEMA_VERSION: i64 = 11;
+/// each cursor commit prunes them in place. Version 12 folds the session
+/// message projection into `lcm_raw_messages`: each message body is stored
+/// once, beside the session-only columns (`kind`, `model`, `tool_names`,
+/// `source_path`, `source_offset`), and one FTS index serves both LCM grep and
+/// session message search. Older stores require a profile reset.
+pub const LCM_SCHEMA_VERSION: i64 = 12;
 
 const MIGRATION_NAME: &str = "lcm";
 
@@ -67,37 +70,50 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
      DROP INDEX IF EXISTS idx_lcm_external_payloads_owner;",
 ];
 
-/// Raw-message FTS structure (schema v3): index only `index_text`, matching
-/// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
-/// nothing but the message content column. Earlier schemas also indexed
-/// `role` and `metadata_json`, so an unqualified MATCH over-matched rows via
-/// role names or metadata text. Role and source filtering happen as plain
-/// SQL predicates on `lcm_raw_messages`, never through the FTS index.
+/// The single message FTS index. Session message search ranks over every
+/// column (`bm25` weights 10/2/1/1/1), while LCM grep keeps hermes-lcm
+/// `build_message_fts_spec` (store.py:173-204) semantics by qualifying its
+/// MATCH with [`RAW_FTS_CONTENT_COLUMN_FILTER`]: an unqualified LCM MATCH would
+/// over-match rows through role, kind, model, or tool names.
 const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
-        index_text,
+        index_text, role, kind, model, tool_names,
         content='lcm_raw_messages',
         content_rowid='store_id'
     );
     CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_insert
         AFTER INSERT ON lcm_raw_messages BEGIN
-            INSERT INTO lcm_raw_messages_fts(rowid, index_text)
-            VALUES (NEW.store_id, NEW.index_text);
+            INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, kind, model, tool_names)
+            VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
         END;
     CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_delete
         AFTER DELETE ON lcm_raw_messages BEGIN
-            INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts, rowid, index_text)
-            VALUES ('delete', OLD.store_id, OLD.index_text);
+            INSERT INTO lcm_raw_messages_fts(
+                lcm_raw_messages_fts, rowid, index_text, role, kind, model, tool_names
+            )
+            VALUES (
+                'delete', OLD.store_id, OLD.index_text, OLD.role, OLD.kind, OLD.model,
+                OLD.tool_names
+            );
         END;
     CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_update
         AFTER UPDATE ON lcm_raw_messages BEGIN
-            INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts, rowid, index_text)
-            VALUES ('delete', OLD.store_id, OLD.index_text);
-            INSERT INTO lcm_raw_messages_fts(rowid, index_text)
-            VALUES (NEW.store_id, NEW.index_text);
+            INSERT INTO lcm_raw_messages_fts(
+                lcm_raw_messages_fts, rowid, index_text, role, kind, model, tool_names
+            )
+            VALUES (
+                'delete', OLD.store_id, OLD.index_text, OLD.role, OLD.kind, OLD.model,
+                OLD.tool_names
+            );
+            INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, kind, model, tool_names)
+            VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
         END;";
 
+/// FTS5 column filter that restricts a MATCH to the message body, e.g.
+/// `format!("{RAW_FTS_CONTENT_COLUMN_FILTER}({query})")`.
+pub const RAW_FTS_CONTENT_COLUMN_FILTER: &str = "index_text : ";
+
 /// Returns whether the raw-message FTS table and all three synchronization
-/// triggers use the v3 content-only contracts.
+/// triggers use the current five-column contracts.
 pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) -> Option<bool> {
     let mut rows = conn
         .query(
@@ -125,7 +141,8 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
             "lcm_raw_messages_fts" => {
                 table_current = object_type == "table"
                     && sql.contains(
-                        "usingfts5(index_text,content='lcm_raw_messages',content_rowid='store_id')",
+                        "usingfts5(index_text,role,kind,model,tool_names,\
+                         content='lcm_raw_messages',content_rowid='store_id')",
                     );
             }
             "lcm_raw_messages_fts_insert" => {
@@ -133,8 +150,7 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterinsertonlcm_raw_messagesbegin")
                     && sql.contains(
-                        "insertintolcm_raw_messages_fts(rowid,index_text)\
-                         values(new.store_id,new.index_text)",
+                        RAW_FTS_INSERT_NEW,
                     );
             }
             "lcm_raw_messages_fts_delete" => {
@@ -142,9 +158,7 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterdeleteonlcm_raw_messagesbegin")
                     && sql.contains(
-                        "insertintolcm_raw_messages_fts\
-                         (lcm_raw_messages_fts,rowid,index_text)\
-                         values('delete',old.store_id,old.index_text)",
+                        RAW_FTS_DELETE_OLD,
                     );
             }
             "lcm_raw_messages_fts_update" => {
@@ -152,13 +166,10 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
                     && table_name == "lcm_raw_messages"
                     && sql.contains("afterupdateonlcm_raw_messagesbegin")
                     && sql.contains(
-                        "insertintolcm_raw_messages_fts\
-                         (lcm_raw_messages_fts,rowid,index_text)\
-                         values('delete',old.store_id,old.index_text)",
+                        RAW_FTS_DELETE_OLD,
                     )
                     && sql.contains(
-                        "insertintolcm_raw_messages_fts(rowid,index_text)\
-                         values(new.store_id,new.index_text)",
+                        RAW_FTS_INSERT_NEW,
                     );
             }
             _ => {}
@@ -166,6 +177,13 @@ pub async fn raw_fts_structure_is_current(conn: &(impl QueryExecutor + ?Sized)) 
     }
     Some(table_current && insert_current && delete_current && update_current)
 }
+
+const RAW_FTS_INSERT_NEW: &str = "insertintolcm_raw_messages_fts\
+     (rowid,index_text,role,kind,model,tool_names)\
+     values(new.store_id,new.index_text,new.role,new.kind,new.model,new.tool_names)";
+const RAW_FTS_DELETE_OLD: &str = "insertintolcm_raw_messages_fts\
+     (lcm_raw_messages_fts,rowid,index_text,role,kind,model,tool_names)\
+     values('delete',old.store_id,old.index_text,old.role,old.kind,old.model,old.tool_names)";
 
 fn compact_sql(sql: &str) -> String {
     sql.chars()
@@ -303,6 +321,11 @@ pub async fn ensure_lcm_schema_in_transaction(
                 END
             ) VIRTUAL,
             metadata_json TEXT,
+            kind TEXT,
+            model TEXT,
+            tool_names TEXT,
+            source_path TEXT,
+            source_offset INTEGER,
             UNIQUE(provider, message_id),
             FOREIGN KEY(provider, session_id)
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
@@ -311,6 +334,14 @@ pub async fn ensure_lcm_schema_in_transaction(
             ON lcm_raw_messages(provider, session_id, store_id);
         CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_id
             ON lcm_raw_messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_ordinal
+            ON lcm_raw_messages(provider, session_id, ordinal);
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_session_activity
+            ON lcm_raw_messages(
+                provider, session_id, timestamp, ordinal, message_id, kind, tool_names
+            );
+        CREATE INDEX IF NOT EXISTS idx_lcm_raw_timestamp
+            ON lcm_raw_messages(timestamp);
         CREATE TABLE IF NOT EXISTS lcm_external_payloads (
             payload_ref TEXT PRIMARY KEY,
             provider TEXT NOT NULL,
@@ -690,7 +721,11 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE lcm_raw_messages (
                 store_id INTEGER PRIMARY KEY,
-                index_text TEXT NOT NULL
+                index_text TEXT NOT NULL,
+                role TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                tool_names TEXT
             );",
         )
         .await

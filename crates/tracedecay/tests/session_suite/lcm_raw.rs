@@ -173,17 +173,12 @@ async fn transcript_ingest_preserves_lossless_raw_content() {
     assert_eq!(stats.sessions_upserted, 1);
     assert_eq!(stats.messages_upserted, 1);
 
-    let compatibility = db
+    let stored = db
         .session_message_for_test(HostAdmissionScope::Profile, "fake", "fake-message-1")
         .await
         .unwrap()
-        .expect("compatibility message should exist");
-    assert!(compatibility.text.chars().count() <= tracedecay_lcm::MAX_DERIVED_TEXT_CHARS);
-    assert!(
-        compatibility
-            .text
-            .contains(tracedecay_lcm::DERIVED_TRUNCATION_MARKER)
-    );
+        .expect("session message should exist");
+    assert_eq!(stored.text, content, "the session row is the one lossless copy");
 
     let raw = db
         .lcm_load_raw_message_for_test("fake", "fake-message-1")

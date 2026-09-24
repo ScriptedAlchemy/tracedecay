@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tracedecay_domain::CanonicalObservationEnvelopeV1;
+use tracedecay_domain::configuration::LcmSummarizerExecutablesV1;
 
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_lcm::raw::{LcmPredecessorRangeState, predecessor_range_state};
@@ -10,13 +11,22 @@ use tracedecay_runtime_core::db::{
     DatabaseEngineReadSnapshot,
     engine::{QueryExecutor, params},
 };
+use tracedecay_store::StoreShardScopeV1;
 
 mod cursor_agent;
 mod provider_capabilities;
+#[cfg(test)]
+mod summarizer_executable_tests;
 
+#[cfg(test)]
+use provider_capabilities::{CODEX_APP_SERVER_UNCONFIGURED, CURSOR_AGENT_UNCONFIGURED};
 use provider_capabilities::{
     NativeSummaryCandidate, authoritative_summarizer, native_summary_recognizers,
 };
+
+/// Reason reported when a project shard has no published configuration pin,
+/// so its summarizer binding cannot be read at all.
+const SUMMARIZER_CONFIGURATION_UNAVAILABLE: &str = "summarizer_configuration_unavailable";
 
 pub(super) struct AuthoritativeSummary {
     pub(super) text: String,
@@ -46,11 +56,12 @@ pub(super) async fn resolve_authoritative_summary(
     {
         return Ok(summary);
     }
-    generate_provider_summary(provider, request, timeout).await
+    generate_provider_summary(database, provider, request, timeout).await
 }
 
 #[hotpath::measure(label = "daemon.lcm.summarize", future = true)]
 async fn generate_provider_summary(
+    database: &RegisteredGlobalDb,
     provider: &str,
     request: &LcmSummaryRequest,
     timeout: Duration,
@@ -60,8 +71,43 @@ async fn generate_provider_summary(
             "authoritative_summarizer_unavailable",
         ));
     };
+    // The binding is read before the summarizer runs, so an unconfigured or
+    // unreadable setting is a typed pending reason and never a spawn.
+    let executables = summarizer_executables(database)?;
     // Provider summarizers run on a blocking thread and need an owned request.
-    summarizer.summarize(request.clone(), timeout).await
+    summarizer
+        .summarize(request.clone(), timeout, &executables)
+        .await
+}
+
+/// The summarizer executables configured for the shard `database` serves.
+///
+/// Project shards read the daemon-published pin for their registered project.
+/// Profile-wide shards have no project configuration authority, so every
+/// provider is unconfigured there and their sessions stay pending.
+fn summarizer_executables(
+    database: &RegisteredGlobalDb,
+) -> Result<LcmSummarizerExecutablesV1, SummaryResolutionError> {
+    match &database.binding().shard_id.scope {
+        StoreShardScopeV1::Project { project_id }
+        | StoreShardScopeV1::ProjectSessions { project_id }
+        | StoreShardScopeV1::Code { project_id, .. } => {
+            tracedecay_configuration::lcm_summarizer_executables_for_project(project_id).map_err(
+                |error| {
+                    tracing::debug!(
+                        project_id = project_id.as_str(),
+                        %error,
+                        "LCM summarizer binding is unavailable for this project shard"
+                    );
+                    SummaryResolutionError::Unavailable(SUMMARIZER_CONFIGURATION_UNAVAILABLE)
+                },
+            )
+        }
+        StoreShardScopeV1::Profile
+        | StoreShardScopeV1::ProfileMemory
+        | StoreShardScopeV1::ProfileSessions
+        | StoreShardScopeV1::RemoteNode { .. } => Ok(LcmSummarizerExecutablesV1::unconfigured()),
+    }
 }
 
 /// Finds evidence that the host itself already produced an authoritative
@@ -86,22 +132,18 @@ pub(super) async fn native_summary_evidence(
     let (candidate_sql, candidate_params) = if let Some(required) = required_source {
         (
             format!(
-                "SELECT message.message_id, message.text, message.kind, message.metadata_json,
-                    source_range.from_store_id, source_range.to_store_id, raw.store_id,
-                    {MESSAGE_ENVELOPE_COLUMN}
+                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                    message.metadata_json, source_range.from_store_id, source_range.to_store_id,
+                    message.store_id, {MESSAGE_ENVELOPE_COLUMN}
              FROM lcm_raw_predecessor_ranges AS source_range
-             JOIN lcm_raw_messages AS raw
-               ON raw.provider = source_range.provider
-              AND raw.message_id = source_range.message_id
-              AND raw.session_id = source_range.session_id
-             JOIN session_messages AS message
-               ON message.provider = raw.provider
-              AND message.message_id = raw.message_id
-              AND message.session_id = raw.session_id
+             JOIN lcm_raw_messages AS message
+               ON message.provider = source_range.provider
+              AND message.message_id = source_range.message_id
+              AND message.session_id = source_range.session_id
              WHERE source_range.provider = ?1 AND source_range.session_id = ?2
                AND source_range.to_store_id = ?3
-               AND length(trim(message.text)) > 0
-             ORDER BY raw.store_id, raw.message_id
+               AND length(trim(COALESCE(message.content, message.placeholder_text, ''))) > 0
+             ORDER BY message.store_id, message.message_id
              LIMIT 2"
             ),
             params![provider, session_id, required.source_range.to_store_id,],
@@ -109,20 +151,16 @@ pub(super) async fn native_summary_evidence(
     } else {
         (
             format!(
-                "SELECT message.message_id, message.text, message.kind, message.metadata_json,
-                    source_range.from_store_id, source_range.to_store_id, raw.store_id,
-                    {MESSAGE_ENVELOPE_COLUMN}
-             FROM session_messages AS message
-             LEFT JOIN lcm_raw_messages AS raw
-               ON raw.provider = message.provider
-              AND raw.message_id = message.message_id
-              AND raw.session_id = message.session_id
+                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                    message.metadata_json, source_range.from_store_id, source_range.to_store_id,
+                    message.store_id, {MESSAGE_ENVELOPE_COLUMN}
+             FROM lcm_raw_messages AS message
              LEFT JOIN lcm_raw_predecessor_ranges AS source_range
                ON source_range.provider = message.provider
               AND source_range.message_id = message.message_id
               AND source_range.session_id = message.session_id
              WHERE message.provider = ?1 AND message.session_id = ?2
-               AND length(trim(message.text)) > 0
+               AND length(trim(COALESCE(message.content, message.placeholder_text, ''))) > 0
              ORDER BY message.ordinal DESC, message.message_id DESC
              LIMIT 512"
             ),
@@ -255,14 +293,11 @@ async fn native_store_is_recognized(
     let mut rows = snapshot
         .query(
             &format!(
-                "SELECT message.message_id, message.text, message.kind, message.metadata_json,
-                        {MESSAGE_ENVELOPE_COLUMN}
-             FROM lcm_raw_messages AS raw
-             JOIN session_messages AS message
-               ON message.provider = raw.provider
-              AND message.message_id = raw.message_id
-              AND message.session_id = raw.session_id
-             WHERE raw.provider = ?1 AND raw.session_id = ?2 AND raw.store_id = ?3
+                "SELECT message.message_id, COALESCE(message.content, message.placeholder_text, ''), message.kind,
+                        message.metadata_json, {MESSAGE_ENVELOPE_COLUMN}
+             FROM lcm_raw_messages AS message
+             WHERE message.provider = ?1 AND message.session_id = ?2
+               AND message.store_id = ?3
              LIMIT 1"
             ),
             params![provider, session_id, store_id],

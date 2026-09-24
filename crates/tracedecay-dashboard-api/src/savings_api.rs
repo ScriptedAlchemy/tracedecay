@@ -8,7 +8,7 @@
 //!   [`RegisteredGlobalDb::savings_history`], the same queries `tracedecay gain` runs.
 //! - **Session store** (the resolved LCM store the dashboard already serves):
 //!   canonical provider-usage observations plus `sessions` +
-//!   `session_messages`, whose content and model fields provide a separate
+//!   `lcm_raw_messages`, whose content and model fields provide a separate
 //!   non-billing token-count overlay.
 //!
 //! Content token counts carry an explicit provenance label:

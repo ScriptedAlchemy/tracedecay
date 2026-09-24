@@ -222,7 +222,16 @@ pub(super) async fn raw_grep_hits(
         )
         .await;
     }
-    let mut values = vec![Value::Text(query_plan.fts_query.clone())];
+    let content_query = if query_plan.fts_query.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{}({})",
+            crate::schema::RAW_FTS_CONTENT_COLUMN_FILTER,
+            query_plan.fts_query
+        )
+    };
+    let mut values = vec![Value::Text(content_query)];
     let mut filters = Vec::new();
     push_grep_provider_filter(request, "r.provider", &mut filters, &mut values);
     push_raw_grep_filters(

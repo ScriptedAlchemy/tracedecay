@@ -900,22 +900,6 @@ mod tests {
                  transcript_path TEXT,
                  metadata_json TEXT,
                  PRIMARY KEY(provider, session_id)
-             );
-             CREATE TABLE session_messages (
-                 provider TEXT NOT NULL,
-                 message_id TEXT NOT NULL,
-                 session_id TEXT NOT NULL,
-                 role TEXT NOT NULL,
-                 timestamp INTEGER,
-                 ordinal INTEGER NOT NULL,
-                 text TEXT NOT NULL,
-                 kind TEXT,
-                 model TEXT,
-                 tool_names TEXT,
-                 source_path TEXT,
-                 source_offset INTEGER,
-                 metadata_json TEXT,
-                 PRIMARY KEY(provider, message_id)
              );",
         )
         .await

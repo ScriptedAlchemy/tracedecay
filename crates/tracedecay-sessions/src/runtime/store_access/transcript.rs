@@ -1,4 +1,4 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, WriteStatement, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_store::{ParseOffset, SessionMessageRecord, SessionRecord, StoreShardScopeV1};
 
 use tracedecay_lcm::payload::PayloadFileRollback;
@@ -34,8 +34,6 @@ impl<'a> TranscriptGitEvidence<'a> {
     }
 }
 
-const TRANSCRIPT_STATEMENT_WINDOW: usize = 64;
-
 /// Prepares every privacy-protected raw-message write before the transaction
 /// acquires SQLite's single-writer lease.
 ///
@@ -68,25 +66,6 @@ fn stage_full_transcript_messages(
     Ok(staged)
 }
 
-#[hotpath::measure(
-    label = "sessions.store.transcript.flush_statement_window",
-    future = true
-)]
-async fn flush_transcript_statement_window(
-    conn: &impl Executor,
-    statements: &mut Vec<WriteStatement>,
-) -> Result<(), TranscriptPersistenceError> {
-    if statements.is_empty() {
-        return Ok(());
-    }
-    conn.execute_statements(std::mem::take(statements))
-        .await
-        .map(|_| ())
-        .map_err(|error| {
-            TranscriptPersistenceError::storage("upsert session message projections", error)
-        })
-}
-
 async fn reconcile_codex_goal_response(
     conn: &impl Executor,
     current: &SessionMessageRecord,
@@ -104,18 +83,8 @@ async fn reconcile_codex_goal_response(
         params![current.provider.as_str(), response_message_id.as_str()],
     )
     .await
-    .map_err(|error| {
-        TranscriptPersistenceError::storage("remove paired Codex goal raw message", error)
-    })?;
-    conn.execute(
-        "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
-        params![current.provider.as_str(), response_message_id.as_str()],
-    )
-    .await
     .map(|_| ())
-    .map_err(|error| {
-        TranscriptPersistenceError::storage("remove paired Codex goal projection", error)
-    })
+    .map_err(|error| TranscriptPersistenceError::storage("remove paired Codex goal message", error))
 }
 
 /// Reads one durable cursor by its canonical key.
@@ -413,11 +382,10 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
 
     #[hotpath::skip]
     async fn upsert_session_message_in_existing_tx(
-        &self,
         conn: &impl Executor,
         message: &SessionMessageRecord,
         staged: raw::StagedRawMessageIngest,
-    ) -> Result<WriteStatement, TranscriptPersistenceError> {
+    ) -> Result<(), TranscriptPersistenceError> {
         // Clone-on-normalize: message text can be hundreds of kilobytes, and
         // most providers already emit in-range timestamps, so the full-record
         // copy is paid only when the timestamp actually changes.
@@ -429,59 +397,10 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
             owned.timestamp = normalized_timestamp;
             std::borrow::Cow::Owned(owned)
         };
-        let raw = raw::commit_staged_raw_message(conn, canonical_message.as_ref(), staged)
+        raw::commit_staged_raw_message(conn, canonical_message.as_ref(), staged)
             .await
-            .map_err(|error| {
-                TranscriptPersistenceError::storage("upsert LCM raw message", error)
-            })?;
-        Self::session_message_projection_statement(
-            canonical_message.as_ref(),
-            &raw.projection_text,
-            raw.projection_metadata_json.as_deref(),
-        )
-    }
-
-    fn session_message_projection_statement(
-        message: &SessionMessageRecord,
-        text: &str,
-        metadata_json: Option<&str>,
-    ) -> Result<WriteStatement, TranscriptPersistenceError> {
-        WriteStatement::new(
-            "INSERT INTO session_messages
-                 (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-                  tool_names, source_path, source_offset, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             ON CONFLICT(provider, message_id) DO UPDATE SET
-                session_id = excluded.session_id,
-                role = excluded.role,
-                timestamp = excluded.timestamp,
-                ordinal = excluded.ordinal,
-                text = excluded.text,
-                kind = excluded.kind,
-                model = excluded.model,
-                tool_names = excluded.tool_names,
-                source_path = excluded.source_path,
-                source_offset = excluded.source_offset,
-                metadata_json = excluded.metadata_json",
-            params![
-                message.provider.clone(),
-                message.message_id.clone(),
-                message.session_id.clone(),
-                message.role.clone(),
-                message.timestamp,
-                message.ordinal,
-                text,
-                message.kind.clone(),
-                message.model.clone(),
-                message.tool_names.clone(),
-                message.source_path.clone(),
-                message.source_offset,
-                metadata_json,
-            ],
-        )
-        .map_err(|error| {
-            TranscriptPersistenceError::storage("prepare session message projection", error)
-        })
+            .map(|_| ())
+            .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))
     }
 
     /// Atomically upserts one transcript session + all parsed messages and then
@@ -608,7 +527,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         let transaction = self.begin_transcript_transaction().await?;
 
         let write_result: Result<(), TranscriptPersistenceError> = async {
-            let mut projection_statements = Vec::with_capacity(TRANSCRIPT_STATEMENT_WINDOW);
             // Full batches are one-winner compare-and-swap on the durable
             // parse cursor. `actual == next_offset` is not a retry grant:
             // a competing writer can share that destination while carrying
@@ -631,10 +549,6 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                         correlation.source()
                             == tracedecay_store::CodexGoalContextSource::ItemCompleted
                     }) {
-                        // Make any response written earlier in this batch
-                        // visible to the bounded correlation query.
-                        flush_transcript_statement_window(&transaction, &mut projection_statements)
-                            .await?;
                         reconcile_codex_goal_response(&transaction, message).await?;
                     }
                     let staged = staged_messages.next().ok_or_else(|| {
@@ -643,17 +557,10 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                             "staged transcript message count did not match the write batch",
                         )
                     })?;
-                    projection_statements.push(
-                        self.upsert_session_message_in_existing_tx(&transaction, message, staged)
-                            .await?,
-                    );
-                    if projection_statements.len() >= TRANSCRIPT_STATEMENT_WINDOW {
-                        flush_transcript_statement_window(&transaction, &mut projection_statements)
-                            .await?;
-                    }
+                    Self::upsert_session_message_in_existing_tx(&transaction, message, staged)
+                        .await?;
                 }
             }
-            flush_transcript_statement_window(&transaction, &mut projection_statements).await?;
             if staged_messages.next().is_some() {
                 return Err(TranscriptPersistenceError::message(
                     "upsert LCM raw message",
@@ -837,63 +744,12 @@ async fn require_expected_pair_offset(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use tracedecay_runtime_core::db::engine::{
-        Executor, IntoParams, QueryExecutor, Rows, WriteStatement, params,
-    };
     use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
     use super::{
         PayloadFileRollback, TranscriptBatch, TranscriptPersistenceError, decode_u64_bits_value,
-        encode_u64_bits, flush_transcript_statement_window, stage_full_transcript_messages,
+        encode_u64_bits, stage_full_transcript_messages,
     };
-
-    #[derive(Default)]
-    struct BatchCountingExecutor {
-        batch_submissions: AtomicUsize,
-    }
-
-    impl QueryExecutor for BatchCountingExecutor {
-        async fn query<P>(
-            &self,
-            _sql: &str,
-            _params: P,
-        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
-        where
-            P: IntoParams,
-        {
-            panic!("statement-window test must not query")
-        }
-    }
-
-    impl Executor for BatchCountingExecutor {
-        async fn execute<P>(
-            &self,
-            _sql: &str,
-            _params: P,
-        ) -> tracedecay_runtime_core::db::engine::Result<u64>
-        where
-            P: IntoParams,
-        {
-            panic!("statement-window test must not submit scalar writes")
-        }
-
-        async fn execute_statements(
-            &self,
-            statements: Vec<WriteStatement>,
-        ) -> tracedecay_runtime_core::db::engine::Result<Vec<u64>> {
-            self.batch_submissions.fetch_add(1, Ordering::Relaxed);
-            Ok(vec![1; statements.len()])
-        }
-
-        async fn execute_batch(
-            &self,
-            _sql: &str,
-        ) -> tracedecay_runtime_core::db::engine::Result<()> {
-            panic!("statement-window test must not submit raw SQL batches")
-        }
-    }
 
     /// Every `parse_offsets` column round-trips the whole `u64` domain: the
     /// Codex corpus epoch stores a 128-bit digest across `byte_offset` and
@@ -975,21 +831,5 @@ mod tests {
             }
             other => panic!("expected attributed sanitization failure, got {other}"),
         }
-    }
-
-    #[tokio::test]
-    async fn transcript_statement_window_uses_one_batch_submission() {
-        let executor = BatchCountingExecutor::default();
-        let mut statements = vec![
-            WriteStatement::new("INSERT INTO example(value) VALUES (?1)", params![1_i64]).unwrap(),
-            WriteStatement::new("INSERT INTO example(value) VALUES (?1)", params![2_i64]).unwrap(),
-        ];
-
-        flush_transcript_statement_window(&executor, &mut statements)
-            .await
-            .unwrap();
-
-        assert!(statements.is_empty());
-        assert_eq!(executor.batch_submissions.load(Ordering::Relaxed), 1);
     }
 }

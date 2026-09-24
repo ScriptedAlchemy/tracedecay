@@ -8,7 +8,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use super::state::{
     has_other_projector_output_owner, protected_message_rows_compatible, same_projection_lineage,
-    storage,
+    storage, stored_row_matches,
 };
 
 const LIVE_WORKFLOW_FACT_INSERT: &str = "WITH ignored_generation(generation) AS (VALUES (?2))
@@ -216,36 +216,40 @@ pub(super) async fn message_transition(
     projection: &SessionMessageProjection,
     existing: Option<&SessionMessageRecord>,
     state: Option<MessageTransitionState>,
-) -> ProjectionStoreResult<(MessageTransition, bool)> {
-    let protected_compatibility = match existing {
-        Some(actual) => {
-            protected_message_rows_compatible(conn, actual, projection.message()).await?
-        }
-        None => false,
+) -> ProjectionStoreResult<MessageTransition> {
+    let message = projection.message();
+    // A Hermes body is written by the Hermes LCM turn authority. A row it
+    // wrote before any projector claimed the output takes the projection's
+    // session columns without the projector claiming its body.
+    if message.provider == "hermes" && existing.is_some() && state.is_none() {
+        return Ok(MessageTransition::Supersede);
+    }
+    let existing_matches = match existing {
+        Some(actual) => Some(
+            stored_row_matches(actual, message)?
+                || protected_message_rows_compatible(conn, actual, message).await?,
+        ),
+        None => None,
     };
-    let classified_existing = if protected_compatibility {
-        Some(projection.message())
-    } else {
-        existing
-    };
-    let transition =
-        classify_message_transition(sequence, projection.message(), classified_existing, state)?;
+    let transition = classify_message_transition(sequence, message, existing_matches, state)?;
     if transition == MessageTransition::Supersede
         && has_other_projector_output_owner(conn, projection).await?
     {
-        return Err(output_collision(projection.message()));
+        return Err(output_collision(message));
     }
-    Ok((transition, protected_compatibility))
+    Ok(transition)
 }
 
+/// `existing_matches` is `None` when no row is stored, otherwise whether the
+/// stored row is the projector's rendering of `message`.
 fn classify_message_transition(
     sequence: u64,
     message: &SessionMessageRecord,
-    existing: Option<&SessionMessageRecord>,
+    existing_matches: Option<bool>,
     state: Option<MessageTransitionState>,
 ) -> ProjectionStoreResult<MessageTransition> {
-    match (existing, state) {
-        (Some(actual), Some(state)) => {
+    match (existing_matches, state) {
+        (Some(matches), Some(state)) => {
             if !state.same_lineage {
                 return Err(output_collision(message));
             }
@@ -253,20 +257,20 @@ fn classify_message_transition(
                 return Ok(MessageTransition::Retain);
             }
             if state.same_generation {
-                return if actual == message {
+                return if matches {
                     Ok(MessageTransition::Retain)
                 } else {
                     Err(output_collision(message))
                 };
             }
-            if !state.projector_owned || actual == message {
+            if !state.projector_owned || matches {
                 Ok(MessageTransition::Retain)
             } else {
                 Ok(MessageTransition::Supersede)
             }
         }
-        (Some(actual), None) if actual == message => Ok(MessageTransition::Retain),
-        (Some(_), None) | (None, Some(_)) => Err(output_collision(message)),
+        (Some(true), None) => Ok(MessageTransition::Retain),
+        (Some(false), None) | (None, Some(_)) => Err(output_collision(message)),
         (None, None) => Ok(MessageTransition::Insert),
     }
 }
@@ -322,12 +326,7 @@ mod tests {
             MessageTransition::Insert
         );
         assert!(matches!(
-            classify_message_transition(
-                1,
-                &expected,
-                Some(&expected),
-                Some(state(1, true, true, true))
-            ),
+            classify_message_transition(1, &expected, Some(true), Some(state(1, true, true, true))),
             Ok(MessageTransition::Retain)
         ));
         assert!(matches!(
@@ -338,13 +337,12 @@ mod tests {
 
     #[test]
     fn same_generation_requires_compatible_rows() {
-        let actual = message("actual");
         let expected = message("expected");
         assert!(matches!(
             classify_message_transition(
                 2,
                 &expected,
-                Some(&actual),
+                Some(false),
                 Some(state(1, true, true, true))
             ),
             Err(ProjectionStoreError::OutputCollision { .. })
@@ -353,7 +351,7 @@ mod tests {
             classify_message_transition(
                 2,
                 &expected,
-                Some(&expected),
+                Some(true),
                 Some(state(1, false, true, true))
             ),
             Err(ProjectionStoreError::OutputCollision { .. })
@@ -362,13 +360,12 @@ mod tests {
 
     #[test]
     fn rollover_only_supersedes_exclusively_owned_rows() {
-        let actual = message("actual");
         let expected = message("expected");
         assert_eq!(
             classify_message_transition(
                 2,
                 &expected,
-                Some(&actual),
+                Some(false),
                 Some(state(1, true, false, true))
             )
             .unwrap(),
@@ -378,7 +375,7 @@ mod tests {
             classify_message_transition(
                 2,
                 &expected,
-                Some(&actual),
+                Some(false),
                 Some(state(1, true, false, false))
             )
             .unwrap(),
@@ -388,7 +385,7 @@ mod tests {
             classify_message_transition(
                 0,
                 &expected,
-                Some(&actual),
+                Some(false),
                 Some(state(1, true, false, true))
             )
             .unwrap(),

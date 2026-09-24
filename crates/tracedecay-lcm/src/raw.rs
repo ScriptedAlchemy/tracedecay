@@ -25,6 +25,56 @@ pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
                     snippet_text, metadata_json";
+fn record_select_columns(alias: &str, text: &str, metadata: &str) -> String {
+    format!(
+        "{alias}.provider, {alias}.message_id, {alias}.session_id, {alias}.role,
+         {alias}.timestamp, {alias}.ordinal, {text}, {alias}.kind, {alias}.model,
+         {alias}.tool_names, {alias}.source_path, {alias}.source_offset, {metadata}"
+    )
+}
+
+/// Provider metadata as read surfaces return it: the ingest-protection
+/// receipts are storage bookkeeping for the raw authority, not message
+/// metadata.
+fn served_metadata(alias: &str) -> String {
+    format!(
+        "CASE WHEN json_valid({alias}.metadata_json)
+              THEN NULLIF(json_remove({alias}.metadata_json, '$.ingest_protection'), '{{}}')
+              ELSE {alias}.metadata_json END"
+    )
+}
+
+/// Reads a message row as a [`SessionMessageRecord`] in its field order for
+/// search surfaces: the text is the bounded retrieval text (`index_text`),
+/// the stored body capped at [`crate::MAX_DERIVED_TEXT_CHARS`], or the
+/// placeholder of a body stored outside the row. Lossless bodies load through
+/// [`load_raw_message_by_identity`].
+pub fn message_record_select_columns(alias: &str) -> String {
+    record_select_columns(alias, &format!("{alias}.index_text"), &served_metadata(alias))
+}
+
+/// Reads one message row as a [`SessionMessageRecord`] carrying its whole
+/// stored body, or the placeholder of a body stored outside the row.
+pub fn message_body_record_select_columns(alias: &str) -> String {
+    record_select_columns(
+        alias,
+        &format!("COALESCE({alias}.content, {alias}.placeholder_text, '')"),
+        &served_metadata(alias),
+    )
+}
+
+/// Reads a message row as the [`SessionMessageRecord`] its writer stored: the
+/// whole stored body (or the placeholder of a body stored outside the row)
+/// and the protected metadata with its receipts. Writers and verifiers compare
+/// and re-ingest through this form.
+pub fn stored_message_record_select_columns(alias: &str) -> String {
+    record_select_columns(
+        alias,
+        &format!("COALESCE({alias}.content, {alias}.placeholder_text, '')"),
+        &format!("{alias}.metadata_json"),
+    )
+}
+
 pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, NULL AS content, content_hash, storage_kind, payload_ref,
@@ -430,9 +480,9 @@ async fn upsert_owned_raw_message(
             "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref, placeholder_text,
-            metadata_json
+            metadata_json, kind, model, tool_names, source_path, source_offset
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(provider, message_id) DO UPDATE SET
             session_id = excluded.session_id,
             role = excluded.role,
@@ -443,7 +493,12 @@ async fn upsert_owned_raw_message(
             storage_kind = excluded.storage_kind,
             payload_ref = excluded.payload_ref,
             placeholder_text = excluded.placeholder_text,
-            metadata_json = excluded.metadata_json
+            metadata_json = excluded.metadata_json,
+            kind = excluded.kind,
+            model = excluded.model,
+            tool_names = excluded.tool_names,
+            source_path = excluded.source_path,
+            source_offset = excluded.source_offset
          WHERE lcm_raw_messages.session_id = excluded.session_id",
             params![
                 message.provider.as_str(),
@@ -458,6 +513,11 @@ async fn upsert_owned_raw_message(
                 write.payload_ref,
                 write.placeholder,
                 write.metadata_json,
+                message.kind.as_deref(),
+                message.model.as_deref(),
+                message.tool_names.as_deref(),
+                message.source_path.as_deref(),
+                message.source_offset,
             ],
         )
         .await?;
@@ -720,6 +780,18 @@ pub async fn upsert_projection_raw_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
 ) -> Result<(), LcmError> {
+    let stored = projection_stored_message(message)?;
+    upsert_inline_raw_message(conn, message, &stored.text, stored.metadata_json.as_deref()).await
+}
+
+/// The message row exactly as [`upsert_projection_raw_message`] stores it and
+/// [`stored_message_record_select_columns`] reads it back: the body is the sanitized
+/// text and the metadata carries its ingest-protection receipts. Verifiers
+/// compare a stored row against this rather than against the unsanitized
+/// projection record.
+pub fn projection_stored_message(
+    message: &SessionMessageRecord,
+) -> Result<SessionMessageRecord, LcmError> {
     // `sanitize_lcm_payload_text` is a pure function of the text: a failure
     // here is a deterministic content refusal, not a storage fault, and must
     // never be retried as one.
@@ -740,14 +812,12 @@ pub async fn upsert_projection_raw_message(
         quarantine_kind: None,
         pending_payload_refs: Vec::new(),
     };
-    prepared.metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
-    upsert_inline_raw_message(
-        conn,
-        message,
-        &prepared.text,
-        prepared.metadata_json.as_deref(),
-    )
-    .await
+    let metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
+    Ok(SessionMessageRecord {
+        text: std::mem::take(&mut prepared.text),
+        metadata_json,
+        ..message.clone()
+    })
 }
 
 pub fn stage_raw_message_with_payload_tracked(

@@ -72,17 +72,6 @@ async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'session-a', 'project', '/p'),
                 ('cursor', 'session-b', 'project', '/p'),
@@ -311,17 +300,6 @@ async fn create_session_host_tables(conn: &TestConnection) {
             project_key TEXT NOT NULL,
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-         );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
          );",
     )
     .await
@@ -512,17 +490,6 @@ async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_cor
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'large-corpus', 'project.large', '/large');",
     )
@@ -622,17 +589,6 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
             project_key TEXT NOT NULL,
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-         );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
          );",
     )
     .await
@@ -789,17 +745,6 @@ async fn protected_content_revision_requeues_a_current_session() {
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'revised-session', 'project.revised', '/revised');",
     )
@@ -882,17 +827,6 @@ async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
          );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
-         );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'protection-cas', 'project.cas', '/cas');",
     )
@@ -950,17 +884,6 @@ async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
             project_key TEXT NOT NULL,
             project_path TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-         );
-         CREATE TABLE session_messages (
-            provider TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            timestamp INTEGER,
-            ordinal INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            metadata_json TEXT,
-            PRIMARY KEY(provider, message_id)
          );
          INSERT INTO sessions(provider, session_id, project_key, project_path)
          VALUES ('cursor', 'disjoint-revisions', 'project.revised', '/revised');",

@@ -1,7 +1,7 @@
 //! Canonical observation-capture seeding for dashboard integration fixtures.
 //!
 //! The daemon session-temporal projection discovers sessions exclusively from
-//! `session_temporal_observation_effects`; raw `sessions`/`session_messages`
+//! `session_temporal_observation_effects`; raw `sessions`/`lcm_raw_messages`
 //! upserts never reach it. Fixtures that want their sessions readable through
 //! the daemon LCM/explorer authorities must therefore seed messages through
 //! the same durable-observation persist/project route production ingest uses,

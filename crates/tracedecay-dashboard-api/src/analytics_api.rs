@@ -1229,9 +1229,9 @@ async fn session_message_rows(
     query_rows(
         &connection,
         "SELECT COALESCE(tool_names, '') AS tool_names,
-                COALESCE(text, '') AS text,
+                index_text AS text,
                 COALESCE(metadata_json, '') AS metadata_json
-         FROM session_messages
+         FROM lcm_raw_messages
          ORDER BY timestamp, ordinal
          LIMIT 10000",
         (),
@@ -1373,7 +1373,7 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<AnalyticsUsa
         .collect()
 }
 
-/// Bounded scalar count of `session_messages`, capped at the same 10,000-row
+/// Bounded scalar count of `lcm_raw_messages`, capped at the same 10,000-row
 /// ceiling as [`session_message_rows`] so the diagnostics `message_count`
 /// keeps its meaning without hauling full rows (text and metadata included)
 /// through the JSON layer just to be counted.
@@ -1384,7 +1384,7 @@ async fn session_message_count(db: Option<&RegisteredGlobalDb>) -> Result<i64, S
     let connection = db.read_connection();
     query_i64_result(
         &connection,
-        "SELECT COUNT(*) FROM (SELECT 1 FROM session_messages LIMIT 10000)",
+        "SELECT COUNT(*) FROM (SELECT 1 FROM lcm_raw_messages LIMIT 10000)",
         (),
     )
     .await

@@ -57,13 +57,14 @@ pub fn derive_canonical_projection(
     derive_canonical_projection_for(observation, CanonicalRendering::Current)
 }
 
-/// Whether `stored` is the message row a shipped release wrote for `observation`.
+/// Whether the stored row is the message row a shipped release wrote for
+/// `observation`, as judged by `stores` against each released message.
 ///
 /// A current-provenance row that still holds that rendering is an interrupted
 /// write. Any other body, including a derivation that does not complete, is not.
 pub fn stored_message_is_shipped_release_rendering(
     observation: &DurableObservationV1,
-    stored: &SessionMessageRecord,
+    stores: impl Fn(&SessionMessageRecord) -> bool,
 ) -> bool {
     let Ok(released) =
         derive_canonical_projection_for(observation, CanonicalRendering::ShippedRelease)
@@ -72,7 +73,7 @@ pub fn stored_message_is_shipped_release_rendering(
     };
     released
         .messages()
-        .any(|projection| projection.message() == stored)
+        .any(|projection| stores(projection.message()))
 }
 
 #[hotpath::measure(label = "store.projection.derive_canonical")]

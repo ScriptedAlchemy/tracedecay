@@ -58,7 +58,7 @@ async fn seed_session(harness: &RegisteredGlobalDbHarness, session_id: &str) {
         .expect("seed session");
 }
 
-/// Persists one inline raw row plus its projection twin exactly as an older
+/// Persists one inline message row exactly as an older
 /// ingest could have: receipt-bound bytes the current rules never evaluated.
 async fn seed_legacy_inline_row(
     harness: &RegisteredGlobalDbHarness,
@@ -72,14 +72,6 @@ async fn seed_legacy_inline_row(
     })
     .to_string();
     let writer = harness.registered.writer_connection().expect("writer");
-    writer
-        .execute(
-            "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
-             VALUES ('cursor', ?1, ?2, 'user', 1, ?3)",
-            params![message_id, session_id, content],
-        )
-        .await
-        .expect("seed legacy projection twin");
     writer
         .execute(
             "INSERT INTO lcm_raw_messages(
@@ -184,14 +176,6 @@ async fn seed_unreceipted_row(
     let writer = harness.registered.writer_connection().expect("writer");
     writer
         .execute(
-            "INSERT INTO session_messages(provider, message_id, session_id, role, ordinal, text)
-             VALUES ('cursor', ?1, ?2, 'assistant', 3, ?3)",
-            params![message_id, session_id, content],
-        )
-        .await
-        .expect("seed unreceipted projection twin");
-    writer
-        .execute(
             "INSERT INTO lcm_raw_messages(
                 provider, message_id, session_id, role, ordinal, timestamp,
                 content, content_hash, storage_kind, payload_ref, metadata_json
@@ -218,9 +202,7 @@ async fn count_rows_holding(harness: &RegisteredGlobalDbHarness, needle: &str) -
                  WHERE COALESCE(content, '') LIKE ?1
                     OR snippet_text LIKE ?1
                     OR index_text LIKE ?1
-                    OR COALESCE(metadata_json, '') LIKE ?1)
-              + (SELECT COUNT(*) FROM session_messages
-                 WHERE text LIKE ?1 OR COALESCE(metadata_json, '') LIKE ?1)",
+                    OR COALESCE(metadata_json, '') LIKE ?1)",
             params![pattern],
         )
         .await
@@ -325,8 +307,8 @@ async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
     assert_eq!(receipt.remediated_rows, 2);
     assert_eq!(receipt.unavailable_payload_rows, 0);
 
-    // The detector hit is gone from every at-rest surface: raw rows, the
-    // projection twin, and the payload directory (the replaced payload file
+    // The detector hit is gone from every at-rest surface: message rows and
+    // the payload directory (the replaced payload file
     // is deleted, not merely superseded).
     assert_eq!(count_rows_holding(&harness, &secret()).await, 0);
     assert!(!payload_dir_holds(&storage_root, &secret()));

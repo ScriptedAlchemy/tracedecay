@@ -1,7 +1,7 @@
 //! Authorized Loom temporal projection over the retained project session store.
 //!
 //! The endpoint composes existing authorities; it does not collect new data.
-//! `sessions`/`session_messages` provide thread bounds and
+//! `sessions`/`lcm_raw_messages` provide thread bounds and
 //! `sessions.metadata_json` provides provider-native edited-file rollups. Git
 //! correlation is read through [`DashboardGitCorrelationReadPortV1`], the
 //! daemon-owned typed read over the verified session-git-evidence graph
@@ -316,7 +316,7 @@ async fn read_temporal(
                           AND json_type(s.metadata_json, '$.edited_files') = 'array'
                     THEN 1 ELSE 0 END AS edited_files_recorded
         FROM sessions s
-        LEFT JOIN session_messages m
+        LEFT JOIN lcm_raw_messages m
           ON m.provider = s.provider AND m.session_id = s.session_id
         GROUP BY s.provider, s.session_id
         ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC
@@ -327,7 +327,7 @@ async fn read_temporal(
     let model_sql = format!(
         "{PAGE_CTE}
          SELECT m.provider, m.session_id, m.model
-         FROM session_messages m
+         FROM lcm_raw_messages m
          JOIN page p ON p.provider = m.provider AND p.session_id = m.session_id
          WHERE m.model IS NOT NULL AND TRIM(m.model) != ''
          GROUP BY m.provider, m.session_id, m.model

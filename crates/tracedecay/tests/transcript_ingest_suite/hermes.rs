@@ -365,14 +365,20 @@ async fn hermes_state_db_populates_projection_for_session_cwd_project() {
         Some("session_cwd")
     );
 
-    // Projection-only: Hermes raw messages are owned by the runtime LCM
-    // ingest, so the transcript sweep must never write lcm_raw_messages.
+    // The sweep's message rows are the one stored copy, so the LCM raw
+    // authority hydrates the same rows session search serves.
     for ordinal in 2..=5 {
-        assert!(
-            db.lcm_load_raw_message("hermes", &format!("{SESSION_ID}:{ordinal}"))
-                .await
-                .is_none()
-        );
+        let message_id = format!("{SESSION_ID}:{ordinal}");
+        let raw = db
+            .lcm_load_raw_message("hermes", &message_id)
+            .await
+            .expect("the projected Hermes row must hydrate through the raw authority");
+        let stored = db
+            .get_session_message("hermes", &message_id)
+            .await
+            .expect("projected Hermes row");
+        assert_eq!(raw.session_id, stored.session_id);
+        assert!(raw.content.starts_with(stored.text.as_str()));
     }
 }
 
@@ -509,11 +515,12 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
         .await
         .expect("runtime-owned raw message should exist before the sweep");
     assert_eq!(raw_before.content, runtime_owned_raw);
-    assert!(
+    assert_eq!(
         db.get_session_message("hermes", &raw_message_id)
             .await
-            .is_none(),
-        "LCM active-message ingest should not create a session-message projection"
+            .expect("the runtime-owned turn is the session message row")
+            .text,
+        runtime_owned_raw
     );
 
     let stats = ingest_homes(&db, std::slice::from_ref(&hermes_home), &project).await;
@@ -529,13 +536,15 @@ async fn hermes_projection_sweep_does_not_mutate_runtime_owned_raw_messages() {
     assert_eq!(raw_after.content, runtime_owned_raw);
     assert_eq!(raw_after.content_hash, raw_before.content_hash);
 
+    // The sweep contributes the row's session columns; the body stays the
+    // runtime-owned turn, the row's one stored copy.
     let projection = db
         .get_session_message("hermes", &raw_message_id)
         .await
         .expect("projection row should still be searchable");
     assert_eq!(projection.role, "assistant");
     assert_eq!(projection.kind.as_deref(), Some("tool_invocation"));
-    assert!(projection.text.contains("cargo test billing"));
+    assert_eq!(projection.text, runtime_owned_raw);
     assert_eq!(projection.tool_names.as_deref(), Some("terminal"));
 }
 

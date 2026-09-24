@@ -16,8 +16,6 @@ pub struct RetentionConfig {
     #[serde(default = "default_analytics_events_days")]
     pub analytics_events_days: Option<u32>,
     #[serde(default = "default_session_message_days")]
-    pub session_messages_days: Option<u32>,
-    #[serde(default = "default_session_message_days")]
     pub lcm_raw_messages_days: Option<u32>,
 }
 
@@ -35,7 +33,6 @@ impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
             analytics_events_days: default_analytics_events_days(),
-            session_messages_days: default_session_message_days(),
             lcm_raw_messages_days: default_session_message_days(),
         }
     }

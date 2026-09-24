@@ -215,38 +215,10 @@ const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
                 WHERE audit_name = 'observation-authority';
             END",
     },
-    Trigger {
-        name: "projection_output_audit_invalidate_update_v1",
-        table: "session_messages",
-        create_sql: "CREATE TRIGGER projection_output_audit_invalidate_update_v1
-            AFTER UPDATE ON session_messages
-            WHEN EXISTS (
-                SELECT 1 FROM observation_projection_provenance
-                WHERE output_provider = OLD.provider
-                  AND output_message_id = OLD.message_id
-            ) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_output_audit_invalidate_delete_v1",
-        table: "session_messages",
-        create_sql: "CREATE TRIGGER projection_output_audit_invalidate_delete_v1
-            AFTER DELETE ON session_messages
-            WHEN EXISTS (
-                SELECT 1 FROM observation_projection_provenance
-                WHERE output_provider = OLD.provider
-                  AND output_message_id = OLD.message_id
-            ) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    // The message-row triggers above do not see the LCM raw twin. A twin can
-    // drift (content, session identity) while the message row and the current
-    // provenance digest stay put, and the trusted checkpoint would then skip
-    // it forever. Invalidate on the same ownership predicate.
+    // Message rows live in `lcm_raw_messages`. A row can drift (content,
+    // session identity) while the current provenance digest stays put, and
+    // the trusted checkpoint would then skip it forever. Invalidate on the
+    // ownership predicate.
     Trigger {
         name: "projection_raw_audit_invalidate_update_v1",
         table: "lcm_raw_messages",
