@@ -15736,7 +15736,6 @@
           "type": "string"
         },
         "created_at": {
-          "default": 0,
           "format": "int64",
           "type": "integer"
         },
@@ -15781,7 +15780,6 @@
           "type": "string"
         },
         "updated_at": {
-          "default": 0,
           "format": "int64",
           "type": "integer"
         }

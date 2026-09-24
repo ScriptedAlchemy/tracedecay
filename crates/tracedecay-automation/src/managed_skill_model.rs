@@ -227,9 +227,7 @@ pub struct ManagedSkillMetadata {
     pub materialization_scope: ManagedSkillMaterializationScope,
     pub pinned: bool,
     pub checksum: String,
-    #[serde(default)]
     pub created_at: i64,
-    #[serde(default)]
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activated_at: Option<i64>,
