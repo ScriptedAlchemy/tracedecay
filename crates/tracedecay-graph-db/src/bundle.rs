@@ -769,12 +769,15 @@ fn windows_process_is_dead(pid: u32) -> bool {
     use std::ffi::c_void;
 
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
     const ERROR_INVALID_PARAMETER: i32 = 87;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         #[link_name = "OpenProcess"]
         fn open_process(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        #[link_name = "GetExitCodeProcess"]
+        fn get_exit_code_process(process: *mut c_void, exit_code: *mut u32) -> i32;
         #[link_name = "CloseHandle"]
         fn close_handle(handle: *mut c_void) -> i32;
     }
@@ -783,8 +786,14 @@ fn windows_process_is_dead(pid: u32) -> bool {
     if process.is_null() {
         return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER);
     }
+    // An exited process stays openable for as long as anyone (its parent,
+    // typically) holds a handle to it, so a successful open is not liveness.
+    let mut exit_code = 0_u32;
+    // SAFETY: `process` is a live owned handle, `exit_code` is writable for
+    // the duration of the call, and the handle is closed exactly once.
+    let read = unsafe { get_exit_code_process(process, &mut exit_code) };
     let _ = unsafe { close_handle(process) };
-    false
+    read != 0 && exit_code != STILL_ACTIVE
 }
 
 fn bundle_tmp_path(root: &Path, hex: &str, name: &str) -> PathBuf {

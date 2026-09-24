@@ -18,6 +18,8 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::rename_noreplace;
 
+use crate::storage::retry_transient_file_op;
+
 #[path = "sqlite_snapshot_connection.rs"]
 mod connection;
 #[path = "sqlite_snapshot_control.rs"]
@@ -1315,27 +1317,33 @@ fn cleanup_stale_directories(root: &Path) -> io::Result<()> {
         if !name.to_string_lossy().starts_with("read-") {
             continue;
         }
-        let path = entry.path();
         // An owner releases its directory without the cleanup lock, so an
         // entry listed above can be gone by now. Gone is the state this
         // sweep wants; only a failure to reach a present entry is an error.
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => continue,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+        // Windows reports an entry mid-release as access denied until its
+        // last handle closes, which the transient-file retry waits out.
+        retry_transient_file_op(|| cleanup_stale_directory(&entry.path()))?;
+    }
+    Ok(())
+}
+
+fn cleanup_stale_directory(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let removable = match open_private_lock(&path.join(".owner.lock"), false) {
+        Ok(lock) => lock.try_lock().map_err(std::io::Error::from).is_ok(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error),
+    };
+    if removable {
+        match fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
-        }
-        let removable = match open_private_lock(&path.join(".owner.lock"), false) {
-            Ok(lock) => lock.try_lock().map_err(std::io::Error::from).is_ok(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-            Err(error) => return Err(error),
-        };
-        if removable {
-            match fs::remove_dir_all(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
         }
     }
     Ok(())
