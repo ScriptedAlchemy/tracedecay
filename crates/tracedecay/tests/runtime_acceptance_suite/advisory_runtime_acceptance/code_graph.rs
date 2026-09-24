@@ -1,7 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::diagnostics_publication::{
+    CodeIndexPublicationIdentityFuture, CodeIndexPublicationIdentityPortV1,
+    CodeIndexPublicationIdentityV1,
+};
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
@@ -104,7 +109,10 @@ pub(super) fn hermetic_advisory_code_graph(
 pub(super) fn hermetic_ci_code_graph(
     scope: &FeedbackScopeV1,
     project_root: &Path,
-) -> Arc<dyn CodeGraphProjectionReadPort> {
+) -> (
+    Arc<dyn CodeGraphProjectionReadPort>,
+    Arc<dyn CodeIndexPublicationIdentityPortV1>,
+) {
     let logical_path = "src/lib.rs";
     let source =
         std::fs::read_to_string(project_root.join(logical_path)).expect("fixture CI graph source");
@@ -226,25 +234,46 @@ pub(super) fn hermetic_ci_code_graph(
         .collect::<Vec<_>>();
     let symbols =
         GenerationSymbolIndexV1::new(generation.clone(), records).expect("fixture CI symbol index");
+    let source_digest = ContentDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(source.as_bytes()))
+    ))
+    .expect("fixture CI source digest");
     let files = [SanitizedCodeFileV1 {
-        file_occurrence_id: file,
+        file_occurrence_id: file.clone(),
         logical_path: logical_path.to_owned(),
         language: Some(LanguageId::new("rust").expect("fixture CI language")),
-        content_digest: ContentDigest::new(format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(source.as_bytes()))
-        ))
-        .expect("fixture CI source digest"),
+        content_digest: source_digest.clone(),
         disposition: SnapshotFileDispositionV1::Present,
     }];
-    publish_graph(
+    let identity = CodeIndexPublicationIdentityV1::new(
+        generation.clone(),
+        scope.repository_id.clone(),
+        Some(scope.worktree_id.clone()),
+        Some(RefId::new(scope.branch_ref.clone()).expect("fixture CI reference")),
+        Some(scope.head_commit_id.clone()),
+        [(logical_path.to_owned(), file, source_digest)],
+    );
+    let graph = publish_graph(
         resolved_scope(scope),
         generation,
         &edges,
         &chunks,
         &files,
         Some(symbols),
-    )
+    );
+    (graph, Arc::new(StaticCodeIndexIdentity(identity)))
+}
+
+#[cfg(feature = "test-transport")]
+struct StaticCodeIndexIdentity(CodeIndexPublicationIdentityV1);
+
+#[cfg(feature = "test-transport")]
+impl CodeIndexPublicationIdentityPortV1 for StaticCodeIndexIdentity {
+    fn resolve(&self, _project_root: PathBuf) -> CodeIndexPublicationIdentityFuture<'_> {
+        let identity = self.0.clone();
+        Box::pin(async move { Some(identity) })
+    }
 }
 
 fn resolved_scope(scope: &FeedbackScopeV1) -> ResolvedScope {
