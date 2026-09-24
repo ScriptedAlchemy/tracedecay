@@ -24,11 +24,8 @@ import {
   pullRequestStateKind,
 } from './PullRequestInspector.tsx';
 import { relatedAcrossProjects, umbrellasFor } from './umbrella.ts';
-import { UmbrellaField } from './UmbrellaField.tsx';
-import { EnvelopeField } from './EnvelopeField.tsx';
-import { DepartureBoard, TransitPanel } from './TransitField.tsx';
 import { LaneField } from './LaneField.tsx';
-import { laneZoom } from './lanes.ts';
+import { laneZoom, zoomPatch } from './lanes.ts';
 
 const STATUS_OPTIONS = [
   ['open', 'Open'],
@@ -87,16 +84,7 @@ export function InboxWorkspace({
       ) : location.layout === 'table' ? (
         <InboxTable context={context} rows={rows} related={related} />
       ) : (
-        <div
-          className={cn(
-            'grid min-h-0 flex-1 grid-cols-1',
-            location.renderer === 'transit'
-              ? 'lg:grid-cols-[16rem_minmax(0,1fr)]'
-              : location.renderer === 'lanes'
-                ? 'lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_20rem]'
-                : 'lg:grid-cols-[19rem_minmax(0,1fr)] xl:grid-cols-[19rem_minmax(0,1fr)_22rem]',
-          )}
-        >
+        <div className="grid min-h-0 flex-1 grid-cols-1 max-lg:auto-rows-max max-lg:overflow-y-auto lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_20rem]">
           <div className="flex min-h-0 flex-col border-r border-edge-subtle bg-surface-1">
             <PullRequestQueue
               context={context}
@@ -107,9 +95,9 @@ export function InboxWorkspace({
             {scopedProject === null ? null : <RelatedRail context={context} related={related} />}
           </div>
           <div className="flex min-h-64 min-w-0 flex-col border-r border-edge-subtle p-3">
-            <FieldColumn context={context} rows={rows} selectedRow={selectedRow} />
+            <InboxLanes context={context} rows={rows} selectedRow={selectedRow} />
           </div>
-          {location.renderer === 'transit' ? null : selectedRow === null ? (
+          {selectedRow === null ? (
             <aside className="flex items-center justify-center p-6 text-center text-xs text-text-muted lg:col-span-2 xl:col-span-1">
               Select a pull request to inspect its identity, attention evidence and correlation edges.
             </aside>
@@ -268,9 +256,9 @@ function ProjectStrip({ context }: { context: DeliveryContext }) {
   );
 }
 
-/** The field column for the selected renderer; absent `?renderer=` keeps the
- * shipping umbrella field. */
-function FieldColumn({
+/** The inbox field: repositories as lanes over observed time, zoomed through
+ * the URL scope (portfolio, repository, pull request). */
+function InboxLanes({
   context,
   rows,
   selectedRow,
@@ -280,70 +268,18 @@ function FieldColumn({
   selectedRow: DeliveryInboxPullRequestV1 | null;
 }) {
   const { inbox, location, navigate, umbrellas } = context;
-  const selectRow = (row: DeliveryInboxPullRequestV1) => navigate({ pullRequest: row.id });
-  const renderer = location.renderer;
-  switch (renderer) {
-    case null:
-      return (
-        <>
-          <UmbrellaField
-            inbox={inbox}
-            rows={rows}
-            projection={umbrellas}
-            focusUmbrellaId={null}
-            selectedRowId={selectedRow?.id ?? null}
-            selectedUmbrellaId={null}
-            onSelectRow={selectRow}
-            onSelectUmbrella={(umbrella) => navigate({ mode: 'umbrella', umbrella })}
-          />
-          <FieldLegend />
-        </>
-      );
-    case 'envelopes':
-      return (
-        <EnvelopeField inbox={inbox} rows={rows} projection={umbrellas} selectedRowId={selectedRow?.id ?? null} onSelectRow={selectRow} />
-      );
-    case 'transit':
-      return selectedRow === null ? (
-        <DepartureBoard inbox={inbox} rows={rows} onSelectRow={selectRow} />
-      ) : (
-        <TransitPanel inbox={inbox} row={selectedRow} onOpenEpisode={(episode) => navigate({ mode: 'journey', episode })} />
-      );
-    case 'lanes': {
-      const focusProject = location.project ?? selectedRow?.project_id ?? null;
-      return (
-        <LaneField
-          inbox={inbox}
-          rows={rows}
-          projection={umbrellas}
-          zoom={laneZoom(location.project, selectedRow?.id ?? null)}
-          focusProject={focusProject}
-          selectedRowId={selectedRow?.id ?? null}
-          journey={null}
-          selectedEpisodeId={null}
-          onSelectRow={selectRow}
-          onSelectEpisode={null}
-          onZoom={(zoom) =>
-            navigate(zoom === 'portfolio' ? { project: null, pullRequest: null } : zoom === 'repository' ? { project: focusProject, pullRequest: null } : {})
-          }
-        />
-      );
-    }
-    default: {
-      const unhandled: never = renderer;
-      return unhandled;
-    }
-  }
-}
-
-function FieldLegend() {
+  const focusProject = location.project ?? selectedRow?.project_id ?? null;
   return (
-    <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-3xs text-text-muted" aria-label="Field legend">
-      <li>◎ project hub</li>
-      <li>● admitted PR · amber dot = active attention</li>
-      <li>◌ umbrella root at member centroid</li>
-      <li className="flex items-center gap-1">edge grade <GradeMark grade="explicit" /> <GradeMark grade="inferred" /></li>
-    </ul>
+    <LaneField
+      inbox={inbox}
+      rows={rows}
+      projection={umbrellas}
+      zoom={laneZoom(location.project, selectedRow?.id ?? null)}
+      focusProject={focusProject}
+      selectedRowId={selectedRow?.id ?? null}
+      onSelectRow={(row) => navigate({ pullRequest: row.id })}
+      onZoom={(zoom) => navigate(zoomPatch(zoom, focusProject))}
+    />
   );
 }
 

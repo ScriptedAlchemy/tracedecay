@@ -8,9 +8,9 @@ import type { EvidenceGrade } from './evidence.ts';
 import type { UmbrellaProjection } from './umbrella.ts';
 
 /**
- * Readings the candidate Delivery renderers share. Each is a fixed
- * presentation of a served field; none infers a relation, a size, a time or
- * an attention state the inbox did not serve.
+ * Readings the Delivery lanes field and journey transit share. Each is a
+ * fixed presentation of a served field; none infers a relation, a time or an
+ * attention state the inbox did not serve.
  */
 
 /** The short engraved code an amber attention beacon prints beside its glyph. */
@@ -73,29 +73,6 @@ export function isVerificationSource(source: DeliveryAttentionSourceV1): boolean
       return unhandled;
     }
   }
-}
-
-export function activeItems(row: DeliveryInboxPullRequestV1): readonly DeliveryAttentionItemV1[] {
-  return row.attention.filter((item) => item.state === 'active');
-}
-
-/** Attention the daemon could not evaluate: printed as a typed gap, never amber. */
-export function unevaluatedItems(row: DeliveryInboxPullRequestV1): readonly DeliveryAttentionItemV1[] {
-  return row.attention.filter((item) => item.state === 'unavailable' || item.state === 'denied');
-}
-
-/** Lines changed as served by the provider identity, or `null` when the
- * identity was not served. A missing size is never drawn as zero. */
-export function measuredChange(row: DeliveryInboxPullRequestV1): number | null {
-  const identity = row.pull_request.identity;
-  return identity === null ? null : identity.additions + identity.deletions;
-}
-
-/** Mark radius on a log scale of measured change, so a 100k-line PR and a
- * 10-line PR are both legible. `null` change has no radius of its own. */
-export function changeRadius(change: number, ceiling: number, min = 4, max = 15): number {
-  const top = Math.log10(1 + Math.max(ceiling, 1));
-  return min + (max - min) * (Math.log10(1 + Math.max(change, 0)) / top);
 }
 
 export type HeadJoin =

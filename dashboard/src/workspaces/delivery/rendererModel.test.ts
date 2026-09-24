@@ -2,11 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { INBOX, INBOX_BRANCH_ONLY, T0 } from '../../test/deliveryFixtures.ts';
 import {
   attentionCode,
-  changeRadius,
   evidenceLinks,
   headJoin,
   headJoinSentence,
-  measuredChange,
   observationWindow,
   uncorrelatedRows,
 } from './rendererModel.ts';
@@ -24,13 +22,6 @@ describe('renderer readings', () => {
     expect(attentionCode('ci_failure')).toBe('CI');
     expect(attentionCode('unresolved_review')).toBe('REVIEW');
     expect(attentionCode('stale_provider_state')).toBe('STALE');
-  });
-
-  it('keeps a missing provider identity as an unknown size, not zero', () => {
-    expect(measuredChange(PR42)).toBe(155);
-    expect(measuredChange({ ...PR42, pull_request: { ...PR42.pull_request, identity: null } })).toBeNull();
-    expect(changeRadius(0, 155)).toBe(4);
-    expect(changeRadius(155, 155)).toBe(15);
   });
 
   it('types the provider/indexed head join instead of assuming it', () => {

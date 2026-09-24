@@ -3645,6 +3645,11 @@ const INBOX_HEADS = {
   'module-federation': 'c4e9a022'.padEnd(40, '1'),
 } as const;
 
+/** Delivery observation time: daemon read and attention stamps, hours ago. */
+function deliveryHoursAgo(hours: number): number {
+  return nowMicros - Math.round(hours * 3_600_000_000);
+}
+
 function inboxProject(
   projectId: keyof typeof INBOX_HEADS,
   branch: string,
@@ -3675,12 +3680,15 @@ function inboxPullRequest(
     prState?: string;
     attention?: ReadonlyArray<Record<string, unknown>>;
     sizes?: readonly [number, number, number];
-    fetchedAgoHours?: number;
+    /** Hours ago each provider read last completed, in operation order
+     * (pull_request, reviews, review_comments, review_threads). The daemon
+     * reads operations independently, so a PR's observation window spans them. */
+    readsAgoHours?: readonly [number, number, number, number];
   } = {},
 ): Record<string, unknown> {
   const head = INBOX_HEADS[projectId];
   const [additions, deletions, files] = options.sizes ?? [512, 87, 12];
-  const fetched = nowMicros - (options.fetchedAgoHours ?? 2) * 3_600_000_000;
+  const reads = options.readsAgoHours ?? [2, 2, 2, 2];
   return {
     id: `${projectId}:github:${number}`,
     project_id: projectId,
@@ -3703,12 +3711,12 @@ function inboxPullRequest(
         deletions,
         changed_files: files,
       },
-      operations: ['pull_request', 'reviews', 'review_comments', 'review_threads'].map(
-        (operation) => ({
+      operations: (['pull_request', 'reviews', 'review_comments', 'review_threads'] as const).map(
+        (operation, index) => ({
           operation,
           last_complete: {
             coverage: 'complete',
-            fetched_at_micros: fetched,
+            fetched_at_micros: deliveryHoursAgo(reads[index]!),
             merge_base_commit_id: '3e6167b2'.padEnd(40, '0'),
             outcome: options.state === 'stale' ? 'stale' : 'complete',
             provider_base_commit_id: 'dfc669d9'.padEnd(40, '0'),
@@ -3724,7 +3732,7 @@ function inboxPullRequest(
       pull_request_id: number,
       state: 'active',
       coverage: 'complete',
-      observed_at_micros: fetched,
+      observed_at_micros: deliveryHoursAgo(reads[3]!),
       ...item,
     })),
     shared_code: [
@@ -3775,31 +3783,42 @@ function deliveryInboxPayload(): Record<string, unknown> {
       inboxPullRequest('rspack', 'perf/persistent-cache-v2', '10337', 'perf: persistent caching v2', {
         state: 'stale',
         sizes: [4_812, 1_206, 58],
-        fetchedAgoHours: 9,
+        readsAgoHours: [30, 26, 21, 14],
         attention: [
-          { source: 'stale_provider_state', evidence: [{ kind: 'provider_operation', operation: 'pull_request', fetched_at_micros: nowMicros - 9 * 3_600_000_000 }] },
+          { source: 'stale_provider_state', observed_at_micros: deliveryHoursAgo(14), evidence: [{ kind: 'provider_operation', operation: 'pull_request', fetched_at_micros: deliveryHoursAgo(30) }] },
+          { source: 'test_risk', observed_at_micros: deliveryHoursAgo(20), evidence: [{ kind: 'indexed_generation', generation: 'generation.rspack.2026-09-16.001' }] },
         ],
       }),
       inboxPullRequest('rspack', 'perf/persistent-cache-v2', '10315', 'feat: emit perf graph leak diagnostics', {
         state: 'stale',
         sizes: [143, 32, 6],
-        fetchedAgoHours: 9,
+        readsAgoHours: [28, 27, 18, 16],
+        attention: [
+          { source: 'weak_evidence', observed_at_micros: deliveryHoursAgo(17), evidence: [{ kind: 'indexed_generation', generation: 'generation.rspack.2026-09-16.001' }] },
+        ],
       }),
       inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '707', 'feat: restore TraceDecay V2 review head', {
         sizes: [78_341, 21_904, 1_840],
+        readsAgoHours: [11, 6, 3, 1.5],
         attention: [
-          { source: 'unresolved_review', evidence: [{ kind: 'review_comment', comment_id: 'r1234567890', path: 'dashboard/src/workspaces/delivery/DeliveryPage.tsx' }] },
-          { source: 'ci_failure', evidence: [{ kind: 'ci_failure', failure_anchor: 'ci:integration-tests:cargo-test' }] },
+          { source: 'unresolved_review', observed_at_micros: deliveryHoursAgo(3), evidence: [{ kind: 'review_comment', comment_id: 'r1234567890', path: 'dashboard/src/workspaces/delivery/DeliveryPage.tsx' }] },
+          { source: 'ci_failure', observed_at_micros: deliveryHoursAgo(2), evidence: [{ kind: 'ci_failure', failure_anchor: 'ci:integration-tests:cargo-test' }] },
+          { source: 'new_review_comment', observed_at_micros: deliveryHoursAgo(1.5), evidence: [{ kind: 'review_comment', comment_id: 'r1234567931', path: 'dashboard/src/workspaces/delivery/lanes.ts' }] },
+          { source: 'unsafe_pattern', state: 'unavailable', coverage: 'unsupported', observed_at_micros: null, evidence: [] },
         ],
       }),
       inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '694', 'fix: tag jitter on retries', {
         draft: true,
         sizes: [76, 12, 3],
+        readsAgoHours: [8, 5, 4, 0.5],
+        attention: [
+          { source: 'overlapping_edit', observed_at_micros: deliveryHoursAgo(0.75), evidence: [{ kind: 'proximity_encounter', encounter_id: 'sha256:9f2c41d0', relation: 'overlapping_edit' }] },
+        ],
       }),
       inboxPullRequest('tracedecay', 'codex/tracedecay-total-redesign-plan', '681', 'docs: delivery lookbook authority', {
         prState: 'merged',
         sizes: [1_204, 0, 14],
-        fetchedAgoHours: 30,
+        readsAgoHours: [52, 47, 46, 40],
       }),
     ],
     membership_edges: [

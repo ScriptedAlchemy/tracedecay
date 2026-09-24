@@ -5,7 +5,7 @@ import { EVIDENCE_GRADES } from './evidence.ts';
 import { attentionCode } from './rendererModel.ts';
 
 /**
- * Marks the candidate Delivery renderers share. Amber appears in exactly one
+ * Marks the Delivery lanes field and journey transit share. Amber appears in exactly one
  * place, the attention beacon, and every field that draws one also mounts
  * `AttentionLegend`, which names that meaning in text.
  */

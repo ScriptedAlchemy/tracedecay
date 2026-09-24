@@ -27,8 +27,6 @@ import {
   type JourneyEpisode,
   type JourneyModel,
 } from './journey.ts';
-import { JourneyField } from './JourneyField.tsx';
-import { LaneField } from './LaneField.tsx';
 import { CompactRail, TransitField } from './TransitField.tsx';
 import { buildTransit } from './transit.ts';
 import { ProjectionLedger, laneStateDetail, overviewReadState } from './ProjectionLedger.tsx';
@@ -72,6 +70,7 @@ function JourneyBody({
 }) {
   const { navigate, location } = context;
   const model = useMemo(() => buildJourney(overview, { row, edges }), [overview, row, edges]);
+  const transit = useMemo(() => buildTransit(row, edges, model), [row, edges, model]);
   const selected = model.episodes.find((episode) => episode.id === location.episode) ?? null;
   const project = projectFor(context.inbox, row.project_id);
   const title = row.pull_request.identity?.title ?? row.pull_request.label;
@@ -110,19 +109,16 @@ function JourneyBody({
         ]}
       />
 
-      <div
-        className={cn(
-          'grid grid-cols-1',
-          location.renderer === 'transit' ? 'lg:grid-cols-[12rem_minmax(0,1fr)]' : 'xl:grid-cols-[minmax(0,1fr)_22rem]',
-        )}
-      >
-        {location.renderer === 'transit' ? (
-          <CompactRail inbox={context.inbox} selectedId={row.id} onSelect={(id) => navigate({ pullRequest: id, episode: null })} />
-        ) : null}
-        <div className="flex min-w-0 flex-col border-r border-edge-subtle p-3">
-          <JourneyRenderer context={context} row={row} edges={edges} model={model} />
+      <div className="grid grid-cols-1 lg:grid-cols-[12rem_minmax(0,1fr)]">
+        <CompactRail inbox={context.inbox} selectedId={row.id} onSelect={(id) => navigate({ pullRequest: id, episode: null })} />
+        <div className="flex min-w-0 flex-col p-3">
+          <TransitField
+            model={transit}
+            selectedEpisodeId={location.episode}
+            onSelectEpisode={(episode) => navigate({ episode })}
+          />
         </div>
-        <div className={cn(location.renderer === 'transit' && 'border-t border-edge-subtle lg:col-start-2')}>
+        <div className="border-t border-edge-subtle lg:col-start-2">
           <EpisodeInspector episode={selected} />
         </div>
       </div>
@@ -132,62 +128,6 @@ function JourneyBody({
       <ProjectionLedger overview={overview} className="m-3" />
     </div>
   );
-}
-
-/** The journey field for the selected renderer; absent `?renderer=` (and the
- * inbox-only envelopes candidate) keeps the shipping lane journey. */
-function JourneyRenderer({
-  context,
-  row,
-  edges,
-  model,
-}: {
-  context: DeliveryContext;
-  row: DeliveryInboxPullRequestV1;
-  edges: readonly DeliveryMembershipEdgeV1[];
-  model: JourneyModel;
-}) {
-  const { location, navigate } = context;
-  const selectEpisode = (episode: string) => navigate({ episode });
-  const renderer = location.renderer;
-  switch (renderer) {
-    case null:
-    case 'envelopes':
-      return (
-        <>
-          <JourneyField model={model} selectedEpisodeId={location.episode} onSelect={(episode) => selectEpisode(episode.id)} />
-          <FieldLegend />
-        </>
-      );
-    case 'transit':
-      return <TransitField model={buildTransit(row, edges, model)} selectedEpisodeId={location.episode} onSelectEpisode={selectEpisode} />;
-    case 'lanes':
-      return (
-        <LaneField
-          inbox={context.inbox}
-          rows={context.inbox.pull_requests}
-          projection={context.umbrellas}
-          zoom="pull_request"
-          focusProject={row.project_id}
-          selectedRowId={row.id}
-          journey={model}
-          selectedEpisodeId={location.episode}
-          onSelectRow={(next) => navigate({ pullRequest: next.id, episode: null })}
-          onSelectEpisode={selectEpisode}
-          onZoom={(zoom) =>
-            navigate(
-              zoom === 'portfolio'
-                ? { mode: 'inbox', project: null, pullRequest: null, episode: null }
-                : { mode: 'inbox', project: row.project_id, pullRequest: null, episode: null },
-            )
-          }
-        />
-      );
-    default: {
-      const unhandled: never = renderer;
-      return unhandled;
-    }
-  }
 }
 
 /** `MM-DD HH:MM → MM-DD HH:MM`; the year is in the exact table below. */
@@ -218,16 +158,6 @@ function timeKindLabel(kind: JourneyEpisode['timeKind']): string {
 
 function destinationLabel(href: string): string {
   return href.startsWith('/loom') ? 'Open in Loom' : 'Open in Code · Compare';
-}
-
-function FieldLegend() {
-  return (
-    <p aria-label="Journey legend" className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-3xs text-text-muted">
-      <span>● EVENT time · ◇ OBSERVED time · ▭ undated gutter · dashed lane = authority not served · edge grade</span>
-      <GradeMark grade="exact" />
-      <GradeMark grade="inferred" />
-    </p>
-  );
 }
 
 function EpisodeInspector({ episode }: { episode: JourneyEpisode | null }) {

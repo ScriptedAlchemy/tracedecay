@@ -9,6 +9,7 @@ import {
   OVERVIEW_LOCAL_ONLY,
 } from '../../test/deliveryFixtures.ts';
 import { PR_42, renderDelivery } from '../../test/renderDelivery.tsx';
+import { LANE_FIELD_LABEL } from './LaneField.tsx';
 
 /** Inbox already joined by the server, overlapping_edit is Active with typed
  * proximity evidence (no client `/api/feedback/proximity` re-join). */
@@ -144,7 +145,7 @@ describe('DeliveryPage · inbox', () => {
     expect(rows).toHaveLength(4);
     expect(within(table).getAllByText('WORK / EXPLICIT')).toHaveLength(2);
     expect(within(table).getAllByRole('button', { name: 'Journey' })).toHaveLength(3);
-    expect(screen.queryByRole('group', { name: 'Delivery outcome field' })).toBeNull();
+    expect(screen.queryByRole('group', { name: LANE_FIELD_LABEL })).toBeNull();
   });
 
   it('separates the scoped project queue from correlated cross-project pull requests', async () => {
@@ -166,17 +167,13 @@ describe('DeliveryPage · inbox', () => {
     expect(screen.getByText('correlation unavailable')).toBeTruthy();
   });
 
-  it('opens the outcome field node and the umbrella root from the same selection', async () => {
+  it('selects a lane bar through the same URL the queue writes, and draws no umbrella node', async () => {
     const user = userEvent.setup();
     renderDelivery(INBOX);
-    const field = await screen.findByRole('group', { name: 'Delivery outcome field' });
+    const field = await screen.findByRole('group', { name: LANE_FIELD_LABEL });
     await user.click(within(field).getByRole('button', { name: /Pull request #8/ }));
-    expect(screen.getByTestId('location').textContent).toContain('pr=project.beta%3Agithub%3A8');
-    await user.click(within(field).getByRole('button', { name: /Umbrella Shared Work objective/ }));
-    expect(screen.getByTestId('location').textContent).toContain('mode=umbrella');
-    expect(screen.getByTestId('location').textContent).toContain(
-      'umbrella=shared_work_objective%3Awork.retry-backoff',
-    );
+    expect(screen.getByTestId('location').textContent).toBe('?pr=project.beta%3Agithub%3A8');
+    expect(within(field).queryByRole('button', { name: /Umbrella/ })).toBeNull();
   });
 
   it('renders provider-not-configured as a typed absence, not a transport failure or zero', async () => {

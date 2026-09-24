@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DeliveryOverviewV1 } from '../../contracts/generated.ts';
 import { INBOX, OVERVIEW_ALPHA, OVERVIEW_LOCAL_ONLY, T0 } from '../../test/deliveryFixtures.ts';
-import {
-  JOURNEY_GUTTER_WIDTH,
-  JOURNEY_LANES,
-  buildJourney,
-  laneServes,
-  layoutJourney,
-} from './journey.ts';
+import { JOURNEY_LANES, buildJourney, laneServes } from './journey.ts';
 
 const ROW_42 = INBOX.pull_requests[0]!;
 const EDGES_42 = INBOX.membership_edges.filter(
@@ -99,82 +93,5 @@ describe('buildJourney', () => {
       releases: 'not_published',
     });
     expect(model.span).toEqual({ start: T0 + 3_600_000_000, end: T0 + 3 * 3_600_000_000 });
-  });
-});
-
-describe('layoutJourney', () => {
-  it('never invents a timestamp for an undated record', () => {
-    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: EDGES_42 });
-    const first = layoutJourney(model, { width: 900 });
-    expect(first.gutterWidth).toBe(JOURNEY_GUTTER_WIDTH);
-    for (const point of first.points) {
-      if (point.episode.at === null) {
-        expect(point.x).toBeLessThan(first.gutterWidth);
-      } else {
-        expect(point.x).toBeGreaterThanOrEqual(first.gutterWidth);
-      }
-    }
-  });
-
-  it('orders dated points by recorded time and keeps lane rows fixed', () => {
-    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: [] });
-    const layout = layoutJourney(model, { width: 900 });
-    expect(layout.gutterWidth).toBe(0);
-    const dated = layout.points
-      .filter((point) => point.episode.at !== null)
-      .sort((left, right) => (left.episode.at as number) - (right.episode.at as number));
-    for (let index = 1; index < dated.length; index += 1) {
-      expect(dated[index]!.x).toBeGreaterThanOrEqual(dated[index - 1]!.x);
-    }
-    const commitsRow = layout.rows.find((row) => row.lane.id === 'commits')!;
-    for (const point of layout.points.filter((p) => p.episode.lane === 'commits')) {
-      expect(point.y).toBe(commitsRow.y);
-    }
-    expect(layout.ticks.length).toBeGreaterThan(1);
-    expect(layout.ticks.length).toBeLessThanOrEqual(9);
-  });
-
-  it('fans out same-instant marks on one lane instead of overprinting them', () => {
-    const layout = layoutJourney(buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: [] }), { width: 900 });
-    const reviews = layout.points.filter((point) => point.episode.lane === 'reviews');
-    const row = layout.rows.find((candidate) => candidate.lane.id === 'reviews')!;
-    expect(reviews).toHaveLength(2);
-    expect(reviews[0]!.x).toBe(reviews[1]!.x);
-    expect(new Set(reviews.map((point) => point.y)).size).toBe(2);
-    expect(reviews.map((point) => Math.abs(point.y - row.y)).sort()).toEqual([0, 9]);
-    for (const tick of layout.ticks.slice(1)) {
-      const previous = layout.ticks[layout.ticks.indexOf(tick) - 1]!;
-      expect(tick.x - previous.x).toBeGreaterThanOrEqual(44);
-    }
-  });
-
-  it('compresses long empty time into a visible break', () => {
-    const late: DeliveryOverviewV1 = {
-      ...OVERVIEW_ALPHA,
-      releases: {
-        state: 'ready',
-        value: {
-          truncated: false,
-          items: [
-            {
-              id: 'release.v1',
-              label: 'v1.0.0',
-              name: 'v1.0.0',
-              tag: 'v1.0.0',
-              draft: false,
-              prerelease: false,
-              release_id: 1,
-              source_url: 'https://github.com/example/alpha/releases/v1.0.0',
-              created_at_micros: T0 + 400 * 3_600_000_000,
-              published_at_micros: T0 + 400 * 3_600_000_000,
-              assets: [],
-            },
-          ],
-        },
-      },
-    };
-    const layout = layoutJourney(buildJourney(late, { row: ROW_42, edges: [] }), { width: 900 });
-    expect(layout.breaks).toHaveLength(1);
-    expect(layout.breaks[0]!.toMicros).toBe(T0 + 400 * 3_600_000_000);
   });
 });

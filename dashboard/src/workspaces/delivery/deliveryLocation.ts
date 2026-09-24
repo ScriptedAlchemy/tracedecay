@@ -21,20 +21,10 @@ export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 export const DELIVERY_LAYOUTS = ['field', 'table'] as const;
 export type DeliveryLayout = (typeof DELIVERY_LAYOUTS)[number];
 
-/**
- * The renderer exploration: three candidate Delivery fields over the same two
- * reads, selected with `?renderer=`. Absent keeps the shipping umbrella field
- * and lane journey, so the losing candidates delete as whole files plus their
- * entry here.
- */
-export const DELIVERY_RENDERERS = ['envelopes', 'transit', 'lanes'] as const;
-export type DeliveryRenderer = (typeof DELIVERY_RENDERERS)[number];
-
 export interface DeliveryLocation {
   readonly mode: DeliveryMode;
   /** Exact list/tree/table fallback instead of the SVG field. */
   readonly layout: DeliveryLayout;
-  readonly renderer: DeliveryRenderer | null;
   readonly project: string | null;
   readonly pullRequest: string | null;
   readonly umbrella: string | null;
@@ -52,7 +42,6 @@ export interface DeliveryLocation {
 const PARAMS = {
   mode: 'mode',
   layout: 'layout',
-  renderer: 'renderer',
   project: 'project',
   pullRequest: 'pr',
   umbrella: 'umbrella',
@@ -87,7 +76,6 @@ export function readDeliveryLocation(params: URLSearchParams): DeliveryLocation 
   return {
     mode: oneOf(params.get(PARAMS.mode), DELIVERY_MODES) ?? 'inbox',
     layout: oneOf(params.get(PARAMS.layout), DELIVERY_LAYOUTS) ?? 'field',
-    renderer: oneOf(params.get(PARAMS.renderer), DELIVERY_RENDERERS),
     project: params.get(PARAMS.project),
     pullRequest: params.get(PARAMS.pullRequest),
     umbrella: params.get(PARAMS.umbrella),
@@ -126,7 +114,6 @@ export function writeDeliveryLocation(
   if (patch.layout !== undefined) {
     set(PARAMS.layout, patch.layout === 'field' ? null : patch.layout);
   }
-  if (patch.renderer !== undefined) set(PARAMS.renderer, patch.renderer);
   if (patch.project !== undefined) set(PARAMS.project, patch.project);
   if (patch.pullRequest !== undefined) set(PARAMS.pullRequest, patch.pullRequest);
   if (patch.umbrella !== undefined) set(PARAMS.umbrella, patch.umbrella);
