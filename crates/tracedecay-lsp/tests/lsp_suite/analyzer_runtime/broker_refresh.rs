@@ -755,7 +755,8 @@ async fn broker_drops_warm_client_when_the_admitted_root_disappears() {
         &script_path,
         fake_lsp_script_with_preamble(
             &format!(
-                "with open({:?}, \"a\", encoding=\"utf-8\") as starts:\n    starts.write(\"start\\n\")\n",
+                "import os\nos.chdir({:?})\nwith open({:?}, \"a\", encoding=\"utf-8\") as starts:\n    starts.write(\"start\\n\")\n",
+                temp.path().display().to_string(),
                 counter_path.display().to_string()
             ),
             FAKE_DIAGNOSTIC_PUBLISH,
