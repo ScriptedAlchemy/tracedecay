@@ -179,7 +179,7 @@ export function BrainField({
   }
   return (
     <figure className={className ?? 'flex h-full min-h-0 flex-col gap-2'}>
-      <div className="relative min-h-0 flex-1">
+      <div className="td-night relative min-h-0 flex-1 max-md:min-h-80">
         <div
           ref={containerRef}
           data-brain-field
