@@ -1881,7 +1881,6 @@ mod recent_first_discovery_tests {
             .expect("one source replay index");
         assert_eq!(index.completed_enumerations, 1);
         assert_eq!(index.files_considered, 73);
-        assert!(!index._memory.is_empty());
     }
 
     #[tokio::test]

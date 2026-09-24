@@ -48,7 +48,7 @@ pub use attachment::{
 };
 pub use capacity::StoreRuntimeRegistryConfig;
 #[cfg(test)]
-pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
+pub(crate) use capacity::MAX_PROJECT_CODE_OPEN_RUNTIMES;
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
 pub use graph::{

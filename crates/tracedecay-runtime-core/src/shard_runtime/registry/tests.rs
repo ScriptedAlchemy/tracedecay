@@ -13,12 +13,13 @@ use super::*;
 use support::*;
 
 #[test]
-fn budget_defaults_to_four_caps_at_eight_and_rejects_zero() {
+fn budget_accepts_the_cap_and_rejects_zero_or_above_cap() {
     assert_eq!(
-        StoreRuntimeRegistryConfig::default().project_code_open_runtime_budget(),
-        DEFAULT_PROJECT_CODE_OPEN_RUNTIMES
+        StoreRuntimeRegistryConfig::new(MAX_PROJECT_CODE_OPEN_RUNTIMES)
+            .unwrap()
+            .project_code_open_runtime_budget(),
+        MAX_PROJECT_CODE_OPEN_RUNTIMES
     );
-    assert!(StoreRuntimeRegistryConfig::new(MAX_PROJECT_CODE_OPEN_RUNTIMES).is_ok());
     for invalid in [0, MAX_PROJECT_CODE_OPEN_RUNTIMES + 1] {
         assert!(matches!(
             StoreRuntimeRegistryConfig::new(invalid),

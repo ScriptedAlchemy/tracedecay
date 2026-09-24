@@ -230,7 +230,10 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
         content,
         "canonical historical message 1 with durable context"
     );
-    assert!(!summary.summary_text.is_empty());
+    assert_eq!(
+        summary.summary_text,
+        "fixture summary preserving canonical historical context"
+    );
     assert_eq!(
         response.relation_projection_status,
         LcmRelationProjectionStatus::Applied

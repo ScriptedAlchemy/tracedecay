@@ -467,7 +467,7 @@ async fn committed_payload_delete_drain_failure_returns_pending_then_retries() -
     let removed = drain_pending_payload_delete(&store.conn, &store.storage_root, &payload_ref)
         .await
         .map_err(|err| err.to_string())?;
-    assert!(removed.is_some());
+    assert_eq!(removed, Some("body to retry".len() as u64));
     assert!(!payload_path(&store, &payload_ref).exists());
     Ok(())
 }

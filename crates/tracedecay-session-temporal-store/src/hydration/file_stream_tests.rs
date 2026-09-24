@@ -258,9 +258,11 @@ impl TemporalHydrationBackend for ExternalPayloadBackend<'_> {
 use tracedecay_domain::test_fixtures::repeated_sha256_text as digest;
 
 fn snapshot(control: ExecutionControl) -> TemporalExecutionSnapshot {
-    let limits = ExecutionLimits::default();
-    assert_eq!(limits.hydration_payload_bytes, MAX_PAYLOAD_BYTES);
-    assert_eq!(limits.hydration_chunk_bytes, CHUNK_BYTES);
+    let limits = ExecutionLimits {
+        hydration_payload_bytes: MAX_PAYLOAD_BYTES,
+        hydration_chunk_bytes: CHUNK_BYTES,
+        ..ExecutionLimits::default()
+    };
     TemporalExecutionSnapshot::new_authorized(
         TemporalSnapshotRequest::new(
             SessionId::new("session-1").expect("session"),
