@@ -105,6 +105,32 @@ pub fn try_acquire_code_generation_store_lock(
         GenerationScopeFence::PassBusy | GenerationScopeFence::Pending => return Ok(None),
         fence => fence,
     };
+    try_acquire_code_generation_store_lock_unfenced(store_root)
+}
+
+pub(super) fn try_acquire_code_generation_store_lock_during_scope_retention(
+    store_root: &Path,
+    scope_retention_lock: &CodeGenerationStoreLockV1,
+) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
+    let parent = store_root.parent().ok_or_else(|| {
+        CodeGenerationRetentionErrorV1::UnsafeState(
+            "code-index scope has no parent for retention lock".to_owned(),
+        )
+    })?;
+    if scope_retention_lock.generation_store
+        || scope_retention_lock.shared
+        || canonical_store_root(parent)? != scope_retention_lock.store_root
+    {
+        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
+            "scope collection requires its exact exclusive parent lock".to_owned(),
+        ));
+    }
+    try_acquire_code_generation_store_lock_unfenced(store_root)
+}
+
+fn try_acquire_code_generation_store_lock_unfenced(
+    store_root: &Path,
+) -> Result<Option<CodeGenerationStoreLockV1>, CodeGenerationRetentionErrorV1> {
     let store_root = canonical_store_root(store_root)?;
     let lock = open_lock_file(&store_root.join(STORE_LOCK_FILE))?;
     match lock.try_lock().map_err(std::io::Error::from) {
