@@ -6,7 +6,7 @@
  * forced-colors. Glyphs are drawn in a 16x16 box centred at the origin so the
  * scene can translate and scale them without knowing what they are.
  */
-import type { JSX } from 'react';
+import type { JSX, ReactNode } from 'react';
 import { gradeColorVar, gradeDashArray } from './palette.ts';
 import { JOURNEY_EVENT_KINDS, type EvidenceGrade, type JourneyEventKind, type SceneGap } from './types.ts';
 
@@ -112,7 +112,32 @@ export function glyphLabel(kind: JourneyEventKind): string {
   }
 }
 
-export function TemporalLegend({ gaps }: { gaps: readonly SceneGap[] }): JSX.Element {
+function LineSwatch({ grade }: { grade: EvidenceGrade }): JSX.Element {
+  return (
+    <svg width={28} height={8} aria-hidden="true" className="block shrink-0">
+      <line
+        x1={0}
+        y1={4}
+        x2={28}
+        y2={4}
+        stroke={gradeColorVar(grade)}
+        strokeWidth={1.4}
+        strokeDasharray={gradeDashArray(grade) || undefined}
+      />
+    </svg>
+  );
+}
+
+export function TemporalLegend({
+  gaps,
+  Swatch = LineSwatch,
+  children,
+}: {
+  gaps: readonly SceneGap[];
+  Swatch?: (props: { grade: EvidenceGrade }) => JSX.Element;
+  /** Renderer-specific encodings, printed beside the grade ladder. */
+  children?: ReactNode;
+}): JSX.Element {
   const pageWide = gaps.filter((gap) => gap.laneId === null);
   return (
     <div className="flex flex-col gap-1.5 border-t border-edge-subtle px-2 py-1.5">
@@ -120,21 +145,12 @@ export function TemporalLegend({ gaps }: { gaps: readonly SceneGap[] }): JSX.Ele
         <span className="td-legend">Legend</span>
         {GRADES.map((grade) => (
           <span key={grade} className="flex items-center gap-1.5">
-            <svg width={28} height={8} aria-hidden="true" className="block shrink-0">
-              <line
-                x1={0}
-                y1={4}
-                x2={28}
-                y2={4}
-                stroke={gradeColorVar(grade)}
-                strokeWidth={1.4}
-                strokeDasharray={gradeDashArray(grade) || undefined}
-              />
-            </svg>
+            <Swatch grade={grade} />
             <span className="td-legend">{grade.toUpperCase()}</span>
           </span>
         ))}
       </div>
+      {children}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         {JOURNEY_EVENT_KINDS.map((kind) => (
           <span key={kind} className="flex items-center gap-1.5 text-text-muted">

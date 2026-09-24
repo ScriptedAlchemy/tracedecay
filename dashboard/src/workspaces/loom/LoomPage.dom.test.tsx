@@ -947,4 +947,17 @@ describe('LoomPage', () => {
     }
     expect(screen.getByText('LOADED END')).toBeTruthy();
   });
+
+  it('swaps only the paint when a renderer is named in the URL, keeping the table and selection', async () => {
+    const { container } = renderLoom(HAPPY, '/loom?scope=project-loom&loomRenderer=strata');
+    await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    expect(container.querySelector('[data-scene-renderer]')?.getAttribute('data-scene-renderer')).toBe('strata');
+    expect(screen.getByText('NOW = newest record in this page · not a live stream')).toBeTruthy();
+    expect(container.querySelector('[data-legend-encodings="strata"]')).toBeTruthy();
+    expect(screen.getByRole('table')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Select session Deliver Git primitive runtime' }));
+    await waitFor(() => expect(screen.getByTestId('loom-url').textContent).toContain('loomSession='));
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomRenderer=strata');
+    expect(container.querySelector('[data-scene-renderer]')?.getAttribute('data-scene-renderer')).toBe('strata');
+  });
 });

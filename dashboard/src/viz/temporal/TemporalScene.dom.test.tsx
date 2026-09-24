@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SCENE_RENDERERS } from './renderers/index.ts';
 import { TemporalScene, type TemporalSceneProps } from './TemporalScene.tsx';
 import type { SceneNode, SceneWindow, TemporalSceneModel } from './types.ts';
 
@@ -119,7 +120,7 @@ function stubCanvas(available: boolean): string[] {
   return calls;
 }
 
-function renderScene(overrides: Partial<TemporalSceneProps> = {}) {
+function renderSceneWith(overrides: Partial<TemporalSceneProps> = {}) {
   const handlers = {
     onSelectLane: vi.fn(),
     onSelectEvent: vi.fn(),
@@ -159,6 +160,8 @@ describe('TemporalScene', () => {
     });
   });
 
+  const renderScene = renderSceneWith;
+
   describe('layers', () => {
     it('paints the canvas substrate once a 2D context exists', () => {
       const calls = stubCanvas(true);
@@ -179,87 +182,6 @@ describe('TemporalScene', () => {
     });
   });
 
-  describe('events', () => {
-    it('renders one button per node with a Select label', () => {
-      const { container, model } = renderScene();
-      const events = container.querySelectorAll('[data-event]');
-      expect(events.length).toBe(model.nodes.length);
-      for (const element of events) {
-        expect(element.getAttribute('role')).toBe('button');
-        expect(element.getAttribute('aria-label')?.startsWith('Select ')).toBe(true);
-      }
-    });
-
-    it('selects on click and on Enter', () => {
-      const { container, onSelectEvent } = renderScene();
-      fireEvent.click(container.querySelector('[data-event="n-commit"]')!);
-      expect(onSelectEvent).toHaveBeenCalledWith('n-commit');
-      fireEvent.keyDown(container.querySelector('[data-event="n-spawn"]')!, { key: 'Enter' });
-      expect(onSelectEvent).toHaveBeenCalledWith('n-spawn');
-      expect(onSelectEvent).toHaveBeenCalledTimes(2);
-    });
-
-    it('declares a sequence-placed node as recorded order', () => {
-      const { container } = renderScene();
-      const sequenced = container.querySelector('[data-event="n-msg"]')!;
-      expect(sequenced.getAttribute('data-x-basis')).toBe('sequence');
-      expect(sequenced.querySelector('title')?.textContent).toContain('recorded order');
-      expect(container.querySelector('[data-event="n-commit"]')?.getAttribute('data-grade')).toBe('inferred');
-    });
-
-    it('hover inspects without selecting', () => {
-      const { container, model, onInspect, onSelectEvent } = renderScene();
-      const tool = container.querySelector('[data-event="n-tool"]')!;
-      fireEvent.mouseOver(tool);
-      expect(onInspect).toHaveBeenLastCalledWith(model.nodes.find((entry) => entry.id === 'n-tool'));
-      const otherLane = container.querySelector(`[data-lane-group='${CHILD}']`) as SVGGElement;
-      expect(otherLane.style.opacity).toBe('0.55');
-      fireEvent.mouseOut(tool);
-      expect(onInspect).toHaveBeenLastCalledWith(null);
-      expect(otherLane.style.opacity).toBe('1');
-      expect(onSelectEvent).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('lanes and branches', () => {
-    it('opens a lane from its label row', () => {
-      const { onSelectLane } = renderScene();
-      fireEvent.click(screen.getByRole('button', { name: `Open session ${ROOT_LABEL}` }));
-      expect(onSelectLane).toHaveBeenCalledWith(ROOT);
-    });
-
-    it('toggles a branch from the lane column and from the cluster body', () => {
-      const { onToggleBranch } = renderScene();
-      fireEvent.click(screen.getByRole('button', { name: `Collapse branch ${ROOT_LABEL}` }));
-      expect(onToggleBranch).toHaveBeenCalledWith(ROOT);
-      fireEvent.click(
-        screen.getByRole('button', { name: `Expand branch ${BUNDLE_LABEL} · 4 sessions · 3 subagents · 57 messages` }),
-      );
-      expect(onToggleBranch).toHaveBeenCalledWith(BUNDLE);
-    });
-  });
-
-  describe('intervals and gaps', () => {
-    it('exposes a proximity encounter as a button that pivots selection', () => {
-      const { container, onSelectEncounter } = renderScene();
-      const proximity = container.querySelector('[data-proximity-encounter="enc-1"]')!;
-      expect(proximity).toBeTruthy();
-      fireEvent.click(proximity.closest('[role="button"]')!);
-      expect(onSelectEncounter).toHaveBeenCalledWith('enc-1');
-      expect(container.querySelector('[data-interval-kind="git_span"]')).toBeTruthy();
-    });
-
-    it('marks lane gaps in the field and lists page-wide gaps in the legend', () => {
-      const { container } = renderScene();
-      const gap = container.querySelector('[data-gap-kind="extent_unknown"]')!;
-      expect(gap.getAttribute('role')).toBe('img');
-      expect(screen.getByRole('list', { name: 'Evidence gaps' }).textContent).toContain('handoff unavailable');
-      for (const grade of ['EXACT', 'EXPLICIT', 'INFERRED', 'AMBIGUOUS', 'STALE', 'UNAVAILABLE']) {
-        expect(screen.getByText(grade)).toBeTruthy();
-      }
-    });
-  });
-
   describe('cursor and tail', () => {
     it('draws the reveal cursor at the model x and the tail marker label', () => {
       const { container } = renderScene();
@@ -269,66 +191,151 @@ describe('TemporalScene', () => {
     });
   });
 
-  describe('time window', () => {
-    it('zooms in to the middle half around the centre', () => {
-      const { onWindowChange } = renderScene();
-      fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
-      const next = lastWindow(onWindowChange);
-      expect(next.end - next.start).toBeCloseTo(3600, 6);
-      expect((next.start + next.end) / 2).toBeCloseTo((WINDOW.start + WINDOW.end) / 2, 6);
+  // The overlay contract is the host's, so it holds for every renderer.
+  describe.each(Object.values(SCENE_RENDERERS))('$id renderer', (renderer) => {
+    const renderScene = (overrides: Partial<TemporalSceneProps> = {}) => renderSceneWith({ renderer, ...overrides });
+    describe('events', () => {
+      it('renders one button per node with a Select label', () => {
+        const { container, model } = renderScene();
+        const events = container.querySelectorAll('[data-event]');
+        expect(events.length).toBe(model.nodes.length);
+        for (const element of events) {
+          expect(element.getAttribute('role')).toBe('button');
+          expect(element.getAttribute('aria-label')?.startsWith('Select ')).toBe(true);
+        }
+      });
+
+      it('selects on click and on Enter', () => {
+        const { container, onSelectEvent } = renderScene();
+        fireEvent.click(container.querySelector('[data-event="n-commit"]')!);
+        expect(onSelectEvent).toHaveBeenCalledWith('n-commit');
+        fireEvent.keyDown(container.querySelector('[data-event="n-spawn"]')!, { key: 'Enter' });
+        expect(onSelectEvent).toHaveBeenCalledWith('n-spawn');
+        expect(onSelectEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('declares a sequence-placed node as recorded order', () => {
+        const { container } = renderScene();
+        const sequenced = container.querySelector('[data-event="n-msg"]')!;
+        expect(sequenced.getAttribute('data-x-basis')).toBe('sequence');
+        expect(sequenced.querySelector('title')?.textContent).toContain('recorded order');
+        expect(container.querySelector('[data-event="n-commit"]')?.getAttribute('data-grade')).toBe('inferred');
+      });
+
+      it('hover inspects without selecting', () => {
+        const { container, model, onInspect, onSelectEvent } = renderScene();
+        const tool = container.querySelector('[data-event="n-tool"]')!;
+        fireEvent.mouseOver(tool);
+        expect(onInspect).toHaveBeenLastCalledWith(model.nodes.find((entry) => entry.id === 'n-tool'));
+        const otherLane = container.querySelector(`[data-lane-group='${CHILD}']`) as SVGGElement;
+        expect(otherLane.style.opacity).toBe('0.55');
+        fireEvent.mouseOut(tool);
+        expect(onInspect).toHaveBeenLastCalledWith(null);
+        expect(otherLane.style.opacity).toBe('1');
+        expect(onSelectEvent).not.toHaveBeenCalled();
+      });
     });
 
-    it('ctrl-wheel on the overlay narrows the window', () => {
-      const { container, onWindowChange } = renderScene();
-      fireEvent.wheel(container.querySelector('[data-scene-layer="overlay"]')!, { ctrlKey: true, deltaY: -100 });
-      const next = lastWindow(onWindowChange);
-      expect(next.end - next.start).toBeLessThan(7200);
+    describe('lanes and branches', () => {
+      it('opens a lane from its label row', () => {
+        const { onSelectLane } = renderScene();
+        fireEvent.click(screen.getByRole('button', { name: `Open session ${ROOT_LABEL}` }));
+        expect(onSelectLane).toHaveBeenCalledWith(ROOT);
+      });
+
+      it('toggles a branch from the lane column and from the cluster body', () => {
+        const { onToggleBranch } = renderScene();
+        fireEvent.click(screen.getByRole('button', { name: `Collapse branch ${ROOT_LABEL}` }));
+        expect(onToggleBranch).toHaveBeenCalledWith(ROOT);
+        fireEvent.click(
+          screen.getByRole('button', { name: `Expand branch ${BUNDLE_LABEL} · 4 sessions · 3 subagents · 57 messages` }),
+        );
+        expect(onToggleBranch).toHaveBeenCalledWith(BUNDLE);
+      });
     });
 
-    it('pans later by a quarter of the span', () => {
-      const { onWindowChange } = renderScene();
-      fireEvent.click(screen.getByRole('button', { name: 'Pan later' }));
-      const next = lastWindow(onWindowChange);
-      expect(next.start).toBeCloseTo(WINDOW.start + 1800, 6);
-      expect(next.end - next.start).toBeCloseTo(7200, 6);
+    describe('intervals and gaps', () => {
+      it('exposes a proximity encounter as a button that pivots selection', () => {
+        const { container, onSelectEncounter } = renderScene();
+        const proximity = container.querySelector('[data-proximity-encounter="enc-1"]')!;
+        expect(proximity).toBeTruthy();
+        fireEvent.click(proximity.closest('[role="button"]')!);
+        expect(onSelectEncounter).toHaveBeenCalledWith('enc-1');
+        expect(container.querySelector('[data-interval-kind="git_span"]')).toBeTruthy();
+      });
+
+      it('marks lane gaps in the field and lists page-wide gaps in the legend', () => {
+        const { container } = renderScene();
+        const gap = container.querySelector('[data-gap-kind="extent_unknown"]')!;
+        expect(gap.getAttribute('role')).toBe('img');
+        expect(screen.getByRole('list', { name: 'Evidence gaps' }).textContent).toContain('handoff unavailable');
+        for (const grade of ['EXACT', 'EXPLICIT', 'INFERRED', 'AMBIGUOUS', 'STALE', 'UNAVAILABLE']) {
+          expect(screen.getByText(grade)).toBeTruthy();
+        }
+      });
     });
 
-    it('offers Fit only when the window differs from the full extent', () => {
-      const fitted = renderScene({ fullWindow: WINDOW });
-      expect(screen.getByRole('button', { name: 'Fit' })).toHaveProperty('disabled', true);
-      fitted.unmount();
-      const full = { start: WINDOW.start - 3600, end: WINDOW.end + 3600 };
-      const { onWindowChange } = renderScene({ fullWindow: full });
-      const fit = screen.getByRole('button', { name: 'Fit' });
-      expect(fit).toHaveProperty('disabled', false);
-      fireEvent.click(fit);
-      expect(onWindowChange).toHaveBeenCalledWith(full);
+    describe('time window', () => {
+      it('zooms in to the middle half around the centre', () => {
+        const { onWindowChange } = renderScene();
+        fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+        const next = lastWindow(onWindowChange);
+        expect(next.end - next.start).toBeCloseTo(3600, 6);
+        expect((next.start + next.end) / 2).toBeCloseTo((WINDOW.start + WINDOW.end) / 2, 6);
+      });
+
+      it('ctrl-wheel on the overlay narrows the window', () => {
+        const { container, onWindowChange } = renderScene();
+        fireEvent.wheel(container.querySelector('[data-scene-layer="overlay"]')!, { ctrlKey: true, deltaY: -100 });
+        const next = lastWindow(onWindowChange);
+        expect(next.end - next.start).toBeLessThan(7200);
+      });
+
+      it('pans later by a quarter of the span', () => {
+        const { onWindowChange } = renderScene();
+        fireEvent.click(screen.getByRole('button', { name: 'Pan later' }));
+        const next = lastWindow(onWindowChange);
+        expect(next.start).toBeCloseTo(WINDOW.start + 1800, 6);
+        expect(next.end - next.start).toBeCloseTo(7200, 6);
+      });
+
+      it('offers Fit only when the window differs from the full extent', () => {
+        const fitted = renderScene({ fullWindow: WINDOW });
+        expect(screen.getByRole('button', { name: 'Fit' })).toHaveProperty('disabled', true);
+        fitted.unmount();
+        const full = { start: WINDOW.start - 3600, end: WINDOW.end + 3600 };
+        const { onWindowChange } = renderScene({ fullWindow: full });
+        const fit = screen.getByRole('button', { name: 'Fit' });
+        expect(fit).toHaveProperty('disabled', false);
+        fireEvent.click(fit);
+        expect(onWindowChange).toHaveBeenCalledWith(full);
+      });
+
+      it('treats a click on the empty field as clearing the lane selection', () => {
+        const { container, onSelectLane, onWindowChange } = renderScene();
+        const background = container.querySelector('[data-field-background]')!;
+        fireEvent.pointerDown(background, { pointerId: 1, button: 0, clientX: 400 });
+        fireEvent.pointerUp(background, { pointerId: 1, clientX: 401 });
+        expect(onSelectLane).toHaveBeenCalledWith(null);
+        expect(onWindowChange).not.toHaveBeenCalled();
+      });
     });
 
-    it('treats a click on the empty field as clearing the lane selection', () => {
-      const { container, onSelectLane, onWindowChange } = renderScene();
-      const background = container.querySelector('[data-field-background]')!;
-      fireEvent.pointerDown(background, { pointerId: 1, button: 0, clientX: 400 });
-      fireEvent.pointerUp(background, { pointerId: 1, clientX: 401 });
-      expect(onSelectLane).toHaveBeenCalledWith(null);
-      expect(onWindowChange).not.toHaveBeenCalled();
-    });
-  });
+    describe('minimap', () => {
+      it('draws bins, lanes and the viewport rect', () => {
+        const { container } = renderScene();
+        expect(container.querySelectorAll('[data-minimap-bin]').length).toBe(8);
+        expect(container.querySelectorAll('[data-minimap-lane]').length).toBe(3);
+        expect(container.querySelector('[data-scene-viewport]')).toBeTruthy();
+      });
 
-  describe('minimap', () => {
-    it('draws bins, lanes and the viewport rect', () => {
-      const { container } = renderScene();
-      expect(container.querySelectorAll('[data-minimap-bin]').length).toBe(8);
-      expect(container.querySelectorAll('[data-minimap-lane]').length).toBe(3);
-      expect(container.querySelector('[data-scene-viewport]')).toBeTruthy();
-    });
-
-    it('pans with the arrow keys while keeping the span', () => {
-      const { onWindowChange } = renderScene();
-      fireEvent.keyDown(screen.getByRole('group', { name: 'Temporal minimap' }), { key: 'ArrowRight' });
-      const next = lastWindow(onWindowChange);
-      expect(next.end - next.start).toBeCloseTo(7200, 6);
-      expect(next.start).toBeGreaterThan(WINDOW.start);
+      it('pans with the arrow keys while keeping the span', () => {
+        const { onWindowChange } = renderScene();
+        fireEvent.keyDown(screen.getByRole('group', { name: 'Temporal minimap' }), { key: 'ArrowRight' });
+        const next = lastWindow(onWindowChange);
+        expect(next.end - next.start).toBeCloseTo(7200, 6);
+        expect(next.start).toBeGreaterThan(WINDOW.start);
+      });
     });
   });
 });

@@ -22,6 +22,7 @@ export const LOOM_PARAMS = {
   hidden: 'loomHide',
   zoom: 'loomZoom',
   encounter: 'loomEncounter',
+  renderer: 'loomRenderer',
 } as const;
 
 /** Earliest epoch second a Loom window may name. Anything smaller is not a

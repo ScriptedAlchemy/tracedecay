@@ -18,7 +18,9 @@ import {
   fittedWindowFor,
   layoutTemporalScene,
 } from '../../viz/temporal/layout.ts';
+import { layoutDensity } from '../../viz/temporal/density.ts';
 import { glyphLabel } from '../../viz/temporal/glyphs.tsx';
+import { parseSceneRenderer, SCENE_RENDERERS } from '../../viz/temporal/renderers/index.ts';
 import { TemporalScene } from '../../viz/temporal/TemporalScene.tsx';
 import type {
   JourneyEventKind,
@@ -245,6 +247,15 @@ function TemporalBody({
       }),
     [projection, width, window, zoom, collapsed, expanded, selectedLane, playback.active, playback.state.followLive, playback.reveal, hiddenKinds],
   );
+  const renderer = SCENE_RENDERERS[parseSceneRenderer(params.get(LOOM_PARAMS.renderer))];
+  const density = useMemo(
+    () =>
+      renderer.id === 'current'
+        ? null
+        : layoutDensity(projection, model, { reveal: playback.reveal, hiddenKinds }),
+    [renderer.id, projection, model, playback.reveal, hiddenKinds],
+  );
+  const tailLabel = renderer.id === 'current' ? 'LOADED END' : 'NOW';
 
   const update = (mutate: (next: URLSearchParams) => void) => {
     const next = new URLSearchParams(params);
@@ -413,6 +424,7 @@ function TemporalBody({
             <FieldControls
               following={following}
               onReturnToTail={() => setWindow(null)}
+              tailLabel={tailLabel}
               zoom={zoom}
               onZoom={setZoom}
               projection={projection}
@@ -424,7 +436,9 @@ function TemporalBody({
             <TemporalScene
               model={model}
               ariaLabel={fieldDescription(projection, model)}
-              tailLabel="LOADED END"
+              tailLabel={tailLabel}
+              renderer={renderer}
+              density={density}
               fullWindow={fullWindow}
               reducedMotion={reduced}
               onMeasure={setWidth}
@@ -569,6 +583,7 @@ function writeSet(search: URLSearchParams, key: string, ids: ReadonlySet<string>
 function FieldControls({
   following,
   onReturnToTail,
+  tailLabel,
   zoom,
   onZoom,
   projection,
@@ -579,6 +594,7 @@ function FieldControls({
 }: {
   following: boolean;
   onReturnToTail: () => void;
+  tailLabel: string;
   zoom: 'workstream' | 'agent' | 'event';
   onZoom: (zoom: 'workstream' | 'agent') => void;
   projection: JourneyProjection;
@@ -610,7 +626,7 @@ function FieldControls({
             RETURN TO LOADED TAIL
           </button>
         )}
-        <span className="text-text-muted">LOADED END = newest record in this page · not a live stream</span>
+        <span className="text-text-muted">{tailLabel} = newest record in this page · not a live stream</span>
       </div>
       <div className="flex items-center gap-1" role="group" aria-label="Semantic zoom">
         <span className="td-legend">zoom</span>
