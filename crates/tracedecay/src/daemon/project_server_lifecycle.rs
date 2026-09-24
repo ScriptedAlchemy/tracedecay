@@ -6,6 +6,8 @@
 
 use super::*;
 use std::collections::HashSet;
+use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
+use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::shutdown::ShutdownStatus;
@@ -162,8 +164,17 @@ pub(super) async fn shutdown_detached_project_servers(
                     &graph.hook_store_layout().data_root,
                 )
                 .await;
+                let scout_owner = hook_project_id_for_layout(graph.hook_store_layout())
+                    .map(|project_id| (project_id, graph.db_path()));
                 drop(graph);
-                server.shutdown_until(deadline).await
+                let status = server.shutdown_until(deadline).await;
+                // The process-global Context Scout owner holds the project
+                // graph `Database`; while registered, the store runtime cannot
+                // close and its writer never runs the shutdown checkpoint.
+                if let Some((project_id, graph_db_path)) = scout_owner {
+                    unregister_registered_context_scout_owner(project_id, &graph_db_path);
+                }
+                status
             })
         }),
     )

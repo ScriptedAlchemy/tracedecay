@@ -644,7 +644,7 @@ async fn run_foreground_unix(
         .await?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
-        profile_database.clone(),
+        profile_database,
         engine.store_administration.clone(),
         engine.invocation.code_index_schedulers.clone(),
         sync_config.retention.clone(),
