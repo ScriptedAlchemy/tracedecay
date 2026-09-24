@@ -15,7 +15,9 @@ use tracedecay_store::StoreShardScopeV1;
 
 mod cursor_agent;
 mod provider_capabilities;
-#[cfg(test)]
+// The summarizer fixtures are `#!/bin/sh` executables found through a
+// `:`-joined PATH.
+#[cfg(all(test, unix))]
 mod summarizer_executable_tests;
 
 #[cfg(test)]
