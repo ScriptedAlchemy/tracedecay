@@ -628,7 +628,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         // consult: it means query serving is still being
                         // produced. Holding it for work behind owners that
                         // already serve reported a complete current generation
-                        // as verifying (#1103). The worker still owns and joins
+                        // as verifying. The worker still owns and joins
                         // the task, so shutdown sees the work.
                         retained_projection_successor_only = owners_ready;
                         let projection_pass = (!retained_projection_successor_only).then(|| {

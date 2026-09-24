@@ -9,21 +9,21 @@ use super::{LcmError, LcmRawMessage, raw};
 #[cfg(test)]
 use super::util;
 
-/// Version 10 message and raw rows no longer carry a copy of their observation
-/// envelope; readers join it from the `observations` row. Raw rows store their
-/// body once: `snippet_text` and `index_text` are virtual columns computing
+/// Message and raw rows carry no copy of their observation envelope; readers
+/// join it from the `observations` row. Raw rows store their body once.
+/// `snippet_text` and `index_text` are virtual columns computing
 /// [`crate::retrieval_content::derived_text_for_snippet`] and
 /// [`crate::retrieval_content::derived_text_for_index`] from `content`, or
-/// from `placeholder_text` when the body lives outside the row. Version 11
-/// admits deleting cursor advances the durable cursor strictly supersedes, so
-/// each cursor commit prunes them in place. Version 12 folds the session
-/// message projection into `lcm_raw_messages`: each message body is stored
-/// once, beside the session-only columns (`kind`, `model`, `tool_names`,
-/// `source_path`, `source_offset`), and one FTS index serves both LCM grep and
-/// session message search. Version 13 removes the LCM summary tables: every
-/// summary read joins the canonical `session_summary_nodes` /
+/// from `placeholder_text` when the body lives outside the row. Each cursor
+/// commit deletes the cursor advances the durable cursor strictly supersedes.
+/// `lcm_raw_messages` also holds the session message projection, so each
+/// message body is stored once beside the session-only columns (`kind`,
+/// `model`, `tool_names`, `source_path`, `source_offset`), and one FTS index
+/// serves both LCM grep and session message search. There are no LCM summary
+/// tables. Every summary read joins the canonical `session_summary_nodes` /
 /// `session_summary_sources` authority (session temporal schema) through
-/// [`SUMMARY_VISIBLE_SQL`]. Older stores require a profile reset.
+/// [`SUMMARY_VISIBLE_SQL`]. Stores at an older version require a profile
+/// reset.
 pub const LCM_SCHEMA_VERSION: i64 = 13;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`

@@ -9,9 +9,9 @@ export type EmergentPositions =
   | { state: 'ready'; positions: ReadonlyMap<string, [number, number]> };
 
 /**
- * Force-settled coordinates for a returned graph, from the same bounded
- * worker the legacy canvas uses. `null` input skips layout for renderers that
- * do not place symbols spatially.
+ * Force-settled coordinates for a returned graph, computed by the bounded
+ * emergent-layout worker. `null` input skips layout for renderers that do not
+ * place symbols spatially.
  */
 export function useEmergentPositions(
   nodes: readonly GraphCanvasNode[] | null,

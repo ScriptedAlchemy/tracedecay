@@ -22,28 +22,24 @@ use super::*;
 
 /// The partitioned generation manifest revision, which the daemon publishes.
 ///
-/// Revisions through eight predate required clone-body source rows and are
-/// rebuilt rather than interpreted as successful empty clone evidence.
-/// Revision 10 stored generation-bound `symbol_occurrences` on each file
-/// segment descriptor; revision 11 stores generation-independent
-/// `symbol_identities` and rebinds occurrences at restore so one-file seal
-/// reuse no longer SHA-256-rebounds every unchanged file's symbols. Revision
-/// 12 seals `full_replay_digest` as a parent-delta (optional parent binding).
-/// Revision 11 bytes omit that field; decoding them as 12 would fail
-/// `validate_for_changes` as contract corruption instead of the typed rebuild
-/// refusal, so revision 11 is retired rather than migrated. Revision 9, the
-/// single-file monolithic envelope, is retired as well: every revision other
-/// than this one is refused and the generation is rebuilt from source.
-/// Revision 15 generations mint file occurrences without the worktree, so
-/// identical trees in linked worktrees derive identical artifacts; a
-/// revision 14 generation names worktree-bound occurrences and is rebuilt.
-/// Revision 14 keeps segments in the project's `code-index-v1/`, shared by
-/// every worktree scope, and leaves the scope identity out of each segment.
-/// Revision 13 stored compact file segments (DEFLATE-compressed, clone token
-/// streams interned, chunk text stored once per file, symbol identities
-/// inside the segment) described by their decoded size and an identity
-/// digest, and evidence whose lineage, request, and receipt rows leave what
-/// the generation's own symbols and chunks imply implicit.
+/// File segments are compact (DEFLATE-compressed, clone token streams
+/// interned, chunk text stored once per file, symbol identities inside the
+/// segment), each described by its decoded size and an identity digest. They
+/// live in the project's `code-index-v1/`, shared by every worktree scope, and
+/// carry no scope identity. File occurrences are minted without the worktree,
+/// so identical trees in linked worktrees derive identical artifacts. Each
+/// segment descriptor holds generation-independent `symbol_identities`, and
+/// restore rebinds occurrences, so a one-file seal does not SHA-256-rebind
+/// every unchanged file's symbols. `full_replay_digest` is sealed as a
+/// parent delta (optional parent binding). Evidence lineage, request, and
+/// receipt rows leave implicit what the generation's own symbols and chunks
+/// imply.
+///
+/// Every other revision is refused through
+/// [`superseded_sealed_generation_revision`], and the generation is rebuilt
+/// from source rather than migrated. Revisions through eight also predate
+/// required clone-body source rows, so the rebuild keeps them from reading as
+/// successful empty clone evidence.
 pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 15;
 
 /// The typed refusal for a sealed generation this build no longer reads.
