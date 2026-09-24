@@ -25,6 +25,7 @@ import type { WorkProductView, WorkTaskView } from '../workProductView.ts';
 import type { WorkDagReading } from '../workViewsModel.ts';
 import { DagFittedField } from './DagFittedField.tsx';
 import { DagMatrixField } from './DagMatrixField.tsx';
+import { RelationSample, relationGrade, relationLabel, relationMarker } from './DagRelationLayer.tsx';
 import type { CardWiring, DagFieldProps, Emphasis, WorkDagFieldView } from './dagField.ts';
 import { EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
@@ -67,22 +68,6 @@ const ZOOM_STEP = 1.25;
 const FITTED_FLOOR = 0.8;
 
 type FocusPath = 'none' | 'root' | 'outcome';
-
-
-function relationLabel(kind: WorkDagRelationKind): string {
-  switch (kind) {
-    case 'gating':
-      return 'gating dependency';
-    case 'informational':
-      return 'informational relation';
-    case 'causal':
-      return 'causal candidate';
-    default: {
-      const unhandled: never = kind;
-      return unhandled;
-    }
-  }
-}
 
 /** The gating edges that join consecutive tasks of the authority's chain. The
  * chain is over the whole graph version, so a consecutive pair with no drawn
@@ -536,38 +521,16 @@ function Legend({
         }
       />
       <ul className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-3xs text-text-muted">
-        <LegendItem sample={<span className="h-px w-5 bg-text-secondary" />} grade="exact" source="GRAPH">
-          solid · {relationLabel('gating')} · {counts.gating}
-        </LegendItem>
-        <LegendItem
-          sample={
-            <span
-              className="h-px w-5"
-              style={{ backgroundImage: 'repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px)' }}
-            />
-          }
-          grade="explicit"
-          source="GRAPH"
-        >
-          dashed · {relationLabel('informational')} · {counts.informational}
-        </LegendItem>
-        <LegendItem
-          sample={
-            <span
-              className="h-px w-5"
-              style={{ backgroundImage: 'repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 4px)' }}
-            />
-          }
-          grade="explicit"
-          source="GRAPH"
-        >
-          dotted · {relationLabel('causal')} · {counts.causal}
-        </LegendItem>
+        {(['gating', 'informational', 'causal'] as const).map((kind) => (
+          <LegendItem key={kind} sample={<RelationSample kind={kind} />} grade={relationGrade(kind)} source="GRAPH">
+            {relationMarker(kind)} · {relationLabel(kind)} · <span className="td-value">{counts[kind]}</span>
+          </LegendItem>
+        ))}
         <LegendItem sample={<span className="h-[2px] w-5 bg-alert" />} grade={reading.effort.available ? 'exact' : 'unavailable'} source="GRAPH">
           amber · effort-weighted critical path
         </LegendItem>
         <LegendItem sample={<span className="h-px w-5 bg-state-conflicting" />} grade="exact" source="GRAPH">
-          curved · declared cycle · {reading.cycles.length}
+          conflicting hue · declared cycle · <span className="td-value">{reading.cycles.length}</span>
         </LegendItem>
         {layout.unresolved.length > 0 ? (
           <li className="flex items-center gap-1.5">
@@ -592,7 +555,7 @@ function LegendItem({
 }) {
   return (
     <li className="flex items-center gap-1.5">
-      <span aria-hidden className="flex w-5 items-center text-text-secondary">
+      <span aria-hidden className="flex w-6 items-center text-text-secondary">
         {sample}
       </span>
       <span>{children}</span>

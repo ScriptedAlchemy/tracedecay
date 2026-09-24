@@ -161,16 +161,17 @@ describe('the task dependency board', () => {
     expect(container.querySelectorAll('[data-work-dag-relation="gating"]')).toHaveLength(4);
     expect(container.querySelector('[data-work-dag-edge="informational:leaf->root"]')).not.toBeNull();
     expect(container.querySelector('[data-work-dag-edge="causal:side->leaf"]')).not.toBeNull();
-    // Soft relations are told apart by line style, never by hue alone.
-    expect(
-      container.querySelector('[data-work-dag-relation="informational"]')?.getAttribute('stroke-dasharray'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-work-dag-relation="causal"]')?.getAttribute('stroke-dasharray'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-work-dag-relation="gating"]')?.getAttribute('stroke-dasharray'),
-    ).toBeNull();
+    // Kind rides the end marker; the dash is the grade's, so the two
+    // EXPLICIT kinds share one stroke and differ only by marker.
+    const edge = (kind: string) => container.querySelector(`[data-work-dag-relation="${kind}"]`)!;
+    expect(['gating', 'informational', 'causal'].map((kind) => edge(kind).getAttribute('data-work-dag-marker'))).toEqual([
+      'arrowhead',
+      'bar',
+      'diamond',
+    ]);
+    expect(edge('gating').getAttribute('stroke-dasharray')).toBeNull();
+    expect(edge('informational').getAttribute('stroke-dasharray')).toBe('6 2 1 2');
+    expect(edge('causal').getAttribute('stroke-dasharray')).toBe(edge('informational').getAttribute('stroke-dasharray'));
   });
 
   it('emphasises the effort-weighted critical path the authority served, and only that', async () => {
