@@ -778,11 +778,11 @@ jobs:
       # crates without implicitly linking evaluator code into this resolution.
       - name: Build full transport selection and support executables
         id: transport_build
-        if: always()
+        if: ${{ always() && !cancelled() }}
         run: cargo build -p tracedecay -p tracedecay-cli --bins --tests --example tracedecay-host-cli-fixture --locked --profile perf --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport
 
       - name: Run full transport selection
-        if: ${{ always() && steps.transport_build.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && steps.transport_build.outcome == 'success' }}
         run: |
           set +e
           cargo nextest run -p tracedecay -p tracedecay-cli --bins --tests --profile ci --cargo-profile perf --locked --features tracedecay/test-helpers,tracedecay/test-transport,tracedecay-cli/test-transport --no-tests=fail
