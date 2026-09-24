@@ -44,13 +44,15 @@ asset_name_for_tag() {
 # True when the releases API payload already lists both the platform archive
 # and SHA256SUMS for this tag. Release Please can publish a non-draft
 # prerelease before release-beta.yml uploads those assets; matching on
-# browser_download_url paths skips that half-published window.
+# browser_download_url paths skips that half-published window. The payload is
+# far larger than a pipe buffer, so piping it into `grep -q` lets the writer
+# die of SIGPIPE and `pipefail` turns a match into 141; grep a here-string.
 release_has_install_assets() {
   local json=$1
   local candidate=$2
   local candidate_asset=$3
-  printf '%s' "$json" | grep -Fq "/download/${candidate}/${candidate_asset}" &&
-    printf '%s' "$json" | grep -Fq "/download/${candidate}/SHA256SUMS"
+  grep -Fq -- "/download/${candidate}/${candidate_asset}" <<<"$json" &&
+    grep -Fq -- "/download/${candidate}/SHA256SUMS" <<<"$json"
 }
 
 # `latest` is the newest published release including prereleases, because the
