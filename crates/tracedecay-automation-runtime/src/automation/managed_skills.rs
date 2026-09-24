@@ -557,8 +557,7 @@ fn decode_managed_skill_record(path: &Path, bytes: &[u8]) -> Result<ManagedSkill
             path.display()
         ))
     };
-    let mut skill: ManagedSkill = serde_json::from_slice(bytes).map_err(|e| invalid(&e))?;
-    skill.normalize_timestamps();
+    let skill: ManagedSkill = serde_json::from_slice(bytes).map_err(|e| invalid(&e))?;
     validate_managed_skill(&skill).map_err(|e| invalid(&e))?;
     Ok(skill)
 }

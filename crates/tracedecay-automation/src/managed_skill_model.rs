@@ -279,26 +279,6 @@ impl ManagedSkill {
         self.metadata.updated_at = current_metadata_timestamp();
     }
 
-    pub fn normalize_timestamps(&mut self) {
-        let now = current_metadata_timestamp();
-        match (self.metadata.created_at, self.metadata.updated_at) {
-            (0, 0) => {
-                self.metadata.created_at = now;
-                self.metadata.updated_at = now;
-            }
-            (0, updated_at) => {
-                self.metadata.created_at = updated_at;
-            }
-            (created_at, 0) => {
-                self.metadata.updated_at = created_at;
-            }
-            (created_at, updated_at) if updated_at < created_at => {
-                self.metadata.updated_at = created_at;
-            }
-            _ => {}
-        }
-    }
-
     pub fn refresh_checksum(&mut self) {
         self.metadata.checksum = self.content_checksum();
     }
