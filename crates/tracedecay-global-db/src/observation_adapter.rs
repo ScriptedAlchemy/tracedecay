@@ -43,8 +43,8 @@ use tracedecay_store::{
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
 use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
-    COMMIT_SOURCE_CURSOR_SQL, READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL,
-    RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
+    COMMIT_SOURCE_CURSOR_SQL, PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL, READ_CURSOR_ADVANCE_SQL,
+    READ_SOURCE_CURSOR_SQL, RECORD_CURSOR_ADVANCE_SQL, cursor_advance_ledger_row_matches,
 };
 use tracedecay_rusqlite_runtime::repository::{
     REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,
@@ -299,6 +299,16 @@ impl GlobalDbObservationStore {
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
         transaction
+            .execute(
+                PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+                tracedecay_runtime_core::db::engine::params![
+                    source_json.as_str(),
+                    scope_json.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| runtime_storage_error(OPERATION, error))?;
+        transaction
             .commit()
             .await
             .map_err(|error| runtime_storage_error(OPERATION, error))?;
@@ -413,6 +423,16 @@ impl GlobalDbObservationStore {
                     source_json.as_str(),
                     scope_json.as_str(),
                     next_cursor_json.as_str()
+                ],
+            )
+            .await
+            .map_err(|error| runtime_storage_error(OPERATION, error))?;
+        transaction
+            .execute(
+                PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
+                tracedecay_runtime_core::db::engine::params![
+                    source_json.as_str(),
+                    scope_json.as_str()
                 ],
             )
             .await

@@ -14,9 +14,11 @@ use super::util;
 /// body once: `snippet_text` and `index_text` are virtual columns computing
 /// [`crate::retrieval_content::derived_text_for_snippet`] and
 /// [`crate::retrieval_content::derived_text_for_index`] from `content`, or
-/// from `placeholder_text` when the body lives outside the row. Older stores
-/// require a profile reset.
-pub const LCM_SCHEMA_VERSION: i64 = 10;
+/// from `placeholder_text` when the body lives outside the row. Version 11
+/// admits deleting cursor advances the durable cursor strictly supersedes, so
+/// each cursor commit prunes them in place. Older stores require a profile
+/// reset.
+pub const LCM_SCHEMA_VERSION: i64 = 11;
 
 const MIGRATION_NAME: &str = "lcm";
 

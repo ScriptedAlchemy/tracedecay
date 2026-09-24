@@ -64,6 +64,7 @@ use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Dispatch, Event, Metadata, Subscriber};
 
+use crate::schema_contract::invariants::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::COMMIT_SOURCE_CURSOR_SQL;
@@ -2941,11 +2942,7 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
         .await
         .unwrap();
     transaction
-        .execute_batch(
-            "CREATE TRIGGER source_cursor_advances_immutable_delete_v1 BEFORE DELETE ON \
-             source_cursor_advances BEGIN SELECT RAISE(ABORT, \
-             'source cursor advances are immutable'); END",
-        )
+        .execute_batch(SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL)
         .await
         .unwrap();
     transaction.commit().await.unwrap();

@@ -15,6 +15,9 @@ mod rows;
 pub(crate) mod test_fixture;
 mod triggers;
 
+#[cfg(test)]
+pub(crate) use triggers::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
+
 use audit::{
     AuditCheckpoint, AuditProgress, audit_checkpoint_is_plausible, ensure_audit_checkpoint_schema,
     read_audit_checkpoint, validate_projection_authority_chunk,

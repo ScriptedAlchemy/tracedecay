@@ -833,6 +833,63 @@ fn source_cursor_advance_keeps_the_first_owner_once_the_frontier_is_reached() {
     ));
 }
 
+fn advance_ledger_ends(connection: &Connection) -> Vec<i64> {
+    let mut statement = connection
+        .prepare(
+            "SELECT json_extract(coverage_json, '$.range.end')
+             FROM source_cursor_advances ORDER BY 1",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+#[test]
+fn cursor_commits_keep_only_the_advance_supporting_the_frontier() {
+    let mut connection = connection();
+    let write = anchored_observation_write("fixture", "receipt.fixture");
+    execute(&mut connection, &write).unwrap();
+    let identity = write.observation().identity();
+    let mut cursor = write.next_cursor().clone();
+    for end in 2_u64..=6 {
+        let advance = ObservationCursorAdvance::for_ordering(
+            write.observation().source().clone(),
+            write.observation().scope().clone(),
+            identity.generation(),
+            identity.ordering_domain(),
+            Some(cursor.clone()),
+            ObservationSourceRangeV1::new(end - 1, end).unwrap(),
+            ObservationCoverageReason::OutOfScope,
+        )
+        .unwrap();
+        execute_cursor_advance(&mut connection, &advance).unwrap();
+        cursor = advance.next_cursor().clone();
+        assert_eq!(
+            advance_ledger_ends(&connection),
+            vec![i64::try_from(end).unwrap()]
+        );
+    }
+    assert_eq!(cursor.position(), 6);
+
+    let next = anchored(observation_write_for_record(
+        "next",
+        "receipt.next",
+        1,
+        6,
+        7,
+        Some(cursor),
+        "record.next",
+    ));
+    execute(&mut connection, &next).unwrap();
+    assert!(
+        advance_ledger_ends(&connection).is_empty(),
+        "an observation past the frontier settles the last advance"
+    );
+}
+
 #[test]
 fn canonical_cursor_advance_receipt_remains_typed_after_authority_lookup() {
     let mut connection = connection();

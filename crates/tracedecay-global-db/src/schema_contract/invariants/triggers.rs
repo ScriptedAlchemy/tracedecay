@@ -54,6 +54,25 @@ const RECEIPT_IMMUTABILITY: &[Trigger] = &[
     },
 ];
 
+/// Only advances the durable cursor strictly supersedes may be deleted: the
+/// row supporting the current frontier and rows beyond it stay immutable.
+pub(crate) const SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL: &str =
+    "CREATE TRIGGER source_cursor_advances_immutable_delete_v1
+            BEFORE DELETE ON source_cursor_advances
+            WHEN NOT EXISTS (
+                SELECT 1 FROM source_cursors AS cursor
+                WHERE cursor.source_json = OLD.source_json
+                  AND cursor.scope_json = OLD.scope_json
+                  AND (json_extract(cursor.cursor_json, '$.generation')
+                          IS NOT json_extract(OLD.coverage_json, '$.generation')
+                    OR (COALESCE(json_extract(cursor.cursor_json, '$.ordering_domain'), 'file_bytes')
+                          = json_extract(OLD.coverage_json, '$.ordering_domain')
+                      AND json_extract(cursor.cursor_json, '$.byte_offset')
+                          > json_extract(OLD.coverage_json, '$.range.end')))
+            ) BEGIN
+                SELECT RAISE(ABORT, 'source cursor advances are immutable');
+            END";
+
 const SOURCE_CURSOR_ADVANCE_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "source_cursor_advances_immutable_update_v1",
@@ -66,10 +85,7 @@ const SOURCE_CURSOR_ADVANCE_IMMUTABILITY: &[Trigger] = &[
     Trigger {
         name: "source_cursor_advances_immutable_delete_v1",
         table: "source_cursor_advances",
-        create_sql: "CREATE TRIGGER source_cursor_advances_immutable_delete_v1
-            BEFORE DELETE ON source_cursor_advances BEGIN
-                SELECT RAISE(ABORT, 'source cursor advances are immutable');
-            END",
+        create_sql: SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL,
     },
 ];
 
