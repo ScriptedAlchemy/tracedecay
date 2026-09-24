@@ -139,6 +139,36 @@ fn run_kiro(home: &Path, args: &[String]) -> Result<u8, String> {
     }
 }
 
+fn read_kiro_servers(config: &Path) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let Some(text) = existing_text(config) else {
+        return Ok(serde_json::Map::new());
+    };
+    let document: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "failed to parse Kiro fixture config {}: {error}",
+            config.display()
+        )
+    })?;
+    match document.get("mcpServers") {
+        Some(serde_json::Value::Object(servers)) => Ok(servers.clone()),
+        Some(_) => Err(format!(
+            "Kiro fixture config {} has a non-object mcpServers field",
+            config.display()
+        )),
+        None => Ok(serde_json::Map::new()),
+    }
+}
+
+fn write_kiro_servers(
+    config: &Path,
+    servers: serde_json::Map<String, serde_json::Value>,
+) -> Result<String, String> {
+    let body = serde_json::json!({ "mcpServers": servers }).to_string();
+    write_parent(config)?;
+    fs::write(config, format!("{body}\n")).map_err(io_err)?;
+    Ok(body)
+}
+
 fn kiro_mcp_add(home: &Path, args: &[String]) -> Result<u8, String> {
     if args.get(6).map(String::as_str) != Some("--args")
         || args.get(7).map(String::as_str) != Some("serve")
@@ -157,20 +187,12 @@ fn kiro_mcp_add(home: &Path, args: &[String]) -> Result<u8, String> {
         println!("not-a-json-document");
         return Ok(0);
     }
-    let preserve_other = existing_text(&config).is_some_and(|text| text.contains("\"other\""));
-    let body = if preserve_other {
-        format!(
-            r#"{{"mcpServers":{{"other":{{"command":"other","args":[]}},"tracedecay":{{"command":"{}","args":["serve"]}}}}}}"#,
-            json_escape(&command)
-        )
-    } else {
-        format!(
-            r#"{{"mcpServers":{{"tracedecay":{{"command":"{}","args":["serve"]}}}}}}"#,
-            json_escape(&command)
-        )
-    };
-    write_parent(&config)?;
-    fs::write(&config, format!("{body}\n")).map_err(io_err)?;
+    let mut servers = read_kiro_servers(&config)?;
+    servers.insert(
+        "tracedecay".to_owned(),
+        serde_json::json!({ "command": command, "args": ["serve"] }),
+    );
+    let body = write_kiro_servers(&config, servers)?;
     println!("{body}");
     Ok(0)
 }
@@ -188,17 +210,12 @@ fn kiro_mcp_remove(home: &Path, args: &[String]) -> Result<u8, String> {
         return Ok(64);
     }
     let config = kiro_config_path(home);
-    match existing_text(&config) {
-        Some(text) if text.contains("\"other\"") => {
-            fs::write(
-                &config,
-                "{\"mcpServers\":{\"other\":{\"command\":\"other\",\"args\":[]}}}\n",
-            )
-            .map_err(io_err)?;
-        }
-        Some(_) | None => {
-            let _ = fs::remove_file(&config);
-        }
+    let mut servers = read_kiro_servers(&config)?;
+    servers.remove("tracedecay");
+    if servers.is_empty() {
+        let _ = fs::remove_file(&config);
+    } else {
+        write_kiro_servers(&config, servers)?;
     }
     Ok(0)
 }
