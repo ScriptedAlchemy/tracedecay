@@ -22,7 +22,9 @@ import { AgentHandoffs } from './AgentHandoffs.tsx';
 import { AgentHandoffTokens } from './AgentHandoffTokens.tsx';
 import { AgentInspector, type DiagnosticsForInspector } from './AgentInspector.tsx';
 import { AgentTelemetryRegister } from './AgentTelemetryRegister.tsx';
-import { DelegationTopology } from './DelegationTopology.tsx';
+import { DelegationRadial } from './DelegationRadial.tsx';
+import { DelegationTimeline } from './DelegationTimeline.tsx';
+import { DelegationTopology, type TopologyInteraction } from './DelegationTopology.tsx';
 import { SubagentTree } from './SubagentTree.tsx';
 import { resolveSubject } from './agentInspector.ts';
 import { useAgentWorkGraph } from './agentWorkQuery.ts';
@@ -33,11 +35,12 @@ import {
   usageAuthority,
   workAuthority,
 } from './authorityRegister.ts';
-import { fitDelegationTopology, markId } from './delegationTopology.ts';
+import { fitDelegationTopology, markId, type FittedTopology } from './delegationTopology.ts';
 import { readAttemptFailures } from './failure.ts';
 import { readHandoffFrontier } from './handoff.ts';
 import { newestTreeSession, useAgentHandoffTokens } from './handoffTokenQuery.ts';
 import { readHandoffTokens } from './handoffTokens.ts';
+import { TopologyVariantSwitch, type TopologyVariant } from './topologyVariant.tsx';
 
 const BASE = '/api/plugins/analytics';
 
@@ -106,6 +109,7 @@ export function AgentsPage() {
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [variant, setVariant] = useState<TopologyVariant>('generations');
   const toggleExpanded = useCallback((id: string) => {
     setExpanded((current) => {
       const next = new Set(current);
@@ -253,17 +257,21 @@ export function AgentsPage() {
                 return (
                   <div className="flex min-w-0 flex-col gap-3">
                     {fit !== null && fit.model.marks.length > 0 ? (
-                      <DelegationTopology
-                        fit={fit}
-                        interaction={{
-                          inspectedId,
-                          selectedId,
-                          onInspect: setInspectedId,
-                          onSelect: select,
-                          expanded,
-                          onToggleExpanded: toggleExpanded,
-                        }}
-                      />
+                      <>
+                        <TopologyVariantSwitch value={variant} onChange={setVariant} />
+                        <TopologyRenderer
+                          variant={variant}
+                          fit={fit}
+                          interaction={{
+                            inspectedId,
+                            selectedId,
+                            onInspect: setInspectedId,
+                            onSelect: select,
+                            expanded,
+                            onToggleExpanded: toggleExpanded,
+                          }}
+                        />
+                      </>
                     ) : null}
                     <details
                       className="border-t border-edge-subtle pt-2"
@@ -389,6 +397,31 @@ export function AgentsPage() {
       />
     </div>
   );
+}
+
+function TopologyRenderer({
+  variant,
+  fit,
+  interaction,
+}: {
+  variant: TopologyVariant;
+  fit: FittedTopology;
+  interaction: TopologyInteraction;
+}) {
+  switch (variant) {
+    case 'generations':
+      return <DelegationTopology fit={fit} interaction={interaction} />;
+    case 'rings':
+      return <DelegationTopology fit={fit} interaction={interaction} marks="rings" />;
+    case 'timeline':
+      return <DelegationTimeline fit={fit} interaction={interaction} />;
+    case 'radial':
+      return <DelegationRadial fit={fit} interaction={interaction} />;
+    default: {
+      const unhandled: never = variant;
+      return unhandled;
+    }
+  }
 }
 
 /** The model the inspector is handed before the tree has been read. */

@@ -212,7 +212,7 @@ function StageGroup({
             exact Work graph.
           </caption>
           <thead>
-            <tr className="border-b border-edge text-text-muted">
+            <tr className="border-b border-edge-subtle text-text-muted">
               <th scope="col" className="px-2 py-1 text-left font-medium">
                 Task
               </th>

@@ -17,13 +17,25 @@ import {
   dagPathToRoot,
   workDagLayout,
   type WorkDagLayout,
-  type WorkDagLayoutEdge,
   type WorkDagLayoutNode,
   type WorkDagRelationKind,
 } from '../workDagLayout.ts';
 import { laneReading } from '../workLaneModel.ts';
+import { swimlaneWidth } from '../workSwimlaneLayout.ts';
 import type { WorkProductView, WorkTaskView } from '../workProductView.ts';
 import type { WorkDagReading } from '../workViewsModel.ts';
+import { DagFittedField } from './DagFittedField.tsx';
+import { DagMatrixField } from './DagMatrixField.tsx';
+import { RelationLayer } from './DagRelationLayer.tsx';
+import { DagSwimlaneField } from './DagSwimlaneField.tsx';
+import {
+  WORK_DAG_VARIANTS,
+  useDagVariant,
+  type CardWiring,
+  type DagFieldProps,
+  type Emphasis,
+  type WorkDagVariant,
+} from './dagVariant.ts';
 import { EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -62,13 +74,10 @@ import { EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 const ZOOM_MIN = 0.4;
 const ZOOM_MAX = 2;
 const ZOOM_STEP = 1.25;
+const FITTED_FLOOR = 0.8;
 
 type FocusPath = 'none' | 'root' | 'outcome';
 
-interface Emphasis {
-  readonly tasks: ReadonlySet<string>;
-  readonly edges: ReadonlySet<string>;
-}
 
 function relationLabel(kind: WorkDagRelationKind): string {
   switch (kind) {
@@ -78,21 +87,6 @@ function relationLabel(kind: WorkDagRelationKind): string {
       return 'informational relation';
     case 'causal':
       return 'causal candidate';
-    default: {
-      const unhandled: never = kind;
-      return unhandled;
-    }
-  }
-}
-
-function relationDash(kind: WorkDagRelationKind): string | undefined {
-  switch (kind) {
-    case 'gating':
-      return undefined;
-    case 'informational':
-      return '6 4';
-    case 'causal':
-      return '2 3';
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -137,6 +131,7 @@ export function WorkDagBoard({
   const [criticalOn, setCriticalOn] = useState(true);
   const [focusPath, setFocusPath] = useState<FocusPath>('none');
   const [zoom, setZoom] = useState(1);
+  const [variant, setVariant] = useDagVariant();
   const field = useRef<HTMLDivElement | null>(null);
   const cards = useRef(new Map<string, HTMLButtonElement>());
   const controlsId = useId();
@@ -169,8 +164,28 @@ export function WorkDagBoard({
       setZoom(1);
       return;
     }
-    setZoom(Math.max(ZOOM_MIN, Math.min(1, width / layout.width)));
-  }, [layout.width]);
+    // The fitted renderer frames the graph with its own 24px margin and
+    // stops at a readable floor; wider graphs scroll rather than shrink the
+    // 11px identities below legibility.
+    switch (variant) {
+      case 'layered':
+        setZoom(Math.max(ZOOM_MIN, Math.min(1, width / layout.width)));
+        return;
+      case 'fitted':
+        setZoom(Math.max(FITTED_FLOOR, Math.min(1, (width - 48) / layout.width)));
+        return;
+      case 'swimlane':
+        setZoom(Math.max(FITTED_FLOOR, Math.min(1, (width - 16) / swimlaneWidth(layout))));
+        return;
+      case 'matrix':
+        setZoom(1);
+        return;
+      default: {
+        const unhandled: never = variant;
+        return unhandled;
+      }
+    }
+  }, [layout, variant]);
 
   // A graph wider than its field opens fitted, the 200%-zoom and narrow-
   // viewport focus mode, and re-fits when the graph version changes shape.
@@ -232,6 +247,22 @@ export function WorkDagBoard({
   const tabStop =
     selected !== null && layout.byId.has(selected) ? selected : layout.nodes[0]?.taskId ?? null;
 
+  const card = (taskId: string): CardWiring => ({
+    tabIndex: tabStop === taskId ? 0 : -1,
+    ref: (element) => {
+      if (element === null) cards.current.delete(taskId);
+      else cards.current.set(taskId, element);
+    },
+    onClick: () => onSelect(taskId),
+    onFocus: () => setInspected(taskId),
+    onBlur: () => setInspected(null),
+    onPointerEnter: () => setInspected(taskId),
+    onKeyDown: (event) => {
+      const node = layout.byId.get(taskId);
+      if (node !== undefined) traverse(event, node);
+    },
+  });
+
   if (snapshot.projections.length === 0) {
     return (
       <div className="flex min-w-0 flex-col gap-3" data-work-dag-board="empty">
@@ -258,6 +289,8 @@ export function WorkDagBoard({
         zoom={zoom}
         onZoom={setZoom}
         onFit={fit}
+        variant={variant}
+        onVariant={setVariant}
       />
 
       <div
@@ -265,48 +298,65 @@ export function WorkDagBoard({
         role="group"
         aria-label="Dependency graph field"
         aria-describedby={`${controlsId}-legend`}
-        className="td-optic td-grain td-scanlines relative max-h-[62vh] min-h-48 overflow-auto"
+        className={cn(
+          'td-optic td-grain td-scanlines relative max-h-[62vh] min-h-48 overflow-auto',
+          variant === 'fitted' && 'flex min-h-[22rem]',
+        )}
         data-work-dag-field
+        data-work-dag-variant={variant}
         data-work-dag-zoom={zoom.toFixed(2)}
         data-work-dag-inspected={inspected ?? undefined}
         onPointerLeave={() => setInspected(null)}
       >
-        <div
-          className="relative z-[1]"
-          style={{ width: layout.width * zoom, height: layout.height * zoom }}
-        >
+        {variant === 'layered' ? (
           <div
-            className="absolute left-0 top-0 origin-top-left"
-            style={{ width: layout.width, height: layout.height, transform: `scale(${zoom})` }}
+            className="relative z-[1]"
+            style={{ width: layout.width * zoom, height: layout.height * zoom }}
           >
-            <RelationLayer layout={layout} isolation={isolation} critical={critical} />
-            {layout.nodes.map((node) => {
-              const task = tasks.get(node.taskId);
-              if (task === undefined) return null;
-              const dimmed = isolation !== null && !isolation.tasks.has(node.taskId);
-              return (
-                <TaskCard
-                  key={node.taskId}
-                  node={node}
-                  task={task}
-                  reading={reading}
-                  selected={selected === node.taskId}
-                  dimmed={dimmed}
-                  onCritical={critical?.tasks.has(node.taskId) ?? false}
-                  showLabels={showLabels}
-                  tabStop={tabStop === node.taskId}
-                  register={(element) => {
-                    if (element === null) cards.current.delete(node.taskId);
-                    else cards.current.set(node.taskId, element);
-                  }}
-                  onSelect={onSelect}
-                  onInspect={setInspected}
-                  onKeyDown={(event) => traverse(event, node)}
-                />
-              );
-            })}
+            <div
+              className="absolute left-0 top-0 origin-top-left"
+              style={{ width: layout.width, height: layout.height, transform: `scale(${zoom})` }}
+            >
+              <RelationLayer layout={layout} isolation={isolation} critical={critical} />
+              {layout.nodes.map((node) => {
+                const task = tasks.get(node.taskId);
+                if (task === undefined) return null;
+                const dimmed = isolation !== null && !isolation.tasks.has(node.taskId);
+                return (
+                  <TaskCard
+                    key={node.taskId}
+                    node={node}
+                    task={task}
+                    reading={reading}
+                    selected={selected === node.taskId}
+                    dimmed={dimmed}
+                    onCritical={critical?.tasks.has(node.taskId) ?? false}
+                    showLabels={showLabels}
+                    wiring={card(node.taskId)}
+                  />
+                );
+              })}
+            </div>
           </div>
-        </div>
+        ) : (
+          <VariantField
+            variant={variant}
+            props={{
+              layout,
+              reading,
+              tasks,
+              selected,
+              inspected,
+              isolation,
+              critical,
+              showLabels,
+              zoom,
+              onSelect,
+              onInspect: setInspected,
+              card,
+            }}
+          />
+        )}
       </div>
 
       <Legend id={`${controlsId}-legend`} layout={layout} reading={reading} snapshot={snapshot} />
@@ -321,6 +371,21 @@ export function WorkDagBoard({
       />
     </div>
   );
+}
+
+function VariantField({ variant, props }: { variant: Exclude<WorkDagVariant, 'layered'>; props: DagFieldProps }) {
+  switch (variant) {
+    case 'fitted':
+      return <DagFittedField {...props} />;
+    case 'swimlane':
+      return <DagSwimlaneField {...props} />;
+    case 'matrix':
+      return <DagMatrixField {...props} />;
+    default: {
+      const unhandled: never = variant;
+      return unhandled;
+    }
+  }
 }
 
 function nearestInRow(
@@ -358,6 +423,8 @@ function GraphControls({
   zoom,
   onZoom,
   onFit,
+  variant,
+  onVariant,
 }: {
   id: string;
   showLabels: boolean;
@@ -371,7 +438,10 @@ function GraphControls({
   zoom: number;
   onZoom: (value: number) => void;
   onFit: () => void;
+  variant: WorkDagVariant;
+  onVariant: (value: WorkDagVariant) => void;
 }) {
+  const zoomable = variant !== 'matrix';
   const effort = criticalReading.effort;
   const criticalDisabled = !effort.available || effort.value.taskIds.length === 0;
   const criticalNote = !effort.available
@@ -389,12 +459,30 @@ function GraphControls({
       <span className="td-legend text-text-secondary">graph controls</span>
       <span aria-hidden className="td-rule max-sm:hidden" />
 
-      {/* The one layout this build has. Printed rather than offered as a
-        * select with one option, which would promise a second layout that
-        * does not exist. */}
+      {/* Every renderer reads the same longest-path strata; the choice is
+        * which axes carry them. */}
       <span className="flex items-center gap-1.5 text-3xs text-text-muted">
         <span className="td-legend">layout</span>
-        <span className="td-value text-3xs text-text-secondary">hierarchical · longest-path strata</span>
+        <span role="radiogroup" aria-label="Graph renderer" className="flex items-center border border-edge-subtle rounded-[var(--radius-panel)]">
+          {WORK_DAG_VARIANTS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="radio"
+              aria-checked={variant === option.value}
+              onClick={() => onVariant(option.value)}
+              data-work-dag-variant-option={option.value}
+              className={cn(
+                'td-hit px-2 text-2xs',
+                variant === option.value
+                  ? 'bg-surface-2 text-text-primary shadow-[inset_0_-2px_0_var(--raw-accent)]'
+                  : 'text-text-muted hover:text-text-primary',
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </span>
       </span>
 
       <label className="flex items-center text-2xs text-text-secondary">
@@ -430,7 +518,7 @@ function GraphControls({
         <span className="td-legend">focus</span>
         <select
           aria-label="Focus path"
-          className="min-h-[44px] border border-edge bg-surface-2 px-2 text-2xs text-text-primary disabled:text-text-muted"
+          className="min-h-[44px] border border-edge-subtle bg-surface-2 px-2 text-2xs text-text-primary disabled:text-text-muted"
           value={focusPath}
           disabled={!focusAvailable}
           onChange={(event) => onFocusPath(event.target.value as FocusPath)}
@@ -443,18 +531,18 @@ function GraphControls({
       </label>
 
       <span className="ml-auto flex items-center gap-0.5" role="group" aria-label="Zoom">
-        <ZoomButton label="Zoom out" onClick={() => onZoom(Math.max(ZOOM_MIN, zoom / ZOOM_STEP))} disabled={zoom <= ZOOM_MIN}>
+        <ZoomButton label="Zoom out" onClick={() => onZoom(Math.max(ZOOM_MIN, zoom / ZOOM_STEP))} disabled={!zoomable || zoom <= ZOOM_MIN}>
           −
         </ZoomButton>
-        <ZoomButton label="Reset zoom to 100%" onClick={() => onZoom(1)} disabled={zoom === 1}>
+        <ZoomButton label="Reset zoom to 100%" onClick={() => onZoom(1)} disabled={!zoomable || zoom === 1}>
           <span className="td-value text-3xs" data-cell="numeric">
             {Math.round(zoom * 100)}%
           </span>
         </ZoomButton>
-        <ZoomButton label="Zoom in" onClick={() => onZoom(Math.min(ZOOM_MAX, zoom * ZOOM_STEP))} disabled={zoom >= ZOOM_MAX}>
+        <ZoomButton label="Zoom in" onClick={() => onZoom(Math.min(ZOOM_MAX, zoom * ZOOM_STEP))} disabled={!zoomable || zoom >= ZOOM_MAX}>
           +
         </ZoomButton>
-        <ZoomButton label="Fit the graph to the field" onClick={onFit}>
+        <ZoomButton label="Fit the graph to the field" onClick={onFit} disabled={!zoomable}>
           fit
         </ZoomButton>
       </span>
@@ -486,106 +574,6 @@ function ZoomButton({
   );
 }
 
-function RelationLayer({
-  layout,
-  isolation,
-  critical,
-}: {
-  layout: WorkDagLayout;
-  isolation: Emphasis | null;
-  critical: Emphasis | null;
-}) {
-  const markers = useId();
-  return (
-    <svg
-      aria-hidden
-      className="pointer-events-none absolute inset-0"
-      width={layout.width}
-      height={layout.height}
-      viewBox={`0 0 ${layout.width} ${layout.height}`}
-    >
-      <defs>
-        {(['edge', 'accent', 'alert', 'conflicting'] as const).map((tone) => (
-          <marker
-            key={tone}
-            id={`${markers}-${tone}`}
-            viewBox="0 0 8 8"
-            refX="7"
-            refY="4"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M 0 0 L 8 4 L 0 8 z" fill={toneColor(tone)} />
-          </marker>
-        ))}
-      </defs>
-      {layout.strata.map((stratum) => (
-        <text
-          key={stratum.depth}
-          x={6}
-          y={stratum.y + 11}
-          fill="var(--raw-graph-dim)"
-          fontSize={9}
-          fontFamily="var(--font-mono)"
-        >
-          {String(stratum.depth).padStart(2, '0')}
-        </text>
-      ))}
-      {layout.edges.map((edge) => {
-        const tone = edgeTone(edge, isolation, critical);
-        const dimmed = isolation !== null && !isolation.edges.has(edge.id);
-        return (
-          <path
-            key={edge.id}
-            d={edge.path}
-            fill="none"
-            stroke={toneColor(tone)}
-            strokeWidth={tone === 'alert' || tone === 'accent' ? 1.75 : 1.1}
-            strokeDasharray={relationDash(edge.kind)}
-            markerEnd={`url(#${markers}-${tone})`}
-            opacity={dimmed ? 0.22 : tone === 'edge' ? 0.85 : 1}
-            className="transition-opacity duration-[var(--dur-state)]"
-            data-work-dag-edge={edge.id}
-            data-work-dag-relation={edge.kind}
-            data-work-dag-emphasis={dimmed ? 'dimmed' : tone}
-          />
-        );
-      })}
-    </svg>
-  );
-}
-
-type EdgeTone = 'edge' | 'accent' | 'alert' | 'conflicting';
-
-function edgeTone(
-  edge: WorkDagLayoutEdge,
-  isolation: Emphasis | null,
-  critical: Emphasis | null,
-): EdgeTone {
-  if (edge.climb) return 'conflicting';
-  if (isolation !== null && isolation.edges.has(edge.id)) return 'accent';
-  if (critical !== null && critical.edges.has(edge.id)) return 'alert';
-  return 'edge';
-}
-
-function toneColor(tone: EdgeTone): string {
-  switch (tone) {
-    case 'edge':
-      return 'var(--raw-graph-edge)';
-    case 'accent':
-      return 'var(--raw-graph-accent)';
-    case 'alert':
-      return 'var(--raw-graph-alert)';
-    case 'conflicting':
-      return 'var(--raw-state-conflicting)';
-    default: {
-      const unhandled: never = tone;
-      return unhandled;
-    }
-  }
-}
-
 function TaskCard({
   node,
   task,
@@ -594,11 +582,7 @@ function TaskCard({
   dimmed,
   onCritical,
   showLabels,
-  tabStop,
-  register,
-  onSelect,
-  onInspect,
-  onKeyDown,
+  wiring,
 }: {
   node: WorkDagLayoutNode;
   task: WorkTaskView;
@@ -607,11 +591,7 @@ function TaskCard({
   dimmed: boolean;
   onCritical: boolean;
   showLabels: boolean;
-  tabStop: boolean;
-  register: (element: HTMLButtonElement | null) => void;
-  onSelect: (taskId: string) => void;
-  onInspect: (taskId: string | null) => void;
-  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  wiring: CardWiring;
 }) {
   const lane = laneReading(task.lane);
   const source = reading.nodes.get(task.task_id);
@@ -631,16 +611,16 @@ function TaskCard({
     .join(', ');
   return (
     <button
-      ref={register}
+      ref={wiring.ref}
       type="button"
       aria-label={label}
       aria-pressed={selected}
-      tabIndex={tabStop ? 0 : -1}
-      onClick={() => onSelect(task.task_id)}
-      onFocus={() => onInspect(task.task_id)}
-      onBlur={() => onInspect(null)}
-      onPointerEnter={() => onInspect(task.task_id)}
-      onKeyDown={onKeyDown}
+      tabIndex={wiring.tabIndex}
+      onClick={wiring.onClick}
+      onFocus={wiring.onFocus}
+      onBlur={wiring.onBlur}
+      onPointerEnter={wiring.onPointerEnter}
+      onKeyDown={wiring.onKeyDown}
       className={cn(
         'absolute flex min-h-[44px] flex-col justify-between gap-1 border px-2 py-1.5 text-left',
         'td-raised transition-opacity duration-[var(--dur-state)]',
@@ -830,7 +810,7 @@ function ExactTable({
             selects.
           </caption>
           <thead>
-            <tr className="border-b border-edge text-text-muted">
+            <tr className="border-b border-edge-subtle text-text-muted">
               <th scope="col" className="px-2 py-1 text-left font-medium">Task</th>
               <th scope="col" className="px-2 py-1 text-left font-medium">Identity</th>
               <th scope="col" className="px-2 py-1 text-left font-medium">Lane</th>
@@ -897,7 +877,7 @@ function ExactTable({
               and whether it runs against the strata inside a declared cycle.
             </caption>
             <thead>
-              <tr className="border-b border-edge text-text-muted">
+              <tr className="border-b border-edge-subtle text-text-muted">
                 <th scope="col" className="px-2 py-1 text-left font-medium">Relation</th>
                 <th scope="col" className="px-2 py-1 text-left font-medium">From</th>
                 <th scope="col" className="px-2 py-1 text-left font-medium">To</th>

@@ -248,7 +248,7 @@ export function WorkActivityLedger({ limit = 12 }: { limit?: number }) {
             neither is a column; canonical Work reads refetch on every frame.
           </caption>
           <thead>
-            <tr className="border-b border-edge text-text-muted">
+            <tr className="border-b border-edge-subtle text-text-muted">
               <th scope="col" className="px-2 py-1 text-left font-medium">Observed (UTC)</th>
               <th scope="col" className="px-2 py-1 text-left font-medium">Project</th>
               <th scope="col" className="px-2 py-1 text-left font-medium">Event</th>
