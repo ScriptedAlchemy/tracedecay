@@ -1088,6 +1088,77 @@ mod tests {
         ));
     }
 
+    /// A summary built only from other summaries inherits the typed anchor of
+    /// its first typed child summary rather than falling back to an untyped
+    /// session anchor.
+    #[tokio::test]
+    async fn summary_of_summaries_inherits_its_childs_typed_anchor() {
+        let directory = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .expect("registered profile runtime");
+        let conn = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("profile database")
+            .writer_connection()
+            .expect("profile writer");
+        seed_raw_source(&conn, "1715000001").await;
+        let observation =
+            fixture_observation("codex", "session.message-anchor", "message.source", 1);
+        let anchor = fixture_anchor(&observation);
+        seed_canonical_binding(
+            &conn,
+            &serde_json::to_string(&observation).expect("observation json"),
+            &observation,
+            &anchor,
+            &anchor.owner_column_json().expect("owner json"),
+        )
+        .await;
+        publish(&conn).await.expect("leaf summary publication");
+        let parent = super::super::publication::publish_immutable_summary(
+            &conn,
+            parent_publication(),
+            &empty_relation_projection(),
+        )
+        .await
+        .expect("parent summary publication");
+        assert_eq!(parent.summary.node_id, "summary.message-anchor.parent");
+
+        let anchor_for = |summary_id: &'static str| {
+            let conn = &conn;
+            async move {
+                let mut rows = conn
+                    .query(
+                        "SELECT anchor.anchor_json
+                         FROM session_summary_nodes AS summary
+                         JOIN retrieval_anchors AS anchor
+                           ON anchor.anchor_id = summary.summary_anchor_id
+                         WHERE summary.summary_id = ?1",
+                        params![summary_id],
+                    )
+                    .await
+                    .expect("summary anchor");
+                let row = rows
+                    .next()
+                    .await
+                    .expect("summary anchor row")
+                    .expect("published summary has an anchor");
+                row.get::<String>(0).expect("summary anchor json")
+            }
+        };
+        let leaf: tracedecay_domain::RetrievalAnchorRecord =
+            serde_json::from_str(&anchor_for("summary.message-anchor").await)
+                .expect("the leaf summary anchor is typed");
+        let parent_json = anchor_for("summary.message-anchor.parent").await;
+        let parent_anchor: tracedecay_domain::RetrievalAnchorRecord =
+            serde_json::from_str(&parent_json).unwrap_or_else(|error| {
+                panic!("a summary of typed summaries must get a typed anchor: {error}: {parent_json}")
+            });
+        assert_eq!(parent_anchor.owner(), leaf.owner());
+        assert_eq!(parent_anchor.source_observations(), leaf.source_observations());
+        assert_ne!(parent_anchor.anchor_id(), leaf.anchor_id());
+    }
+
     /// `K` raw sources published before any refresh resolve through one scan
     /// of the session's `N` observation effects, and the same bindings come
     /// back once the refresh has materialized some or all of the occurrences.

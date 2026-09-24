@@ -181,14 +181,14 @@ pub async fn publish_immutable_summary(
     let source_horizon = sources::source_horizon_json(&sources, draft.source_time_end);
     let owner_json = sources::session_owner_json(conn, &draft.provider, &draft.session_id).await?;
     sources::insert_unobserved_raw_anchors(conn, &sources, &owner_json).await?;
-    let source_ids = sources
+    let canonical_sources = sources
         .iter()
-        .map(|source| source.canonical.id.as_str())
+        .map(|source| source.canonical.clone())
         .collect::<Vec<_>>();
     let summary_anchor = sources::derive_summary_anchor(
         conn,
         summary_id,
-        &source_ids,
+        &canonical_sources,
         &owner_json,
         &source_horizon,
         created_at,
@@ -385,15 +385,10 @@ async fn verify_summary_anchor(
     manifest: &CanonicalPublicationManifest,
     created_at: i64,
 ) -> Result<(), LcmError> {
-    let source_ids = manifest
-        .canonical_sources
-        .iter()
-        .map(|source| source.id.as_str())
-        .collect::<Vec<_>>();
     let expected = sources::derive_summary_anchor(
         conn,
         summary_id,
-        &source_ids,
+        &manifest.canonical_sources,
         &manifest.owner_json,
         &manifest.source_horizon_json,
         created_at,

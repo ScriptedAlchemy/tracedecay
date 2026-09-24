@@ -32,7 +32,8 @@ struct LoadedSummarySource {
     source_horizon_json: String,
     publication_json: String,
     summary_anchor_id: String,
-    owner_json: String,
+    anchor_json: String,
+    anchor_owner_json: String,
 }
 
 /// A raw source that exists, is owned by the publishing session, and is
@@ -198,7 +199,8 @@ async fn summary_nodes_by_id(
     let mut rows = conn
         .query(
             "SELECT node.summary_id, node.session_id, node.source_horizon_json,
-                    node.publication_json, node.summary_anchor_id, anchor.owner_json
+                    node.publication_json, node.summary_anchor_id, anchor.anchor_json,
+                    anchor.owner_json
              FROM session_summary_nodes node
              JOIN retrieval_anchors anchor ON anchor.anchor_id = node.summary_anchor_id
              WHERE node.summary_id IN (SELECT value FROM json_each(?1))",
@@ -213,7 +215,8 @@ async fn summary_nodes_by_id(
             source_horizon_json: row.get(2)?,
             publication_json: row.get(3)?,
             summary_anchor_id: row.get(4)?,
-            owner_json: row.get(5)?,
+            anchor_json: row.get(5)?,
+            anchor_owner_json: row.get(6)?,
         });
     }
     Ok(nodes)
@@ -313,10 +316,22 @@ fn validate_summary_source<'a>(
         .map_err(|_| LcmError::ImmutableSummaryConflict {
             summary_id: node_id.to_string(),
         })?;
+    // A typed child anchor is owned by its source observations; an untyped
+    // one by the publishing session, as its manifest records.
+    let anchor_owner_matches = match serde_json::from_str::<RetrievalAnchorRecord>(&node.anchor_json)
+    {
+        Ok(typed) => {
+            typed.anchor_id().as_str() == node.summary_anchor_id
+                && typed
+                    .owner_column_json()
+                    .is_ok_and(|owner| owner == node.anchor_owner_json)
+        }
+        Err(_) => node.anchor_owner_json == manifest.owner_json,
+    };
     if manifest.session_id != draft.session_id
         || manifest.provider != draft.provider
         || manifest.summary_anchor_id != node.summary_anchor_id
-        || manifest.owner_json != node.owner_json
+        || !anchor_owner_matches
         || manifest.depth >= draft.depth
     {
         return Err(LcmError::SummarySourceNotOwnedBySession);
@@ -566,19 +581,21 @@ pub(super) struct StoredAnchor {
 ///
 /// The first source (in source order) with a typed observation-backed anchor
 /// makes the summary anchor a typed [`RetrievalAnchorRecord`] inheriting its
-/// owner, watermark, coverage, observations, and authorization. Sources with
-/// no typed anchor (unobserved raw rows, child summaries) carry none of that
-/// authority, so such a summary gets a session-owned anchor instead. Anchors
-/// are immutable, so publication and exact replay derive the same row.
+/// owner, watermark, coverage, observations, and authorization. A child
+/// summary source contributes its own summary anchor, so a summary of typed
+/// summaries is typed too. Sources with no typed anchor (unobserved raw rows,
+/// untyped child summaries) carry none of that authority, so such a summary
+/// gets a session-owned anchor instead. Anchors are immutable, so publication
+/// and exact replay derive the same row.
 pub(super) async fn derive_summary_anchor(
     conn: &impl crate::handle::SessionTemporalExec,
     summary_id: &str,
-    source_ids: &[&str],
+    sources: &[CanonicalSourceBinding],
     owner_json: &str,
     source_horizon_json: &str,
     created_at: i64,
 ) -> Result<StoredAnchor, LcmError> {
-    let Some(source) = first_typed_source_anchor(conn, source_ids).await? else {
+    let Some(source) = first_typed_source_anchor(conn, sources).await? else {
         let anchor_id = format!("anchor_summary_{}", projected_content_hash(summary_id));
         let anchor_json = json!({
             "kind": "immutable_session_summary",
@@ -636,25 +653,32 @@ pub(super) async fn derive_summary_anchor(
 
 async fn first_typed_source_anchor(
     conn: &impl crate::handle::SessionTemporalExec,
-    source_ids: &[&str],
+    sources: &[CanonicalSourceBinding],
 ) -> Result<Option<RetrievalAnchorRecord>, LcmError> {
-    let encoded_ids =
-        serde_json::to_string(source_ids).map_err(|error| LcmError::Db(error.to_string()))?;
+    let encoded_sources = serde_json::to_string(sources)
+        .map_err(|error| LcmError::Db(error.to_string()))?;
     let mut rows = conn
         .query(
-            "SELECT anchor_id, anchor_json FROM retrieval_anchors
-             WHERE anchor_id IN (SELECT value FROM json_each(?1))",
-            params![encoded_ids],
+            "SELECT source.key, anchor.anchor_json
+             FROM json_each(?1) AS source
+             LEFT JOIN session_summary_nodes AS summary
+               ON json_extract(source.value, '$.kind') = 'summary'
+              AND summary.summary_id = json_extract(source.value, '$.id')
+             JOIN retrieval_anchors AS anchor
+               ON anchor.anchor_id = CASE json_extract(source.value, '$.kind')
+                    WHEN 'summary' THEN summary.summary_anchor_id
+                    ELSE json_extract(source.value, '$.id')
+                  END
+             ORDER BY source.key",
+            params![encoded_sources],
         )
         .await?;
-    let mut typed = BTreeMap::new();
     while let Some(row) = rows.next().await? {
-        let anchor_id: String = row.get(0)?;
         if let Ok(anchor) = serde_json::from_str::<RetrievalAnchorRecord>(&row.get::<String>(1)?) {
-            typed.insert(anchor_id, anchor);
+            return Ok(Some(anchor));
         }
     }
-    Ok(source_ids.iter().find_map(|id| typed.remove(*id)))
+    Ok(None)
 }
 
 pub(super) async fn insert_anchor(
