@@ -334,7 +334,8 @@ fn append_codex_session_meta_agent_relations(
     native_thread_id: Option<&str>,
 ) -> CanonicalObservationRelationsV1 {
     let parent_session_id = string_field(payload, "forked_from_id")
-        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"));
+        .or_else(|| nested_string_field(payload, "/source/subagent/thread_spawn/parent_thread_id"))
+        .or_else(|| string_field(payload, "parent_thread_id"));
     let thread_source = string_field(payload, "thread_source");
     let is_subagent = thread_source.as_deref() == Some("subagent")
         || parent_session_id.is_some()
@@ -348,9 +349,16 @@ fn append_codex_session_meta_agent_relations(
     if let Some(agent_id) = native_thread_id.and_then(observation_id_from_native) {
         relations = relations.with_agent_id(agent_id);
     }
-    if let Some(parent_agent_id) = parent_session_id.and_then(|id| observation_id_from_native(&id))
-    {
-        relations = relations.with_parent_agent_id(parent_agent_id);
+    // The spawning `spawn_agent` call id is recorded only in the parent's
+    // rollout (`SubAgentActivity` `started` item), never in the child's, so
+    // the child carries no parent tool-use id.
+    if let Some(parent) = parent_session_id {
+        if let Some(parent_agent_id) = observation_id_from_native(&parent) {
+            relations = relations.with_parent_agent_id(parent_agent_id);
+        }
+        if let Ok(parent_session_id) = SessionId::new(parent) {
+            relations = relations.with_parent_session_id(parent_session_id);
+        }
     }
     relations
 }

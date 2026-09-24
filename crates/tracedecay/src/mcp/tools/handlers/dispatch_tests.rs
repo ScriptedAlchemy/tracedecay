@@ -1870,6 +1870,79 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     cg.close();
 }
 
+/// The graph-tool owner reports the generation it served on the completion,
+/// so the envelope carries the stale seat and every surface renders the same
+/// trailer from it.
+#[tokio::test]
+async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("graph-tool-trailer");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.graph-tool-trailer",
+    )
+    .await
+    .unwrap();
+
+    let stale = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::Todos,
+        json!({}),
+        None,
+        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a stale-served graph tool still answers");
+    let served = stale.code_graph.clone().expect("served generation");
+    assert_eq!(served.generation, "generation.mcp-verified-graph-fixture.1");
+    assert!(served.freshness.is_stale());
+    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        Some(cg.project_root()),
+        &json!({}),
+        stale,
+    )
+    .unwrap();
+    let rendered = serde_json::to_string(&rendered.value).unwrap();
+    assert!(
+        rendered.contains(
+            "code_graph_freshness: stale, serving the last complete generation \
+             generation.mcp-verified-graph-fixture.1 (sealed 1m ago) while the code index rebuilds"
+        ),
+        "{rendered}"
+    );
+
+    let current = super::compute_graph_tool_for_owner(
+        &cg,
+        ApplicationSurfaceOperation::Todos,
+        json!({}),
+        None,
+        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
+    )
+    .await
+    .expect("a current graph tool answers");
+    assert!(
+        !current
+            .code_graph
+            .as_ref()
+            .expect("served generation")
+            .freshness
+            .is_stale()
+    );
+    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
+        Some(cg.project_root()),
+        &json!({}),
+        current,
+    )
+    .unwrap();
+    assert!(!serde_json::to_string(&rendered.value).unwrap().contains("code_graph_freshness"));
+
+    cg.close();
+}
+
 #[test]
 fn uncataloged_tool_fails_before_handler_dispatch() {
     let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").unwrap_err();

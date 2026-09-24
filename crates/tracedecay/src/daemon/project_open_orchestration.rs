@@ -65,9 +65,18 @@ where
         // mid-statement. The lifecycle activity remains held until the task
         // reports its terminal outcome and shutdown explicitly joins it.
         let result = Box::pin(open_project_server(cancellation.clone())).await;
+        if cancellation.is_cancelled() {
+            log_daemon_event(
+                "project_server_warmup",
+                &[
+                    ("outcome", "cancelled".to_string()),
+                    ("project", project_path.display().to_string()),
+                ],
+            );
+            return Err(result.err().unwrap_or_else(project_open_cancellation_error));
+        }
         match result {
             Ok(server) => {
-                project_open_cancellation_checkpoint(&cancellation)?;
                 if let Some(initialize_request) = initialize_request {
                     // Preserve the regular initialize side effect that records
                     // the negotiated MCP client name on the real server.
@@ -79,9 +88,6 @@ where
                 Ok(())
             }
             Err(error) => {
-                if cancellation.is_cancelled() {
-                    return Err(error);
-                }
                 log_daemon_event(
                     "project_server_warmup",
                     &[

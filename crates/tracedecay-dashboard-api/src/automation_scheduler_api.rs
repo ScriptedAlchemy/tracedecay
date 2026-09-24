@@ -18,6 +18,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
     save_scheduler_control, schedule_decision, scheduler_control_path,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<AutomationSchedulerStatusV1>, JsonError>;
@@ -95,7 +96,7 @@ async fn set_scheduler_paused(
 }
 
 async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
-    let (configuration_revision_id, effective) =
+    let (configuration_revision_id, effective, codex) =
         effective_automation_config(state).map_err(|err| internal_error(&err))?;
     let control = load_scheduler_control(&state.dashboard_root)
         .await
@@ -140,6 +141,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         tasks: vec![
             task_status(
                 &effective,
+                &codex,
                 control.paused,
                 &memory_summary,
                 activity,
@@ -148,6 +150,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
             ),
             task_status(
                 &effective,
+                &codex,
                 control.paused,
                 &session_summary,
                 activity,
@@ -156,6 +159,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
             ),
             task_status(
                 &effective,
+                &codex,
                 control.paused,
                 &skill_summary,
                 activity,
@@ -168,6 +172,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
 
 fn task_status(
     config: &AutomationConfig,
+    codex: &LcmSummarizerExecutableV1,
     paused: bool,
     summary: &AutomationRunLedgerTaskSummary,
     activity: SessionActivity,
@@ -179,7 +184,14 @@ fn task_status(
             AutomationSkipReasonV1::SchedulerPaused,
         )
     } else {
-        schedule_decision(config, task, summary.records(), activity, now)
+        schedule_decision(
+            config,
+            codex.canonical_path(),
+            task,
+            summary.records(),
+            activity,
+            now,
+        )
     };
     AutomationTaskStatusV1 {
         task: task_key(task).to_string(),
@@ -308,6 +320,7 @@ mod tests {
 
         let status = task_status(
             &config,
+            &LcmSummarizerExecutableV1::Unconfigured,
             false,
             &summary,
             SessionActivity::none(),

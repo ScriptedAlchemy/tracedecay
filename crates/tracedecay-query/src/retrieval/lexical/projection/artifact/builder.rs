@@ -1,4 +1,4 @@
-use std::cmp::{Ordering as CmpOrdering, Reverse};
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -75,20 +75,18 @@ const PROGRESS_TAIL_QUERY: &str = "SELECT page_ordinal, next_cursor \
      FROM source_page_cursors ORDER BY page_ordinal DESC LIMIT 1";
 const FINALIZATION_PROGRESS_INTERVAL_OPS: i32 = 4_096;
 const FINALIZATION_CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(1);
-// A plan entry owns its run-order key (borrowed term text, integer field
-// code, document id) and one posting reference. Five words match the 64-bit
+// A plan entry owns its sort key (borrowed term text, integer field code,
+// document id) and one posting reference. Five words match the 64-bit
 // layout and cover the 32-bit one; general allocator metadata remains
 // outside the ledger contract.
 const TERM_INSERT_PLAN_BYTES_PER_REF: usize = 5 * std::mem::size_of::<usize>();
 const TERM_INSERT_CONTROL_INTERVAL: usize = 4_096;
-const TERM_INSERT_SORT_RUN_ROWS: usize = 4_096;
 // An exact-posting plan entry owns its document, field, and term identifiers.
 // Eight words conservatively over-reserves that entry on both the 32-bit and
 // 64-bit layouts; general allocator metadata remains outside the ledger
 // contract.
 const EXACT_INSERT_PLAN_BYTES_PER_REF: usize = 8 * std::mem::size_of::<usize>();
 const EXACT_INSERT_CONTROL_INTERVAL: usize = TERM_INSERT_CONTROL_INTERVAL;
-const EXACT_INSERT_SORT_RUN_ROWS: usize = TERM_INSERT_SORT_RUN_ROWS;
 /// Rows per multi-row `INSERT ... VALUES (...), (...)` statement in the
 /// append phase. The per-row cost of the base-table inserts is statement
 /// overhead plus the per-row builder-gate trigger, not I/O: on a
@@ -127,47 +125,15 @@ impl<'a> PreparedTermInsertRefV1<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct PreparedTermMergeCursorV1<'a> {
-    entry: PreparedTermInsertRefV1<'a>,
-    run_index: usize,
-    run_offset: usize,
-}
-
-impl PartialEq for PreparedTermMergeCursorV1<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.entry.key() == other.entry.key()
-            && self.run_index == other.run_index
-            && self.run_offset == other.run_offset
-    }
-}
-
-impl Eq for PreparedTermMergeCursorV1<'_> {}
-
-impl PartialOrd for PreparedTermMergeCursorV1<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PreparedTermMergeCursorV1<'_> {
-    fn cmp(&self, other: &Self) -> CmpOrdering {
-        self.entry
-            .key()
-            .cmp(&other.entry.key())
-            .then_with(|| self.run_index.cmp(&other.run_index))
-            .then_with(|| self.run_offset.cmp(&other.run_offset))
-    }
-}
-
+/// Every planned term posting of one batch, sorted by key. Keys are unique
+/// (one posting per document, field, and term), so the order is total.
 struct PreparedTermInsertPlanV1<'a> {
     entries: Vec<PreparedTermInsertRefV1<'a>>,
-    merge_heap: BinaryHeap<Reverse<PreparedTermMergeCursorV1<'a>>>,
 }
 
-// Exact postings merge through the same bounded k-way sort as term postings,
-// keyed `(term_id, field, document_id)` so each `exact_posting_runs` list is
-// contiguous in the merged stream.
+// Exact postings sort the same way as term postings, keyed
+// `(term_id, field, document_id)` so each `exact_posting_runs` list is
+// contiguous in the sorted stream.
 #[derive(Clone, Copy)]
 struct PreparedExactInsertRefV1 {
     document_id: i64,
@@ -181,42 +147,8 @@ impl PreparedExactInsertRefV1 {
     }
 }
 
-#[derive(Clone, Copy)]
-struct PreparedExactMergeCursorV1 {
-    entry: PreparedExactInsertRefV1,
-    run_index: usize,
-    run_offset: usize,
-}
-
-impl PartialEq for PreparedExactMergeCursorV1 {
-    fn eq(&self, other: &Self) -> bool {
-        self.entry.key() == other.entry.key()
-            && self.run_index == other.run_index
-            && self.run_offset == other.run_offset
-    }
-}
-
-impl Eq for PreparedExactMergeCursorV1 {}
-
-impl PartialOrd for PreparedExactMergeCursorV1 {
-    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PreparedExactMergeCursorV1 {
-    fn cmp(&self, other: &Self) -> CmpOrdering {
-        self.entry
-            .key()
-            .cmp(&other.entry.key())
-            .then_with(|| self.run_index.cmp(&other.run_index))
-            .then_with(|| self.run_offset.cmp(&other.run_offset))
-    }
-}
-
 struct PreparedExactInsertPlanV1<'a> {
     entries: Vec<PreparedExactInsertRefV1>,
-    merge_heap: BinaryHeap<Reverse<PreparedExactMergeCursorV1>>,
     /// The batch's distinct exact terms with the ids this plan
     /// content-addressed, ascending by id, the order `exact_vocabulary` was
     /// always interned in.
@@ -1643,7 +1575,7 @@ impl CodeLexicalArtifactBuilderV1 {
             self.memory_budget_bytes,
             pages,
         )?;
-        let mut term_insert_plan = hotpath::measure_block!(
+        let term_insert_plan = hotpath::measure_block!(
             "query.artifact.batch.term_order",
             prepare_term_insert_plan(
                 self.fixed_ledger_charge_bytes,
@@ -1652,7 +1584,7 @@ impl CodeLexicalArtifactBuilderV1 {
                 control,
             )
         )?;
-        let mut exact_insert_plan = hotpath::measure_block!(
+        let exact_insert_plan = hotpath::measure_block!(
             "query.artifact.batch.exact_order",
             prepare_exact_insert_plan(
                 self.fixed_ledger_charge_bytes,
@@ -1690,8 +1622,8 @@ impl CodeLexicalArtifactBuilderV1 {
                     append_prepared_postings(
                         &transaction,
                         pages,
-                        &mut term_insert_plan,
-                        &mut exact_insert_plan,
+                        &term_insert_plan,
+                        &exact_insert_plan,
                         control,
                     )
                 )?;
@@ -2527,15 +2459,8 @@ fn prepared_term_row_count(
 }
 
 fn term_insert_plan_ledger_bytes(term_rows: usize) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    let entries = term_rows
+    term_rows
         .checked_mul(TERM_INSERT_PLAN_BYTES_PER_REF)
-        .ok_or_else(batch_ledger_overflow)?;
-    let runs = term_rows.div_ceil(TERM_INSERT_SORT_RUN_ROWS);
-    let merge_heap = runs
-        .checked_mul(std::mem::size_of::<PreparedTermMergeCursorV1<'static>>())
-        .ok_or_else(batch_ledger_overflow)?;
-    entries
-        .checked_add(merge_heap)
         .ok_or_else(batch_ledger_overflow)
 }
 
@@ -2552,15 +2477,8 @@ fn prepared_exact_row_count(
 }
 
 fn exact_insert_plan_ledger_bytes(exact_rows: usize) -> Result<usize, CodeLexicalArtifactErrorV1> {
-    let entries = exact_rows
+    exact_rows
         .checked_mul(EXACT_INSERT_PLAN_BYTES_PER_REF)
-        .ok_or_else(batch_ledger_overflow)?;
-    let runs = exact_rows.div_ceil(EXACT_INSERT_SORT_RUN_ROWS);
-    let merge_heap = runs
-        .checked_mul(std::mem::size_of::<PreparedExactMergeCursorV1>())
-        .ok_or_else(batch_ledger_overflow)?;
-    entries
-        .checked_add(merge_heap)
         .ok_or_else(batch_ledger_overflow)
 }
 
@@ -2672,76 +2590,100 @@ fn prepare_term_insert_plan<'a>(
             }
         }
     }
-    for run in entries.chunks_mut(TERM_INSERT_SORT_RUN_ROWS) {
-        checkpoint(control)?;
-        run.sort_unstable_by_key(PreparedTermInsertRefV1::key);
-        checkpoint(control)?;
-    }
     checkpoint(control)?;
+    sort_insert_plan(&mut entries, PreparedTermInsertRefV1::key, control)?;
+    checkpoint(control)?;
+    Ok(PreparedTermInsertPlanV1 { entries })
+}
 
-    let run_count = term_rows.div_ceil(TERM_INSERT_SORT_RUN_ROWS);
-    let mut merge_heap = BinaryHeap::new();
-    merge_heap.try_reserve_exact(run_count).map_err(|error| {
+/// Sort one batch's insert plan on the indexing pool.
+///
+/// Runs of [`TERM_INSERT_CONTROL_INTERVAL`] sort in waves so cancellation is
+/// observed between them, and each wave takes a background CPU permit. A
+/// k-way merge then materializes the total order, checkpointing on the same
+/// interval. The merge holds a second copy of the plan until the first is
+/// dropped.
+fn sort_insert_plan<T, K>(
+    entries: &mut Vec<T>,
+    key: impl Fn(&T) -> K + Copy + Sync,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1>
+where
+    T: Copy + Send,
+    K: Ord + Copy + Send,
+{
+    if entries.len() <= 1 {
+        return Ok(());
+    }
+    let run = TERM_INSERT_CONTROL_INTERVAL;
+    let workers = tracedecay_code_index::parallelism::indexing_workers().max(1);
+    let wave = run.saturating_mul(workers);
+    let mut start = 0;
+    while start < entries.len() {
+        checkpoint(control)?;
+        let end = start.saturating_add(wave).min(entries.len());
+        let slice = &mut entries[start..end];
+        tracedecay_code_index::parallelism::install(|| {
+            slice.par_chunks_mut(run).for_each(|chunk| {
+                tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                    chunk.sort_unstable_by_key(key);
+                });
+            });
+        })
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        start = end;
+    }
+    if entries.len() <= run {
+        return Ok(());
+    }
+    merge_sorted_runs(entries, run, key, control)
+}
+
+fn merge_sorted_runs<T, K>(
+    entries: &mut Vec<T>,
+    run: usize,
+    key: impl Fn(&T) -> K,
+    control: &dyn CodeIndexExecutionControlV1,
+) -> Result<(), CodeLexicalArtifactErrorV1>
+where
+    T: Copy,
+    K: Ord + Copy,
+{
+    let mut heap = BinaryHeap::new();
+    let mut run_index = 0usize;
+    let mut start = 0usize;
+    while start < entries.len() {
+        heap.push((Reverse(key(&entries[start])), run_index, start));
+        run_index += 1;
+        start = start.saturating_add(run);
+    }
+    let mut merged = Vec::new();
+    merged.try_reserve_exact(entries.len()).map_err(|error| {
         CodeLexicalArtifactErrorV1::Io(format!(
-            "bounded lexical term merge heap allocation failed: {error}"
+            "bounded lexical insert plan merge allocation failed: {error}"
         ))
     })?;
-    for (run_index, run) in entries.chunks(TERM_INSERT_SORT_RUN_ROWS).enumerate() {
-        checkpoint(control)?;
-        let Some(entry) = run.first().copied() else {
-            continue;
-        };
-        merge_heap.push(Reverse(PreparedTermMergeCursorV1 {
-            entry,
-            run_index,
-            run_offset: 0,
-        }));
-    }
-    Ok(PreparedTermInsertPlanV1 {
-        entries,
-        merge_heap,
-    })
-}
-
-fn next_term_insert<'a>(
-    plan: &mut PreparedTermInsertPlanV1<'a>,
-) -> Result<Option<PreparedTermInsertRefV1<'a>>, CodeLexicalArtifactErrorV1> {
-    let Some(Reverse(cursor)) = plan.merge_heap.pop() else {
-        return Ok(None);
-    };
-    let next_offset = cursor
-        .run_offset
-        .checked_add(1)
-        .ok_or_else(batch_ledger_overflow)?;
-    if next_offset < TERM_INSERT_SORT_RUN_ROWS {
-        let run_start = cursor
-            .run_index
-            .checked_mul(TERM_INSERT_SORT_RUN_ROWS)
-            .ok_or_else(batch_ledger_overflow)?;
-        let next_index = run_start
-            .checked_add(next_offset)
-            .ok_or_else(batch_ledger_overflow)?;
-        let run_end = run_start
-            .checked_add(TERM_INSERT_SORT_RUN_ROWS)
-            .ok_or_else(batch_ledger_overflow)?
-            .min(plan.entries.len());
-        if next_index < run_end {
-            let entry = plan.entries.get(next_index).copied().ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "lexical term merge cursor escaped its bounded run".to_owned(),
-                )
-            })?;
-            plan.merge_heap.push(Reverse(PreparedTermMergeCursorV1 {
-                entry,
-                run_index: cursor.run_index,
-                run_offset: next_offset,
-            }));
+    let mut emitted = 0usize;
+    while let Some((Reverse(_), run_index, index)) = heap.pop() {
+        if emitted.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
+            checkpoint(control)?;
+        }
+        merged.push(entries[index]);
+        emitted += 1;
+        let next = index + 1;
+        let run_end = run_index
+            .saturating_add(1)
+            .saturating_mul(run)
+            .min(entries.len());
+        if next < run_end {
+            heap.push((Reverse(key(&entries[next])), run_index, next));
         }
     }
-    Ok(Some(cursor.entry))
+    *entries = merged;
+    Ok(())
 }
 
-// Mirrors `prepare_term_insert_plan`/`next_term_insert` for `exact_postings`,
+// Mirrors `prepare_term_insert_plan` for `exact_postings`,
 // whose `PRIMARY KEY(field, term, document_id)` `WITHOUT ROWID` layout has
 // the same clustered-index cost for out-of-order inserts as `term_postings`.
 fn prepare_exact_insert_plan<'a>(
@@ -2812,74 +2754,13 @@ fn prepare_exact_insert_plan<'a>(
     // collision `intern_exact_terms` rejects, and it must reject the same one
     // on every run rather than whichever the hash map happened to yield first.
     interned_terms.sort_unstable_by_key(|(term, term_id)| (*term_id, *term));
-    for run in entries.chunks_mut(EXACT_INSERT_SORT_RUN_ROWS) {
-        checkpoint(control)?;
-        run.sort_unstable_by_key(|entry| entry.key());
-        checkpoint(control)?;
-    }
     checkpoint(control)?;
-
-    let run_count = exact_rows.div_ceil(EXACT_INSERT_SORT_RUN_ROWS);
-    let mut merge_heap = BinaryHeap::new();
-    merge_heap.try_reserve_exact(run_count).map_err(|error| {
-        CodeLexicalArtifactErrorV1::Io(format!(
-            "bounded lexical exact merge heap allocation failed: {error}"
-        ))
-    })?;
-    for (run_index, run) in entries.chunks(EXACT_INSERT_SORT_RUN_ROWS).enumerate() {
-        checkpoint(control)?;
-        let Some(entry) = run.first().copied() else {
-            continue;
-        };
-        merge_heap.push(Reverse(PreparedExactMergeCursorV1 {
-            entry,
-            run_index,
-            run_offset: 0,
-        }));
-    }
+    sort_insert_plan(&mut entries, PreparedExactInsertRefV1::key, control)?;
+    checkpoint(control)?;
     Ok(PreparedExactInsertPlanV1 {
         entries,
-        merge_heap,
         interned_terms,
     })
-}
-
-fn next_exact_insert(
-    plan: &mut PreparedExactInsertPlanV1<'_>,
-) -> Result<Option<PreparedExactInsertRefV1>, CodeLexicalArtifactErrorV1> {
-    let Some(Reverse(cursor)) = plan.merge_heap.pop() else {
-        return Ok(None);
-    };
-    let next_offset = cursor
-        .run_offset
-        .checked_add(1)
-        .ok_or_else(batch_ledger_overflow)?;
-    if next_offset < EXACT_INSERT_SORT_RUN_ROWS {
-        let run_start = cursor
-            .run_index
-            .checked_mul(EXACT_INSERT_SORT_RUN_ROWS)
-            .ok_or_else(batch_ledger_overflow)?;
-        let next_index = run_start
-            .checked_add(next_offset)
-            .ok_or_else(batch_ledger_overflow)?;
-        let run_end = run_start
-            .checked_add(EXACT_INSERT_SORT_RUN_ROWS)
-            .ok_or_else(batch_ledger_overflow)?
-            .min(plan.entries.len());
-        if next_index < run_end {
-            let entry = plan.entries.get(next_index).copied().ok_or_else(|| {
-                CodeLexicalArtifactErrorV1::Contract(
-                    "lexical exact merge cursor escaped its bounded run".to_owned(),
-                )
-            })?;
-            plan.merge_heap.push(Reverse(PreparedExactMergeCursorV1 {
-                entry,
-                run_index: cursor.run_index,
-                run_offset: next_offset,
-            }));
-        }
-    }
-    Ok(Some(cursor.entry))
 }
 
 fn sum_prepared_metric(
@@ -2926,9 +2807,33 @@ fn prepare_page_batch_admission(
         pages,
     )?;
     let current = progress(connection)?;
+    let persisted_previous = pages
+        .first()
+        .map(|page| cursor_before_page(connection, page.page_ordinal()))
+        .transpose()?
+        .flatten();
+    // Each page re-derives its chain from its own recorded predecessor, so the
+    // transitions verify independently; the ordered checks below still report
+    // the first failure in page order.
+    let transitions = tracedecay_code_index::parallelism::install(|| {
+        pages
+            .par_iter()
+            .enumerate()
+            .map(|(index, page)| {
+                let previous = match index.checked_sub(1) {
+                    None => persisted_previous.as_ref(),
+                    Some(previous) => pages
+                        .get(previous)
+                        .map(VerifiedSealedLexicalPageV1::next_cursor),
+                };
+                page.verify_transition(previous)
+            })
+            .collect::<Vec<_>>()
+    })
+    .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
     let mut fresh_start = pages.len();
     let mut expected_fresh_ordinal = current.next_page_ordinal;
-    for (index, page) in pages.iter().enumerate() {
+    for ((index, page), transition) in pages.iter().enumerate().zip(transitions) {
         if let Some(previous_page) = index.checked_sub(1).and_then(|index| pages.get(index)) {
             let expected = previous_page.page_ordinal().checked_add(1).ok_or_else(|| {
                 CodeLexicalArtifactErrorV1::Contract(
@@ -2941,17 +2846,7 @@ fn prepare_page_batch_admission(
                 ));
             }
         }
-        let persisted_previous;
-        let previous = if index == 0 {
-            persisted_previous = cursor_before_page(connection, page.page_ordinal())?;
-            persisted_previous.as_ref()
-        } else {
-            pages
-                .get(index - 1)
-                .map(VerifiedSealedLexicalPageV1::next_cursor)
-        };
-        page.verify_transition(previous)
-            .map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
+        transition.map_err(|error| CodeLexicalArtifactErrorV1::Corrupt(error.to_string()))?;
         if page.page_ordinal() < current.next_page_ordinal {
             verify_replayed_page(connection, page)?;
             continue;
@@ -3867,8 +3762,8 @@ fn derive_clone_fingerprint_postings(
 fn append_prepared_postings(
     transaction: &Transaction<'_>,
     pages: &[PreparedCodeLexicalArtifactPageV1],
-    term_insert_plan: &mut PreparedTermInsertPlanV1<'_>,
-    exact_insert_plan: &mut PreparedExactInsertPlanV1<'_>,
+    term_insert_plan: &PreparedTermInsertPlanV1<'_>,
+    exact_insert_plan: &PreparedExactInsertPlanV1<'_>,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
     let batch_page = pages
@@ -3902,13 +3797,11 @@ fn append_prepared_postings(
         4,
         sqlite_error,
     )?;
-    let expected_term_rows = term_insert_plan.entries.len();
-    let mut inserted_term_rows = 0usize;
     let mut field_totals = BTreeMap::new();
     hotpath::measure_block!("query.artifact.batch.postings.term_rows", {
         let mut run: Option<((&str, i64), PostingListEncoderV1)> = None;
-        while let Some(entry) = next_term_insert(term_insert_plan)? {
-            if inserted_term_rows.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
+        for (index, entry) in term_insert_plan.entries.iter().enumerate() {
+            if index.is_multiple_of(TERM_INSERT_CONTROL_INTERVAL) {
                 checkpoint(control)?;
             }
             let (term, field, document_id) = entry.key();
@@ -3927,30 +3820,20 @@ fn append_prepared_postings(
                     "lexical artifact field total overflowed".to_owned(),
                 )
             })?;
-            inserted_term_rows = inserted_term_rows
-                .checked_add(1)
-                .ok_or_else(batch_ledger_overflow)?;
         }
         if let Some(((term, field), encoder)) = run {
             push_posting_run(&mut term_insert, batch_page, sql_text(term), field, encoder)?;
         }
         term_insert.finish()
     })?;
-    if inserted_term_rows != expected_term_rows {
-        return Err(CodeLexicalArtifactErrorV1::Contract(
-            "lexical term merge omitted planned postings".to_owned(),
-        ));
-    }
     hotpath::measure_block!(
         "query.artifact.batch.postings.field_totals",
         stage_field_totals(transaction, &field_totals)
     )?;
-    let expected_exact_rows = exact_insert_plan.entries.len();
-    let mut inserted_exact_rows = 0usize;
     hotpath::measure_block!("query.artifact.batch.postings.exact_rows", {
         let mut run: Option<((i64, i64), PostingListEncoderV1)> = None;
-        while let Some(entry) = next_exact_insert(exact_insert_plan)? {
-            if inserted_exact_rows.is_multiple_of(EXACT_INSERT_CONTROL_INTERVAL) {
+        for (index, entry) in exact_insert_plan.entries.iter().enumerate() {
+            if index.is_multiple_of(EXACT_INSERT_CONTROL_INTERVAL) {
                 checkpoint(control)?;
             }
             let key = (entry.term_id, entry.field_code);
@@ -3969,9 +3852,6 @@ fn append_prepared_postings(
                     u32::try_from(entry.document_id).map_err(contract_number)?,
                     1,
                 )?;
-            inserted_exact_rows = inserted_exact_rows
-                .checked_add(1)
-                .ok_or_else(batch_ledger_overflow)?;
         }
         if let Some(((term_id, field), encoder)) = run {
             push_posting_run(
@@ -3984,11 +3864,6 @@ fn append_prepared_postings(
         }
         exact_insert.finish()
     })?;
-    if inserted_exact_rows != expected_exact_rows {
-        return Err(CodeLexicalArtifactErrorV1::Contract(
-            "lexical exact merge omitted planned postings".to_owned(),
-        ));
-    }
     Ok(())
 }
 
@@ -5225,6 +5100,96 @@ impl NgramListPassV1 {
     }
 }
 
+/// Row blocks inflated and keyed together by one parallel n-gram step.
+const NGRAM_DERIVE_WINDOW_BLOCKS: usize = 64;
+
+/// A window of stored row blocks awaiting n-gram derivation. Inflating a
+/// block and keying a decoded row are independent, so both run on the
+/// indexing pool; dictionary decoding (one SQLite connection) and list
+/// appends (ascending documents) stay on the calling thread in row order.
+#[derive(Default)]
+struct NgramDeriveWindowV1 {
+    blocks: Vec<(i64, Vec<u8>)>,
+}
+
+impl NgramDeriveWindowV1 {
+    fn derive<'connection>(
+        &mut self,
+        generation: &CodeGenerationId,
+        connection: &'connection Connection,
+        dictionary: &mut ConnectionRowDictionaryV1<'connection>,
+        visited: &mut usize,
+        pass: &mut NgramListPassV1,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        if self.blocks.is_empty() {
+            return Ok(());
+        }
+        let blocks = std::mem::take(&mut self.blocks);
+        let inflated = tracedecay_code_index::parallelism::install(|| {
+            blocks
+                .par_iter()
+                .map(|(first_document, payload)| {
+                    tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                        decode_row_block(*first_document, payload)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        drop(blocks);
+        let mut decoded = Vec::new();
+        for rows in inflated {
+            checkpoint(control)?;
+            for stored in rows? {
+                if *visited > 0 && visited.is_multiple_of(NGRAM_DICTIONARY_WINDOW_ROWS) {
+                    *dictionary = ConnectionRowDictionaryV1::new(connection);
+                }
+                *visited += 1;
+                let row = decode_artifact_row(
+                    generation,
+                    &stored.chunk_id,
+                    &stored.row,
+                    &stored.text,
+                    &*dictionary,
+                )?;
+                decoded.push((stored.document_id, row));
+            }
+        }
+        let keys = tracedecay_code_index::parallelism::install(|| {
+            decoded
+                .par_chunks(NGRAM_DERIVE_ROWS_PER_TASK)
+                .map(|rows| {
+                    tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
+                        rows.iter()
+                            .map(|(_, row)| {
+                                document_ngram_keys(
+                                    &normalized_search_text(row),
+                                    row.sanitized_text.as_str(),
+                                    &row.normalized_text,
+                                    control,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_err(|error| CodeLexicalArtifactErrorV1::Io(error.to_string()))?;
+        for (rows, keys) in decoded.chunks(NGRAM_DERIVE_ROWS_PER_TASK).zip(keys) {
+            for ((document, _), keys) in rows.iter().zip(keys?) {
+                for key in keys {
+                    pass.add(key, *document)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Decoded rows keyed by one pool task, amortizing its CPU permit.
+const NGRAM_DERIVE_ROWS_PER_TASK: usize = 128;
+
 /// Rebuild every sealed n-gram list from the stored rows, in key order,
 /// without any n-gram staging. Each pass walks the rows in document order;
 /// one pass suffices unless the lists outgrow `ngram_memory_bytes`, in which
@@ -5249,6 +5214,7 @@ fn derive_ngram_postings(
         let mut blocks = statement.query([]).map_err(sqlite_error)?;
         let mut dictionary = ConnectionRowDictionaryV1::new(transaction);
         let mut visited = 0usize;
+        let mut window = NgramDeriveWindowV1::default();
         while let Some(block) = blocks.next().map_err(sqlite_error)? {
             checkpoint(control)?;
             let first_document: i64 = block.get(0).map_err(sqlite_error)?;
@@ -5256,28 +5222,26 @@ fn derive_ngram_postings(
                 .get_ref(1)
                 .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
                 .map_err(sqlite_corrupt)?;
-            for stored in decode_row_block(first_document, payload)? {
-                if visited > 0 && visited.is_multiple_of(NGRAM_DICTIONARY_WINDOW_ROWS) {
-                    dictionary = ConnectionRowDictionaryV1::new(transaction);
-                }
-                visited += 1;
-                let decoded = decode_artifact_row(
+            window.blocks.push((first_document, payload.to_vec()));
+            if window.blocks.len() >= NGRAM_DERIVE_WINDOW_BLOCKS {
+                window.derive(
                     authority.generation,
-                    &stored.chunk_id,
-                    &stored.row,
-                    &stored.text,
-                    &dictionary,
-                )?;
-                for key in document_ngram_keys(
-                    &normalized_search_text(&decoded),
-                    decoded.sanitized_text.as_str(),
-                    &decoded.normalized_text,
+                    transaction,
+                    &mut dictionary,
+                    &mut visited,
+                    &mut pass,
                     control,
-                )? {
-                    pass.add(key, stored.document_id)?;
-                }
+                )?;
             }
         }
+        window.derive(
+            authority.generation,
+            transaction,
+            &mut dictionary,
+            &mut visited,
+            &mut pass,
+            control,
+        )?;
         drop(blocks);
         drop(statement);
         let (lists, cutoff) = pass.finish();

@@ -11,6 +11,7 @@
 //! frames are normalized to canonical envelopes and admitted through the
 //! observation pipeline, whose store projector owns the session rows.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
@@ -365,6 +366,52 @@ fn claude_subagent_identity(path: &Path) -> Option<ClaudeSubagentInfo> {
         parent_session_id,
         parent_transcript_path,
     })
+}
+
+/// Largest `agent-<id>.meta.json` sidecar read; real ones are a few hundred
+/// bytes.
+const MAX_SUBAGENT_META_BYTES: u64 = 64 * 1024;
+
+/// The spawn a subagent transcript's sidecar `agent-<id>.meta.json` records:
+/// `toolUseId` is the parent's `tool_use` block id, and `parentAgentId` names
+/// the spawning subagent when one spawned it (its transcript is
+/// `agent-<parentAgentId>.jsonl`); otherwise the session owning `subagents/`
+/// spawned it. A missing or unreadable sidecar keeps the directory parent and
+/// no tool-use id.
+fn claude_spawn_parent(path: &Path) -> Option<(String, Option<String>)> {
+    let info = claude_subagent_identity(path)?;
+    let meta = read_subagent_meta(&path.with_extension("meta.json"));
+    let text = |key: &str| {
+        meta.as_ref()
+            .and_then(|meta| meta.get(key))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let parent_session_id =
+        text("parentAgentId").map_or(info.parent_session_id, |agent| format!("agent-{agent}"));
+    let parent_session_id = protect_sensitive_structural_id(&parent_session_id).ok()?;
+    Some((parent_session_id, text("toolUseId").map(str::to_owned)))
+}
+
+fn read_subagent_meta(path: &Path) -> Option<serde_json::Value> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(path = %path.display(), %error, "unreadable Claude subagent sidecar");
+            }
+            return None;
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_SUBAGENT_META_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SUBAGENT_META_BYTES {
+        tracing::debug!(path = %path.display(), "oversized Claude subagent sidecar");
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 #[cfg(test)]

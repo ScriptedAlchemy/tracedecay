@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::automation::artifacts::sha256_json;
-use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
+use crate::automation::backend::{AgentTaskBackend, AgentTaskKind, AgentTaskResponse};
 use crate::automation::config::AutomationConfig;
 use crate::automation::host_io::HostIo;
 use crate::automation::lifecycle::{
@@ -289,6 +289,7 @@ fn run_skill_writer_for_store_with_publication_inner<'a>(
             "skill_writer",
             options.trigger,
             config,
+            backend.executable(),
             AgentTaskKind::SkillWriter,
         )
         .with_ledger_publication(ledger_publication)

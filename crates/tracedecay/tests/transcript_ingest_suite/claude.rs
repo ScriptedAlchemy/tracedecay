@@ -928,6 +928,136 @@ async fn claude_subagent_layout_uses_parent_cwd_fallback() {
     assert_eq!(results[0].session.session_id, "agent-worker");
 }
 
+/// Writes a sidechain transcript shaped like Claude Code's `Agent` subagents:
+/// records carry `isSidechain`, `agentId`, and the root `sessionId`; the
+/// sibling `agent-<id>.meta.json` sidecar carries `toolUseId` (the spawning
+/// `tool_use` block id) and, for a subagent spawned by a subagent,
+/// `parentAgentId`.
+fn write_claude_sidechain(
+    dir: &std::path::Path,
+    root_session: &str,
+    agent_id: &str,
+    meta: Option<serde_json::Value>,
+) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join(format!("agent-{agent_id}.jsonl")),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "parentUuid": null,
+                "isSidechain": true,
+                "agentId": agent_id,
+                "type": "user",
+                "sessionId": root_session,
+                "uuid": format!("{agent_id}-u1"),
+                "timestamp": "2026-01-01T00:00:10.000Z",
+                "message": {"role": "user", "content": format!("Sidechain {agent_id} reviews the writeback journal")}
+            })
+        ),
+    )
+    .unwrap();
+    if let Some(meta) = meta {
+        std::fs::write(
+            dir.join(format!("agent-{agent_id}.meta.json")),
+            meta.to_string(),
+        )
+        .unwrap();
+    }
+}
+
+/// Parentage comes from the child's own host records: the directory above
+/// `subagents/` (or the sidecar's `parentAgentId`) names the parent session and
+/// the sidecar's `toolUseId` the spawning call. A workflow subagent's sidecar
+/// records no `toolUseId`, and a missing sidecar leaves only the directory
+/// parent.
+#[tokio::test]
+async fn claude_sidechain_records_parent_session_and_spawning_tool_use() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let root = "1b206fb6-57ab-4abe-aa7e-51ac8e1168ce";
+    write_claude_transcript(&home, &project, root);
+    let subagents = home
+        .join(".claude/projects/-some-slug")
+        .join(root)
+        .join("subagents");
+    write_claude_sidechain(
+        &subagents,
+        root,
+        "a0dbe36644e553cf1",
+        Some(serde_json::json!({
+            "agentType": "general-purpose",
+            "description": "Simplification review: writeback",
+            "toolUseId": "toolu_018BToBNsKzNLGunCcnRrSUR",
+            "spawnDepth": 1
+        })),
+    );
+    write_claude_sidechain(
+        &subagents,
+        root,
+        "a270b6e7a135dc633",
+        Some(serde_json::json!({
+            "agentType": "general-purpose",
+            "description": "Simplification review: sftp + nbd + cli",
+            "toolUseId": "toolu_01NewiTR1eBNZGXRqwxkHJVM",
+            "parentAgentId": "a0dbe36644e553cf1",
+            "spawnDepth": 2
+        })),
+    );
+    write_claude_sidechain(
+        &subagents.join("workflows").join("wf_run123"),
+        root,
+        "aworkflow01",
+        Some(serde_json::json!({"agentType": "workflow", "spawnDepth": 1})),
+    );
+    write_claude_sidechain(&subagents, root, "anometa02", None);
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let stats = try_ingest_claude_source(&db, &ClaudeSource::with_home(&home), &project)
+        .await
+        .unwrap();
+    assert_eq!(stats.sessions_upserted, 5);
+
+    let mut rows = Vec::new();
+    for id in [
+        root,
+        "agent-a0dbe36644e553cf1",
+        "agent-a270b6e7a135dc633",
+        "agent-aworkflow01",
+        "agent-anometa02",
+    ] {
+        let session = db.get_session("claude", id).await.unwrap();
+        rows.push((
+            id,
+            session.parent_session_id,
+            session.parent_tool_use_id,
+            session.is_subagent,
+        ));
+    }
+    let owned = |id: &str| Some(id.to_owned());
+    assert_eq!(
+        rows,
+        vec![
+            (root, None, None, false),
+            (
+                "agent-a0dbe36644e553cf1",
+                owned(root),
+                owned("toolu_018BToBNsKzNLGunCcnRrSUR"),
+                true
+            ),
+            // A subagent spawned by a subagent forks from that subagent's call.
+            (
+                "agent-a270b6e7a135dc633",
+                owned("agent-a0dbe36644e553cf1"),
+                owned("toolu_01NewiTR1eBNZGXRqwxkHJVM"),
+                true
+            ),
+            ("agent-aworkflow01", owned(root), None, true),
+            ("agent-anometa02", owned(root), None, true),
+        ]
+    );
+}
+
 /// Writes a cwd-less subagent transcript nested under
 /// `subagents/workflows/<workflow_run>/`.
 fn write_claude_workflow_subagent(

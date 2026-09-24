@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracedecay_automation_runtime::automation::AutomationRunControl;
-use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
 
@@ -1895,6 +1895,10 @@ struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
     settings: tracedecay_automation_runtime::automation::config::AutomationConfig,
+    /// The `codex` executable the same snapshot binds
+    /// (`lcm.summarizer_executables.v1`); the automation backend spawns only
+    /// this path.
+    codex_executable: tracedecay_domain::configuration::LcmSummarizerExecutableV1,
 }
 
 #[hotpath::measure(label = "daemon.scheduler.read_automation_config", future = true)]
@@ -1921,6 +1925,7 @@ async fn effective_automation_config_for_project(
         configuration_revision_id: configuration.revision_id().clone(),
         configuration_digest,
         settings,
+        codex_executable: configuration.config().lcm_summarizers.codex.clone(),
     })
 }
 
@@ -2049,6 +2054,7 @@ async fn run_user_jobs_scheduler_pass(
         match tracedecay_automation_runtime::automation::jobs::evaluate_and_record_scheduler_skip(
             &dashboard_root,
             config,
+            backend.executable(),
             job,
             &requested_run_id,
             occurrence_anchor_run_id.as_deref(),

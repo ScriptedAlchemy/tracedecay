@@ -15,8 +15,9 @@ pub use dispatch::dispatch_tool;
 pub use navigation::{
     compute_impact, compute_node, handle_by_qualified_name, handle_derives, handle_signature,
 };
+pub(crate) use context_markdown::render_context;
 pub use search::{
-    compute_redundancy, compute_rename_preview, compute_similar, handle_context,
+    compute_context, compute_redundancy, compute_rename_preview, compute_similar,
     handle_find_exact_symbol, handle_search,
 };
 pub use verified::{
@@ -73,5 +74,7 @@ pub(crate) fn graph_tool_completion(
     tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
         result,
         touched_files,
+        code_graph: None,
+        analytics: None,
     }
 }

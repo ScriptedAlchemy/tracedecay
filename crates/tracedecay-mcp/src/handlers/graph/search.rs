@@ -2,12 +2,12 @@
 //! `search`, `context`, `similar`, `find_exact_symbol`, `rename_preview`.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::future::Future;
 use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
     ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
@@ -22,21 +22,20 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 
+#[cfg(test)]
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
 use crate::handlers::dependency_hints;
 use crate::handlers::support::{
-    CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result as support_generic,
-    rendered_tool_result as support_rendered, retrieval_cursor,
-    take_internal_context_memory_analytics, text_tool_result, unique_file_paths,
+    decode_primitive_request, generic_tool_result as support_generic,
+    rendered_tool_result as support_rendered, retrieval_cursor, unique_file_paths,
 };
 use crate::tools::render::{self, Md};
 use crate::{McpToolContext, ToolResult};
 
-use super::context_markdown::{append_verified_plan_context, verified_context_markdown};
+use super::context_markdown::verified_plan_context;
 use super::context_support::{
-    ContextMemoryOutcome, context_markdown_lane_preview, context_memory_analytics_value,
-    context_memory_options, context_memory_outcome, context_memory_read_control,
-    insert_context_memory_section,
+    ContextMemoryOutcome, context_memory_analytics, context_memory_options,
+    context_memory_outcome, context_memory_read_control,
 };
 use super::primitive_surface::{
     search_coverage as primitive_search_coverage, symbol_location as primitive_symbol_location,
@@ -56,7 +55,7 @@ use super::{
 use super::{lexical_routing, search_evidence};
 
 #[cfg(test)]
-use super::context_support::context_memory_section;
+use super::context_support::{context_markdown_lane_preview, context_memory_section};
 
 async fn execute_code_index_search(
     executor: Option<&tracedecay_query::code_search::CodeIndexSearchExecutor>,
@@ -153,32 +152,6 @@ fn generic_tool_result(
     touched_files: Vec<String>,
 ) -> ToolResult {
     support_generic(Some(ctx.project_root()), args, value, touched_files)
-}
-
-fn rendered_context_tool_result(
-    ctx: &McpToolContext<'_>,
-    args: &Value,
-    mut value: Value,
-    touched_files: Vec<String>,
-    full_markdown: String,
-    preview_markdown: Option<&str>,
-) -> ToolResult {
-    let internal_analytics = take_internal_context_memory_analytics(&mut value);
-    let text = if render::wants_json(args) {
-        render::finalize(Some(ctx.project_root()), args, &value, || full_markdown)
-    } else {
-        render::markdown_preview_with_handle(
-            Some(ctx.project_root()),
-            &full_markdown,
-            preview_markdown.unwrap_or(&full_markdown),
-        )
-    };
-    let result = text_tool_result(&text, touched_files);
-    if let Some(internal_analytics) = internal_analytics {
-        result.with_internal_analytics(internal_analytics)
-    } else {
-        result
-    }
 }
 
 #[hotpath::measure(label = "mcp.graph.search.total")]
@@ -423,7 +396,7 @@ where
 /// Warns, in the human-facing body, that a result list is short because a lane
 /// was missing. A degraded page is otherwise indistinguishable from a thorough
 /// one, which is exactly how a partial answer gets trusted as a complete one.
-fn append_coverage_md(md: &mut Md, value: &Value) {
+pub(super) fn append_coverage_md(md: &mut Md, value: &Value) {
     let Some(coverage) = value.get("coverage") else {
         return;
     };
@@ -724,31 +697,13 @@ fn extract_lines(source: &str, start_line: u32, end_line: u32) -> String {
     body
 }
 
-fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMatchV1]) {
-    if matches.is_empty() {
-        return;
-    }
-    output.push_str("\n### Available Code Search Matches\n");
-    for search_match in matches {
-        let _ = writeln!(
-            output,
-            "- **{}** ({}), `{}` · rank {} · utility {}",
-            search_match.name,
-            search_match.kind,
-            search_match.file,
-            search_match.rank,
-            search_match.utility_micros,
-        );
-    }
-}
-
 #[hotpath::measure(label = "mcp.graph.context.total")]
-pub async fn handle_context<F>(
+pub async fn compute_context<F>(
     ctx: &McpToolContext<'_>,
     graph: F,
     args: Value,
     scope_prefix: Option<&str>,
-) -> Result<ToolResult>
+) -> Result<GraphToolCompletionV1>
 where
     F: Future<Output = Result<tracedecay_graph_query::VerifiedGraphQuery>>,
 {
@@ -867,101 +822,22 @@ where
         graph_coverage: memory_graph_coverage,
         error: memory_matches_error,
     } = memory_outcome;
-    let seeds = projection
-        .selected
-        .iter()
-        .map(|symbol| symbol.occurrence.clone())
-        .collect::<Vec<_>>();
-    let symbol_values = projection
+    let symbols = projection
         .selected
         .iter()
         .map(primitive_symbol_location)
         .collect::<Result<Vec<_>>>()?;
-    let related_values = projection
+    let related_symbols = projection
         .related
         .iter()
         .map(primitive_symbol_location)
         .collect::<Result<Vec<_>>>()?;
-    let symbol_render_values = symbol_values
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let related_render_values = related_values
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let code_render_values = projection
-        .code_blocks
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let mut output = freshness_lines(&freshness);
-    output.push_str(&verified_context_markdown(
-        task,
-        &symbol_render_values,
-        &related_render_values,
-        &code_render_values,
-    )?);
-    if symbol_values.is_empty() {
-        append_context_search_matches(&mut output, &search_matches);
-    }
-    insert_context_memory_section(
-        &mut output,
-        &memory_matches,
-        memory_matches_error.as_deref(),
-    );
-    if mode == ContextModeV1::Plan
-        && let Some(graph) = graph.as_ref()
-    {
-        append_verified_plan_context(graph, &projection.selected, &mut output)?;
-    }
-
-    if !seeds.is_empty() {
-        let _ = write!(
-            output,
-            "\n{} {}\n",
-            CONTEXT_SEEN_NODE_IDS_LABEL,
-            serde_json::to_string(&seeds)?
-        );
-    }
-
-    let result = ContextResultV1 {
-        task: request.task,
-        mode,
-        freshness,
-        code_generation,
-        search_matches: search_matches.clone(),
-        symbols: symbol_values,
-        related_symbols: related_values,
-        code: projection.code_blocks,
-        coverage,
-        memory_matches: memory_matches.clone(),
-        memory_graph_coverage,
-        memory_matches_error: memory_matches_error.clone(),
-        verified_graph_evidence,
+    let plan = match (mode, graph.as_ref()) {
+        (ContextModeV1::Plan, Some(graph)) => {
+            Some(verified_plan_context(graph, &projection.selected)?)
+        }
+        _ => None,
     };
-    let mut value =
-        hotpath::measure_block!("mcp.graph.context.serialize", serde_json::to_value(result)?);
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
-            json!({
-                "context_memory": context_memory_analytics_value(
-                    &memory_options,
-                    &memory_matches,
-                    memory_matches_error.as_deref()
-                ),
-            }),
-        );
-    }
-    let mut degradation = Md::new();
-    append_coverage_md(&mut degradation, &value);
-    search_evidence::append_verified_graph_evidence_md(&mut degradation, &value);
-    let degradation = degradation.render();
-    if !degradation.is_empty() {
-        output.push('\n');
-        output.push_str(&degradation);
-    }
     let touched_files = unique_file_paths(
         projection.touched_files.iter().map(String::as_str).chain(
             search_matches
@@ -969,15 +845,35 @@ where
                 .map(|search_match| search_match.file.as_str()),
         ),
     );
-    let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
-    Ok(rendered_context_tool_result(
-        ctx,
-        &args,
-        value,
+    let analytics = InvocationAnalyticsV1 {
+        context_memory: Some(context_memory_analytics(
+            &memory_options,
+            &memory_matches,
+            memory_matches_error.as_deref(),
+        )),
+    };
+    let result = ContextResultV1 {
+        task: request.task,
+        mode,
+        freshness,
+        code_generation,
+        search_matches,
+        symbols,
+        related_symbols,
+        code: projection.code_blocks,
+        coverage,
+        memory_matches,
+        memory_graph_coverage,
+        memory_matches_error,
+        verified_graph_evidence,
+        plan,
+    };
+    Ok(GraphToolCompletionV1 {
+        result: GraphToolResultV1::Context(result),
         touched_files,
-        output,
-        preview.as_deref(),
-    ))
+        code_graph: None,
+        analytics: Some(analytics),
+    })
 }
 
 /// Bare-name lookup against `idx_nodes_name`, no BM25 scoring, no fuzzy

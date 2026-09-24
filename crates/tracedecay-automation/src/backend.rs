@@ -669,6 +669,12 @@ pub trait AgentTaskBackend: Send + Sync {
         &self,
         request: &AgentTaskRequest,
     ) -> std::result::Result<AgentTaskResponse, AgentTaskError>;
+
+    /// The host executable this backend spawns for a task, or `None` when it
+    /// runs in-process or its executable is not configured. The durable
+    /// backend identity stamps the opened file behind this path so replacing
+    /// the binary in place re-admits a settled deterministic failure.
+    fn executable(&self) -> Option<&std::path::Path>;
 }
 
 /// Availability state returned by runtime adapters. This crate does not probe

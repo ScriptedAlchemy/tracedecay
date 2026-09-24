@@ -82,13 +82,23 @@ async fn rmcp_route_fixture_with_projects(
     #[cfg(not(unix))]
     let (store_administration, server) = {
         let store_administration = test_store_administration_for_profile(&profile_root);
+        // Daemon bootstrap installs the profile worker plan before any
+        // project opens; the portable route is driven directly here, so it
+        // reproduces that ordering or project open refuses.
+        let invocation = super::super::DaemonInvocationState::default();
+        invocation
+            .install_worker_selection(
+                &store_administration,
+                tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
+            )
+            .expect("install portable route profile worker plan");
         let server = Box::pin(super::super::portable_project_server_for_request(
             DaemonLifecycle::default(),
             store_administration.clone(),
             Arc::new(tokio::sync::Mutex::new(
                 super::super::ProjectOpenGates::default(),
             )),
-            super::super::DaemonInvocationState::default(),
+            invocation,
             super::super::http_application::DaemonHttpApplicationRegistry::default(),
             &handshake,
             super::super::ProjectServerRequirement::Core,

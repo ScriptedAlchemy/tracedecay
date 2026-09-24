@@ -13,7 +13,16 @@ use tracedecay_automation_runtime::automation::backend::{
     AgentTaskResponse, CodexAppServerBackend, backend_availability,
 };
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_session_memory::provider_pricing::{cost_of_usage, load_table};
+
+/// The automation settings and the configured `codex` executable one project
+/// configuration snapshot binds for the Scout model route.
+#[derive(Clone, Copy)]
+pub struct ContextScoutModelConfig<'a> {
+    pub automation: &'a AutomationConfig,
+    pub codex: &'a LcmSummarizerExecutableV1,
+}
 
 const CONTEXT_SCOUT_PROMPT_V1: &str = "\
 Select one supplied candidate and return only the JSON object required by the response schema. \
@@ -35,22 +44,25 @@ pub fn context_scout_backend_from_automation_config(
 
 #[hotpath::measure(label = "agent_hosts.context_scout.model_route")]
 pub fn context_scout_model_assistant_from_automation_config(
-    config: &AutomationConfig,
+    config: ContextScoutModelConfig<'_>,
 ) -> Arc<dyn ContextScoutModelAssistantV1> {
-    let route = context_scout_backend_from_automation_config(config);
+    let route = context_scout_backend_from_automation_config(config.automation);
     if route != ContextScoutModelBackendV1::CodexAppServer
-        || !backend_availability(config).available
+        || !backend_availability(config.automation, config.codex).available
     {
         return Arc::new(UnavailableContextScoutModelAssistantV1 { route });
     }
     Arc::new(ProductionContextScoutModelAssistantV1::new(
-        Arc::new(CodexAppServerBackend::from_automation_config(config)),
+        Arc::new(CodexAppServerBackend::from_automation_config(
+            config.automation,
+            config.codex,
+        )),
         route,
     ))
 }
 
 pub fn context_scout_model_assistant_from_project_config(
-    config: Option<&AutomationConfig>,
+    config: Option<ContextScoutModelConfig<'_>>,
 ) -> Arc<dyn ContextScoutModelAssistantV1> {
     config.map_or_else(
         || {
@@ -324,6 +336,10 @@ mod tests {
                 output_tokens: Some(16),
             })
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
 
     #[cfg(feature = "token-counting")]
@@ -345,6 +361,10 @@ mod tests {
                 input_tokens: None,
                 output_tokens: None,
             })
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
         }
     }
 
@@ -434,6 +454,10 @@ mod tests {
             _request: &AgentTaskRequest,
         ) -> Result<AgentTaskResponse, AgentTaskError> {
             Err(self.error.clone())
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
         }
     }
 

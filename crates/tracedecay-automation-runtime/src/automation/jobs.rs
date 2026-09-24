@@ -520,6 +520,7 @@ async fn run_user_job_with_backend_publication(
     let ctx = JobRunContext {
         dashboard_root,
         config,
+        executable: backend.executable(),
         job,
         run_id: &run_id,
         trigger,
@@ -547,6 +548,7 @@ async fn run_user_job_with_backend_publication(
             return scheduler_gate::record_scheduler_lock_skip(
                 dashboard_root,
                 config,
+                backend.executable(),
                 job,
                 &run_id,
                 &started_at,
@@ -751,6 +753,8 @@ fn config_skip_reason(config: &AutomationConfig) -> Option<AutomationSkipReasonV
 struct JobRunContext<'a> {
     dashboard_root: &'a Path,
     config: &'a AutomationConfig,
+    /// The executable the job's backend spawns (`AgentTaskBackend::executable`).
+    executable: Option<&'a Path>,
     job: &'a AutomationJob,
     run_id: &'a str,
     trigger: AutomationTrigger,
@@ -787,7 +791,11 @@ impl JobRunContext<'_> {
             task: AgentTaskKind::UserJob,
             task_key: Some(job_task_key(&self.job.id)),
             backend: self.config.backend.as_str().to_string(),
-            backend_identity: super::backend_identity::backend_identity(self.config).ok(),
+            backend_identity: super::backend_identity::backend_identity(
+                self.config,
+                self.executable,
+            )
+            .ok(),
             host_mode: Some(self.config.host_mode.as_str().to_string()),
             prompt_version: Some(
                 super::backend::prompt_version(AgentTaskKind::UserJob).to_string(),

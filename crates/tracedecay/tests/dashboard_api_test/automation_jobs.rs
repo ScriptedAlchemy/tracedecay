@@ -18,8 +18,6 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let marker = tmp_root.join("dashboard-command-ran");
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let missing_codex_bin = tmp_root.join("missing-codex");
-        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &missing_codex_bin);
 
         let mut global_config = tracedecay_session_memory::user_config::UserConfig::default();
         global_config.automation.enabled = true;
@@ -109,8 +107,6 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
         let profile_root = tmp_root.join("profile").join(".tracedecay");
         let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
         let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-        let missing_codex_bin = tmp_root.join("missing-codex");
-        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &missing_codex_bin);
 
         let (cg, host_runtime) = setup_project(&project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
@@ -275,10 +271,15 @@ for line in sys.stdin:
         );
         write_file(&fake_codex_script, &script);
         install_fake_codex_launcher(&fake_codex_script, &fake_codex_bin);
-        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex_bin);
 
         let (cg, host_runtime) = setup_project(&project_root).await;
         let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let project_id = cg
+            .configuration_runtime()
+            .configuration_target()
+            .project_id
+            .as_str()
+            .to_owned();
         let agent = http_agent();
         let port = pick_free_port();
         let base_url = format!("http://127.0.0.1:{port}");
@@ -293,6 +294,7 @@ for line in sys.stdin:
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
+        configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex_bin);
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
         let (status, current_config) = get_json(&agent, &config_url);

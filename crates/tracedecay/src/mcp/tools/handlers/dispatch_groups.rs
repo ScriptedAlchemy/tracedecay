@@ -52,7 +52,7 @@ async fn admitted_graph_query(
 /// Lends the root's verified-graph admission funnel to a portable dispatch
 /// table for one tool call. The borrow of `options` is the whole lifetime of
 /// the table's dispatch, so every lazy open it issues reports back through
-/// the same `served_stale_graph_generation` slot.
+/// the same `served_code_graph` slot.
 fn verified_graph_open<'o>(
     options: &'o ToolCallRegistryOptions<'_>,
 ) -> impl Fn(ApplicationOperation) -> VerifiedGraphOpenFuture<'o> + Sync + 'o {
@@ -96,22 +96,15 @@ async fn admitted_graph_query_for_operation(
         label = "mcp.dispatch.graph_query_admission"
     )
     .await?;
-    if let tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-        sealed_at,
-        rebuild_in_flight,
-    } = query.freshness()
-    {
-        // Every graph-backed tool funnels through this open, so this is the
-        // single point that reports serve-old-while-rebuilding back to the
-        // dispatch boundary for the typed response trailer.
-        let _ = options
-            .served_stale_graph_generation
-            .set(super::ServedStaleCodeGraphReadV1 {
-                generation: query.generation().as_str().to_owned(),
-                sealed_at,
-                rebuild_in_flight,
-            });
-    }
+    // Every graph-backed tool funnels through this open, so this is the
+    // single point that reports the served generation, and a
+    // serve-old-while-rebuilding seat, back to the dispatch boundary.
+    options
+        .served_code_graph
+        .record(tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1 {
+            generation: query.generation().as_str().to_owned(),
+            freshness: query.freshness(),
+        });
     Ok(query)
 }
 
@@ -362,7 +355,20 @@ fn dispatch_application_surface_tools_inner<'a>(
         let Some(operation) = ApplicationSurfaceOperation::from_tool_name(tool_name) else {
             return Err(unknown_tool_error(tool_name));
         };
-        if RetainedSurfaceOperation::from_application(operation).is_some() {
+        let retained = RetainedSurfaceOperation::from_application(operation).is_some();
+        let source_edit = tracedecay_daemon_protocol::is_source_edit_operation(operation);
+        let graph_tool = operation.is_graph_tool();
+        // An already-elapsed carried deadline is refused before these tools
+        // dispatch, exactly as their retained handlers always refused it.
+        if (retained || source_edit || graph_tool)
+            && tool_dispatch_budget(tool_name, options.application_deadline.as_ref()).is_none()
+        {
+            return Err(tool_dispatch_deadline_error(
+                tool_name,
+                std::time::Duration::ZERO,
+            ));
+        }
+        if retained {
             return application_surface::run_retained_surface_tool(
                 Some(cg.project_root()),
                 BindingSurface::Mcp,
@@ -375,7 +381,7 @@ fn dispatch_application_surface_tools_inner<'a>(
             )
             .await;
         }
-        if operation.is_graph_tool() {
+        if graph_tool {
             let execution = application_surface::execute_graph_tool_surface(
                 BindingSurface::Mcp,
                 operation,
@@ -392,7 +398,7 @@ fn dispatch_application_surface_tools_inner<'a>(
                 execution,
             );
         }
-        if tracedecay_daemon_protocol::is_source_edit_operation(operation) {
+        if source_edit {
             return edit::source_edit_tool(
                 Some(cg.project_root()),
                 BindingSurface::Mcp,
@@ -468,7 +474,8 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
         };
         let project = admitted_project_authorities(cg, &options)?;
         let snapshots = AdmittedRequestSnapshotsV1::default();
-        let ctx = admitted_tool_context(&options, &project, &snapshots, None)?;
+        let freshness = graph_freshness_reader(tool_name, &options);
+        let ctx = admitted_tool_context(&options, &project, &snapshots, freshness)?;
         let open = verified_graph_open(&options);
         let computed = tracedecay_mcp::handlers::graph_tool::compute_graph_tool(
             &ctx,
@@ -477,10 +484,12 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
             args,
             scope_prefix,
         );
-        match tokio::time::timeout(budget, computed).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
-        }
+        let mut completion = match tokio::time::timeout(budget, computed).await {
+            Ok(result) => result?,
+            Err(_elapsed) => return Err(tool_dispatch_deadline_error(tool_name, budget)),
+        };
+        completion.code_graph = options.served_code_graph.served();
+        Ok(completion)
     })
 }
 

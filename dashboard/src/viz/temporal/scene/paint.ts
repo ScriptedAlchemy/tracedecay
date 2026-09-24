@@ -223,7 +223,7 @@ export function paintScene(ctx: CanvasRenderingContext2D, frame: SceneFrame, pal
   ctx.setLineDash([1, 3]);
   ctx.strokeStyle = palette.text;
   for (const path of model.paths) {
-    if (path.kind !== 'sequence') continue;
+    if (path.kind !== 'sequence' && path.kind !== 'edit_link') continue;
     ctx.globalAlpha = 0.45 * focusAlpha(path.focus);
     ctx.beginPath();
     ctx.moveTo(path.controls[0]!, path.controls[1]!);

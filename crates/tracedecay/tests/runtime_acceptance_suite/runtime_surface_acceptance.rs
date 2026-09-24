@@ -2228,8 +2228,9 @@ async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
 
     assert!(
         output.status.success(),
-        "graceful LSP exit must not fail explicit bridge detach: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "graceful LSP exit must not fail explicit bridge detach: {}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        fixture.daemon_log_tail()
     );
 }
 
@@ -2255,7 +2256,12 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         cancellation,
     )
     .await
-    .expect("open production daemon LSP session");
+    .unwrap_or_else(|error| {
+        panic!(
+            "open production daemon LSP session: {error:?}\n{}",
+            fixture.daemon_log_tail()
+        )
+    });
 
     let projections = [
         "diagnostics",

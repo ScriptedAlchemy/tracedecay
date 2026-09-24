@@ -308,6 +308,29 @@ pub struct PrimitiveSearchCoverageV1 {
     pub recall: PrimitiveRecallV1,
 }
 
+/// A public trait or interface among the context's selected symbols.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextExtensionPointV1 {
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub line: u32,
+    pub implementor_count: usize,
+}
+
+/// Plan-mode enrichment: where the selected code can be extended and which
+/// test files reach it.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextPlanV1 {
+    pub extension_points: Vec<ContextExtensionPointV1>,
+    /// Test files calling the selected symbols within two hops; absent when
+    /// no symbol was selected to trace from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_files: Option<Vec<String>>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextResultV1 {
@@ -331,6 +354,9 @@ pub struct ContextResultV1 {
     pub memory_matches_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_graph_evidence: Option<PrimitiveUnavailableEvidenceV1>,
+    /// Present in plan mode when the verified graph answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ContextPlanV1>,
 }
 
 impl ContextResultV1 {
@@ -730,6 +756,7 @@ mod tests {
             memory_graph_coverage: None,
             memory_matches_error: None,
             verified_graph_evidence: None,
+            plan: None,
         }
     }
 

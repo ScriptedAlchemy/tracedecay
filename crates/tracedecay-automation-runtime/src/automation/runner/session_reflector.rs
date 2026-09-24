@@ -685,6 +685,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
             "session_reflector",
             options.trigger,
             config,
+            backend.executable(),
             AgentTaskKind::SessionReflector,
         )
         .with_ledger_publication(ledger_publication)

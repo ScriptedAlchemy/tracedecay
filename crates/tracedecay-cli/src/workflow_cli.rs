@@ -237,6 +237,8 @@ pub async fn invoke_workflow_cli(
                 scope,
                 outcome: erase_workflow_outcome(outcome)?,
                 touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
             }))
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => Ok(Err(

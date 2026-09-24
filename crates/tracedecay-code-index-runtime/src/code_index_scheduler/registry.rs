@@ -145,11 +145,12 @@ const TEXT_PROJECTION_MAXIMUM_ACTIVATION_ADVANCES_V1: usize = 10_000;
 /// generation, so a complete sealed generation sat on disk with zero seat
 /// attempts and no log line, because a missing prepare is not a refusal. The
 /// gate is now the text owner, not the tree: a publication prepares on its own
-/// pass once its lightweight text owner has finished, and an unchanged pass
-/// prepares as soon as a retained owner exists to recover a verified head.
-/// Fresh graph publication and any retained full replay follow text projection
-/// because both are corpus-sized consumers of the sealed source and process
-/// memory. Every skip names itself.
+/// pass alongside its lightweight text owner's projection, and an unchanged
+/// pass prepares as soon as a retained owner exists to recover a verified head.
+/// Both are corpus-sized consumers of the sealed source and process memory, so
+/// fresh graph publication starts only once that projection holds its build
+/// reservation, and any retained full replay follows text projection. Every
+/// skip names itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphSeatGateV1 {
     /// Prepare, decode, activate, and swap this generation into serving.
@@ -182,9 +183,11 @@ enum PublishedTextProjectionOutcomeV1 {
 
 impl GraphSeatGateV1 {
     /// `text_owner_admitted_for_graph` means a publication's replacement
-    /// owner is ready, or an unchanged pass has a retained owner from which it
-    /// can first try to recover an already-verified graph head. A retained full
-    /// replay is gated separately on text readiness after that recovery attempt.
+    /// owner is ready or its projection runs in this pass (the serving swap
+    /// joins it before seating), or an unchanged pass has a retained owner
+    /// from which it can first try to recover an already-verified graph head.
+    /// A retained full replay is gated separately on text readiness after that
+    /// recovery attempt.
     #[hotpath::skip]
     pub const fn decide(
         activation_enabled: bool,
@@ -2294,9 +2297,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// advance at a time, until exact and lexical serving are ready or the
     /// projection stops typed.
     ///
-    /// The caller chooses ordering. Fresh publications await this before graph
-    /// work because text and graph compete for the same sealed source and
-    /// resident-memory headroom. Retained owners may still run on their own
+    /// The caller chooses ordering. Text and graph compete for the same sealed
+    /// source and resident-memory headroom, so a fresh publication starts
+    /// graph work only once `opened` fires: the first advance succeeded and
+    /// the build holds its reservation. A projection that stops before that
+    /// (parked, failed, or already ready) drops the sender instead, and graph
+    /// then waits for ready owners. Retained owners may still run on their own
     /// task while the scheduler recovers an already-verified graph head. The
     /// advance itself is single-flight on the owner's projection slot, so
     /// scheduler wakes that race it wait, never double drive.
@@ -2319,6 +2325,7 @@ impl CodeIndexSchedulerRegistryV1 {
         shutting_down: Arc<AtomicBool>,
         convergence_park: Arc<RwLock<Option<CodeIndexConvergenceParkedV1>>>,
         installed: Option<Arc<RwLock<Option<LatestCodeTextGenerationV1>>>>,
+        mut opened: Option<tokio::sync::oneshot::Sender<()>>,
         #[cfg(test)] project_root: PathBuf,
     ) -> PublishedTextProjectionOutcomeV1 {
         #[cfg(test)]
@@ -2345,14 +2352,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 break;
             }
             let advancing = text.clone();
-            match hotpath::future!(
+            let advance = hotpath::future!(
                 tokio::task::spawn_blocking(
                     move || advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
                 ),
                 label = "daemon.code_index.text_projection"
             )
-            .await
+            .await;
+            if matches!(advance, Ok(Ok(_)))
+                && let Some(opened) = opened.take()
             {
+                let _ = opened.send(());
+            }
+            match advance {
                 Ok(Ok(true)) => {
                     clear_convergence_park(&convergence_park);
                     break;

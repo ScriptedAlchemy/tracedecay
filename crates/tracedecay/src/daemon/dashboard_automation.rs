@@ -55,10 +55,13 @@ struct DashboardAutomationRequestRuntime {
 }
 
 impl DashboardAutomationRequestRuntime {
-    fn new(configured: &AutomationConfig) -> Self {
+    fn new(
+        configured: &AutomationConfig,
+        codex: &tracedecay_domain::configuration::LcmSummarizerExecutableV1,
+    ) -> Self {
         let mut config = configured.clone();
         config.timeout_secs = config.timeout_secs.min(USER_JOB_REQUEST_TIMEOUT_SECS);
-        let backend = CodexAppServerBackend::from_automation_config(&config);
+        let backend = CodexAppServerBackend::from_automation_config(&config, codex);
         Self { config, backend }
     }
 
@@ -376,7 +379,8 @@ async fn execute_dashboard_automation_run(
             &pinned.snapshot().resolution_provenance_digest,
         )
         .map_err(automation_failed)?;
-    let runtime = DashboardAutomationRequestRuntime::new(&config);
+    let runtime =
+        DashboardAutomationRequestRuntime::new(&config, &pinned.config().lcm_summarizers.codex);
     let (config, backend) = runtime.execution();
     let run = match request {
         DashboardAutomationRunRequestV1::UserJob { job_id, run_id } => {
@@ -636,7 +640,10 @@ mod tests {
             ..AutomationConfig::default()
         };
 
-        let runtime = DashboardAutomationRequestRuntime::new(&configured);
+        let runtime = DashboardAutomationRequestRuntime::new(
+            &configured,
+            &tracedecay_domain::configuration::LcmSummarizerExecutableV1::Unconfigured,
+        );
 
         assert_eq!(runtime.execution().0.timeout_secs, 120);
     }

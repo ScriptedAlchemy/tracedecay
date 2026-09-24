@@ -634,11 +634,11 @@ impl ProductionFeedbackCycleAuthorizationPort for ProjectOpenFeedbackCycleAuthor
 async fn install_project_open_context_scout_configuration(
     owner: &ProjectContextScoutOwnerV1,
     pin: ContextScoutConfigurationPinV1,
-    model_config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    model_config: tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig<'_>,
 ) -> Result<()> {
     let admitted_model_config = pin.control().model_path.and_then(|expected| {
         (tracedecay_agent_hosts::agents::context_scout::model::context_scout_backend_from_automation_config(
-            model_config,
+            model_config.automation,
         ) == expected)
             .then_some(model_config)
     });
@@ -998,7 +998,10 @@ async fn run_production_hook_cycle(
     if install_project_open_context_scout_configuration(
         producer.scout_owner.as_ref(),
         scout_configuration.clone(),
-        &model_config,
+        tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig {
+            automation: &model_config,
+            codex: &pinned_configuration.config().lcm_summarizers.codex,
+        },
     )
     .await
     .is_err()
@@ -1592,7 +1595,10 @@ async fn register_production_advisory_owner(
     install_project_open_context_scout_configuration(
         scout_owner.as_ref(),
         scout_configuration,
-        &model_config,
+        tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig {
+            automation: &model_config,
+            codex: &configuration.config().lcm_summarizers.codex,
+        },
     )
     .await?;
     let scout_registry = invocation

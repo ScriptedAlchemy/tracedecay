@@ -152,6 +152,13 @@ function proximityGrade(relation: FeedbackProximityRelationV1): EvidenceGrade {
   }
 }
 
+interface ToolCallAnchor {
+  readonly eventId: string;
+  readonly toolUseId: string;
+  readonly label: string;
+  readonly time: number | null;
+}
+
 interface ParentClaim {
   readonly parentSessionId: string;
   readonly toolUseId: string | null;
@@ -277,6 +284,28 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   const gaps: JourneyGap[] = [];
   const spawnEvents: JourneyEvent[] = [];
 
+  // Tool calls the selected transcript page carries, by the host's own
+  // tool-use id. A fork or an edit binds to one only through that identity
+  // (or, for an edit, its recorded second); the first recorded call wins.
+  const toolCalls = new Map<string, ToolCallAnchor>();
+  const toolCallsBySecond = new Map<string, ToolCallAnchor[]>();
+  if (selected && drafts.has(selected.laneId)) {
+    for (const message of orderMessages(selected.messages)) {
+      const toolUseId = message.tool_use_id?.trim();
+      if (!toolUseId || transcriptKind(message) !== 'tool_call') continue;
+      const key = JSON.stringify([selected.laneId, toolUseId]);
+      if (toolCalls.has(key)) continue;
+      const time = isFinitePositive(message.timestamp) ? message.timestamp : null;
+      const anchor = { eventId: `msg:${selected.laneId}:${message.message_id}`, toolUseId, label: transcriptLabel(message), time };
+      toolCalls.set(key, anchor);
+      if (time === null) continue;
+      const secondKey = JSON.stringify([selected.laneId, time]);
+      const bucket = toolCallsBySecond.get(secondKey);
+      if (bucket) bucket.push(anchor);
+      else toolCallsBySecond.set(secondKey, [anchor]);
+    }
+  }
+
   // --- parentage -----------------------------------------------------------
   // Two sources name a parent: the session row's own `parent_session_id`
   // column, and the subagent tree. Where both speak they must agree; a
@@ -372,13 +401,24 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
       if (child.parentId === null) child.parentId = parent.id;
       const precedes = child.start < parent.start;
       const agreed = both !== null && !parentsDiffer;
-      // The loaded transcript carries no tool-use identity, so the fork
-      // cannot sit on the parent's tool call; it sits at the child's start.
-      const grade: EvidenceGrade = parentsDiffer || toolsDiffer || precedes ? 'ambiguous' : 'inferred';
+      // The fork sits on the parent's tool call only when a loaded parent
+      // message carries the recorded tool-use id; otherwise at the child's
+      // start, saying why.
+      const anchor =
+        claim.toolUseId === null ? undefined : toolCalls.get(JSON.stringify([parent.id, claim.toolUseId]));
+      const placement = anchor
+        ? `fork placed on the spawning tool call ${anchor.label}`
+        : claim.toolUseId === null
+          ? 'fork placed at the child start: no parent tool-use id recorded'
+          : selected?.laneId !== parent.id
+            ? 'fork placed at the child start: the parent transcript is not loaded'
+            : `fork placed at the child start: no loaded parent tool call carries ${claim.toolUseId}`;
+      const grade: EvidenceGrade =
+        parentsDiffer || toolsDiffer || precedes ? 'ambiguous' : anchor ? 'exact' : 'inferred';
       const basis = [
         agreed ? 'sessions row and subagent tree agree' : claim.source,
         `parent_session_id · parent_tool_use_id ${claim.toolUseId ?? 'unrecorded'}`,
-        'fork placed at the child start: no tool-use identity in the loaded transcript',
+        placement,
         parentsDiffer ? 'the other source names a different parent' : null,
         toolsDiffer ? 'the sources name different tool uses' : null,
         precedes ? 'child start precedes parent start' : null,
@@ -386,6 +426,11 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
         .filter((part): part is string => part !== null)
         .join(' · ');
       const suffix = parentsDiffer ? `:${claim.source}` : '';
+      if (anchor) {
+        // The tool-call glyph is the fork's mark; no second spawn mark.
+        relations.push({ id: `rel:spawn:${child.id}${suffix}`, kind: 'spawn', fromLaneId: parent.id, toLaneId: child.id, time: anchor.time, grade, basis, fromEventId: anchor.eventId });
+        continue;
+      }
       relations.push({ id: `rel:spawn:${child.id}${suffix}`, kind: 'spawn', fromLaneId: parent.id, toLaneId: child.id, time: child.start, grade, basis });
       spawnEvents.push({
         id: `spawn:${child.id}${suffix}`,
@@ -559,7 +604,16 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   for (const file of temporal.edited_files) {
     const laneId = keyOf(file.provider, file.session_id);
     if (!laneIndex.has(laneId) || file.edited_at_micros == null) continue;
-    const parts = [file.change_type, file.hunks === null ? null : `${file.hunks} ${file.hunks === 1 ? 'hunk' : 'hunks'}`, file.path];
+    // An edit binds to the one loaded tool call recorded in its second; two
+    // calls in that second name no single call, so neither is linked.
+    const sameSecond = toolCallsBySecond.get(JSON.stringify([laneId, Math.floor(file.edited_at_micros / 1_000_000)]));
+    const call = sameSecond?.length === 1 ? sameSecond[0] : undefined;
+    const parts = [
+      file.change_type,
+      file.hunks === null ? null : `${file.hunks} ${file.hunks === 1 ? 'hunk' : 'hunks'}`,
+      file.path,
+      call ? `tool call ${call.label} ${call.toolUseId}` : null,
+    ];
     pushRecorded({
       id: `edit:${laneId}:${file.path}:${file.edited_at_micros}`,
       laneId,
@@ -571,6 +625,7 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
       label: file.path.split('/').pop() || file.path,
       detail: parts.filter((part): part is string => part !== null).join(' · '),
       ref: file.path,
+      ...(call ? { linkedEventId: call.eventId } : {}),
     });
   }
   for (const event of spawnEvents) pushRecorded(event);

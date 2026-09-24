@@ -300,11 +300,8 @@ fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
     }
 }
 
-/// The page every callable-code query serves when the caller omits one.
-///
-/// Callee traversal runs through the graph retrieval lane, whose candidate
-/// budget is 32 per lane, so a wider default page would never fill and the
-/// continuation would never mint; `meta.cursor` continues past this page.
+/// The page every callable-code query serves when the caller omits one;
+/// `meta.cursor` continues past it through the whole result set.
 pub(crate) const CALLABLE_CODE_DEFAULT_PAGE_SIZE: u32 = 10;
 
 fn code_query_capability_id(

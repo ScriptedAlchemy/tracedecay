@@ -320,6 +320,8 @@ pub async fn execute_profile_retained_application(
                 scope,
                 outcome,
                 touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
             }),
             Err(problem) => Err(application_problem_envelope(
                 operation.result_contract().clone(),

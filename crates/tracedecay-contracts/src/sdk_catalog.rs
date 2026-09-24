@@ -109,6 +109,7 @@ pub fn application_http_route_path(operation: ApplicationSurfaceOperation) -> St
         | ApplicationSurfaceOperation::HealthDelta
         | ApplicationSurfaceOperation::StorageStatus
         | ApplicationSurfaceOperation::DiagnosticsRead
+        | ApplicationSurfaceOperation::Context
         | ApplicationSurfaceOperation::Node
         | ApplicationSurfaceOperation::Impact
         | ApplicationSurfaceOperation::Similar

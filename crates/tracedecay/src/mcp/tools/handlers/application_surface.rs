@@ -12,7 +12,9 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_daemon_protocol::{DaemonInvocationExecutor, RequestedOutputFormat};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1;
 use tracedecay_mcp::application_output::view::CanonicalHumanView;
+use tracedecay_mcp::tools::response_trailers::append_code_graph_freshness;
 use tracedecay_mcp::tools::dispatch::{
     resolve_mcp_application_surface_for_target,
     resolve_mcp_application_surface_with_controls_for_target,
@@ -170,30 +172,30 @@ pub(super) async fn handle_application_surface(
     }
     .map_err(application_surface_dispatch_error)?;
 
-    let served_stale = served_stale_code_graph_read(&result);
+    let served = served_code_graph_read(&result);
     let mut rendered = render_result(cg, result)?;
-    if let Some(served) = served_stale.as_ref() {
-        super::append_code_graph_freshness(&mut rendered, served);
+    if let Some(served) = served.as_ref() {
+        append_code_graph_freshness(&mut rendered, served);
     }
     Ok(rendered)
 }
 
-fn served_stale_code_graph_read(
+fn served_code_graph_read(
     result: &ApplicationSurfaceInvocationResult,
-) -> Option<super::ServedStaleCodeGraphReadV1> {
+) -> Option<ServedCodeGraphGenerationV1> {
     let Ok(envelope) = &result.result else {
         return None;
     };
     let ApplicationOutcome::Evidence(evidence) = &envelope.outcome else {
         return None;
     };
-    served_stale_code_graph_temporal(result.operation, &evidence.temporal)
+    served_code_graph_temporal(result.operation, &evidence.temporal)
 }
 
-fn served_stale_code_graph_temporal(
+fn served_code_graph_temporal(
     operation: ApplicationSurfaceOperation,
     temporal: &tracedecay_contracts::TemporalState,
-) -> Option<super::ServedStaleCodeGraphReadV1> {
+) -> Option<ServedCodeGraphGenerationV1> {
     if !matches!(
         operation,
         ApplicationSurfaceOperation::CodeSymbolSearch
@@ -205,18 +207,9 @@ fn served_stale_code_graph_temporal(
     ) {
         return None;
     }
-    let generation = temporal.source_generation.as_ref()?;
-    let Some(tracedecay_graph_query::CodeGraphReadFreshnessV1::LastCompleteStale {
-        sealed_at,
-        rebuild_in_flight,
-    }) = temporal.code_graph_freshness
-    else {
-        return None;
-    };
-    Some(super::ServedStaleCodeGraphReadV1 {
-        generation: generation.as_str().to_owned(),
-        sealed_at,
-        rebuild_in_flight,
+    Some(ServedCodeGraphGenerationV1 {
+        generation: temporal.source_generation.as_ref()?.as_str().to_owned(),
+        freshness: temporal.code_graph_freshness?,
     })
 }
 
@@ -560,6 +553,8 @@ pub async fn execute_graph_tool_surface(
     Ok(tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
         result,
         touched_files: envelope.touched_files,
+        code_graph: envelope.code_graph,
+        analytics: envelope.analytics,
     })
 }
 
@@ -655,7 +650,7 @@ mod tests {
     use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, TemporalState};
     use tracedecay_domain::{CodeGenerationId, UtcMicros};
 
-    use super::{complete_protocol_controls, served_stale_code_graph_temporal};
+    use super::{complete_protocol_controls, served_code_graph_temporal};
     use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
     #[test]
@@ -733,13 +728,13 @@ mod tests {
                 rebuild_in_flight: true,
             },
         );
-        let served = served_stale_code_graph_temporal(
+        let served = served_code_graph_temporal(
             ApplicationSurfaceOperation::CodeSymbolSearch,
             &temporal,
         )
         .expect("stale page metadata");
         let mut rendered = super::super::text_tool_result("{}");
-        super::super::append_code_graph_freshness(&mut rendered, &served);
+        super::append_code_graph_freshness(&mut rendered, &served);
         let trailer = rendered
             .value
             .pointer("/content/1/text")

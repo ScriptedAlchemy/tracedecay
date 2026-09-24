@@ -177,7 +177,8 @@ async fn run_one_host_receipt_review(
         automation_context.project_id(),
     )
     .await?;
-    let backend = CodexAppServerBackend::from_automation_config(config);
+    let backend =
+        CodexAppServerBackend::from_automation_config(config, &configuration.codex_executable);
     let host_run_id = format!("host_receipt_{}", pending.generation);
     let combined_options = CombinedReviewAutomationOptions {
         session_reflector: SessionReflectorAutomationOptions {

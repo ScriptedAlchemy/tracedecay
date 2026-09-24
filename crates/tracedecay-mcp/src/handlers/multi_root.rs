@@ -214,6 +214,8 @@ where
         scope,
         outcome,
         touched_files: Vec::new(),
+        code_graph: None,
+        analytics: None,
     };
     let payload = json!({
         "binding_id": binding_id(operation)?,

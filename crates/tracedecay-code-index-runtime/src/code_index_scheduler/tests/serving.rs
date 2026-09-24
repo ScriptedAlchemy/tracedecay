@@ -15,10 +15,10 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, CodeRelationRequest,
-    CodeSymbolSearchRequest, ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest,
-    PhraseSearchRequest, QualifiedNameRequest, ResolvedScope, ResultProjection, RetrievalOrder,
-    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRequest,
-    callable_code_operation,
+    CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRequest, OmissionReason,
+    OpaqueCursor, PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResolvedScope,
+    ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
+    RetrievalRequestMeta, SourceMetadataRequest, callable_code_operation,
     retrieval::{
         CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
         CodeImplementationsRequest, CodeNavigationRequest, CodeTimelineRequest,
@@ -52,17 +52,17 @@ use tracedecay_runtime_core::resident_memory::{
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 use super::{
-    ALPHA_LIB_V1, CALLER_PAGE, GitFixture, ReadyRetrievalControlV1, active_text_artifact_path,
-    application_context, build_progress_snapshot, caller_star_sources, callers_page_meta,
-    core_search_request, decode_hex, git, install_verified_graph_store,
-    install_verified_graph_store_on_text, mount_core_query_authority, mount_query_authority,
-    mounted_core_query_worktree, mounted_core_query_worktree_with_one_permit,
-    moved_reference_scope, progress_snapshot_for_generation, published, query_authority,
-    query_authority_with_candidate_cap, query_meta, quiesced_background_reconcile_admission,
-    ranked_symbol_names, ranks_symbol, rewrite_active_text_artifact_format_revision,
-    routed_core_search_request, scheduler, settle_text_projection, test_project_id,
-    wait_for_live_complete_generation, wait_for_queryable_text_generation,
-    wait_for_queryable_text_generation_change,
+    ALPHA_LIB_V1, CALLER_PAGE, CALLER_STAR, GitFixture, ReadyRetrievalControlV1,
+    active_text_artifact_path, application_context, build_progress_snapshot, callee_fanout_sources,
+    caller_star_sources, callers_page_meta, core_search_request, decode_hex, git,
+    install_verified_graph_store, install_verified_graph_store_on_text, mount_core_query_authority,
+    mount_query_authority, mounted_core_query_worktree,
+    mounted_core_query_worktree_with_one_permit, moved_reference_scope,
+    progress_snapshot_for_generation, published, query_authority, query_meta,
+    quiesced_background_reconcile_admission, ranked_symbol_names, ranks_symbol,
+    rewrite_active_text_artifact_format_revision, routed_core_search_request, scheduler,
+    settle_text_projection, test_project_id, wait_for_live_complete_generation,
+    wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
 };
 use crate::{
     code_index::production::{
@@ -4439,56 +4439,6 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     );
     assert!(second_continuation.next_cursor.is_none());
 
-    registry
-        .mount_query_authority(
-            fixture.path(),
-            graph_context.scope(),
-            query_authority_with_candidate_cap(
-                latest.generation.manifest().privacy_domain.clone(),
-                2,
-            ),
-        )
-        .await
-        .expect("mount candidate-capped query authority");
-    let capped_dispatch_request = CodeRelationRequest {
-        node_id: continuation_request.node_id.clone(),
-        maximum_depth: 1,
-        resolve_trait_dispatch: true,
-        scope: scope.clone(),
-        meta: query_meta(),
-    };
-    let capped_dispatch = registry
-        .callees(
-            RetrievalPortContext {
-                request: &graph_context,
-                operation: &graph_operation,
-            },
-            &capped_dispatch_request,
-        )
-        .await;
-    let RetrievalPortOutcome::Partial(capped_dispatch) = capped_dispatch else {
-        panic!("candidate-capped trait dispatch must report partial coverage");
-    };
-    let capped_page = capped_dispatch
-        .payload
-        .expect("candidate-capped trait dispatch page");
-    assert_eq!(capped_page.items.len(), 1);
-    assert_eq!(capped_page.items[0].symbol.node_id, trait_method);
-    assert!(!capped_page.items[0].dispatch_via_trait);
-    assert!(
-        capped_dispatch
-            .omissions
-            .iter()
-            .any(|omission| omission.reason == OmissionReason::Budget)
-    );
-    mount_query_authority(
-        &registry,
-        fixture.path(),
-        &graph_context,
-        latest.generation.manifest().privacy_domain.clone(),
-    )
-    .await;
-
     let qualified_name = latest
         .generation
         .symbols()
@@ -4899,8 +4849,11 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     registry.shutdown().await;
 }
 
+/// A relation page reports the true relation count, not the fusion lane's
+/// 32-candidate budget, and its cursor walks the whole set while each page
+/// hydrates only its own slice.
 #[tokio::test]
-async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slice() {
+async fn callers_page_reports_the_true_relation_count_and_hydrates_only_the_requested_slice() {
     let sources = caller_star_sources();
     let files = sources
         .iter()
@@ -4961,16 +4914,19 @@ async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slic
         )
         .await;
     let first_page = match first {
-        RetrievalPortOutcome::Partial(evidence) => {
-            assert_eq!(evidence.coverage.eligible, Some(33));
-            assert_eq!(evidence.omissions.len(), 1);
-            assert_eq!(evidence.omissions[0].reason, OmissionReason::Budget);
+        RetrievalPortOutcome::Completed(evidence) => {
+            assert_eq!(
+                evidence.coverage.completeness,
+                CoverageCompleteness::Complete
+            );
+            assert_eq!(evidence.coverage.eligible, Some(CALLER_STAR as u64));
+            assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
             evidence.payload.expect("first callers page")
         }
-        other => panic!("expected capped callers page, got {other:?}"),
+        other => panic!("expected a complete callers page, got {other:?}"),
     };
     assert_eq!(first_page.items.len(), CALLER_PAGE as usize);
-    assert_eq!(first_page.total, Some(32));
+    assert_eq!(first_page.total, Some(CALLER_STAR as u64));
     let page1_hydrations = registry.take_relation_symbol_hydrations();
     assert_eq!(
         page1_hydrations,
@@ -4996,9 +4952,10 @@ async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slic
         )
         .await;
     let second_page = match second {
-        RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("second callers page"),
-        other => panic!("expected capped callers continuation, got {other:?}"),
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("second callers page"),
+        other => panic!("expected a complete callers continuation, got {other:?}"),
     };
+    assert_eq!(second_page.total, Some(CALLER_STAR as u64));
     assert_eq!(second_page.items.len(), CALLER_PAGE as usize);
     assert!(
         second_page
@@ -5014,16 +4971,18 @@ async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slic
         "page 2 must hydrate only the returned slice; observed {page2_hydrations}"
     );
 
-    let mut collected = first_page.items.clone();
-    collected.extend(second_page.items);
-    let mut cursor = second_page.next_cursor;
-    while let Some(next) = cursor {
+    // Every page re-enumerates the relation set before hydrating its slice, so
+    // the full walk uses wider pages than the slice assertions above.
+    const WALK_PAGE: u32 = 200;
+    let mut collected = Vec::new();
+    let mut cursor = None;
+    loop {
         let page_request = CodeRelationRequest {
             node_id: hub.occurrence.as_str().to_owned(),
             maximum_depth: 1,
             resolve_trait_dispatch: false,
             scope: scope.clone(),
-            meta: callers_page_meta(CALLER_PAGE, Some(next)),
+            meta: callers_page_meta(WALK_PAGE, cursor.take()),
         };
         let page = match registry
             .callers(
@@ -5035,23 +4994,145 @@ async fn callers_page_reports_candidate_cap_and_hydrates_only_the_requested_slic
             )
             .await
         {
-            RetrievalPortOutcome::Partial(evidence) => evidence.payload.expect("callers page"),
-            other => panic!("expected capped callers page, got {other:?}"),
+            RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("callers page"),
+            other => panic!("expected a complete callers page, got {other:?}"),
         };
+        assert_eq!(page.total, Some(CALLER_STAR as u64));
+        assert_eq!(page.items.len(), WALK_PAGE as usize);
         collected.extend(page.items);
         cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
     }
     let _ = registry.take_relation_symbol_hydrations();
     assert_eq!(
         collected.len(),
-        32,
-        "the declared candidate cap is enforced"
+        CALLER_STAR,
+        "the cursor walks every relation, not a lane budget's prefix"
     );
     let identities = collected
         .iter()
         .map(|record| record.symbol.node_id.as_str())
         .collect::<BTreeSet<_>>();
-    assert_eq!(identities.len(), collected.len(), "capped rows stay unique");
+    assert_eq!(
+        identities.len(),
+        collected.len(),
+        "each relation is served once"
+    );
+    registry.shutdown().await;
+}
+
+/// `code_callees` shares the compact-key page with `code_callers`: 104 callees
+/// answer as a ten-row first page with `total: 104`, a minted cursor, and
+/// complete coverage, and the cursors walk all 104 exactly once. The fusion
+/// lane's 32-candidate budget used to answer this as `total: 32` without a
+/// continuation.
+#[tokio::test]
+async fn callees_page_reports_the_true_relation_count_and_walks_every_relation() {
+    const RELATIONS: usize = 104;
+    let sources = callee_fanout_sources(RELATIONS);
+    let files = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = GitFixture::new(&files);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let latest = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    install_verified_graph_store(&latest);
+    let generation = latest.generation.manifest().generation_id.clone();
+    let repository = latest.generation.snapshot().repository.clone();
+    let worktree = latest
+        .generation
+        .snapshot()
+        .worktree
+        .clone()
+        .expect("worktree identity");
+    let scope = CodeQueryScope::new(generation.clone(), None).expect("query scope");
+    let fanout = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("fanout"))
+        .expect("fanout symbol");
+    let operation = callable_code_operation(CallableCodeOperationKind::Callees).expect("operation");
+    let context = application_context(&operation, repository, worktree);
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let page_request = |cursor: Option<OpaqueCursor>| CodeRelationRequest {
+        node_id: fanout.occurrence.as_str().to_owned(),
+        maximum_depth: 1,
+        resolve_trait_dispatch: false,
+        scope: scope.clone(),
+        meta: callers_page_meta(CALLER_PAGE, cursor),
+    };
+    let mut cursor = None;
+    let mut walked = Vec::new();
+    let mut pages = 0;
+    loop {
+        let outcome = registry
+            .callees(
+                RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &page_request(cursor.take()),
+            )
+            .await;
+        let RetrievalPortOutcome::Completed(evidence) = outcome else {
+            panic!("expected a complete callees page, got {outcome:?}");
+        };
+        assert_eq!(
+            evidence.coverage.completeness,
+            CoverageCompleteness::Complete
+        );
+        assert_eq!(evidence.coverage.eligible, Some(RELATIONS as u64));
+        assert!(evidence.omissions.is_empty(), "{:?}", evidence.omissions);
+        let page = evidence.payload.expect("callees page");
+        assert_eq!(page.total, Some(RELATIONS as u64));
+        pages += 1;
+        if pages == 1 {
+            assert_eq!(page.items.len(), CALLER_PAGE as usize);
+            assert!(page.next_cursor.is_some(), "page 1 must mint a cursor");
+        }
+        assert_eq!(
+            registry.take_relation_symbol_hydrations(),
+            page.items.len() as u64,
+            "each page hydrates only its own rows"
+        );
+        walked.extend(page.items);
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(pages, RELATIONS.div_ceil(CALLER_PAGE as usize));
+    assert_eq!(walked.len(), RELATIONS);
+    let identities = walked
+        .iter()
+        .map(|record| record.symbol.node_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(identities.len(), RELATIONS, "each callee is served once");
+    assert!(
+        walked
+            .iter()
+            .all(|record| record.edge_kind == "calls" && !record.dispatch_via_trait)
+    );
     registry.shutdown().await;
 }
 
@@ -5131,11 +5212,11 @@ async fn graph_cursor_holds_its_generation_until_the_cursor_expires() {
         )
         .await;
     let (page, expires_at) = match first {
-        RetrievalPortOutcome::Partial(evidence) => {
+        RetrievalPortOutcome::Completed(evidence) => {
             let expires_at = evidence.page.expires_at.expect("minted cursor expiry");
             (evidence.payload.expect("first callers page"), expires_at)
         }
-        other => panic!("expected capped callers page, got {other:?}"),
+        other => panic!("expected a complete callers page, got {other:?}"),
     };
     assert!(page.next_cursor.is_some(), "page 1 must mint a cursor");
     assert_eq!(

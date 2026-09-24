@@ -637,3 +637,94 @@ async fn codex_file_change_items_record_edit_times_and_call_ids() {
         "a message without a tool call carries no tool_use_id: {no_tool:?}"
     );
 }
+
+/// A Codex subagent's `session_meta` names its parent thread
+/// (`parent_thread_id`, `source.subagent.thread_spawn.parent_thread_id`) but
+/// not the call that spawned it: the `spawn_agent` `call_id` is recorded only
+/// in the parent's rollout (`function_call` and the `SubAgentActivity`
+/// `started` item), so the child records its parent session and no parent
+/// tool-use id.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn codex_subagent_records_parent_thread_without_a_spawning_call_id() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let parent = "01a05f21-02a8-74a3-84a0-dc2e889604c9";
+    let child = "01a05f8e-17ba-7ff2-84b5-7337fb92dbc6";
+    let cwd = project.to_string_lossy();
+    let dir = home.join(".codex/sessions/2026/09/02");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_jsonl(
+        &dir.join(format!("rollout-2026-09-01T22-39-54-{parent}.jsonl")),
+        &[
+            serde_json::json!({
+                "timestamp": "2026-09-01T22:39:54.000Z",
+                "type": "session_meta",
+                "payload": {"id": parent, "cwd": cwd, "model_provider": "openai"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-09-02T00:39:02.832Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call", "name": "spawn_agent", "namespace": "collaboration",
+                    "call_id": "call_oRAA9a98A0CtRz7yOPePQLYp",
+                    "arguments": "{\"agent_type\":\"explorer\",\"fork_turns\":\"none\"}"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-09-02T00:39:03.193Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed", "thread_id": parent,
+                    "item": {
+                        "type": "SubAgentActivity", "id": "call_oRAA9a98A0CtRz7yOPePQLYp",
+                        "kind": "started", "agent_thread_id": child, "agent_path": "/root/readme_tone_bottom"
+                    },
+                    "started_at_ms": 1_788_309_543_193i64, "completed_at_ms": 1_788_309_543_193i64
+                }
+            }),
+        ],
+    );
+    write_jsonl(
+        &dir.join(format!("rollout-2026-09-02T00-39-02-{child}.jsonl")),
+        &[
+            serde_json::json!({
+                "timestamp": "2026-09-02T00:39:02.843Z",
+                "type": "session_meta",
+                "payload": {
+                    "session_id": parent, "id": child, "parent_thread_id": parent, "cwd": cwd,
+                    "source": {"subagent": {"thread_spawn": {
+                        "parent_thread_id": parent, "depth": 1, "agent_path": "/root/readme_tone_bottom",
+                        "agent_nickname": "Erdos", "agent_role": "explorer"
+                    }}},
+                    "thread_source": "subagent", "agent_nickname": "Erdos", "agent_role": "explorer",
+                    "model_provider": "openai", "multi_agent_version": "v2"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-09-02T00:39:05.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Explorer read the README tone guide."}
+            }),
+        ],
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+
+    let child_row = db.get_session("codex", child).await.unwrap();
+    assert_eq!(child_row.parent_session_id.as_deref(), Some(parent));
+    assert!(child_row.is_subagent);
+    assert_eq!(child_row.parent_tool_use_id, None);
+    let parent_row = db.get_session("codex", parent).await.unwrap();
+    assert_eq!(
+        (parent_row.parent_session_id, parent_row.is_subagent),
+        (None, false)
+    );
+}

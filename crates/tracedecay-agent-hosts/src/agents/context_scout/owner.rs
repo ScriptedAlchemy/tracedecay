@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
-use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutClaimHandleV1, ContextScoutClaimRequestV1,
@@ -25,7 +24,7 @@ use super::address_registry::{
     ContextScoutConfigurationPinV1, ContextScoutLifecycleAddressV1,
     ProjectContextScoutAddressRegistryV1,
 };
-use super::model::context_scout_model_assistant_from_project_config;
+use super::model::{ContextScoutModelConfig, context_scout_model_assistant_from_project_config};
 use super::{
     ContextScoutBudgetStateV1, ContextScoutCapabilityStateV1, ContextScoutControlV1,
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableRuntimeV1,
@@ -146,7 +145,7 @@ impl ProjectContextScoutOwnerV1 {
         database: Database,
         project_id: [u8; 16],
         now: UtcMicros,
-        model_config: Option<&AutomationConfig>,
+        model_config: Option<ContextScoutModelConfig<'_>>,
     ) -> Option<Arc<Self>> {
         if let Some(existing) = lookup_registered_context_scout_owners(project_id)
             .into_iter()
@@ -613,7 +612,7 @@ impl ProjectContextScoutOwnerV1 {
     pub async fn install_configuration(
         &self,
         pin: ContextScoutConfigurationPinV1,
-        model_config: Option<&AutomationConfig>,
+        model_config: Option<ContextScoutModelConfig<'_>>,
     ) -> Result<(), ContextScoutErrorV1> {
         let control = pin.control();
         let model = model_config.map_or_else(

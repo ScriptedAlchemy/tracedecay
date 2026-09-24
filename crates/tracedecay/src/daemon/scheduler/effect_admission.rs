@@ -3,7 +3,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
-use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
+use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
 
 use super::super::{DaemonEngine, DaemonHandshake};
 use super::{
@@ -72,6 +72,7 @@ fn log_scheduler_schedule_skip(
 async fn fixed_task_schedule_decision(
     dashboard_root: &Path,
     config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     activity: tracedecay_automation_runtime::automation::scheduler::SessionActivity,
     now_secs: i64,
@@ -86,6 +87,7 @@ async fn fixed_task_schedule_decision(
     Ok(
         tracedecay_automation_runtime::automation::scheduler::schedule_decision(
             config,
+            executable,
             task,
             summary.records(),
             activity,
@@ -354,7 +356,8 @@ fn run_automation_scheduler_tick_inner<'a>(
             )
             .await;
         }
-        let backend = CodexAppServerBackend::from_automation_config(config);
+        let backend =
+            CodexAppServerBackend::from_automation_config(config, &configuration.codex_executable);
         let session_database = engine
             .store_administration
             .registered_project_session_database(
@@ -371,6 +374,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let memory_curator_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
+            backend.executable(),
             AgentTaskKind::MemoryCurator,
             schedule_activity,
             schedule_now_secs,
@@ -379,6 +383,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let session_reflector_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
+            backend.executable(),
             AgentTaskKind::SessionReflector,
             schedule_activity,
             schedule_now_secs,
@@ -387,6 +392,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let skill_writer_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
+            backend.executable(),
             AgentTaskKind::SkillWriter,
             schedule_activity,
             schedule_now_secs,
@@ -743,6 +749,7 @@ mod tests {
         let decision = fixed_task_schedule_decision(
             dashboard.path(),
             &config,
+            None,
             tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
             tracedecay_automation_runtime::automation::scheduler::SessionActivity::none(),
             1,

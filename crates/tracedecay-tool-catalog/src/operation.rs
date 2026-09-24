@@ -169,6 +169,7 @@ application_surface_operations! {
     SourceBody => "source_body";
     SourceOutline => "source_outline";
     ModuleApi => "module_api";
+    Context => "context";
     Node => "node";
     Impact => "impact";
     Similar => "similar";
@@ -246,7 +247,8 @@ application_surface_operations! {
 impl ApplicationSurfaceOperation {
     /// Graph and port reads answered by the project's graph-tool owner with
     /// their typed catalog result in `ApplicationOutcome::Result`.
-    pub const GRAPH_TOOL_OPERATIONS: [Self; 8] = [
+    pub const GRAPH_TOOL_OPERATIONS: [Self; 9] = [
+        Self::Context,
         Self::Node,
         Self::Impact,
         Self::Similar,

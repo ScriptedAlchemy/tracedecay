@@ -244,6 +244,7 @@ fn application_surface_branch_sensitivity(
         | SourceBody
         | SourceOutline
         | ModuleApi
+        | ApplicationSurfaceOperation::Context
         | ApplicationSurfaceOperation::Node
         | ApplicationSurfaceOperation::Impact
         | ApplicationSurfaceOperation::Similar

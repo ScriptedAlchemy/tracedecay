@@ -761,6 +761,51 @@ pub(crate) fn post_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u
     response_to_json(response)
 }
 
+/// Binds `codex_bin` as the project's configured `codex` summarizer through
+/// the dashboard's application configuration routes: the automation backend
+/// spawns only the executable `lcm.summarizer_executables.v1` names.
+pub(crate) fn configure_codex_summarizer(
+    agent: &ureq::Agent,
+    base_url: &str,
+    project_id: &str,
+    codex_bin: &Path,
+) {
+    let key = tracedecay_domain::configuration::LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY;
+    let configuration_url = format!("{base_url}/api/application/configuration");
+    let (status, current) = post_json_body(
+        agent,
+        &format!("{configuration_url}/configuration_get"),
+        &serde_json::json!({ "key": key }),
+    );
+    assert_eq!(status, 200, "configuration read failed: {current}");
+    let expected_revision = current
+        .pointer("/outcome/value/payload/revision_id")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("configuration revision: {current}"))
+        .to_owned();
+    let (status, receipt) = post_json_body(
+        agent,
+        &format!("{configuration_url}/configuration_set"),
+        &serde_json::json!({
+            "layer": {"kind": "project", "project_id": project_id},
+            "key": key,
+            "value": {
+                "kind": "lcm_summarizer_executables",
+                "value": {
+                    "codex": {"state": "configured", "canonical_path": codex_bin},
+                },
+            },
+            "expected_revision": expected_revision,
+            "idempotency_key": "configuration.idempotency.dashboard-codex-summarizer",
+        }),
+    );
+    assert_eq!(status, 200, "codex summarizer binding failed: {receipt}");
+    assert_eq!(
+        receipt["outcome"]["outcome"], "effect",
+        "codex summarizer binding must commit: {receipt}"
+    );
+}
+
 pub(crate) fn patch_json_body(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
     let response = crate::common::http_call_with_retry(&format!("PATCH {url} (with body)"), || {
         agent.patch(url).send_json(body)

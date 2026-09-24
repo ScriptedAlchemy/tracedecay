@@ -91,17 +91,15 @@ mod tests {
 
     #[test]
     fn configured_executable_requires_an_absolute_clean_path() {
+        let absolute_base = std::env::temp_dir();
         assert!(LcmSummarizerExecutableV1::configured(PathBuf::from("cursor-agent")).is_err());
         assert!(
-            LcmSummarizerExecutableV1::configured(PathBuf::from("/opt/../bin/cursor-agent"))
+            LcmSummarizerExecutableV1::configured(absolute_base.join("opt/../bin/cursor-agent"))
                 .is_err()
         );
-        let configured =
-            LcmSummarizerExecutableV1::configured(PathBuf::from("/opt/bin/cursor-agent")).unwrap();
-        assert_eq!(
-            configured.canonical_path(),
-            Some(Path::new("/opt/bin/cursor-agent"))
-        );
+        let clean = absolute_base.join("bin").join("cursor-agent");
+        let configured = LcmSummarizerExecutableV1::configured(clean.clone()).unwrap();
+        assert_eq!(configured.canonical_path(), Some(clean.as_path()));
     }
 
     #[test]

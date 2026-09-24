@@ -187,7 +187,7 @@ fn run_codex_app_server_prompt(
 ) -> std::result::Result<tracedecay_automation_runtime::ports::codex_app_server::Summary, String> {
     let config =
         tracedecay_sessions::runtime::hosts::codex_app_server::CodexAppServerSummaryConfig {
-            codex_bin: config.codex_bin.clone(),
+            codex_bin: config.codex_bin.to_string_lossy().into_owned(),
             model: config.model.clone(),
             timeout: config.timeout,
         };

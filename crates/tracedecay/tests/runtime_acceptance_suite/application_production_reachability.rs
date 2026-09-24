@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tracedecay_contracts::retrieval::SymbolGraphScope;
 use tracedecay_contracts::{
-    ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
-    ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
+    ApplicationEnvelope, ApplicationOutcome, CoverageCompleteness, EvidencePacket, LegalAction,
+    OpaqueCursor, OperationTermination, ProblemTerminality, RequestId, ResultProjection,
+    RetrievalOrder,
 };
 use tracedecay_daemon_protocol::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceRequest,
@@ -416,6 +417,13 @@ fn symbol_search_surface_request(query: &str, cursor: Option<&str>) -> Applicati
 }
 
 fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
+    evidence_packet(result)
+        .payload
+        .as_ref()
+        .expect("evidence payload")
+}
+
+fn evidence_packet(result: &ApplicationSurfaceInvocationResult) -> &EvidencePacket<Value> {
     let envelope = result.result.as_ref().unwrap_or_else(|problem| {
         panic!(
             "{} returned {:?}: {:?}",
@@ -439,7 +447,7 @@ fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
                 result.operation.as_str(),
                 evidence.execution.termination,
             );
-            evidence.payload.as_ref().expect("evidence payload")
+            evidence
         }
         other => panic!("expected evidence outcome, got {other:?}"),
     }
@@ -1060,6 +1068,11 @@ enum ContinuationExpectation {
     /// The fixture must drive this operation past its [`surface_page_size`].
     /// A short page fails and says to grow the fixture.
     CrossesPages,
+    /// [`CrossesPages`](Self::CrossesPages), and the fixture holds exactly this
+    /// many rows: `total` must report that count and the cursors must walk
+    /// every row once, so a lane budget can no longer pass off its admitted
+    /// prefix as the whole relation set.
+    CrossesPagesWithTotal(u64),
     /// The runtime materializes at most one row here whatever the fixture
     /// holds, so there is no continuation to mint. A page that does mint one
     /// fails, because the operation has become continuation-capable and owes
@@ -1231,7 +1244,9 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                     "meta": callable_code_meta(cursor),
                 })
             },
-            expectation: ContinuationExpectation::CrossesPages,
+            expectation: ContinuationExpectation::CrossesPagesWithTotal(
+                PROBE_RELATION_COUNT as u64,
+            ),
         },
         ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeCallees,
@@ -1244,7 +1259,9 @@ fn continuation_cases() -> Vec<ContinuationCase> {
                     "meta": callable_code_meta(cursor),
                 })
             },
-            expectation: ContinuationExpectation::CrossesPages,
+            expectation: ContinuationExpectation::CrossesPagesWithTotal(
+                PROBE_RELATION_COUNT as u64,
+            ),
         },
         ContinuationCase {
             operation: ApplicationSurfaceOperation::CodeFacets,
@@ -1313,6 +1330,15 @@ async fn continuation_page(
     label: &str,
     arguments: Value,
 ) -> Value {
+    evidence_payload(&continuation_result(fixture, operation, label, arguments).await).clone()
+}
+
+async fn continuation_result(
+    fixture: &ProductionFixture,
+    operation: ApplicationSurfaceOperation,
+    label: &str,
+    arguments: Value,
+) -> ApplicationSurfaceInvocationResult {
     let build_request = || {
         parse_application_surface_request(operation, arguments.clone()).unwrap_or_else(|error| {
             panic!(
@@ -1333,7 +1359,7 @@ async fn continuation_page(
         "{} must decode into a request that carries a surface cursor",
         operation.as_str()
     );
-    let result = admitted_mcp_invocation(
+    admitted_mcp_invocation(
         &fixture.client,
         operation,
         &format!(
@@ -1342,8 +1368,7 @@ async fn continuation_page(
         ),
         build_request,
     )
-    .await;
-    evidence_payload(&result).clone()
+    .await
 }
 
 /// The continuation contract holds for every operation whose surface request
@@ -1373,13 +1398,14 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
 
     for case in cases {
         let surface = case.operation.as_str();
-        let first = continuation_page(
+        let first_result = continuation_result(
             &fixture,
             case.operation,
             "first",
             (case.arguments)(&anchors, None),
         )
         .await;
+        let first = evidence_payload(&first_result).clone();
         match case.expectation {
             ContinuationExpectation::BoundedToOneRow { authority } => {
                 let items = first["items"]
@@ -1398,7 +1424,8 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
                 assert_truncation_agrees_with_cursor(surface, &first);
                 continue;
             }
-            ContinuationExpectation::CrossesPages => {}
+            ContinuationExpectation::CrossesPages
+            | ContinuationExpectation::CrossesPagesWithTotal(_) => {}
         }
 
         let items = first["items"]
@@ -1407,6 +1434,45 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
         let total = first["total"]
             .as_u64()
             .unwrap_or_else(|| panic!("{surface} page total: {first:#}"));
+        if let ContinuationExpectation::CrossesPagesWithTotal(expected) = case.expectation {
+            assert_eq!(
+                total, expected,
+                "{surface} must report the fixture's whole relation set: {first:#}"
+            );
+            assert_eq!(
+                evidence_packet(&first_result).coverage.completeness,
+                CoverageCompleteness::Complete,
+                "{surface} coverage must read complete when every relation is counted: {first:#}"
+            );
+            let mut walked = std::collections::BTreeSet::new();
+            let mut page = first.clone();
+            loop {
+                for item in page["items"].as_array().expect("page items") {
+                    let node_id = item["symbol"]["node_id"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{surface} relation node id: {item:#}"));
+                    assert!(
+                        walked.insert(node_id.to_owned()),
+                        "{surface} served {node_id} twice while walking its cursors"
+                    );
+                }
+                let Some(cursor) = page["next_cursor"].as_str().map(str::to_owned) else {
+                    break;
+                };
+                page = continuation_page(
+                    &fixture,
+                    case.operation,
+                    "walk",
+                    (case.arguments)(&anchors, Some(cursor.as_str())),
+                )
+                .await;
+            }
+            assert_eq!(
+                walked.len() as u64,
+                expected,
+                "{surface} cursors must walk every relation exactly once"
+            );
+        }
         let page_size = surface_page_size(case.operation);
         assert!(
             total > page_size as u64 && items.len() == page_size,

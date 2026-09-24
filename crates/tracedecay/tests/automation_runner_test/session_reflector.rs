@@ -1413,6 +1413,10 @@ impl AgentTaskBackend for NoSummaryReplayBackend {
             output_tokens: Some(20),
         })
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 #[cfg(feature = "test-transport")]

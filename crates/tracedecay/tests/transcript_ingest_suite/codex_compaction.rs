@@ -95,6 +95,63 @@ fn write_codex_rollout_with_compaction(
     path
 }
 
+/// Binds `codex_bin` as the project's `codex` summarizer through the CLI
+/// configuration tools, the same route an operator uses.
+#[cfg(unix)]
+fn configure_codex_summarizer(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    project_id: &ProjectId,
+    codex_bin: &std::path::Path,
+) {
+    let key = tracedecay_domain::configuration::LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY;
+    let run_tool = |name: &str, args: serde_json::Value| -> serde_json::Value {
+        let output = tracedecay_command_with_home(home)
+            .current_dir(project)
+            .args(["tool", name, "--json", "--args"])
+            .arg(args.to_string())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|error| panic!("run `tracedecay tool {name}`: {error}"));
+        assert!(
+            output.status.success(),
+            "`tracedecay tool {name}` failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("`tracedecay tool {name}` envelope: {error}"))
+    };
+    let current = run_tool(
+        "tracedecay_configuration_get",
+        serde_json::json!({ "key": key }),
+    );
+    let expected_revision = current
+        .pointer("/outcome/value/payload/revision_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("configuration revision: {current}"))
+        .to_owned();
+    let receipt = run_tool(
+        "tracedecay_configuration_set",
+        serde_json::json!({
+            "layer": {"kind": "project", "project_id": project_id.as_str()},
+            "key": key,
+            "value": {
+                "kind": "lcm_summarizer_executables",
+                "value": {
+                    "codex": {"state": "configured", "canonical_path": codex_bin},
+                },
+            },
+            "expected_revision": expected_revision,
+            "idempotency_key": "configuration.idempotency.codex-compaction-summarizer",
+        }),
+    );
+    assert_eq!(
+        receipt["outcome"]["outcome"], "effect",
+        "codex summarizer binding must commit: {receipt}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
@@ -130,12 +187,10 @@ done
     .unwrap();
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let _summary_env = [
-        EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &codex_bin),
-        EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
-    ];
     // Init starts the managed daemon, so its provider environment must already
-    // point at this fixture before initialization captures the process environment.
+    // hold the summary tuning before initialization captures the process
+    // environment.
+    let _summary_env = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5");
     let project_id = mark_test_project(&project);
     // The hook resolves the project root through the initialized-store gate,
     // exactly like production installs: `init` creates the project store
@@ -143,6 +198,11 @@ done
     // (the canonical enrollment composition itself creates the project graph
     // database, so init must come first, as it does in a real install).
     crate::common::initialize_tracedecay_cli_project(&home, &project);
+    // The daemon launches a summarizer only through the project's
+    // `lcm.summarizer_executables.v1` binding, so the fake `codex` is bound
+    // through the production configuration surface while the managed daemon
+    // from init is still serving the project.
+    configure_codex_summarizer(&home, &project, &project_id, &codex_bin);
     crate::common::stop_managed_daemon(&home);
     let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await

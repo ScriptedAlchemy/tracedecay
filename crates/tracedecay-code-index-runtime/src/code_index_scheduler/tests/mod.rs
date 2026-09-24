@@ -715,13 +715,6 @@ fn install_verified_graph_store_on_text(
 }
 
 fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {
-    query_authority_with_candidate_cap(privacy_domain, 32)
-}
-
-fn query_authority_with_candidate_cap(
-    privacy_domain: PrivacyDomainId,
-    max_candidates_per_lane: u32,
-) -> Arc<QueryAuthorityV1> {
     let id = |value: &str| value.to_owned();
     let profile = FusionProfile {
         profile_id: id("profile.code-index.fixture")
@@ -790,7 +783,7 @@ fn query_authority_with_candidate_cap(
             .try_into()
             .expect("diversity id"),
         retrieval_budget: RetrievalBudget {
-            max_candidates_per_lane,
+            max_candidates_per_lane: 32,
             max_fused_candidates: 32,
             max_hydrated_results: 32,
             max_hydration_bytes: 32 * 65_536,
@@ -1435,6 +1428,32 @@ fn caller_star_sources() -> Vec<(String, String)> {
         files.push((format!("src/callers_{file_idx:02}.rs"), body));
     }
     files.insert(0, ("src/lib.rs".to_owned(), mods));
+    files
+}
+
+/// One `fanout` function calling `relations` distinct leaves, one statement
+/// per call so the extractor sees every site, spread over the star's files.
+fn callee_fanout_sources(relations: usize) -> Vec<(String, String)> {
+    let per_file = relations.div_ceil(CALLER_STAR_FILES);
+    let mut lib = String::new();
+    let mut fanout = String::from("pub fn fanout() {\n");
+    let mut files = Vec::new();
+    for (index, chunk) in (0..relations)
+        .collect::<Vec<_>>()
+        .chunks(per_file)
+        .enumerate()
+    {
+        let _ = writeln!(lib, "pub mod leaves_{index:02};");
+        let mut module = String::new();
+        for leaf in chunk {
+            let _ = writeln!(module, "pub fn leaf_{leaf:04}() {{}}");
+            let _ = writeln!(fanout, "    crate::leaves_{index:02}::leaf_{leaf:04}();");
+        }
+        files.push((format!("src/leaves_{index:02}.rs"), module));
+    }
+    fanout.push_str("}\n");
+    lib.push_str(&fanout);
+    files.insert(0, ("src/lib.rs".to_owned(), lib));
     files
 }
 

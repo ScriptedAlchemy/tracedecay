@@ -11,12 +11,13 @@ use tempfile::TempDir;
 
 use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    BackendRetryPolicy, CodexAppServerBackend, agent_task_failure_disposition,
-    backend_availability, classify_agent_task_error_message, extract_json_object_prefix,
-    run_agent_task_with_retry,
+    BackendRetryPolicy, CODEX_EXECUTABLE_UNCONFIGURED, CodexAppServerBackend,
+    agent_task_failure_disposition, backend_availability, classify_agent_task_error_message,
+    extract_json_object_prefix, run_agent_task_with_retry,
 };
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
+use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_sessions::runtime::hosts::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
 };
@@ -328,7 +329,7 @@ fn codex_app_server_backend_run_task_uses_injected_config() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
+        codex_bin: fake.bin.clone(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
     });
@@ -380,7 +381,7 @@ fn codex_app_server_backend_uses_first_schema_matching_json_object() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json_after_echo");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
+        codex_bin: fake.bin.clone(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
     });
@@ -415,7 +416,7 @@ fn codex_app_server_backend_rejects_no_skill_decision_without_skills_array() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("no_skill_without_array");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
+        codex_bin: fake.bin.clone(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
     });
@@ -447,7 +448,7 @@ fn codex_app_server_backend_preserves_failed_turn_error() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("turn_failed");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
+        codex_bin: fake.bin.clone(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
     });
@@ -480,7 +481,7 @@ fn codex_app_server_backend_falls_back_to_configured_model_when_server_omits_mod
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("no_model");
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
+        codex_bin: fake.bin.clone(),
         model: Some("configured-model".to_string()),
         timeout: fake_codex_response_timeout(),
     });
@@ -508,14 +509,16 @@ fn codex_app_server_backend_from_automation_config_uses_the_pinned_model() {
     // env lock just for that window instead of across the subprocess run.
     let backend = {
         let _env_lock = ENV_LOCK.lock().unwrap();
-        let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
         let _ambient_model = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MODEL", "ambient-model");
-        CodexAppServerBackend::from_automation_config(&AutomationConfig {
-            backend: AutomationBackend::CodexAppServer,
-            model_id: Some("configured-model".to_owned()),
-            timeout_secs: fake_codex_response_timeout_secs(),
-            ..AutomationConfig::default()
-        })
+        CodexAppServerBackend::from_automation_config(
+            &AutomationConfig {
+                backend: AutomationBackend::CodexAppServer,
+                model_id: Some("configured-model".to_owned()),
+                timeout_secs: fake_codex_response_timeout_secs(),
+                ..AutomationConfig::default()
+            },
+            &fake.executable(),
+        )
     };
     let request = AgentTaskRequest::new(
         "run_runtime_options".to_string(),
@@ -543,14 +546,16 @@ fn codex_app_server_backend_uses_environment_model_when_unpinned() {
     let fake = FakeCodexAppServer::new_with_behavior("json");
     let backend = {
         let _env_lock = ENV_LOCK.lock().unwrap();
-        let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
         let _ambient_model = EnvVarGuard::set("TRACEDECAY_CODEX_SUMMARY_MODEL", "ambient-model");
-        CodexAppServerBackend::from_automation_config(&AutomationConfig {
-            backend: AutomationBackend::CodexAppServer,
-            model_id: None,
-            timeout_secs: fake_codex_response_timeout_secs(),
-            ..AutomationConfig::default()
-        })
+        CodexAppServerBackend::from_automation_config(
+            &AutomationConfig {
+                backend: AutomationBackend::CodexAppServer,
+                model_id: None,
+                timeout_secs: fake_codex_response_timeout_secs(),
+                ..AutomationConfig::default()
+            },
+            &fake.executable(),
+        )
     };
     let request = AgentTaskRequest::new(
         "run_env_model".to_string(),
@@ -618,13 +623,12 @@ fn codex_app_server_backend_propagates_empty_output_errors_and_reaps_child() {
 
 #[test]
 fn backend_availability_reports_configured_codex_executable_status() {
-    let _env_lock = ENV_LOCK.lock().unwrap();
     let fake = FakeCodexAppServer::new();
-    let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake.bin);
-    let available = backend_availability(&AutomationConfig {
+    let config = AutomationConfig {
         backend: AutomationBackend::CodexAppServer,
         ..AutomationConfig::default()
-    });
+    };
+    let available = backend_availability(&config, &fake.executable());
 
     assert!(available.available);
     assert_eq!(
@@ -632,12 +636,9 @@ fn backend_availability_reports_configured_codex_executable_status() {
         Some(fake.bin.to_string_lossy().as_ref())
     );
 
-    let missing = fake.bin.with_file_name("missing-codex");
-    let _codex_bin = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &missing);
-    let unavailable = backend_availability(&AutomationConfig {
-        backend: AutomationBackend::CodexAppServer,
-        ..AutomationConfig::default()
-    });
+    let missing =
+        LcmSummarizerExecutableV1::configured(fake.bin.with_file_name("missing-codex")).unwrap();
+    let unavailable = backend_availability(&config, &missing);
 
     assert!(!unavailable.available);
     assert!(
@@ -645,6 +646,40 @@ fn backend_availability_reports_configured_codex_executable_status() {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("was not found"))
+    );
+
+    let unconfigured = backend_availability(&config, &LcmSummarizerExecutableV1::Unconfigured);
+    assert!(!unconfigured.available);
+    assert_eq!(unconfigured.executable, None);
+    assert_eq!(
+        unconfigured.reason.as_deref(),
+        Some(CODEX_EXECUTABLE_UNCONFIGURED)
+    );
+}
+
+#[test]
+fn unconfigured_codex_backend_settles_unavailable_without_spawning() {
+    register_runtime_ports();
+    let backend = CodexAppServerBackend::from_automation_config(
+        &AutomationConfig {
+            backend: AutomationBackend::CodexAppServer,
+            ..AutomationConfig::default()
+        },
+        &LcmSummarizerExecutableV1::Unconfigured,
+    );
+    assert_eq!(backend.executable(), None);
+    let request = AgentTaskRequest::new(
+        "run_unconfigured".to_string(),
+        AgentTaskKind::MemoryCurator,
+        "backend prompt".to_string(),
+        None,
+        json!({}),
+    );
+    let error = backend.run_task(&request).unwrap_err();
+    assert_eq!(error.failure_class(), AgentTaskFailureClass::Unavailable);
+    assert!(
+        error.to_string().contains(CODEX_EXECUTABLE_UNCONFIGURED),
+        "{error}"
     );
 }
 
@@ -673,11 +708,18 @@ struct FakeCodexAppServer {
     pid: PathBuf,
 }
 
+impl FakeCodexAppServer {
+    /// The configured `codex` binding an operator would publish for this fake.
+    fn executable(&self) -> LcmSummarizerExecutableV1 {
+        LcmSummarizerExecutableV1::configured(self.bin.clone()).unwrap()
+    }
+}
+
 fn backend_error_for_behavior(behavior: &str, timeout: Duration) -> (String, u32) {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior(behavior);
     let backend = CodexAppServerBackend::from_config(AutomationSummaryConfig {
-        codex_bin: fake.bin.display().to_string(),
+        codex_bin: fake.bin.clone(),
         model: Some("configured-model".to_string()),
         timeout,
     });
@@ -903,6 +945,10 @@ impl AgentTaskBackend for FlakyBackend {
             input_tokens: None,
             output_tokens: None,
         })
+    }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
     }
 }
 

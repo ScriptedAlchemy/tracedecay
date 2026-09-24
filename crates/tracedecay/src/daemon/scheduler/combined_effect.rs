@@ -1058,6 +1058,10 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             panic!("a disabled scheduler run must not invoke its backend")
         }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            None
+        }
     }
 
     struct RecordingEarlyGateRetrieval {

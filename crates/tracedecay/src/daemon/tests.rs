@@ -299,21 +299,6 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     engine
 }
 
-use crate::isolated_profile::EnvVarGuard;
-
-/// Pins the codex app-server launcher to a path that cannot exist so any
-/// automation tick reached during the test fails with the typed spawn error
-/// instead of invoking the operator's real `codex` binary. Without this,
-/// a tick spawns a live external process whose runtime depends on a real
-/// backend, and a harness kill (e.g. nextest SIGTERM) orphans that process
-/// group because in-process cleanup never runs.
-fn isolate_codex_app_server_binary(root: &std::path::Path) -> EnvVarGuard {
-    EnvVarGuard::set(
-        "TRACEDECAY_CODEX_BIN",
-        root.join("missing-codex-app-server-binary"),
-    )
-}
-
 fn enter_test_daemon_database_scope(
     profile_root: &std::path::Path,
     label: &str,

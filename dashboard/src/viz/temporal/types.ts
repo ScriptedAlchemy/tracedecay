@@ -115,6 +115,8 @@ export interface JourneyEvent {
   readonly detail: string | null;
   /** The source record's own identifier: message id, commit SHA, child lane id. */
   readonly ref: string;
+  /** For a file edit, the loaded tool-call event recorded in the same second. */
+  readonly linkedEventId?: string;
 }
 
 export type JourneyRelationKind = 'spawn' | 'handoff' | 'rejoin' | 'result';
@@ -130,6 +132,9 @@ export interface JourneyRelation {
   readonly grade: EvidenceGrade;
   /** The stated basis, e.g. `parent_session_id · parent_tool_use_id toolu_01`. */
   readonly basis: string;
+  /** The parent-lane event the relation leaves from: the loaded tool call
+   * whose tool-use id the child recorded. */
+  readonly fromEventId?: string;
 }
 
 export type JourneyGapKind =
@@ -319,7 +324,8 @@ export type ScenePathKind =
   | 'handoff'
   | 'rejoin'
   | 'result'
-  | 'sequence';
+  | 'sequence'
+  | 'edit_link';
 
 /** A curve. `controls` is `[x0,y0,cx0,cy0,cx1,cy1,x1,y1]` for a cubic, or
  * `[x0,y0,x1,y1]` for a straight segment. */

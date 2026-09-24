@@ -29,16 +29,37 @@ pub fn stable_record_id(
     provider_observation_id(&candidate).ok_or(ObservationRecordParseErrorV1::NormalizationFailed)
 }
 
+/// The spawn a Claude subagent transcript records about itself: the session
+/// that owns its `subagents/` directory (or the subagent named by the
+/// sidecar's `parentAgentId`) and the sidecar's `toolUseId`, the parent's
+/// `tool_use` block id. Absent fields stay absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClaudeSpawnParent<'a> {
+    pub session_id: &'a str,
+    pub tool_use_id: Option<&'a str>,
+}
+
 pub fn normalize(
     native: &Value,
     session_id: &str,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    normalize_spawned(native, session_id, None, stable_record_id, range)
+}
+
+/// [`normalize`] for a record of a subagent transcript spawned by `parent`.
+pub fn normalize_spawned(
+    native: &Value,
+    session_id: &str,
+    parent: Option<ClaudeSpawnParent<'_>>,
+    stable_record_id: ObservationId,
+    range: ObservationSourceRangeV1,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     // Claude records order by file bytes, so the range length is the source
     // record's byte length. Failed normalizations are counted, never hidden.
     hotpath::gauge!("capture.claude.record_bytes").inc(range.end() - range.start());
-    let envelope = normalize_record(native, session_id, stable_record_id, range);
+    let envelope = normalize_record(native, session_id, parent, stable_record_id, range);
     if envelope.is_err() {
         hotpath::gauge!("capture.claude.normalize_failures").inc(1u64);
     }
@@ -50,6 +71,7 @@ pub fn normalize(
 fn normalize_record(
     native: &Value,
     session_id: &str,
+    parent: Option<ClaudeSpawnParent<'_>>,
     stable_record_id: ObservationId,
     range: ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
@@ -137,6 +159,13 @@ fn normalize_record(
     }
     if let Some(agent) = optional_id(native, &["agentId", "agent_id"]) {
         relations = relations.with_agent_id(agent);
+    }
+    if let Some(parent) = parent {
+        relations = relations
+            .with_parent_session_id(SessionId::new(parent.session_id).map_err(|_| invalid())?);
+        if let Some(tool_use_id) = parent.tool_use_id.and_then(provider_observation_id) {
+            relations = relations.with_parent_tool_use_id(tool_use_id);
+        }
     }
 
     let mut evidence =

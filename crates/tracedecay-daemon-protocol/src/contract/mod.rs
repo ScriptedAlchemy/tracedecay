@@ -971,7 +971,8 @@ impl DaemonInvocationRequest {
             | ApplicationSurfaceOperation::SourceEditRollback => {
                 unreachable!("source-edit operations use their typed constructors")
             }
-            ApplicationSurfaceOperation::Node
+            ApplicationSurfaceOperation::Context
+            | ApplicationSurfaceOperation::Node
             | ApplicationSurfaceOperation::Impact
             | ApplicationSurfaceOperation::Similar
             | ApplicationSurfaceOperation::Redundancy

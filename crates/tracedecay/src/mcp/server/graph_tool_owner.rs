@@ -56,6 +56,7 @@ impl McpServer {
             code_index_search_authority: self.code_index_search_authority.clone(),
             admitted_project_scope: self.admitted_project_scope.clone(),
             verified_graph_query_port: self.verified_graph_query_port.clone(),
+            code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
             ..ToolCallRegistryOptions::default()
         };
         compute_graph_tool_for_owner(

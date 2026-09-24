@@ -34,7 +34,7 @@ struct RetainedOwnerTestExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -42,7 +42,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestEx
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 

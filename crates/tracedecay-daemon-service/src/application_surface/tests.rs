@@ -717,12 +717,9 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
         }
     }
 
-    assert_eq!(
-        compatibility_operations,
-        ["context"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+    assert!(
+        compatibility_operations.is_empty(),
+        "{compatibility_operations:?}"
     );
 }
 

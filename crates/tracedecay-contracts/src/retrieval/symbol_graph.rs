@@ -33,6 +33,16 @@ impl CodeGraphReadFreshnessV1 {
     }
 }
 
+/// The code-graph generation an operation read and that generation's
+/// freshness. A stale seat answers soundly for its generation but may trail
+/// the live worktree.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServedCodeGraphGenerationV1 {
+    pub generation: String,
+    pub freshness: CodeGraphReadFreshnessV1,
+}
+
 /// Optional narrowing inside the immutable project/repository/worktree scope
 /// carried by [`RequestContext`]. A path prefix never establishes identity or
 /// authorization.

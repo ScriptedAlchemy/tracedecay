@@ -48,7 +48,6 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
 use tracedecay::daemon::call_default_tool_awaiting_project_open;
-use tracedecay::mcp::server::TOKEN_ACCOUNTING_FOOTER_PREFIX;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RetainedSurfaceOperation};
 use tracedecay_daemon_protocol::{
@@ -61,6 +60,9 @@ use tracedecay_daemon_protocol::{
 use tracedecay_daemon_service::application_surface::observe_surface_argument_rejection;
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tools::response_trailers::{
+    TOKEN_ACCOUNTING_FOOTER_PREFIX, account_tool_result,
+};
 use tracedecay_mcp::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, internal_daemon_tool_definition,
     render_tool_cli_help, short_tool_name,
@@ -724,6 +726,7 @@ async fn dispatch_cli_graph_tool(
         &tool_args,
         completion,
     )?;
+    account_tool_result(project.as_deref(), &mut result);
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     print_tool_output(&result.value, raw_json);
     tool_result_process_outcome(&result.value, tool_name)

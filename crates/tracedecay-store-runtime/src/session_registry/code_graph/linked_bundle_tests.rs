@@ -24,6 +24,7 @@ use tracedecay_graph_db::{
     SealedGraphStateDigest, SealedReadBundleArtifactStateV1, retire_sealed_read_bundle,
     sealed_read_bundle_artifact_file_digest, sealed_read_bundle_manifest_artifact_digests,
 };
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 
@@ -66,10 +67,7 @@ async fn publish_linked_worktree_bundles(
     linked_only_source: Option<&str>,
 ) -> LinkedBundlesV1 {
     let temporary = tempfile::tempdir().expect("temporary fixture parent");
-    let root = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
+    let root = canonical_root_identity(temporary.path());
     let profile_root = root.join("profile");
     let project_root = root.join("project");
     std::fs::create_dir_all(project_root.join("src")).expect("project source directory");

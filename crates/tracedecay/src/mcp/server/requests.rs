@@ -9,17 +9,15 @@ use tracedecay_mcp::server::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest,
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
 };
+use tracedecay_mcp::tools::response_trailers::{
+    ToolTokenAccounting, record_token_accounting, response_token_count,
+};
 use tracedecay_mcp::{
     ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
     tool_error_response, tool_result_has_semantic_error,
 };
 use tracedecay_runtime_core::db::migrations::render_expected_final_schema_markdown;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
-
-/// Prefix of the out-of-band token-accounting block appended after a tool's
-/// payload. `tracedecay tool` routes blocks carrying it to stderr so a JSON
-/// payload on stdout stays a single document for scripts and hosts.
-pub const TOKEN_ACCOUNTING_FOOTER_PREFIX: &str = "tracedecay_metrics:";
 
 mod tool_dispatch;
 
@@ -52,12 +50,6 @@ impl Drop for ToolActivityPublishRunning {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
-}
-
-struct ToolTokenAccounting {
-    raw_file_tokens: u64,
-    response_tokens: u64,
-    net_saved_tokens: u64,
 }
 
 pub(super) fn invocation_target_for_route(
@@ -946,21 +938,6 @@ impl McpServer {
             .or_insert_with(|| json!(elapsed_us));
     }
 
-    fn response_token_count(result: &ToolResult) -> u64 {
-        result
-            .value
-            .get("content")
-            .and_then(|content| content.as_array())
-            .map_or(0, |content| {
-                let total_chars: usize = content
-                    .iter()
-                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
-                    .map(str::len)
-                    .sum();
-                (total_chars / 4) as u64
-            })
-    }
-
     /// Resolves the raw-read counterfactual from the retained cache, falling
     /// back to bounded metadata reads for files owned by the current response.
     ///
@@ -1017,41 +994,42 @@ impl McpServer {
         tool_name: &str,
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
+        // A result the shared renderer already accounted carries its figures
+        // and footer; only persist them.
+        let accounting = match result.token_accounting() {
+            Some(accounting) => accounting,
+            None => self.account_unrendered_result(cg, result).await,
+        };
+        self.spawn_token_accounting_persist(
+            cg.project_root(),
+            tool_name,
+            accounting.net_saved_tokens(),
+            accounting.raw_file_tokens,
+        );
+        self.maybe_flush_worldwide();
+        accounting
+    }
+
+    async fn account_unrendered_result(
+        &self,
+        cg: &TraceDecay,
+        result: &mut ToolResult,
+    ) -> ToolTokenAccounting {
         // Estimate approximate token count of the graph response
         // ("after"), before any banners/metrics lines are appended.
-        let response_tokens = Self::response_token_count(result);
+        let response_tokens = response_token_count(result);
         // "Before" counterfactual: reading every referenced file raw,
         // in full. Counters credit only the net saving per call,
         // before minus what this response actually delivered.
         let raw_file_tokens = self
             .raw_file_tokens(cg.project_root(), &result.touched_files)
             .await;
-        let net_saved_tokens = raw_file_tokens.saturating_sub(response_tokens);
-        self.spawn_token_accounting_persist(
-            cg.project_root(),
-            tool_name,
-            net_saved_tokens,
-            raw_file_tokens,
-        );
-        self.maybe_flush_worldwide();
-
-        // Append per-call token savings to the response content.
-        if raw_file_tokens > 0
-            && let Some(content) = result
-                .value
-                .get_mut("content")
-                .and_then(|c| c.as_array_mut())
-        {
-            content.push(json!({"type": "text", "text": format!(
-                "\n{TOKEN_ACCOUNTING_FOOTER_PREFIX} before={raw_file_tokens} after={response_tokens}"
-            )}));
-        }
-
-        ToolTokenAccounting {
+        let accounting = ToolTokenAccounting {
             raw_file_tokens,
             response_tokens,
-            net_saved_tokens,
-        }
+        };
+        record_token_accounting(result, accounting);
+        accounting
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1082,10 +1060,10 @@ impl McpServer {
         let savings_db = self.accounting_db.clone();
         let analytics_db = self.global_db.clone();
         if savings_db.is_some() || analytics_db.is_some() {
+            let net_saved_tokens = accounting.net_saved_tokens();
             let ToolTokenAccounting {
                 raw_file_tokens,
                 response_tokens,
-                net_saved_tokens,
             } = accounting;
             let project_path_str =
                 RegisteredGlobalDb::canonical_project_key(accounting_project_root);

@@ -694,6 +694,50 @@ describe('layoutTemporalScene', () => {
     expect(path).toMatchObject({ fromId: 'A', grade: 'exact', basis: spawn(A, B).basis, weight: null });
   });
 
+  it('leaves a fork from its spawning tool-call glyph and links a same-second edit to it', () => {
+    const task = event({ id: 'msg:A:task', laneId: 'A', kind: 'tool_call', time: T0 + 540, source: 'transcript', label: 'Task' });
+    const undatedTask = event({ id: 'msg:A:undated', laneId: 'A', kind: 'tool_call', time: null, sequence: 1, source: 'transcript', label: 'Task' });
+    const edit = event({ id: 'edit:A:src/a.ts', laneId: 'A', kind: 'file_edit', time: T0 + 540.25, source: 'file_rollup', label: 'a.ts', linkedEventId: 'msg:A:task' });
+    const proj = projection({
+      lanes: [A, B, C],
+      events: [...laneEvents(A, [edit]), task, undatedTask, ...laneEvents(B), ...laneEvents(C)],
+      relations: [
+        { ...spawn(A, B), time: T0 + 540, fromEventId: 'msg:A:task' },
+        { ...spawn(A, C), time: null, fromEventId: 'msg:A:undated' },
+      ],
+    });
+    const expanded = layoutTemporalScene(proj, optionsFor(proj, { zoom: 'event', selectedLaneId: 'A' }));
+    const glyph = expanded.nodes.find((n) => n.id === 'msg:A:task');
+    const undatedGlyph = expanded.nodes.find((n) => n.id === 'msg:A:undated');
+    const b = sceneLane(expanded, 'B');
+    const c = sceneLane(expanded, 'C');
+    expect(glyph).toMatchObject({ x: timeToX(expanded.viewport, T0 + 540), xBasis: 'time' });
+    const forks = new Map(expanded.paths.filter((p) => p.kind === 'spawn').map((p) => [p.toId, p.controls]));
+    const kOf = (y0: number, y1: number) => Math.min(28, Math.max(8, Math.abs(y1 - y0) * 0.35));
+    const kb = kOf(glyph!.y, b.y);
+    expect(forks.get('B')).toEqual([glyph!.x - kb, glyph!.y, glyph!.x + kb * 0.2, glyph!.y, glyph!.x - kb * 0.2, b.y, glyph!.x + kb, b.y]);
+    // An undated tool call still anchors the fork, in the recorded-order gutter.
+    expect(undatedGlyph?.xBasis).toBe('sequence');
+    expect(forks.get('C')?.slice(0, 2)).toEqual([undatedGlyph!.x - kOf(undatedGlyph!.y, c.y), undatedGlyph!.y]);
+    const editNode = expanded.nodes.find((n) => n.id === 'edit:A:src/a.ts');
+    expect(expanded.paths.find((p) => p.kind === 'edit_link')).toMatchObject({
+      fromId: 'edit:A:src/a.ts',
+      toId: 'msg:A:task',
+      grade: 'exact',
+      controls: [editNode!.x, editNode!.y, glyph!.x, glyph!.y],
+    });
+
+    // Folded transcript: the dated fork falls back to its recorded time on the
+    // parent row, the undated one has no x at all, and the edit links nothing.
+    const folded = layoutTemporalScene(proj, optionsFor(proj));
+    const a = sceneLane(folded, 'A');
+    const x = timeToX(folded.viewport, T0 + 540);
+    expect(folded.paths.filter((p) => p.kind === 'spawn').map((p) => [p.toId, p.controls[0], p.controls[1]])).toEqual([
+      ['B', x - kOf(a.y, sceneLane(folded, 'B').y), a.y],
+    ]);
+    expect(folded.paths.some((p) => p.kind === 'edit_link')).toBe(false);
+  });
+
   it('places intervals on their lane rows, clamped to the window', () => {
     const proj = treeProjection();
     const model = layoutTemporalScene(proj, optionsFor(proj));

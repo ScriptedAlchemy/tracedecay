@@ -383,13 +383,13 @@ async fn fresh_graph_activation_waits_while_the_published_text_owner_is_parked()
     fixture.registry.shutdown().await;
 }
 
-/// The published pass waits for the owners the seat needs, and its single
-/// build seals every one of them: fresh graph activation starts on ready
-/// owners with no text projection work left behind.
+/// A publication's graph activation overlaps its own text projection once
+/// that projection has opened its build: text readiness never waits on graph
+/// activation, and the serving swap still waits for both.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fresh_graph_activation_starts_on_the_first_sealed_text_owner() {
+async fn fresh_graph_activation_never_delays_the_published_text_owner() {
     let (fixture, admission) =
-        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-on-first-seal", |_| {})
+        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-beside-text", |_| {})
             .await;
     let scope = fixture
         .registry
@@ -401,7 +401,7 @@ async fn fresh_graph_activation_starts_on_the_first_sealed_text_owner() {
 
     tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
         .await
-        .expect("fresh graph activation starts once the query owners are ready");
+        .expect("fresh graph activation starts beside the opened text projection");
     let canonical = fixture.project.canonicalize().expect("canonical project");
     let text = {
         let mounted = fixture.registry.mounted.lock().await;
@@ -414,15 +414,38 @@ async fn fresh_graph_activation_starts_on_the_first_sealed_text_owner() {
             .clone()
     }
     .expect("the publication installed its text owner before activation");
+    tokio::time::timeout(CONVERGENCE_DEADLINE, async {
+        while !text.query_owners_are_ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the text owner finishes while graph activation is held");
     assert!(
-        text.query_owners_are_ready(),
-        "graph activation must not start before the query owners are ready"
-    );
-    assert!(
-        !text.text_projection_needs_work(),
-        "the first seal leaves no text projection work behind"
+        fixture
+            .registry
+            .serving_code_scope(&fixture.project)
+            .await
+            .expect("mounted scope")
+            .serving_generation
+            .is_none(),
+        "the seat waits for the held graph activation"
     );
     gate.release();
+    tokio::time::timeout(CONVERGENCE_DEADLINE, async {
+        while fixture
+            .registry
+            .serving_code_scope(&fixture.project)
+            .await
+            .expect("mounted scope")
+            .serving_generation
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the publication seats once graph activation and text are done");
     fixture.registry.shutdown().await;
 }
 

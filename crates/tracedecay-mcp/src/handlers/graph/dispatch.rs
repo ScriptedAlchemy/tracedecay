@@ -5,7 +5,7 @@ use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV
 use tracedecay_domain::errors::Result;
 
 use super::{
-    handle_by_qualified_name, handle_context, handle_derives, handle_find_exact_symbol,
+    handle_by_qualified_name, handle_derives, handle_find_exact_symbol,
     handle_search, handle_signature,
 };
 use crate::ToolResult;
@@ -63,9 +63,6 @@ pub async fn dispatch_tool(
                 ctx.cancellation().cloned(),
             )
             .await
-        }
-        "tracedecay_context" => {
-            handle_context(ctx, open(read("context")?), args, scope_prefix).await
         }
         "tracedecay_find_exact_symbol" => {
             handle_find_exact_symbol(

@@ -2124,7 +2124,7 @@ async fn capabilities(
     let has_lcm = state.lcm_read_authority.is_some();
     let automation = automation_config_api::effective_automation_config(&state);
     let (automation_configured, automation_mode, automation_payload) = match automation {
-        Ok((configuration_revision_id, config)) => {
+        Ok((configuration_revision_id, config, codex)) => {
             let backend_supported = matches!(config.backend, AutomationBackend::CodexAppServer);
             let configured = config.enabled && backend_supported;
             let mode = if !configured {
@@ -2144,7 +2144,7 @@ async fn capabilities(
                     "mode": mode,
                     "backend": config.backend,
                     "host_mode": config.host_mode,
-                    "availability": backend::backend_availability(&config),
+                    "availability": backend::backend_availability(&config, &codex),
                 }),
             )
         }

@@ -446,6 +446,7 @@ export function layoutTemporalScene(
   // --- nodes -----------------------------------------------------------------
   const nodes: SceneNode[] = [];
   const nodeById = new Map<string, SceneNode>();
+  const linkedEventIds = new Map<string, string>();
   const gutterYOf = (lane: SceneLane): number =>
     lane.y + lane.height / 2 - SEQUENCE_GUTTER_RISE_PX;
   const undatedByLane = new Map<string, SceneNode[]>();
@@ -488,6 +489,7 @@ export function layoutTemporalScene(
       };
       nodes.push(scene);
       nodeById.set(scene.id, scene);
+      if (node.event.linkedEventId !== undefined) linkedEventIds.set(scene.id, node.event.linkedEventId);
       if (scene.xBasis === 'sequence') laneUndated.push(scene);
     });
     if (laneUndated.length > 0) undatedByLane.set(sceneLane.id, laneUndated);
@@ -523,14 +525,16 @@ export function layoutTemporalScene(
       relationsWithheld += 1;
       continue;
     }
-    if (relation.time === null) continue;
+    // A fork bound to a drawn tool-call glyph leaves from that glyph.
+    const origin = relation.fromEventId === undefined ? undefined : nodeById.get(relation.fromEventId);
+    const px = origin ? origin.x : relation.time === null ? null : x(relation.time);
+    if (px === null) continue;
     const targetId = standInFor(relation.toLaneId);
     if (targetId === null || targetId === parent.id) continue;
     const target = sceneLaneById.get(targetId);
     if (!target) continue;
-    const px = x(relation.time);
     if (!inWindow(px)) continue;
-    const py = parent.y;
+    const py = origin ? origin.y : parent.y;
     const ty = target.y;
     const k = Math.min(28, Math.max(8, Math.abs(ty - py) * 0.35));
     const childFocus = focusFor(relation.toLaneId);
@@ -566,6 +570,23 @@ export function layoutTemporalScene(
         weight: null,
       });
     }
+  }
+
+  for (const node of nodes) {
+    const linkedId = linkedEventIds.get(node.id);
+    const call = linkedId === undefined ? undefined : nodeById.get(linkedId);
+    if (!call) continue;
+    paths.push({
+      id: `edit_link:${node.id}→${call.id}`,
+      kind: 'edit_link',
+      fromId: node.id,
+      toId: call.id,
+      grade: 'exact',
+      basis: 'edit recorded in the same second as the tool call',
+      focus: node.focus,
+      controls: [node.x, node.y, call.x, call.y],
+      weight: null,
+    });
   }
 
   // --- clusters --------------------------------------------------------------

@@ -4310,13 +4310,27 @@ const LOOM_CHAIN_TOOLS = [
   null,
 ] as const;
 
+/** The spawning `Task` call each Loom parent transcript records, as
+ * `[message index, tool_use_id]`: the id its child's `parent_tool_use_id`
+ * names, so the field forks on that glyph, graded EXACT. The row-parented
+ * child of session 20 and the Claude orphan name calls no loaded transcript
+ * carries, so they stay INFERRED at the child's start. */
+const LOOM_SPAWN_CALLS: Readonly<Record<string, readonly (readonly [number, string])[]>> = {
+  'session.codex.root': [[7, 'toolu_codex_01']],
+  'session.codex.child': [[13, 'toolu_codex_02']],
+  [loomSessionId(8)]: [[19, 'toolu_loom_5']],
+};
+
 /** One session's transcript, served for whichever session is asked for.
  * `timestamp` is null on every message, exactly as the daemon serves it. The
  * chain rail reads that and prints "ordinal order", so a fixture with
- * timestamps would hide the behaviour under audit. */
+ * timestamps would hide the behaviour under audit. Every tool call carries its
+ * host tool-use id. */
 function loomChainPayload(sessionId: string): Record<string, unknown> {
+  const spawns = new Map(LOOM_SPAWN_CALLS[sessionId] ?? []);
   const messages = Array.from({ length: 46 }, (_, i) => {
-    const tool = i === 0 ? null : LOOM_CHAIN_TOOLS[i % LOOM_CHAIN_TOOLS.length];
+    const spawn = spawns.get(i);
+    const tool = spawn ? 'Task' : i === 0 ? null : LOOM_CHAIN_TOOLS[i % LOOM_CHAIN_TOOLS.length];
     return {
       message_id: `${sessionId}:${String(i).padStart(4, '0')}`,
       session_id: sessionId,
@@ -4331,6 +4345,7 @@ function loomChainPayload(sessionId: string): Record<string, unknown> {
       snippet: null,
       timestamp: null,
       tool_name: tool,
+      tool_use_id: spawn ?? (tool ? `toolu_chain_${String(i).padStart(4, '0')}` : null),
       token_count: 18 + (i % 9) * 7,
       token_count_provenance: 'o200k_approximate',
       // `lcm_queries` selects a literal `0 AS pinned`: pinning is not tracked

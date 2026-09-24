@@ -52,6 +52,14 @@ project layer; model, timeout, and workspace tuning for a configured executable
 remain the `TRACEDECAY_CURSOR_SUMMARY_*` / `TRACEDECAY_CODEX_SUMMARY_*`
 environment knobs.
 
+The same `codex` entry is the only executable the automation backend
+(memory curator, session reflector, skill writer, user jobs, Context Scout)
+spawns for `codex_app_server`. While it is unconfigured, `backend_availability`
+reports the backend unavailable and every task settles as `Unavailable`
+without a spawn; the durable backend identity stamps the opened configured
+file, so replacing that binary in place re-admits a settled deterministic
+failure.
+
 ## Replay and recovery
 
 Replay is ordered by source/store position, with summary blocks preceding raw

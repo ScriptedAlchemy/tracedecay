@@ -41,10 +41,9 @@ pub use session_authorities::SessionAuthorities;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use session_authorities::mcp_session_authorities;
 pub use support::{
-    CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
-    json_result, rendered_tool_result, require_node_id, require_object_args,
-    require_positive_limit, take_internal_context_memory_analytics, text_tool_result, tool_json,
-    tool_json_with_md, unique_file_paths, unknown_tool_error,
+    decode_primitive_request, effective_path, generic_tool_result, json_result,
+    rendered_tool_result, require_node_id, require_object_args, require_positive_limit,
+    text_tool_result, tool_json, tool_json_with_md, unique_file_paths, unknown_tool_error,
 };
 pub use verified_read::{VerifiedGraphOpen, VerifiedGraphOpenFuture, verified_read_operation};
 pub use work::handle_work;

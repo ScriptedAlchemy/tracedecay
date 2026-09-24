@@ -92,7 +92,8 @@ pub use ports::{
     TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
 };
 pub use primitive_surface::{
-    ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
+    ContextCodeBlockV1, ContextExtensionPointV1, ContextModeV1, ContextPlanV1, ContextResultV1,
+    ContextSearchMatchV1,
     ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, MAX_REDUNDANCY_FAMILIES_V1,
     MAX_REDUNDANCY_PULL_REQUEST_PATHS_V1, MAX_REDUNDANCY_WORK_V1, NodeDepthSurfaceRequestV1,
     NodeDetailsV1, NodeExpansionCostV1, NodeResultV1, NodeSurfaceRequestV1, PortCycleAnchorV1,
@@ -134,8 +135,8 @@ pub use symbol_graph::{
     CodeGraphReadFreshnessV1, ExactSymbolRequest, GraphImpactPrimitiveRequest,
     GraphRelationRequest, ImplementationRecord, ImplementationSelector, ImplementationsRequest,
     MAX_SYMBOL_GRAPH_DEPTH, MAX_SYMBOL_GRAPH_FILTERS, MAX_SYMBOL_GRAPH_QUERY_BYTES,
-    PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap, SignatureSearchRequest,
-    SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture, SymbolGraphPortOutcome,
+    PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap, ServedCodeGraphGenerationV1,
+    SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture, SymbolGraphPortOutcome,
     SymbolGraphPrimitivePort, SymbolGraphScope, SymbolPrimitiveRecord, SymbolRelationRecord,
     SymbolSearchPrimitiveRequest, TypeHierarchyRecord, TypeHierarchyRequest,
 };

@@ -523,6 +523,8 @@ pub fn application_response(
             scope,
             outcome,
             touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         },
         DaemonInvocationOutcome::SourceEdit { scope, result } => ApplicationEnvelope {
             contract: result_contract,
@@ -532,6 +534,8 @@ pub fn application_response(
                 serde_json::to_value(result).map_err(|_| InvocationError::Unavailable)?,
             ),
             touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         },
         DaemonInvocationOutcome::GraphTool { scope, completion } => ApplicationEnvelope {
             contract: result_contract,
@@ -544,6 +548,8 @@ pub fn application_response(
                     .map_err(|_| InvocationError::Unavailable)?,
             ),
             touched_files: completion.touched_files,
+            code_graph: completion.code_graph,
+            analytics: completion.analytics,
         },
         // The daemon already resolved this invocation to a typed problem
         // (e.g. `configuration.conflict`); carry it whole so surface adapters
@@ -599,6 +605,8 @@ fn retained_application_response(
                 scope,
                 outcome: application_outcome_value(outcome).map_err(|_| invalid())?,
                 touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
             }))
         }
         DaemonInvocationOutcome::RetainedApplicationProblem { scope, problem }
@@ -800,6 +808,7 @@ pub fn application_surface_feedback_operation(
         | ApplicationSurfaceOperation::SourceBody
         | ApplicationSurfaceOperation::SourceOutline
         | ApplicationSurfaceOperation::ModuleApi
+        | ApplicationSurfaceOperation::Context
         | ApplicationSurfaceOperation::Node
         | ApplicationSurfaceOperation::Impact
         | ApplicationSurfaceOperation::Similar

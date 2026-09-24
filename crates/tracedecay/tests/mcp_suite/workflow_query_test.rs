@@ -305,7 +305,7 @@ async fn workflows_query_surface_end_to_end() {
         .expect("init retains registered project session runtime");
 
     let stats = runtime
-        .ingest_workflows_for_test(cg.project_root())
+        .ingest_workflows_for_test(&home, cg.project_root())
         .await
         .unwrap_or_else(|error| panic!("ingest workflows: {error}"));
     assert_eq!(stats.runs_ingested, 1, "one run ingested: {stats:?}");
@@ -613,7 +613,7 @@ async fn workflows_tool_returns_literal_query_documents() {
         .test_runtime_for_test()
         .expect("init retains registered project session runtime");
     let stats = runtime
-        .ingest_workflows_for_test(cg.project_root())
+        .ingest_workflows_for_test(&home, cg.project_root())
         .await
         .unwrap_or_else(|error| panic!("ingest workflows: {error}"));
     assert_eq!(stats.runs_ingested, 1);

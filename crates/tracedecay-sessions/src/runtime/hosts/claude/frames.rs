@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tracedecay_capture::claude::{normalize, stable_record_id};
+use tracedecay_capture::claude::{ClaudeSpawnParent, normalize_spawned, stable_record_id};
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 
 use crate::runtime::shared::StoredCursor;
@@ -165,6 +165,13 @@ pub fn try_scan_claude_source_frames_with_resume(
         })
         .collect::<Vec<_>>();
 
+    let spawn = super::claude_spawn_parent(&identity.source_path);
+    let spawn = spawn
+        .as_ref()
+        .map(|(session_id, tool_use_id)| ClaudeSpawnParent {
+            session_id,
+            tool_use_id: tool_use_id.as_deref(),
+        });
     for frame in raw.frames.drain(..) {
         let Ok(range) = ObservationSourceRangeV1::new(frame.offset, frame.end_offset) else {
             return Ok(None);
@@ -181,7 +188,13 @@ pub fn try_scan_claude_source_frames_with_resume(
                 }));
                 let stable_record_id =
                     stable_record_id(&native, &identity.session_id, frame.offset)?;
-                normalize(&native, &identity.session_id, stable_record_id, range)
+                normalize_spawned(
+                    &native,
+                    &identity.session_id,
+                    spawn,
+                    stable_record_id,
+                    range,
+                )
             },
         ) else {
             skipped_frames.push(ClaudeSkippedFrame {

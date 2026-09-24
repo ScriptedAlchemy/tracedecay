@@ -37,10 +37,13 @@ impl HostAdmissionTestRuntimeV1 {
         })
     }
 
-    /// Runs workflow ingestion through this runtime's exact ProjectSessions mount.
+    /// Runs workflow ingestion through this runtime's exact ProjectSessions
+    /// mount, reading Claude transcripts under the isolated `home` only. The
+    /// operator's real home is never consulted.
     #[doc(hidden)]
     pub async fn ingest_workflows_for_test(
         &self,
+        home: &Path,
         project_root: &Path,
     ) -> Result<tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats> {
         let project_id = self
@@ -51,11 +54,6 @@ impl HostAdmissionTestRuntimeV1 {
                 message: "project session authority is unavailable".to_owned(),
             })?;
         let database = self.project_database_for_test()?;
-        let Some(home) = tracedecay_sessions::runtime::home_dir() else {
-            return Ok(
-                tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStats::default(),
-            );
-        };
         let store = tracedecay_global_db::GlobalDbWorkflowStore::new(database);
         Ok(
             tracedecay_sessions::runtime::workflow_ingest::ingest_workflow_runs_with_sink(

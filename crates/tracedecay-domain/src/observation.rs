@@ -1392,6 +1392,10 @@ pub struct CanonicalObservationRelationsV1 {
     agent_id: Option<ObservationId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent_agent_id: Option<ObservationId>,
+    /// The host's id of the parent-session tool call that spawned this
+    /// session, as recorded by the host on the child side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_tool_use_id: Option<ObservationId>,
 }
 
 impl CanonicalObservationRelationsV1 {
@@ -1405,6 +1409,7 @@ impl CanonicalObservationRelationsV1 {
             parent_message_id: None,
             agent_id: None,
             parent_agent_id: None,
+            parent_tool_use_id: None,
         }
     }
 
@@ -1450,6 +1455,12 @@ impl CanonicalObservationRelationsV1 {
         self
     }
 
+    #[must_use]
+    pub fn with_parent_tool_use_id(mut self, parent_tool_use_id: ObservationId) -> Self {
+        self.parent_tool_use_id = Some(parent_tool_use_id);
+        self
+    }
+
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
@@ -1482,6 +1493,10 @@ impl CanonicalObservationRelationsV1 {
         self.parent_agent_id.as_ref()
     }
 
+    pub fn parent_tool_use_id(&self) -> Option<&ObservationId> {
+        self.parent_tool_use_id.as_ref()
+    }
+
     fn validate(&self) -> Result<(), ObservationContractError> {
         self.session_id
             .validate()
@@ -1498,6 +1513,7 @@ impl CanonicalObservationRelationsV1 {
             self.parent_message_id.as_ref(),
             self.agent_id.as_ref(),
             self.parent_agent_id.as_ref(),
+            self.parent_tool_use_id.as_ref(),
         ]
         .into_iter()
         .flatten()

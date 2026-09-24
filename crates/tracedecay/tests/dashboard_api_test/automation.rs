@@ -155,7 +155,12 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             fixture.near_duplicate_fact_id.clone(),
             fixture.near_duplicate_last_event_id.clone(),
         );
-        let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex.bin);
+        let project_id = cg
+            .configuration_runtime()
+            .configuration_target()
+            .project_id
+            .as_str()
+            .to_owned();
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
         let port = pick_free_port();
@@ -167,6 +172,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             port,
         );
         wait_for_dashboard(&agent, &base_url).await;
+        configure_codex_summarizer(&agent, &base_url, &project_id, &fake_codex.bin);
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
         let (status, current_config) = get_json(&agent, &config_url);

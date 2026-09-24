@@ -176,7 +176,13 @@ fn derive_canonical_projection_for(
             .relations()
             .agent_id()
             .map(|id| id.as_str().to_owned()),
-        parent_tool_use_id: None,
+        // A spawning call names a call in the parent session, so it is
+        // recorded only alongside that parent.
+        parent_tool_use_id: envelope
+            .relations()
+            .parent_session_id()
+            .and(envelope.relations().parent_tool_use_id())
+            .map(|id| id.as_str().to_owned()),
     };
     let ordinal = envelope
         .evidence()

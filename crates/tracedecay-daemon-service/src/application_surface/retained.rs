@@ -95,6 +95,8 @@ pub fn result_value(
             outcome: tracedecay_daemon_protocol::application_outcome_value(envelope.outcome)
                 .map_err(ApplicationSurfaceAdapterError::invalid_request)?,
             touched_files: envelope.touched_files,
+            code_graph: envelope.code_graph,
+            analytics: envelope.analytics,
         })),
         Err(problem) => Ok(Err(problem)),
     }

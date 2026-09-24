@@ -98,6 +98,8 @@ fn effect_reply(operation: RetainedSurfaceOperation, result: RetainedSurfaceResu
         scope: scope(),
         outcome,
         touched_files: Vec::new(),
+        code_graph: None,
+        analytics: None,
     })
     .unwrap()
 }

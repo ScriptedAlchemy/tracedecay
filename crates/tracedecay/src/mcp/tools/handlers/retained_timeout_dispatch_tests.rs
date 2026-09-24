@@ -203,7 +203,7 @@ struct FactStoreCurateSuccessExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSuccessExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -211,7 +211,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for FactStoreCurateSucc
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -289,7 +297,7 @@ struct ExpiredDeadlineExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -297,7 +305,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for ExpiredDeadlineExec
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -499,7 +515,7 @@ impl PostCommitPartialEffectExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEffectExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -507,7 +523,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PostCommitPartialEf
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 
@@ -560,7 +584,7 @@ struct PreCommitInterruptionExecutor {
 impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterruptionExecutor {
     fn invoke(
         &self,
-        _invocation: tracedecay_contracts::ApplicationInvocation,
+        invocation: tracedecay_contracts::ApplicationInvocation,
     ) -> tracedecay_contracts::ApplicationInvocationFuture<
         '_,
         std::result::Result<
@@ -568,7 +592,15 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for PreCommitInterrupti
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        Box::pin(async move {
+            let (context, request) = invocation.into_parts();
+            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
+            else {
+                return Err(tracedecay_contracts::InvocationError::Unavailable);
+            };
+            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
+                .await
+        })
     }
 }
 

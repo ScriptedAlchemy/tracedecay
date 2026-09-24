@@ -39,6 +39,10 @@ impl crate::automation::backend::AgentTaskBackend for NeverAutomationBackend {
     > {
         panic!("disabled retained automation must not invoke its backend")
     }
+
+    fn executable(&self) -> Option<&std::path::Path> {
+        None
+    }
 }
 
 use tracedecay_domain::test_fixtures::digest;

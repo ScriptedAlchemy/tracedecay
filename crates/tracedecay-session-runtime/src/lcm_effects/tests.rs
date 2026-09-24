@@ -1,5 +1,7 @@
 use super::*;
 use serde_json::Value;
+use tracedecay_domain::ProjectId;
+use tracedecay_domain::configuration::{LcmSummarizerExecutableV1, LcmSummarizerExecutablesV1};
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1,
     ObservationIdentityMaterialV1, ObservationScopeV1, ObservationSourceCursorV1,
@@ -8,7 +10,10 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_global_db::tests::harness::{
+    RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
+};
 use tracedecay_lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -108,8 +113,90 @@ fn retained_guard(
     }
 }
 
+/// A registered project sessions shard whose summarizer binding the test
+/// publishes explicitly through `lcm.summarizer_executables.v1`. Provider
+/// executables are never resolved from the environment or `PATH`, so a test
+/// that expects a fake summarizer to run must pin it here.
+struct ProjectSummarizerFixture {
+    runtime: RegisteredGlobalDbTestRuntime,
+    project_id: ProjectId,
+    root: tempfile::TempDir,
+}
+
+impl ProjectSummarizerFixture {
+    /// The project identity is the `project_key` every fixture session
+    /// carries, so observations scoped to this project reconcile with the
+    /// sessions the tests upsert directly.
+    async fn open() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let project_id = ProjectId::new("project.lcm-effects".to_owned()).unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            root.path().join("profile"),
+            root.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        Self {
+            runtime,
+            project_id,
+            root,
+        }
+    }
+
+    fn db(&self) -> RegisteredGlobalDbLeaseV1 {
+        self.runtime.project_database_arc().unwrap()
+    }
+
+    fn pin(&self, executables: LcmSummarizerExecutablesV1) {
+        tracedecay_configuration::test_support::pin_lcm_summarizer_executables(
+            self.project_id.clone(),
+            &self.root.path().join("project"),
+            executables,
+        )
+        .unwrap();
+    }
+
+    fn pin_cursor_agent(&self, cursor_agent: &std::path::Path) {
+        self.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: LcmSummarizerExecutableV1::configured(cursor_agent.to_path_buf())
+                .unwrap(),
+            codex: LcmSummarizerExecutableV1::Unconfigured,
+        });
+    }
+
+    fn pin_codex(&self, codex: &std::path::Path) {
+        self.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: LcmSummarizerExecutableV1::Unconfigured,
+            codex: LcmSummarizerExecutableV1::configured(codex.to_path_buf()).unwrap(),
+        });
+    }
+
+    /// Reopens the same project shard, as a daemon restart would.
+    async fn restart(self) -> Self {
+        let Self {
+            runtime,
+            project_id,
+            root,
+        } = self;
+        drop(runtime);
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            root.path().join("profile"),
+            root.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        Self {
+            runtime,
+            project_id,
+            root,
+        }
+    }
+}
+
 /// Runs a future under the canonical user-data-dir env lock so provider
-/// binary env overrides cannot race parallel tests.
+/// tuning env overrides cannot race parallel tests.
 fn run_with_test_env_lock<T>(future: impl std::future::Future<Output = T>) -> T {
     let _lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
     tokio::runtime::Builder::new_multi_thread()
@@ -945,8 +1032,8 @@ async fn successive_claude_compactions_bind_to_the_previous_native_boundary_afte
 #[test]
 fn native_compaction_requires_exact_selected_raw_membership() {
     run_with_test_env_lock(async {
-        let harness = RegisteredGlobalDbHarness::open("lcm-native-membership").await;
-        let db = harness.registered.clone();
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
         let session_id = "codex-native-membership-session";
         let mut messages = Vec::new();
         for ordinal in 1..=4 {
@@ -1010,11 +1097,8 @@ done
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&codex_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let codex_bin_env = codex_bin.to_string_lossy().into_owned();
-        let _env = TestEnvironment::set([
-            ("TRACEDECAY_CODEX_BIN", codex_bin_env.as_str()),
-            ("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
-        ]);
+        fixture.pin_codex(&codex_bin);
+        let _env = TestEnvironment::set([("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5")]);
 
         let converged =
             super::super::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
@@ -1851,18 +1935,15 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
 #[test]
 fn mega_session_convergence_bounds_protection_and_compression_pages() {
     run_with_test_env_lock(async {
-        // Summarization must never reach the operator's installed agent CLI.
+        // Summarization must never reach the operator's installed agent CLI:
+        // this profile shard has no `lcm.summarizer_executables.v1` binding,
+        // so every provider stays unconfigured and nothing is launched.
         let temporary = tempfile::tempdir().unwrap();
-        let missing_bin = temporary.path().join("cursor-agent-absent");
-        let missing_bin_env = missing_bin.to_string_lossy().into_owned();
         let workspace_env = temporary.path().to_string_lossy().into_owned();
-        let _env = TestEnvironment::set([
-            ("TRACEDECAY_CURSOR_AGENT_BIN", missing_bin_env.as_str()),
-            (
-                "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
-                workspace_env.as_str(),
-            ),
-        ]);
+        let _env = TestEnvironment::set([(
+            "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
+            workspace_env.as_str(),
+        )]);
         const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
         let harness = RegisteredGlobalDbHarness::open("lcm-summary-convergence-mega").await;
         let db = harness.registered.clone();
@@ -1921,8 +2002,8 @@ fn mega_session_convergence_bounds_protection_and_compression_pages() {
 fn retained_pages_never_reuse_unbound_session_wide_native_text() {
     run_with_test_env_lock(async {
         const RAW_ROWS: i64 = tracedecay_lcm::LCM_SCAN_PAGE_ROWS + 1;
-        let harness = RegisteredGlobalDbHarness::open("lcm-page-bound-summary").await;
-        let db = harness.registered.clone();
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
         let storage_root = db.db_path().parent().unwrap();
         let session_id = "page-bound-summary-session";
         assert!(db.upsert_session(&session("cursor", session_id)).await);
@@ -1934,17 +2015,22 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
                 .unwrap();
         }
         let native_text = "one native summary for the entire retained session";
-        let native_summary = canonical_record(canonical_envelope(
-            "cursor",
-            session_id,
-            "session-wide-native-summary",
-            None,
-            (u64::try_from(RAW_ROWS + 1).unwrap(), 0),
-            vec![serde_json::json!({
-                "kind": "compaction",
-                "summary": native_text
-            })],
-        ));
+        let native_summary = canonical_record_for_scope(
+            canonical_envelope(
+                "cursor",
+                session_id,
+                "session-wide-native-summary",
+                None,
+                (u64::try_from(RAW_ROWS + 1).unwrap(), 0),
+                vec![serde_json::json!({
+                    "kind": "compaction",
+                    "summary": native_text
+                })],
+            ),
+            ObservationScopeV1::Project {
+                project_id: fixture.project_id.clone(),
+            },
+        );
         ingest_canonical(&db, session_id, &[], &[&native_summary]).await;
 
         let temporary = tempfile::tempdir().unwrap();
@@ -1961,10 +2047,9 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let cursor_bin_env = cursor_bin.to_string_lossy().into_owned();
+        fixture.pin_cursor_agent(&cursor_bin);
         let workspace_env = temporary.path().to_string_lossy().into_owned();
         let _env = TestEnvironment::set([
-            ("TRACEDECAY_CURSOR_AGENT_BIN", cursor_bin_env.as_str()),
             (
                 "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
                 workspace_env.as_str(),
@@ -2027,8 +2112,8 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
 #[test]
 fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
     run_with_test_env_lock(async {
-        let harness = RegisteredGlobalDbHarness::open("lcm-revised-raw-summary").await;
-        let db = harness.registered.clone();
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
         let storage_root = db.db_path().parent().unwrap();
         let session_id = "revised-raw-summary-session";
         assert!(db.upsert_session(&session("cursor", session_id)).await);
@@ -2090,10 +2175,9 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let cursor_bin_env = cursor_bin.to_string_lossy().into_owned();
+        fixture.pin_cursor_agent(&cursor_bin);
         let workspace_env = temporary.path().to_string_lossy().into_owned();
         let _env = TestEnvironment::set([
-            ("TRACEDECAY_CURSOR_AGENT_BIN", cursor_bin_env.as_str()),
             (
                 "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
                 workspace_env.as_str(),
@@ -2181,8 +2265,8 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
 #[test]
 fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
     run_with_test_env_lock(async {
-        let harness = RegisteredGlobalDbHarness::open("lcm-disjoint-summary-revisions").await;
-        let db = harness.registered.clone();
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
         let storage_root = db.db_path().parent().unwrap();
         let session_id = "disjoint-summary-revisions";
         assert!(db.upsert_session(&session("cursor", session_id)).await);
@@ -2291,10 +2375,9 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let cursor_bin_env = cursor_bin.to_string_lossy().into_owned();
+        fixture.pin_cursor_agent(&cursor_bin);
         let workspace_env = temporary.path().to_string_lossy().into_owned();
         let _env = TestEnvironment::set([
-            ("TRACEDECAY_CURSOR_AGENT_BIN", cursor_bin_env.as_str()),
             (
                 "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
                 workspace_env.as_str(),
@@ -2313,8 +2396,8 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
         ));
         drop(db);
 
-        let harness = harness.restart().await;
-        let restarted = harness.registered.clone();
+        let fixture = fixture.restart().await;
+        let restarted = fixture.db();
         for _ in 0..8 {
             super::super::lcm_summary_convergence::run_summary_convergence_page(
                 restarted.clone(),
@@ -2401,8 +2484,8 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
 #[test]
 fn retained_summary_rejects_a_role_revision_during_model_generation() {
     run_with_test_env_lock(async {
-        let harness = RegisteredGlobalDbHarness::open("lcm-summary-revision-barrier").await;
-        let db = harness.registered.clone();
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
         let storage_root = db.db_path().parent().unwrap().to_path_buf();
         let session_id = "summary-revision-barrier-session";
         assert!(db.upsert_session(&session("cursor", session_id)).await);
@@ -2429,10 +2512,9 @@ fn retained_summary_rejects_a_role_revision_during_model_generation() {
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&cursor_bin, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let cursor_bin_env = cursor_bin.to_string_lossy().into_owned();
+        fixture.pin_cursor_agent(&cursor_bin);
         let workspace_env = temporary.path().to_string_lossy().into_owned();
         let _env = TestEnvironment::set([
-            ("TRACEDECAY_CURSOR_AGENT_BIN", cursor_bin_env.as_str()),
             (
                 "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
                 workspace_env.as_str(),
@@ -2861,6 +2943,12 @@ struct CanonicalRecord {
 }
 
 fn canonical_record(envelope: Value) -> CanonicalRecord {
+    canonical_record_for_scope(envelope, ObservationScopeV1::Profile)
+}
+
+/// A canonical record whose observation is owned by `scope`; the scope must
+/// match the shard the record is ingested into (profile-wide or one project).
+fn canonical_record_for_scope(envelope: Value, scope: ObservationScopeV1) -> CanonicalRecord {
     let typed: CanonicalObservationEnvelopeV1 = serde_json::from_value(envelope.clone()).unwrap();
     let record_id = typed.stable_record_id().as_str();
     let receipt = SanitizationReceiptV1::new(
@@ -2881,7 +2969,7 @@ fn canonical_record(envelope: Value) -> CanonicalRecord {
                 typed.relations().session_id().clone(),
             )
             .unwrap(),
-            ObservationScopeV1::Profile,
+            scope,
             ObservationSourceGenerationV1::new(1).unwrap(),
             typed.evidence().range(),
             typed.evidence().ordering_domain(),
@@ -3074,8 +3162,8 @@ async fn ingest_codex_compaction_evidence(
 #[test]
 fn codex_and_cursor_daemon_adapters_commit_exact_authoritative_summaries() {
     run_with_test_env_lock(async {
-        let harness = RegisteredGlobalDbHarness::open("lcm-provider-summary-adapters").await;
-        let db = harness.registered.clone();
+        let fixture = ProjectSummarizerFixture::open().await;
+        let db = fixture.db();
         let temporary = tempfile::tempdir().unwrap();
         let cursor_bin = temporary.path().join("cursor-agent");
         let codex_bin = temporary.path().join("codex");
@@ -3104,17 +3192,17 @@ done
         for path in [&cursor_bin, &codex_bin] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let cursor_bin_env = cursor_bin.to_string_lossy().into_owned();
-        let codex_bin_env = codex_bin.to_string_lossy().into_owned();
+        fixture.pin(LcmSummarizerExecutablesV1 {
+            cursor_agent: LcmSummarizerExecutableV1::configured(cursor_bin.clone()).unwrap(),
+            codex: LcmSummarizerExecutableV1::configured(codex_bin.clone()).unwrap(),
+        });
         let workspace_env = temporary.path().to_string_lossy().into_owned();
         let env = TestEnvironment::set([
-            ("TRACEDECAY_CURSOR_AGENT_BIN", cursor_bin_env.as_str()),
             (
                 "TRACEDECAY_CURSOR_SUMMARY_WORKSPACE",
                 workspace_env.as_str(),
             ),
             ("TRACEDECAY_CURSOR_SUMMARY_TIMEOUT_SECS", "5"),
-            ("TRACEDECAY_CODEX_BIN", codex_bin_env.as_str()),
             ("TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS", "5"),
         ]);
 

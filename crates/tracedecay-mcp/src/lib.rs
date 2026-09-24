@@ -77,10 +77,9 @@ pub use context_headings::{
     CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
 };
 pub use handlers::{
-    CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, effective_path, generic_tool_result,
-    handle_multi_root, handle_work, handle_workflow, rendered_tool_result, require_node_id,
-    require_object_args, require_positive_limit, take_internal_context_memory_analytics,
-    text_tool_result, tool_json, tool_json_with_md, unique_file_paths,
+    decode_primitive_request, effective_path, generic_tool_result, handle_multi_root, handle_work,
+    handle_workflow, rendered_tool_result, require_node_id, require_object_args,
+    require_positive_limit, text_tool_result, tool_json, tool_json_with_md, unique_file_paths,
 };
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,

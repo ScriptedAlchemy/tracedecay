@@ -80,6 +80,20 @@ fn normalize_composer_bubble_record(
     if let Ok(thread_id) = ObservationId::new(composer_id) {
         relations = relations.with_thread_id(thread_id);
     }
+    if let Some(parent) = native
+        .get("tracedecayParentComposerId")
+        .and_then(Value::as_str)
+        .and_then(|parent| SessionId::new(parent).ok())
+    {
+        relations = relations.with_parent_session_id(parent);
+        if let Some(tool_call_id) = native
+            .get("tracedecayParentToolCallId")
+            .and_then(Value::as_str)
+            .and_then(|id| ObservationId::new(id).ok())
+        {
+            relations = relations.with_parent_tool_use_id(tool_call_id);
+        }
+    }
     let mut facts = Vec::new();
     if let Some(project_path) = native
         .get("tracedecayProjectPath")
@@ -496,6 +510,23 @@ pub fn composer_observation_with_session(
             ] {
                 if let Some(value) = value.filter(|value| !value.is_null()) {
                     object.insert(key.to_string(), value.clone());
+                }
+            }
+            // A subagent composer's `subagentInfo` names the composer that
+            // spawned it and the spawning `task_v2` calls in order; the first
+            // is the spawn, later ones resumed it.
+            if let Some(spawn) = envelope.get("subagentInfo")
+                && let Some(parent) = spawn
+                    .get("parentComposerId")
+                    .filter(|parent| parent.as_str().is_some_and(|parent| !parent.is_empty()))
+            {
+                object.insert("tracedecayParentComposerId".to_string(), parent.clone());
+                if let Some(call) = spawn
+                    .pointer("/toolCallIdHistory/0")
+                    .or_else(|| spawn.get("toolCallId"))
+                    .filter(|call| call.is_string())
+                {
+                    object.insert("tracedecayParentToolCallId".to_string(), call.clone());
                 }
             }
         }

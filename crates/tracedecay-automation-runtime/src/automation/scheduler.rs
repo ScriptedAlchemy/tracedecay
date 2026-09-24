@@ -361,36 +361,52 @@ where
 }
 
 #[hotpath::measure(label = "automation.scheduler.decision")]
+/// Decides whether `task` is due under `config`, given the ledger `records`
+/// and the executable the backend now in force would spawn
+/// (`AgentTaskBackend::executable`); the latter is part of the backend
+/// identity a settled deterministic failure is judged against.
 pub fn schedule_decision(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
     now_secs: i64,
 ) -> AutomationScheduleDecision {
-    schedule_decision_or_history_denial(config, task, records, activity, now_secs, true)
+    schedule_decision_or_history_denial(config, executable, task, records, activity, now_secs, true)
 }
 
 pub fn host_receipt_decision(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
     now_secs: i64,
 ) -> AutomationScheduleDecision {
-    schedule_decision_or_history_denial(config, task, records, activity, now_secs, false)
+    schedule_decision_or_history_denial(
+        config, executable, task, records, activity, now_secs, false,
+    )
 }
 
 fn schedule_decision_or_history_denial(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
     now_secs: i64,
     enforce_schedule: bool,
 ) -> AutomationScheduleDecision {
-    match schedule_decision_for_trigger(config, task, records, activity, now_secs, enforce_schedule)
-    {
+    match schedule_decision_for_trigger(
+        config,
+        executable,
+        task,
+        records,
+        activity,
+        now_secs,
+        enforce_schedule,
+    ) {
         Ok(decision) => decision,
         Err(_) => {
             AutomationScheduleDecision::skipped(AutomationSkipReasonV1::SchedulerHistoryInvalid)
@@ -400,6 +416,7 @@ fn schedule_decision_or_history_denial(
 
 fn schedule_decision_for_trigger(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
     activity: SessionActivity,
@@ -515,7 +532,7 @@ fn schedule_decision_for_trigger(
             );
             // Identity-stand first: a deterministic failure stamped under the
             // current backend stays suppressed until that identity changes.
-            match deterministic_backend_failure_standing(record, config) {
+            match deterministic_backend_failure_standing(record, config, executable) {
                 Ok(BackendFailureStanding::Stands) => {
                     return Ok(AutomationScheduleDecision::skipped(
                         AutomationSkipReasonV1::BackendIdentitySuppressed,
@@ -659,6 +676,7 @@ enum BackendFailureStanding {
 fn deterministic_backend_failure_standing(
     record: &AutomationRunLedgerRecord,
     config: &AutomationConfig,
+    executable: Option<&Path>,
 ) -> Result<BackendFailureStanding> {
     let Some(classification) = record.error_classification else {
         return Ok(BackendFailureStanding::NotSettled);
@@ -669,7 +687,7 @@ fn deterministic_backend_failure_standing(
     let Some(recorded_identity) = record.backend_identity.as_deref() else {
         return Ok(BackendFailureStanding::NotSettled);
     };
-    if backend_identity(config)? != recorded_identity {
+    if backend_identity(config, executable)? != recorded_identity {
         return Ok(BackendFailureStanding::IdentityChanged);
     }
     let ladder_reproduced_the_class = !record.backend_attempts.is_empty()
@@ -1663,6 +1681,7 @@ mod tests {
     /// every attempt, stamped with `identity`.
     fn settled_backend_failure(
         config: &AutomationConfig,
+        executable: Option<&Path>,
         error: &str,
         classification: AgentTaskFailureClass,
         attempts: u32,
@@ -1687,7 +1706,7 @@ mod tests {
                 backoff_millis: 0,
             })
             .collect();
-        record.backend_identity = identity.or_else(|| backend_identity(config).ok());
+        record.backend_identity = identity.or_else(|| backend_identity(config, executable).ok());
         record
     }
 
@@ -1697,13 +1716,10 @@ disconnected: config error: codex app-server closed stdout before completing";
 
     #[test]
     fn deterministic_backend_failure_settles_once_and_never_relaunches() {
-        // The executable override is process-global. Keep the stamped
-        // identity and every later suppression read under one environment
-        // lock so the same-path replacement test cannot interleave them.
-        let _env_lock = tracedecay_runtime_core::config::lock_user_data_dir_test_env();
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
+            None,
             PERMANENT_PROTOCOL_ERROR,
             AgentTaskFailureClass::Permanent,
             3,
@@ -1723,6 +1739,7 @@ disconnected: config error: codex app-server closed stdout before completing";
             assert_eq!(
                 schedule_decision(
                     &config,
+                    None,
                     AgentTaskKind::MemoryCurator,
                     &records,
                     SessionActivity::none(),
@@ -1741,6 +1758,7 @@ disconnected: config error: codex app-server closed stdout before completing";
         let config = curator_config();
         let mut record = settled_backend_failure(
             &config,
+            None,
             DISCONNECT_ERROR,
             AgentTaskFailureClass::Disconnected,
             3,
@@ -1753,6 +1771,7 @@ disconnected: config error: codex app-server closed stdout before completing";
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
@@ -1772,10 +1791,11 @@ evidence about it",
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("codex-backend");
         std::fs::write(&path, b"backend-revision-one").unwrap();
-        let _env = super::super::backend_identity::CodexBinEnvGuard::set(&path);
+        let executable = Some(path.as_path());
         let config = curator_config();
         let records = vec![settled_backend_failure(
             &config,
+            executable,
             PERMANENT_PROTOCOL_ERROR,
             AgentTaskFailureClass::Permanent,
             3,
@@ -1786,6 +1806,7 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                executable,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
@@ -1799,6 +1820,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                executable,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
@@ -1832,6 +1854,7 @@ evidence about it",
         ] {
             let records = vec![settled_backend_failure(
                 &config,
+                None,
                 error,
                 classification,
                 3,
@@ -1843,6 +1866,7 @@ evidence about it",
             assert_eq!(
                 schedule_decision(
                     &config,
+                    None,
                     AgentTaskKind::MemoryCurator,
                     &records,
                     SessionActivity::none(),
@@ -1857,6 +1881,7 @@ evidence about it",
             assert!(
                 schedule_decision(
                     &config,
+                    None,
                     AgentTaskKind::MemoryCurator,
                     &records,
                     SessionActivity::none(),
@@ -1873,6 +1898,7 @@ evidence about it",
         let config = curator_config();
         let mut record = settled_backend_failure(
             &config,
+            None,
             DISCONNECT_ERROR,
             AgentTaskFailureClass::Disconnected,
             3,
@@ -1887,6 +1913,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::MemoryCurator,
                 &records,
                 SessionActivity::none(),
@@ -1930,6 +1957,7 @@ evidence about it",
         let decision_at = |reason: &'static str, now: i64| {
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &[budget_exhausted_skip_with_reason(
                     "run-exhausted",
@@ -1980,6 +2008,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &records,
                 SessionActivity::at(2_500),
@@ -2007,6 +2036,7 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &[exhausted, earlier_success],
                 SessionActivity::at(2_500),
@@ -2037,6 +2067,7 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::at(2_500),
@@ -2049,6 +2080,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::at(2_500),
@@ -2075,6 +2107,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SkillWriter,
                 &records,
                 SessionActivity::at(2_500),
@@ -2098,6 +2131,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &records,
                 SessionActivity::at(2_500),
@@ -2131,6 +2165,7 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 std::slice::from_ref(&timeout),
                 SessionActivity::at(1_500),
@@ -2143,6 +2178,7 @@ evidence about it",
         assert!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 std::slice::from_ref(&timeout),
                 SessionActivity::at(1_500),
@@ -2167,6 +2203,7 @@ evidence about it",
         assert_eq!(
             schedule_decision(
                 &config,
+                None,
                 AgentTaskKind::SessionReflector,
                 &[cancelled],
                 SessionActivity::at(1_500),

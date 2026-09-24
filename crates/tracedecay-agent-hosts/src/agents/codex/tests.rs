@@ -857,11 +857,15 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
 fn install_fake_codex_cli(
     dir: &Path,
 ) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
-    let binary = dir.join(format!("codex{}", std::env::consts::EXE_SUFFIX));
-    std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
+    // Windows runs neither a shebang script nor one named `.exe`; a batch
+    // file is the native spelling the host-program lookup admits.
+    #[cfg(windows)]
+    std::fs::write(dir.join("codex.cmd"), "@exit /b 0\r\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let binary = dir.join("codex");
+        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").unwrap();
         let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&binary, permissions).unwrap();

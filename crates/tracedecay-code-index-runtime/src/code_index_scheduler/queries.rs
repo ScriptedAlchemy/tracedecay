@@ -35,10 +35,10 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
     ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest, NodeKind,
-    PrincipalId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId,
-    RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
+    PrincipalId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalBudget,
+    RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1,
+    UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -54,21 +54,18 @@ use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest,
 };
-use tracedecay_query::retrieval::graph::{
-    GraphLaneRequest, GraphLaneRetriever, graph_read_cancellation,
-};
+use tracedecay_query::retrieval::graph::graph_read_cancellation;
 use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::{
-    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalExecutionControl, RetrievalPortError,
+    CodeCandidateBindingV1, RetrievalExecutionControl, RetrievalPortError,
 };
 use tracedecay_query::retrieval::{
-    AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
-    NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
-    PreparedQueryRoutingBindingsV1, PreparedQueryV1, QueryExecutionContractErrorV1,
-    route_authenticated_prepared_query_cursor,
+    AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeLaneOutcomeV1,
+    NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1, NativeSymbolRecordV1,
+    PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryRoutingBindingsV1, PreparedQueryV1,
+    QueryExecutionContractErrorV1, route_authenticated_prepared_query_cursor,
 };
 
 const CALLABLE_CODE_SORT: &str = "sort.application.code-index.v1";
@@ -1165,11 +1162,6 @@ impl NativeRecordReadPortV1 for LatestCompleteCodeIndexV1 {
     }
 }
 
-struct GraphProjectionNativeRecordReadPortV1 {
-    generation: CodeGenerationId,
-    reader: CodeGraphInteractiveReader,
-}
-
 fn graph_projection_symbol_record(
     summary: tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
     symbol: &SymbolOccurrenceId,
@@ -1216,32 +1208,6 @@ fn graph_projection_symbol_record(
         signature: metadata.signature,
         is_async: metadata.is_async,
     })
-}
-
-impl NativeRecordReadPortV1 for GraphProjectionNativeRecordReadPortV1 {
-    fn generation(&self) -> &CodeGenerationId {
-        &self.generation
-    }
-
-    fn occurrence(
-        &self,
-        _binding: &CodeCandidateBindingV1,
-    ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        Err(QueryExecutionContractErrorV1::RecordUnavailable)
-    }
-
-    fn symbol(
-        &self,
-        symbol: &SymbolOccurrenceId,
-        file: &FileOccurrenceId,
-    ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
-        let summary = self
-            .reader
-            .symbol_summary(symbol, Arc::new(tracedecay_graph_db::NeverCancelled))
-            .map_err(|_| QueryExecutionContractErrorV1::RecordUnavailable)?
-            .ok_or(QueryExecutionContractErrorV1::RecordUnavailable)?;
-        graph_projection_symbol_record(summary, symbol, file)
-    }
 }
 
 struct TextArtifactNativeRecordReadPortV1 {
@@ -1315,19 +1281,6 @@ fn application_symbol_record(record: NativeSymbolRecordV1) -> SymbolPrimitiveRec
     }
 }
 
-fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord {
-    SymbolRelationRecord {
-        symbol: application_symbol_record(record.symbol),
-        edge_kind: record.edge_kind.map_or_else(
-            || "unknown".to_owned(),
-            |edge| relation_edge_kind_name(edge).to_owned(),
-        ),
-        dispatch_via_trait: false,
-        dispatch_from: None,
-        depth: Some(record.depth),
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DispatchExpansionStop {
     Cancelled,
@@ -1372,7 +1325,6 @@ fn visit_trait_dispatch_targets(
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
     control: &Arc<dyn RetrievalExecutionControl>,
-    examined: &mut u64,
     mut visit: impl FnMut(
         &tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
     ) -> Result<bool, DispatchExpansionStop>,
@@ -1393,9 +1345,7 @@ fn visit_trait_dispatch_targets(
         .ok_or(DispatchExpansionStop::Unavailable)?
         .simple_name
         .clone();
-    let relation_limit = usize::try_from(budget.max_candidates_per_lane)
-        .unwrap_or(usize::MAX)
-        .max(1);
+    let relation_limit = MAX_RELATION_CANDIDATE_KEYS;
     check_dispatch_control(control.as_ref(), budget)?;
     let parent_batches = match reader.callers(
         std::slice::from_ref(callee),
@@ -1408,14 +1358,9 @@ fn visit_trait_dispatch_targets(
             tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
                 ..
             },
-        ) => {
-            *examined = examined.saturating_add(relation_limit as u64);
-            return Ok(false);
-        }
+        ) => return Ok(false),
         Err(_) => return Err(dispatch_read_stop(control.as_ref(), budget)),
     };
-    let parent_count = parent_batches.iter().map(Vec::len).sum::<usize>();
-    *examined = examined.saturating_add(parent_count as u64);
     let mut traits = Vec::new();
     for edge in parent_batches.into_iter().flatten() {
         let metadata = edge
@@ -1445,14 +1390,9 @@ fn visit_trait_dispatch_targets(
             tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
                 ..
             },
-        ) => {
-            *examined = examined.saturating_add(relation_limit as u64);
-            return Ok(false);
-        }
+        ) => return Ok(false),
         Err(_) => return Err(dispatch_read_stop(control.as_ref(), budget)),
     };
-    let implementor_count = implementor_batches.iter().map(Vec::len).sum::<usize>();
-    *examined = examined.saturating_add(implementor_count as u64);
     let implementors = implementor_batches
         .into_iter()
         .flatten()
@@ -1473,14 +1413,9 @@ fn visit_trait_dispatch_targets(
             tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted {
                 ..
             },
-        ) => {
-            *examined = examined.saturating_add(relation_limit as u64);
-            return Ok(false);
-        }
+        ) => return Ok(false),
         Err(_) => return Err(dispatch_read_stop(control.as_ref(), budget)),
     };
-    let child_count = child_batches.iter().map(Vec::len).sum::<usize>();
-    *examined = examined.saturating_add(child_count as u64);
     for child in child_batches
         .into_iter()
         .flatten()
@@ -1510,160 +1445,96 @@ fn visit_trait_dispatch_targets(
     Ok(true)
 }
 
-fn callee_dispatch_usage(
-    page: &NativeLanePageV1<SymbolRelationRecord>,
-    examined: u64,
-    control: &dyn RetrievalExecutionControl,
-) -> RetrievalBudgetUsage {
-    RetrievalBudgetUsage {
-        candidates_examined: page.coverage.examined.saturating_add(examined),
-        candidates_returned: u64::try_from(page.items.len()).unwrap_or(u64::MAX),
-        hydrated_results: u64::try_from(page.items.len()).unwrap_or(u64::MAX),
-        hydration_bytes: 0,
-        elapsed_micros: control.elapsed_micros(),
-    }
-}
-
-fn augment_callee_dispatch_page(
+/// Appends the concrete impl methods reachable through each direct callee's
+/// trait as compact keys (`dispatch_from` names the trait method), so they
+/// page and hydrate like every other relation. Dispatch keys follow the
+/// direct keys in canonical order; a trait fan-out past the key ceiling
+/// leaves the listing incomplete rather than claiming full dispatch.
+fn augment_callee_dispatch_keys(
     reader: &CodeGraphInteractiveReader,
-    page: NativeLanePageV1<NativeGraphRecordV1>,
+    found: &mut GraphRelationKeysV1,
     scope: &tracedecay_contracts::CodeQueryScope,
     budget: RetrievalBudget,
     control: &Arc<dyn RetrievalExecutionControl>,
-) -> Result<NativeLanePageV1<SymbolRelationRecord>, Box<NativeLaneOutcomeV1<SymbolRelationRecord>>>
-{
-    let candidate_cap = usize::try_from(budget.max_candidates_per_lane).unwrap_or(usize::MAX);
-    let mut page = NativeLanePageV1 {
-        generation: page.generation,
-        items: page
-            .items
-            .into_iter()
-            .map(application_graph_record)
-            .collect(),
-        total_eligible: page.total_eligible,
-        coverage: page.coverage,
-    };
-    let direct = page.items.clone();
-    let mut seen = direct
+) -> Result<(), DispatchExpansionStop> {
+    let mut seen = found
+        .keys
         .iter()
-        .map(|record| record.symbol.node_id.clone())
+        .map(|key| key.occurrence.clone())
         .collect::<BTreeSet<_>>();
-    let mut examined = 0_u64;
-    let mut eligible = 0_u64;
-
-    'callees: for callee in direct {
-        match check_dispatch_control(control.as_ref(), budget) {
-            Ok(()) => {}
-            Err(DispatchExpansionStop::Cancelled) => {
-                return Err(Box::new(NativeLaneOutcomeV1::Cancelled));
-            }
-            Err(DispatchExpansionStop::TimedOut) => {
-                return Err(Box::new(NativeLaneOutcomeV1::TimedOut(
-                    callee_dispatch_usage(&page, examined, control.as_ref()),
-                )));
-            }
-            Err(DispatchExpansionStop::Unavailable) => {
-                return Err(Box::new(NativeLaneOutcomeV1::Unavailable(
-                    RetrievalFailure::AuthorityUnavailable {
-                        detail: "verified code graph dispatch authority is unavailable".to_owned(),
-                    },
-                )));
-            }
-        }
-        if page.items.len() >= candidate_cap {
-            page.coverage.unknown = page.coverage.unknown.saturating_add(1);
-            break;
-        }
-        let Ok(callee_id) = SymbolOccurrenceId::new(callee.symbol.node_id.clone()) else {
-            continue;
-        };
+    let mut dispatch = Vec::new();
+    for callee in &found.keys {
         let exhausted = visit_trait_dispatch_targets(
             reader,
-            &callee_id,
+            &callee.occurrence,
             scope,
             budget,
             control,
-            &mut examined,
             |target| {
-                if !seen.insert(target.occurrence.as_str().to_owned()) {
-                    return Ok(true);
+                if seen.insert(target.occurrence.clone()) {
+                    dispatch.push(RelationKeyV1 {
+                        occurrence: target.occurrence.clone(),
+                        edge_kind: RelationEdgeKindV1::Calls,
+                        dispatch_from: Some(callee.occurrence.clone()),
+                        depth: callee.depth,
+                    });
                 }
-                let file = target
-                    .binding
-                    .as_ref()
-                    .map(|binding| &binding.file)
-                    .ok_or(DispatchExpansionStop::Unavailable)?;
-                let symbol =
-                    graph_projection_symbol_record(target.clone(), &target.occurrence, file)
-                        .map(application_symbol_record)
-                        .map_err(|_| DispatchExpansionStop::Unavailable)?;
-                eligible = eligible.saturating_add(1);
-                page.items.push(SymbolRelationRecord {
-                    symbol,
-                    edge_kind: relation_edge_kind_name(RelationEdgeKindV1::Calls).to_owned(),
-                    dispatch_via_trait: true,
-                    dispatch_from: Some(callee.symbol.node_id.clone()),
-                    depth: callee.depth,
-                });
-                Ok(page.items.len() < candidate_cap)
+                Ok(found.keys.len() + dispatch.len() < MAX_RELATION_CANDIDATE_KEYS)
             },
-        );
-        match exhausted {
-            Ok(true) => {}
-            Ok(false) => {
-                page.coverage.unknown = page.coverage.unknown.saturating_add(1);
-                break 'callees;
-            }
-            Err(DispatchExpansionStop::Cancelled) => {
-                return Err(Box::new(NativeLaneOutcomeV1::Cancelled));
-            }
-            Err(DispatchExpansionStop::TimedOut) => {
-                return Err(Box::new(NativeLaneOutcomeV1::TimedOut(
-                    callee_dispatch_usage(&page, examined, control.as_ref()),
-                )));
-            }
-            Err(DispatchExpansionStop::Unavailable) => {
-                return Err(Box::new(NativeLaneOutcomeV1::Unavailable(
-                    RetrievalFailure::AuthorityUnavailable {
-                        detail: "verified code graph dispatch authority is unavailable".to_owned(),
-                    },
-                )));
-            }
+        )?;
+        if !exhausted {
+            found.complete = false;
+            break;
         }
     }
-    page.total_eligible = page.total_eligible.saturating_add(eligible);
-    page.coverage.examined = page.coverage.examined.saturating_add(examined);
-    page.coverage.eligible = page.coverage.eligible.saturating_add(eligible);
-    Ok(page)
+    dispatch.sort_by(|left, right| {
+        left.depth
+            .cmp(&right.depth)
+            .then(left.occurrence.cmp(&right.occurrence))
+    });
+    found.keys.append(&mut dispatch);
+    Ok(())
 }
 
-fn augment_callee_dispatch(
-    reader: &CodeGraphInteractiveReader,
-    outcome: NativeLaneOutcomeV1<NativeGraphRecordV1>,
-    scope: &tracedecay_contracts::CodeQueryScope,
-    budget: RetrievalBudget,
+/// A relation read that stopped is typed by what stopped it: the request's
+/// cancellation, its deadline, or the graph authority.
+fn relation_read_stop<T>(
+    prepared: &impl PreparedCallableQueryStateV1,
+    stop: DispatchExpansionStop,
     control: &Arc<dyn RetrievalExecutionControl>,
-) -> NativeLaneOutcomeV1<SymbolRelationRecord> {
-    match outcome {
-        NativeLaneOutcomeV1::Complete(page) => {
-            match augment_callee_dispatch_page(reader, page, scope, budget, control) {
-                Ok(page) => NativeLaneOutcomeV1::Complete(page),
-                Err(terminal) => *terminal,
-            }
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    let finished_at = query_finished_at();
+    let generation = prepared.generation().clone();
+    match stop {
+        DispatchExpansionStop::Cancelled => {
+            let mut evidence =
+                terminal_lane_evidence(finished_at, generation, OmissionReason::Cancelled);
+            evidence.cancellation = Some(CancellationObservation {
+                stage: CancellationStage::DuringRead,
+                observed_at: finished_at,
+            });
+            RetrievalPortOutcome::Cancelled(evidence)
         }
-        NativeLaneOutcomeV1::Partial { page, reason } => {
-            match augment_callee_dispatch_page(reader, page, scope, budget, control) {
-                Ok(page) => NativeLaneOutcomeV1::Partial { page, reason },
-                Err(terminal) => *terminal,
-            }
+        DispatchExpansionStop::TimedOut => {
+            let mut evidence =
+                terminal_lane_evidence(finished_at, generation, OmissionReason::TimedOut);
+            evidence.budget.elapsed_micros = control.elapsed_micros();
+            RetrievalPortOutcome::TimedOut(evidence)
         }
-        NativeLaneOutcomeV1::Unavailable(reason) => NativeLaneOutcomeV1::Unavailable(reason),
-        NativeLaneOutcomeV1::Denied => NativeLaneOutcomeV1::Denied,
-        NativeLaneOutcomeV1::Stale(source) => NativeLaneOutcomeV1::Stale(source),
-        NativeLaneOutcomeV1::BudgetExceeded(usage) => NativeLaneOutcomeV1::BudgetExceeded(usage),
-        NativeLaneOutcomeV1::TimedOut(usage) => NativeLaneOutcomeV1::TimedOut(usage),
-        NativeLaneOutcomeV1::Cancelled => NativeLaneOutcomeV1::Cancelled,
+        DispatchExpansionStop::Unavailable => unavailable_for_generation(finished_at, generation),
     }
+}
+
+fn relation_read_failure<T>(
+    prepared: &impl PreparedCallableQueryStateV1,
+    control: &Arc<dyn RetrievalExecutionControl>,
+    budget: RetrievalBudget,
+) -> RetrievalPortOutcome<CodeQueryPage<T>> {
+    relation_read_stop(
+        prepared,
+        dispatch_read_stop(control.as_ref(), budget),
+        control,
+    )
 }
 
 fn symbol_record(
@@ -2265,6 +2136,25 @@ struct GraphRelationKeysV1 {
     complete: bool,
 }
 
+/// Compact relation keys one navigation query enumerates before it reports
+/// the remainder as unknown (`Partial`, `Budget` omission, `total` = the
+/// admitted count the cursor walks).
+///
+/// This is a runaway guard, not the page budget: the fusion profile's
+/// `max_candidates_per_lane` (32) ranks search candidates and must not bound
+/// an exhaustive relation listing, which is what made `code_callers` and
+/// `code_callees` answer a 104-relation symbol with `total: 32`. Keys are
+/// identities only and rows hydrate per page, so `total` is the true relation
+/// count whenever the neighborhood fits under this ceiling.
+///
+/// Enumeration costs about 60 µs per relation (Hotpath
+/// `query.graph.relation_keys`: 2.1 ms at 32 relations, 5.7 ms at 104, 60 ms
+/// at 1,000, 125 ms at 2,000; two `graph_db` entity reads per edge, the far
+/// symbol's only for the scope path) and is paid again on every page, so this
+/// ceiling keeps a page under one second while the request deadline
+/// (`TimedOut`) remains the bound on the rest.
+const MAX_RELATION_CANDIDATE_KEYS: usize = 10_000;
+
 fn graph_summary_symbol_record(
     summary: tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
 ) -> Result<SymbolPrimitiveRecord, PreparedQueryErrorV1> {
@@ -2279,6 +2169,7 @@ fn graph_summary_symbol_record(
         .map_err(|_| PreparedQueryErrorV1::Unavailable)
 }
 
+#[hotpath::measure(label = "query.graph.relation_keys")]
 fn graph_relation_keys(
     reader: &CodeGraphInteractiveReader,
     start: &SymbolOccurrenceId,
@@ -2286,9 +2177,9 @@ fn graph_relation_keys(
     reverse: bool,
     maximum_depth: u32,
     scope: &tracedecay_contracts::CodeQueryScope,
-    cap: usize,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
 ) -> Result<GraphRelationKeysV1, PreparedQueryErrorV1> {
+    let cap = MAX_RELATION_CANDIDATE_KEYS;
     let mut queue = VecDeque::from([(start.clone(), 0_u32)]);
     let mut visited = BTreeSet::from([start.clone()]);
     let mut keys = Vec::new();
@@ -2358,6 +2249,7 @@ fn graph_relation_keys(
     Ok(GraphRelationKeysV1 { keys, complete })
 }
 
+#[hotpath::measure(label = "query.graph.relation_hydrate")]
 fn hydrate_graph_relation_records(
     reader: &CodeGraphInteractiveReader,
     keys: &[RelationKeyV1],
@@ -2374,7 +2266,7 @@ fn hydrate_graph_relation_records(
             Ok(SymbolRelationRecord {
                 symbol: graph_summary_symbol_record(summary)?,
                 edge_kind: relation_edge_kind_name(key.edge_kind).to_owned(),
-                dispatch_via_trait: key.edge_kind == RelationEdgeKindV1::Implements,
+                dispatch_via_trait: key.dispatch_from.is_some(),
                 dispatch_from: key
                     .dispatch_from
                     .as_ref()
@@ -2804,7 +2696,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
         request: &'a CodeRelationRequest,
     ) -> CallableCodeQueryFuture<'a, SymbolRelationRecord> {
         Box::pin(async move {
-            let (prepared, query_binding_digest) = prepare_graph_callable_query_or_return!(
+            let (prepared, binding) = prepare_graph_callable_query_or_return!(
                 self,
                 context,
                 request,
@@ -2819,104 +2711,52 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     &request.meta.order,
                 )
             );
-            let latest = &prepared.latest;
-            let served_generation = latest.metadata().manifest().generation_id.clone();
-            let finished_at = query_finished_at();
-            let base = prepared.query.request();
-            let Ok(symbol) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
-                return unavailable(finished_at);
-            };
-            let Ok(Some(summary)) = prepared
-                .reader
-                .symbol_summary(&symbol, Arc::new(tracedecay_graph_db::NeverCancelled))
-            else {
-                return unavailable_for_generation(finished_at, served_generation);
-            };
-            let Some(symbol_binding) = summary.binding else {
-                return unavailable(finished_at);
-            };
-            let source_occurrence =
-                SourceOccurrenceId::new(format!("code-symbol:{}", symbol.as_str()))
-                    .unwrap_or_else(|_| panic!("validated symbol creates source occurrence"));
-            let seed = CodeCandidateBindingV1 {
-                candidate_anchor: RetrievalAnchorId::new(format!(
-                    "code-symbol:{}",
-                    symbol.as_str()
-                ))
-                .unwrap_or_else(|_| panic!("validated symbol creates anchor")),
-                occurrence: CodeOccurrenceRefV1 {
-                    generation: served_generation.clone(),
-                    file: symbol_binding.file,
-                    symbol: Some(symbol),
-                    chunk: symbol_binding.chunk,
-                },
-                language_descriptor_revision: symbol_binding.language_descriptor_revision,
-                matched_term_kinds: Vec::new(),
-                source_occurrence,
-            };
-            let graph_budget = graph_budget_for_request(base.budget, context.request);
-            let lane_request = GraphLaneRequest {
-                generation: served_generation.clone(),
-                seed_anchors: vec![seed],
-                edge_kinds: vec![RelationEdgeKindV1::Calls],
-                max_depth: request.maximum_depth,
-                budget: graph_budget,
-                base: base.clone(),
-            };
-            let Ok(graph_serving) = latest.production_graph_serving() else {
-                return unavailable(finished_at);
-            };
-            let records = GraphProjectionNativeRecordReadPortV1 {
-                generation: served_generation.clone(),
-                reader: prepared.reader.clone(),
-            };
-            let Ok(native_context) =
-                AdmittedGenerationContextV1::admit(served_generation.clone(), &records)
-            else {
-                return unavailable_for_generation(finished_at, served_generation);
-            };
+            let graph_budget =
+                graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let outcome = graph_serving
-                .graph
-                .retrieve_graph(&lane_request, Arc::clone(&graph_control));
-            match outcome {
-                Ok(outcome) => {
-                    let Ok(outcome) = native_context.graph(outcome, |path| {
-                        path_is_in_code_query_scope(path, &request.scope)
-                    }) else {
-                        return unavailable(finished_at);
-                    };
-                    if request.resolve_trait_dispatch {
-                        let outcome = augment_callee_dispatch(
-                            &prepared.reader,
-                            outcome,
-                            &request.scope,
-                            graph_budget,
-                            &graph_control,
-                        );
-                        finish_native_lane_query(
-                            &prepared,
-                            &context,
-                            "code_callees",
-                            query_binding_digest,
-                            &request.meta.page,
-                            outcome,
-                            |record| record,
-                        )
-                    } else {
-                        finish_native_lane_query(
-                            &prepared,
-                            &context,
-                            "code_callees",
-                            query_binding_digest,
-                            &request.meta.page,
-                            outcome,
-                            application_graph_record,
-                        )
-                    }
-                }
-                Err(_) => unavailable(finished_at),
+            let cancellation =
+                graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
+            let start = resolve_graph_start_symbol!(prepared, request.node_id, cancellation);
+            let Ok(mut found) = graph_relation_keys(
+                &prepared.reader,
+                &start,
+                &[RelationEdgeKindV1::Calls],
+                false,
+                request.maximum_depth,
+                &request.scope,
+                Arc::clone(&cancellation),
+            ) else {
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
+            };
+            if request.resolve_trait_dispatch
+                && let Err(stop) = augment_callee_dispatch_keys(
+                    &prepared.reader,
+                    &mut found,
+                    &request.scope,
+                    graph_budget,
+                    &graph_control,
+                )
+            {
+                return relation_read_stop(&prepared, stop, &graph_control);
             }
+            finish_generation_candidate_page(
+                &prepared,
+                &context,
+                "code_callees",
+                binding,
+                found.keys,
+                |slice| {
+                    hydrate_graph_relation_records(
+                        &prepared.reader,
+                        slice,
+                        cancellation,
+                        &self.relation_symbol_hydrations,
+                    )
+                },
+                &request.meta.page,
+                "callees",
+                found.complete,
+            )
         })
     }
 
@@ -3147,8 +2987,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let graph_budget =
                 graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
-            let cap = graph_budget.max_candidates_per_lane as usize;
+            let cancellation =
+                graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
+            let cap = MAX_RELATION_CANDIDATE_KEYS;
             let selector_simple = selector
                 .rsplit_once("::")
                 .map_or(selector.as_str(), |(_, name)| name);
@@ -3167,10 +3008,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     Arc::clone(&cancellation),
                 ),
             ) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             let mut complete = targets.len() <= cap && simple_targets.len() <= cap;
             targets.extend(simple_targets);
@@ -3182,8 +3020,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             }
             let mut keys = Vec::new();
             for target in targets {
-                let remaining = cap.saturating_sub(keys.len());
-                if remaining == 0 {
+                if keys.len() >= cap {
                     complete = false;
                     break;
                 }
@@ -3194,19 +3031,19 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     true,
                     1,
                     &request.scope,
-                    remaining,
                     Arc::clone(&cancellation),
                 ) else {
-                    return unavailable_for_generation(
-                        query_finished_at(),
-                        prepared.generation().clone(),
-                    );
+                    return relation_read_failure(&prepared, &graph_control, graph_budget);
                 };
                 complete &= found.complete;
                 keys.extend(found.keys);
             }
             keys.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
             keys.dedup_by(|left, right| left.occurrence == right.occurrence);
+            if keys.len() > cap {
+                keys.truncate(cap);
+                complete = false;
+            }
             finish_generation_candidate_page(
                 &prepared,
                 &context,
@@ -3251,7 +3088,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let graph_budget =
                 graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
+            let cancellation =
+                graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
             let start = resolve_graph_start_symbol!(prepared, request.node_id, cancellation);
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
@@ -3260,13 +3098,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 false,
                 request.maximum_depth,
                 &request.scope,
-                graph_budget.max_candidates_per_lane as usize,
                 Arc::clone(&cancellation),
             ) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             let parent_node_id = request.node_id.clone();
             finish_generation_candidate_page(
@@ -3325,7 +3159,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let graph_budget =
                 graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
+            let cancellation =
+                graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
             let start = resolve_graph_start_symbol!(prepared, request.node_id, cancellation);
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
@@ -3334,13 +3169,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 true,
                 request.maximum_depth,
                 &request.scope,
-                graph_budget.max_candidates_per_lane as usize,
                 Arc::clone(&cancellation),
             ) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             let mut traversed = vec![start];
             traversed.extend(
@@ -3425,7 +3256,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let graph_budget =
                 graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
+            let cancellation =
+                graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
             let start = resolve_graph_start_symbol!(prepared, request.node_id, cancellation);
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
@@ -3442,13 +3274,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 true,
                 request.maximum_depth,
                 &request.scope,
-                graph_budget.max_candidates_per_lane as usize,
                 Arc::clone(&cancellation),
             ) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             finish_generation_candidate_page(
                 &prepared,
@@ -3500,8 +3328,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let graph_budget =
                 graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
-            let cap = graph_budget.max_candidates_per_lane as usize;
+            let cancellation =
+                graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
+            let cap = MAX_RELATION_CANDIDATE_KEYS;
             let Ok(mut summaries) = prepared.reader.find_symbols(
                 &|_, binding, metadata| {
                     let Some(path) = binding.and_then(|binding| binding.logical_path.as_deref())
@@ -3515,10 +3344,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 cap.saturating_add(1),
                 Arc::clone(&cancellation),
             ) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             let complete = summaries.len() <= cap;
             summaries.truncate(cap);
@@ -3795,7 +3621,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             let graph_budget =
                 graph_budget_for_request(prepared.query.request().budget, context.request);
             let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-            let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
+            let cancellation =
+                graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
             let start = resolve_graph_start_symbol!(prepared, request.node_id, cancellation);
             let Ok(found) = graph_relation_keys(
                 &prepared.reader,
@@ -3809,13 +3636,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 true,
                 1,
                 &request.scope,
-                graph_budget.max_candidates_per_lane as usize,
                 Arc::clone(&cancellation),
             ) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             finish_generation_candidate_page(
                 &prepared,
@@ -3863,7 +3686,8 @@ fn navigation_symbol_query<'a>(
         let graph_budget =
             graph_budget_for_request(prepared.query.request().budget, context.request);
         let graph_control = CallableRetrievalExecutionControl::for_request(context.request);
-        let cancellation = graph_read_cancellation(graph_control, graph_budget.deadline_micros);
+        let cancellation =
+            graph_read_cancellation(Arc::clone(&graph_control), graph_budget.deadline_micros);
         let start = resolve_graph_start_symbol!(prepared, request.node_id, cancellation);
         let mut items = Vec::new();
         let summary = match prepared
@@ -3901,13 +3725,9 @@ fn navigation_symbol_query<'a>(
                 false,
                 1,
                 &request.scope,
-                graph_budget.max_candidates_per_lane as usize,
                 Arc::clone(&cancellation),
             ) else {
-                return unavailable_for_generation(
-                    query_finished_at(),
-                    prepared.generation().clone(),
-                );
+                return relation_read_failure(&prepared, &graph_control, graph_budget);
             };
             return finish_generation_candidate_page(
                 &prepared,

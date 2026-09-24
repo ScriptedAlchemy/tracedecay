@@ -119,6 +119,12 @@ pub struct ApplicationEnvelope<T> {
     /// activity beside the result rather than inside it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub touched_files: Vec<String>,
+    /// The code-graph generation a graph-backed operation served, so every
+    /// surface can report a stale seat beside the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_graph: Option<crate::retrieval::ServedCodeGraphGenerationV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analytics: Option<super::InvocationAnalyticsV1>,
 }
 
 impl<T> ApplicationEnvelope<T> {
@@ -134,6 +140,8 @@ impl<T> ApplicationEnvelope<T> {
             scope,
             outcome: ApplicationOutcome::Evidence(packet),
             touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         }
     }
 
@@ -149,6 +157,8 @@ impl<T> ApplicationEnvelope<T> {
             scope,
             outcome: ApplicationOutcome::Preview(preview),
             touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         }
     }
 
@@ -164,6 +174,8 @@ impl<T> ApplicationEnvelope<T> {
             scope,
             outcome: ApplicationOutcome::Effect(effect),
             touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
         }
     }
 }

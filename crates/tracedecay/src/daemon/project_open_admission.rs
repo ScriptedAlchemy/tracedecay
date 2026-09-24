@@ -905,6 +905,14 @@ impl ProjectOpenTasks {
         }
     }
 
+    /// Signals every admitted open to stop at its next cancellation boundary
+    /// without waiting; `shutdown` joins them.
+    pub(super) fn cancel_all(&self) {
+        for entry in self.lock_registry().routes.values() {
+            entry.cancellation.cancel();
+        }
+    }
+
     #[hotpath::skip]
     pub(super) async fn shutdown(&self) -> bool {
         self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)

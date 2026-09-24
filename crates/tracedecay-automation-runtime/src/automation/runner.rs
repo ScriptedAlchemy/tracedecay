@@ -382,6 +382,7 @@ pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlem
 /// `Ok(Err(dispatch))` is the not-due answer the caller returns verbatim.
 async fn acquire_combined_task_lock(
     config: &AutomationConfig,
+    executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
@@ -393,6 +394,7 @@ async fn acquire_combined_task_lock(
         Some(guard) => {
             task_run_gate_for_retained_settlement(
                 config,
+                executable,
                 dashboard_root,
                 sessions_db,
                 task,
@@ -401,7 +403,17 @@ async fn acquire_combined_task_lock(
             )
             .await?
         }
-        None => task_run_gate(config, dashboard_root, sessions_db, task, trigger).await?,
+        None => {
+            task_run_gate(
+                config,
+                executable,
+                dashboard_root,
+                sessions_db,
+                task,
+                trigger,
+            )
+            .await?
+        }
     };
     Ok(match gate {
         SchedulerGate::Proceed(lock) => Ok(lock),
@@ -494,6 +506,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         let sessions_db = project_automation_sessions(cg);
         let _reflector_lock = match acquire_combined_task_lock(
             config,
+            backend.executable(),
             &dashboard_root,
             sessions_db.as_ref(),
             AgentTaskKind::SessionReflector,
@@ -508,6 +521,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
         };
         let _skill_lock = match acquire_combined_task_lock(
             config,
+            backend.executable(),
             &dashboard_root,
             sessions_db.as_ref(),
             AgentTaskKind::SkillWriter,
@@ -598,6 +612,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
             &reflector_run_id,
             options.trigger,
             config,
+            backend.executable(),
             AgentTaskKind::SessionReflector,
             &started_at,
             input_hash.clone(),
@@ -609,6 +624,7 @@ fn run_combined_review_for_retrieval_inner<'a>(
             &skill_run_id,
             options.trigger,
             config,
+            backend.executable(),
             AgentTaskKind::SkillWriter,
             &started_at,
             input_hash,

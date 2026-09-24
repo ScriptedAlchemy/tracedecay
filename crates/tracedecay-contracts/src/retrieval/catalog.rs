@@ -198,9 +198,8 @@ const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
 
 fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
     match spec.operation {
-        // These established tool handlers retain their current wire schemas
-        // and rendering across the generic CLI fallback and MCP, while using
-        // this operation identity for canonical code-graph read admission.
+        // The project's graph-tool owner answers these for the tool surfaces
+        // only; their typed results render as the established tool output.
         "context" | "node" | "impact" | "similar" | "redundancy" | "rename_preview"
         | "port_status" | "port_order" | "todos" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,

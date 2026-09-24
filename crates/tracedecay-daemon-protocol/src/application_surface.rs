@@ -884,7 +884,8 @@ pub fn parse_application_surface_request(
                 .map(ApplicationSurfaceRequest::Retained)
                 .map_err(ApplicationSurfaceAdapterError::invalid_request)
         }
-        ApplicationSurfaceOperation::Node
+        ApplicationSurfaceOperation::Context
+        | ApplicationSurfaceOperation::Node
         | ApplicationSurfaceOperation::Impact
         | ApplicationSurfaceOperation::Similar
         | ApplicationSurfaceOperation::Redundancy

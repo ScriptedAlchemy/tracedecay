@@ -4,9 +4,10 @@
 //! when it goes away, and authorizes the workspace a request may reach.
 
 use tracedecay_daemon_service::{
-    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationService,
-    DaemonLspSessionAccess,
+    DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
+    DaemonInvocationService, DaemonLspSessionAccess,
 };
+use tracedecay_runtime_core::logging::log_daemon_event;
 
 use super::*;
 
@@ -121,31 +122,41 @@ async fn authorize_lsp_workspace_for_uris(
     if requested_uris.is_empty()
         || requested_uris.len() > tracedecay_daemon_protocol::MAX_LSP_WORKSPACE_ROOTS
     {
-        return None;
+        return lsp_workspace_refused("root_count_out_of_bounds", project_path);
     }
     // A single folder is only ever the active project: a lone sibling hint
     // must not silently reroute the session. A multi-folder workspace may span
     // registered roots, but the active project must be one of them so the
     // session stays anchored to the admitted route.
     let single_root = requested_uris.len() == 1;
-    let active_project_path = project_path.canonicalize().ok()?;
+    let Ok(active_project_path) = project_path.canonicalize() else {
+        return lsp_workspace_refused("active_project_unresolvable", project_path);
+    };
     let graphs = store_administration.mounted_project_graphs().await;
     let mut selectors = Vec::with_capacity(requested_uris.len());
     let mut canonical_uris = BTreeMap::new();
     let mut admits_active_project = false;
     for requested_uri in requested_uris {
-        let uri = url::Url::parse(&requested_uri).ok()?;
+        let Ok(uri) = url::Url::parse(&requested_uri) else {
+            return lsp_workspace_refused("root_uri_unparseable", project_path);
+        };
         if uri.scheme() != "file" || uri.query().is_some() || uri.fragment().is_some() {
-            return None;
+            return lsp_workspace_refused("root_uri_not_a_local_file", project_path);
         }
-        let requested_path = uri.to_file_path().ok()?.canonicalize().ok()?;
+        let Some(requested_path) = uri
+            .to_file_path()
+            .ok()
+            .and_then(|path| path.canonicalize().ok())
+        else {
+            return lsp_workspace_refused("root_path_unresolvable", project_path);
+        };
         if single_root
             && !tracedecay_runtime_core::path_safety::same_canonical_path(
                 &requested_path,
                 &active_project_path,
             )
         {
-            return None;
+            return lsp_workspace_refused("single_root_is_not_the_active_project", &requested_path);
         }
         if tracedecay_runtime_core::path_safety::same_canonical_path(
             &requested_path,
@@ -173,36 +184,74 @@ async fn authorize_lsp_workspace_for_uris(
         candidates.sort();
         candidates.dedup();
         let [project_id] = candidates.as_slice() else {
-            return None;
+            return lsp_workspace_refused(
+                if candidates.is_empty() {
+                    "root_has_no_mounted_project"
+                } else {
+                    "root_has_ambiguous_mounted_projects"
+                },
+                &requested_path,
+            );
         };
-        selectors.push(
-            tracedecay_contracts::RegisteredRootSelectorV1::new(
-                project_id.clone(),
-                requested_path.clone(),
-            )
-            .ok()?,
-        );
-        let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
-        canonical_uris.insert(requested_path, canonical_uri);
+        let Ok(selector) = tracedecay_contracts::RegisteredRootSelectorV1::new(
+            project_id.clone(),
+            requested_path.clone(),
+        ) else {
+            return lsp_workspace_refused("root_selector_invalid", &requested_path);
+        };
+        selectors.push(selector);
+        let Ok(canonical_uri) = url::Url::from_file_path(&requested_path) else {
+            return lsp_workspace_refused("root_uri_unrepresentable", &requested_path);
+        };
+        canonical_uris.insert(requested_path, canonical_uri.to_string());
     }
     if !admits_active_project {
-        return None;
+        return lsp_workspace_refused("active_project_not_requested", project_path);
     }
-    let resolved = super::invocation_dispatch::resolve_multi_root_projects(
+    let resolved = match super::invocation_dispatch::resolve_multi_root_projects(
         store_administration,
         service,
         &selectors,
     )
     .await
-    .ok()?;
-    let resolved_roots = resolved
-        .into_iter()
-        .map(|(root, scope, locator)| {
-            let uri = canonical_uris.get(&root)?.clone();
-            Some((root, uri, scope, locator))
-        })
-        .collect::<Option<Vec<_>>>()?;
-    service
+    {
+        Ok(resolved) => resolved,
+        Err(problem) => {
+            return lsp_workspace_refused(
+                if problem == DaemonInvocationProblem::Unavailable {
+                    "registered_root_unavailable"
+                } else {
+                    "registered_root_not_authorized"
+                },
+                project_path,
+            );
+        }
+    };
+    let mut resolved_roots = Vec::with_capacity(resolved.len());
+    for (root, scope, locator) in resolved {
+        let Some(uri) = canonical_uris.get(&root).cloned() else {
+            return lsp_workspace_refused("resolved_root_spelling_diverged", &root);
+        };
+        resolved_roots.push((root, uri, scope, locator));
+    }
+    let authorized = service
         .authorize_lsp_workspace(resolved_roots, tracedecay_contracts::clock::now_micros())
-        .await
+        .await;
+    if authorized.is_none() {
+        return lsp_workspace_refused("workspace_authorization_refused", project_path);
+    }
+    authorized
+}
+
+/// Every refusal above reaches the client as the same non-diagnostic
+/// `Denied`, so the cause is recorded in the operator log instead.
+fn lsp_workspace_refused<T>(reason_code: &str, root: &Path) -> Option<T> {
+    log_daemon_event(
+        "lsp_workspace_refused",
+        &[
+            ("root", root.display().to_string()),
+            ("reason_code", reason_code.to_owned()),
+        ],
+    );
+    None
 }
