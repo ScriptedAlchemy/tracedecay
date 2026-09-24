@@ -45,10 +45,9 @@ import {
 
 // Imports live at the top of a module; a `lazy` dynamic import is the
 // documented exception, because the point is that the module is NOT fetched
-// until it is needed. The trace drill-in is a thousand lines plus the whole of
-// `viz/trace`, canvas renderer, spring integrator, palette, and most visits
-// to this workspace never open it, so it is its own chunk rather than dead
-// weight in the spine's. The `TraceFocus` import above stays a normal
+// until it is needed. The trace drill-in is the whole of `viz/trace` (the
+// anatomy plate, its model and readouts), and most visits to this workspace
+// never open it, so it is its own chunk rather than dead weight in the spine's. The `TraceFocus` import above stays a normal
 // top-level type import: types are erased, so it costs nothing at runtime.
 const TraceView = lazy(() =>
   import('./TraceView.tsx').then((m) => ({ default: m.TraceView })),

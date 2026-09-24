@@ -14,9 +14,8 @@
  *
  * Canvas2D cannot read CSS custom properties, so the composing component
  * samples the token block once at mount and once per theme flip and hands the
- * resolved strings in, the same arrangement `viz/trace/palette.ts` uses, which
- * keeps `tokens.css` the single source of the instrument's colour without a
- * `getComputedStyle` call inside a draw.
+ * resolved strings in, which keeps `tokens.css` the single source of the
+ * instrument's colour without a `getComputedStyle` call inside a draw.
  */
 import { kindColor } from '../../viz/graph/kindColor.ts';
 import {

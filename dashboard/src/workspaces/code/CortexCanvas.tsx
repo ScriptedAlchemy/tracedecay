@@ -138,7 +138,7 @@ export function CortexCanvas({
        * is what makes it a text alternative rather than a caption. It is
        * dropped only at widths where the relief is not drawn at all and the
        * table sits immediately below it, because a reader there would be told
-       * the same thing twice. Same rule as `TraceCanvas`. */}
+       * the same thing twice. Same rule as the trace plate. */}
       <div {...(narrow ? {} : { role: 'img', 'aria-label': description })}>
         <canvas
           ref={canvasRef}
