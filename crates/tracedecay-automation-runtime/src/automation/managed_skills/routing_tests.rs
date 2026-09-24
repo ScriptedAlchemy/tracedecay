@@ -1,3 +1,5 @@
+use tracedecay_domain::errors::TraceDecayError;
+
 use super::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSupportFile,
     SkillInstallTarget, create_managed_skill, list_managed_skills, load_managed_skill,
@@ -72,7 +74,7 @@ async fn missing_or_invalid_routing_is_rejected_without_rewriting_records() {
             list_managed_skills(profile.path()).await.unwrap_err(),
         ] {
             assert!(
-                error.to_string().contains(expected_error),
+                matches!(&error, TraceDecayError::Config { message } if message.contains(expected_error)),
                 "unexpected rejection: {error:?}"
             );
         }

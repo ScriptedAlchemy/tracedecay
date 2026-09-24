@@ -545,14 +545,21 @@ fn load_managed_skill_unlocked(profile_root: &Path, id: &str) -> Result<ManagedS
             ))
         }
     })?;
-    let mut skill: ManagedSkill = serde_json::from_slice(&bytes).map_err(|e| {
+    decode_managed_skill_record(&path, &bytes)
+}
+
+/// A stored record that fails to parse or validate is one typed `Config`
+/// failure naming the file, whichever check rejected it.
+fn decode_managed_skill_record(path: &Path, bytes: &[u8]) -> Result<ManagedSkill> {
+    let invalid = |e: &dyn std::fmt::Display| {
         config_error(format!(
-            "failed to parse managed skill record '{}': {e}",
+            "invalid managed skill record '{}': {e}",
             path.display()
         ))
-    })?;
+    };
+    let mut skill: ManagedSkill = serde_json::from_slice(bytes).map_err(|e| invalid(&e))?;
     skill.normalize_timestamps();
-    validate_managed_skill(&skill)?;
+    validate_managed_skill(&skill).map_err(|e| invalid(&e))?;
     Ok(skill)
 }
 
@@ -596,15 +603,7 @@ fn list_managed_skills_unlocked(profile_root: &Path) -> Result<Vec<ManagedSkill>
                 path.display()
             ))
         })?;
-        let mut skill: ManagedSkill = serde_json::from_slice(&bytes).map_err(|e| {
-            config_error(format!(
-                "failed to parse managed skill record '{}': {e}",
-                path.display()
-            ))
-        })?;
-        skill.normalize_timestamps();
-        validate_managed_skill(&skill)?;
-        skills.push(skill);
+        skills.push(decode_managed_skill_record(&path, &bytes)?);
     }
     skills.sort_by(|a, b| a.metadata.id.cmp(&b.metadata.id));
     Ok(skills)
