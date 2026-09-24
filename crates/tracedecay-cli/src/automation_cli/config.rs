@@ -1,4 +1,4 @@
-use crate::cli::{AutomationConfigAction, AutomationConfigScope};
+use crate::cli::AutomationConfigAction;
 use crate::resolve_cli_project_root;
 
 pub(crate) fn project_automation_reconcile_args() -> serde_json::Value {
@@ -34,19 +34,6 @@ pub(super) async fn handle_automation_config_command(
         | AutomationConfigAction::Disable { path, .. }
         | AutomationConfigAction::Set { path, .. } => path.clone(),
     };
-    let scope = match &action {
-        AutomationConfigAction::Get { scope, .. }
-        | AutomationConfigAction::Explain { scope, .. }
-        | AutomationConfigAction::Enable { scope, .. }
-        | AutomationConfigAction::Disable { scope, .. }
-        | AutomationConfigAction::Set { scope, .. } => *scope,
-    };
-    if scope != AutomationConfigScope::Project {
-        return Err(config_error(
-            "automation settings are project-scoped in the V2 configuration control plane; use --scope project",
-        ));
-    }
-
     let requested = resolve_cli_project_root(path, None, None).await?;
     let resolved = crate::commands::resolve_project_scope(requested).await?;
     let current = load_canonical_automation_config(&resolved.project_path).await?;

@@ -11,7 +11,7 @@ mod package_hook;
 mod work;
 mod workflow;
 pub use automation::{
-    AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
+    AutomationAction, AutomationConfigAction, AutomationFactsAction,
     AutomationRunsAction, AutomationSkillsAction,
 };
 use help::*;
