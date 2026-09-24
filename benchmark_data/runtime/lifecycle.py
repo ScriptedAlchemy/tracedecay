@@ -164,9 +164,20 @@ class OwnedDaemon:
             start_new_session=True,
         )
         self.process_group_id = os.getpgid(self.process.pid)
-        self.evidence.process_count = max(
-            1, process_group_process_count(self.process_group_id)
-        )
+        try:
+            self.evidence.process_count = max(
+                1, process_group_process_count(self.process_group_id)
+            )
+        except BaseException:
+            _kill_process_group_without_census(
+                self.process, self.process_group_id, self.evidence
+            )
+            for stream in (self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
+            for log in self._logs:
+                log.close()
+            raise
         self._threads = [
             _start_drain(self.process.stdout, stdout_log),
             _start_drain(self.process.stderr, stderr_log),
@@ -366,9 +377,16 @@ def run_host(
             start_new_session=True,
         )
         process_group_id = os.getpgid(process.pid)
-        evidence.process_count = max(
-            1, process_group_process_count(process_group_id)
-        )
+        try:
+            evidence.process_count = max(
+                1, process_group_process_count(process_group_id)
+            )
+        except BaseException:
+            _kill_process_group_without_census(process, process_group_id, evidence)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            raise
         threads = [
             _start_drain(process.stdout, stdout_handle, stdout_buffer),
             _start_drain(process.stderr, stderr_handle, stderr_buffer),
@@ -482,19 +500,39 @@ def run_host(
     return result
 
 
+def _ps_process_group_count(process_group_id: int) -> int:
+    count = 0
+    try:
+        listing = subprocess.run(
+            ["ps", "-A", "-o", "pgid=", "-o", "state="],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise LifecycleError(
+            f"cannot count processes in process group {process_group_id}"
+        ) from error
+    for line in listing.splitlines():
+        columns = line.split()
+        if (
+            len(columns) >= 2
+            and columns[0] == str(process_group_id)
+            and not columns[1].startswith("Z")
+        ):
+            count += 1
+    return count
+
+
 def process_group_process_count(process_group_id: int) -> int:
-    """Count live Linux processes in one process group."""
+    """Count non-zombie processes in one process group."""
 
     if process_group_id <= 0:
         return 0
     count = 0
     proc = Path("/proc")
     if not proc.is_dir():
-        try:
-            os.killpg(process_group_id, 0)
-        except ProcessLookupError:
-            return 0
-        return 1
+        return _ps_process_group_count(process_group_id)
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
@@ -542,6 +580,24 @@ def terminate_process_group(
     kill_timeout: float | None = None,
 ) -> None:
     bounded_kill_timeout = max(0.01, kill_timeout or max(1.0, grace))
+    try:
+        _terminate_process_group(
+            process, process_group_id, grace, evidence, bounded_kill_timeout
+        )
+    except BaseException:
+        _kill_process_group_without_census(
+            process, process_group_id, evidence, bounded_kill_timeout
+        )
+        raise
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[bytes],
+    process_group_id: int,
+    grace: float,
+    evidence: LifecycleEvidence,
+    bounded_kill_timeout: float,
+) -> None:
     if os.name == "posix" and process_group_process_count(process_group_id):
         try:
             os.killpg(process_group_id, signal.SIGTERM)
@@ -583,6 +639,29 @@ def terminate_process_group(
         if process_group_process_count(process_group_id) == 0:
             break
         time.sleep(0.005)
+
+
+def _kill_process_group_without_census(
+    process: subprocess.Popen[bytes],
+    process_group_id: int,
+    evidence: LifecycleEvidence,
+    timeout: float = 1.0,
+) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process_group_id, signal.SIGKILL)
+        elif process.poll() is None:
+            process.kill()
+        evidence.kill_sent = True
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    if os.name == "posix":
+        _reap_process_group(process_group_id)
 
 
 def _reap_process_group(process_group_id: int) -> None:

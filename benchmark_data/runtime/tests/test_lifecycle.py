@@ -6,10 +6,12 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +40,69 @@ def dashboard_command(mode: str, port: int, *extra: str) -> list[str]:
         str(port),
         *extra,
     ]
+
+
+class ProcessGroupCountTests(unittest.TestCase):
+    def test_ps_counts_only_live_members_of_the_requested_group(self) -> None:
+        listing = " 42 S\n42 R+\n42 Z\n42 Z+\n142 S\n"
+        with (
+            mock.patch.object(lifecycle.Path, "is_dir", return_value=False),
+            mock.patch.object(
+                lifecycle.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=listing),
+            ),
+        ):
+            self.assertEqual(lifecycle.process_group_process_count(42), 2)
+            self.assertEqual(lifecycle.process_group_process_count(43), 0)
+
+    def test_census_failure_cleans_up_spawned_host_and_daemon(self) -> None:
+        command = [sys.executable, "-c", "import time; time.sleep(60)"]
+        real_popen = subprocess.Popen
+        for owner in ("host", "daemon"):
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                spawned = []
+
+                def capture(*args, **kwargs):
+                    process = real_popen(*args, **kwargs)
+                    spawned.append(process)
+                    return process
+
+                with (
+                    mock.patch.object(lifecycle.subprocess, "Popen", side_effect=capture),
+                    mock.patch.object(
+                        lifecycle,
+                        "process_group_process_count",
+                        side_effect=lifecycle.LifecycleError("census failed"),
+                    ),
+                    self.assertRaisesRegex(lifecycle.LifecycleError, "census failed"),
+                ):
+                    if owner == "host":
+                        lifecycle.run_host(
+                            command,
+                            env=os.environ,
+                            log_dir=Path(directory),
+                            timeout=1,
+                            termination_grace=0.05,
+                        )
+                    else:
+                        lifecycle.OwnedDaemon(
+                            command,
+                            env=os.environ,
+                            log_dir=Path(directory),
+                            readiness=lambda: lifecycle.ProbeResult(
+                                True, "ready", "available", None
+                            ),
+                            readiness_timeout=1,
+                            poll_interval=0.01,
+                            termination_grace=0.05,
+                        ).start()
+
+                self.assertEqual(len(spawned), 1)
+                self.assertIsNotNone(spawned[0].poll())
+                for stream in (spawned[0].stdin, spawned[0].stdout, spawned[0].stderr):
+                    if stream is not None:
+                        self.assertTrue(stream.closed)
 
 
 class DashboardLifecycleTests(unittest.TestCase):
