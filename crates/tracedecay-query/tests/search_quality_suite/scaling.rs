@@ -70,10 +70,10 @@ fn common_term_candidates_are_bounded_by_the_rarest_source() {
             document_frequency_budget: MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
         }
     );
-    assert!(
-        !mixed.candidates.is_empty() && mixed.candidates.len() == mixed.coverage.eligible as usize,
-        "only the rare term's documents may be hydrated: {:?}",
+    assert_eq!(
+        (mixed.candidates.len(), mixed.coverage.eligible),
+        (2, 2),
+        "only the two documents holding the rare term may be hydrated: {:?}",
         mixed.coverage
     );
-    assert!(mixed.coverage.eligible < 8);
 }

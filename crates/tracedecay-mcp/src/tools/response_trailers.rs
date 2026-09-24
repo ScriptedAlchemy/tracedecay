@@ -220,14 +220,26 @@ mod tests {
     #[test]
     fn untouched_or_escaping_files_add_no_footer() {
         let root = tempfile::tempdir().expect("root");
-        let mut result = text_result("body", vec!["../outside.rs".to_owned()]);
-        account_tool_result(Some(root.path()), &mut result);
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).expect("project");
+        let outside = root.path().join("outside.rs");
+        std::fs::write(&outside, "x".repeat(400)).expect("outside source");
+        let mut result = text_result(
+            "body",
+            vec![
+                "../outside.rs".to_owned(),
+                outside.display().to_string(),
+                "missing.rs".to_owned(),
+            ],
+        );
+        account_tool_result(Some(&project), &mut result);
         assert_eq!(result.value["content"].as_array().map(Vec::len), Some(1));
         assert_eq!(
-            result
-                .token_accounting()
-                .map(|accounting| accounting.raw_file_tokens),
-            Some(0)
+            result.token_accounting(),
+            Some(ToolTokenAccounting {
+                raw_file_tokens: 0,
+                response_tokens: 1,
+            })
         );
     }
 }

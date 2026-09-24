@@ -688,9 +688,9 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
 }
 
 #[test]
-fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
+fn every_callable_cli_and_mcp_binding_names_an_application_operation() {
     let catalog = super::application_surface_catalog().expect("application catalog");
-    let mut compatibility_operations = std::collections::BTreeSet::new();
+    let mut unmapped = std::collections::BTreeSet::new();
 
     for capability in catalog.capabilities() {
         if !capability.availability().is_callable() {
@@ -698,29 +698,19 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
         }
         for binding_id in capability.binding_ids() {
             let binding = catalog.binding(binding_id).expect("catalog binding");
-            if !matches!(
+            if matches!(
                 binding.surface(),
                 tracedecay_tool_catalog::BindingSurface::Cli
                     | tracedecay_tool_catalog::BindingSurface::Mcp
-            ) || ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
-                .is_some()
+            ) && ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
+                .is_none()
             {
-                continue;
+                unmapped.insert(binding.operation().as_str().to_owned());
             }
-
-            let tool_name = format!("tracedecay_{}", binding.operation().as_str());
-            let resolved = super::resolve_catalog_tool_binding(binding.surface(), &tool_name)
-                .expect("compatibility binding resolution")
-                .unwrap_or_else(|| panic!("{tool_name} must resolve before retained dispatch"));
-            assert_eq!(resolved.binding_id, *binding_id);
-            compatibility_operations.insert(binding.operation().as_str().to_owned());
         }
     }
 
-    assert!(
-        compatibility_operations.is_empty(),
-        "{compatibility_operations:?}"
-    );
+    assert_eq!(unmapped, std::collections::BTreeSet::new());
 }
 
 #[test]
