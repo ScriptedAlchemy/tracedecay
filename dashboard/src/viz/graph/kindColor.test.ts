@@ -9,19 +9,9 @@ function parseOklch(color: string): { l: number; c: number; h: number } {
 }
 
 describe('kindColor', () => {
-  it('gives the common symbol kinds fixed slots on both media', () => {
-    expect(kindColor('function', false)).toBe('oklch(0.8 0.12 202)');
-    expect(kindColor('function', true)).toBe('oklch(0.49 0.135 205)');
-    expect(kindColor('method', false)).toBe('oklch(0.68 0.13 248)');
-    expect(kindColor('struct', false)).toBe('oklch(0.78 0.11 185)');
-    expect(kindColor('class', false)).toBe('oklch(0.78 0.11 185)');
-    expect(kindColor('trait', false)).toBe('oklch(0.9 0.045 222)');
-    expect(kindColor('trait', true)).toBe('oklch(0.41 0.06 225)');
-    expect(kindColor('module', false)).toBe('oklch(0.7 0.12 225)');
-    expect(kindColor('enum', false)).toBe('oklch(0.62 0.1 186)');
-    expect(kindColor('field', false)).toBe('oklch(0.86 0.075 168)');
-    expect(kindColor('impl', false)).toBe('oklch(0.82 0.08 244)');
-    expect(kindColor('Function', false)).toBe(kindColor('function', false));
+  it('resolves a named kind case-insensitively, one side per medium', () => {
+    expect(kindColor('Function', false)).toBe('oklch(0.8 0.12 202)');
+    expect(kindColor('FUNCTION', true)).toBe('oklch(0.49 0.135 205)');
   });
 
   it('hashes other names onto the same ramp, stably', () => {

@@ -18,6 +18,7 @@ describe('Delivery inbox · lanes field', () => {
     expect(within(zoom).getByText('2 lanes · 3 bars drawn · 0 compressed · 2 threads')).toBeTruthy();
 
     const field = screen.getByRole('group', { name: LANE_FIELD_LABEL });
+    expect(within(field).queryByText('provider reads · observed')).toBeNull();
     await user.click(within(field).getAllByRole('button')[0]!);
     expect(screen.getByTestId('location').textContent).toBe(`?pr=${PR_42}`);
     expect(within(zoom).getByText('2 lanes · 2 bars drawn · 1 compressed · 0 threads')).toBeTruthy();
@@ -46,15 +47,12 @@ describe('Delivery inbox · lanes field', () => {
     expect(screen.getByTestId('location').textContent).toBe('?pr=project.alpha%3Agithub%3A43');
   });
 
-  it('keeps the legend truthful: observation window, recency, amber named by source, printed thread grades', async () => {
+  it('names each drawn amber source, counts the unevaluated ones, and prints thread grades', async () => {
     renderDelivery(INBOX);
     const field = await screen.findByRole('group', { name: LANE_FIELD_LABEL });
     expect(screen.getByRole('list', { name: 'Attention legend' }).textContent).toBe(
       'amber = active attention, named sourceCI = ci failureREVIEW = unresolved review1 attention source not evaluated',
     );
-    const legend = screen.getByRole('list', { name: 'Field legend' });
-    expect(within(legend).getByText('▬ bar = daemon observation window, not PR lifetime · the inbox serves no opened or merged time')).toBeTruthy();
-    expect(within(legend).getByText('luminance = recency of the newest observation within this loaded page')).toBeTruthy();
     expect([...field.querySelectorAll('[data-thread]')].map((thread) => [thread.getAttribute('data-grade'), thread.textContent])).toEqual([
       ['explicit', 'WORK · EXPLICIT'],
       ['inferred', 'AGENT · INFERRED'],

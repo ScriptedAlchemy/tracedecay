@@ -175,7 +175,7 @@ describe('provenance cameras', () => {
     expect(container.querySelector('[data-frame="alpha"]')!.textContent).toContain('0.10–0.80');
     fireEvent.click(screen.getByRole('button', { name: 'Open beta: 8 facts' }));
     expect(screen.getByTestId('fact-constellation').getAttribute('data-camera-mode')).toBe('open');
-    expect(container.querySelectorAll('[data-fact-id^="beta-"]').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('[data-fact-id^="beta-"]')).toHaveLength(8);
     expect(container.querySelectorAll('[data-fact-id^="alpha-"]')).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: 'All categories' }));
     expect(screen.getByTestId('fact-constellation').getAttribute('data-camera-mode')).toBe('aggregate');

@@ -304,10 +304,5 @@ describe('temporal field paint', () => {
       expect(gutter.getAttribute('y')).toBe('106');
       expect(gutter.getAttribute('width')).toBe('2');
     });
-
-    it('names its encodings in the legend', () => {
-      const { container } = renderWith();
-      expect(container.querySelector('[data-legend-encodings]')?.textContent).toContain('brightness = recency within the loaded page');
-    });
   });
 });

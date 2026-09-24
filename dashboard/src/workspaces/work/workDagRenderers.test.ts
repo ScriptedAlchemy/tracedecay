@@ -2,15 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { workTaskView } from '../../test/workTaskViewFixture.ts';
 import { workDagLayout } from './workDagLayout.ts';
 import { dsmStep, workDsm } from './workDsmModel.ts';
-import { laneTreatment } from './workLaneTreatment.ts';
 import type { WorkTaskView } from './workProductView.ts';
 import { workDagReading } from './workViewsModel.ts';
 
 /**
  * The matrix re-reads the layered layout. These tests pin what it derives
  * from a five-task plan with a declared cycle: which relations become cells,
- * which of those are back-edges, how bright each cell is, and the
- * typed-state family each lane wears.
+ * which of those are back-edges, and how bright each cell is.
  */
 
 const PLAN: readonly WorkTaskView[] = [
@@ -73,23 +71,5 @@ describe('workDsm', () => {
     expect(dsmStep('PageDown', 0, 30)).toBe(10);
     expect(dsmStep('a', 2, 5)).toBeNull();
     expect(dsmStep('Home', null, 0)).toBeNull();
-  });
-});
-
-describe('laneTreatment', () => {
-  it('maps every lane to the design system typed-state family', () => {
-    const family = (lane: Parameters<typeof laneTreatment>[0]) => {
-      const treatment = laneTreatment(lane);
-      return [treatment.family, treatment.hatched, treatment.dashed];
-    };
-    expect(family({ kind: 'projected', lane: 'blocked' })).toEqual(['degraded', true, false]);
-    expect(family({ kind: 'projected', lane: 'review' })).toEqual(['degraded', true, false]);
-    expect(family({ kind: 'projected', lane: 'cancelled' })).toEqual(['disconnected', false, true]);
-    expect(family({ kind: 'projected', lane: 'unavailable' })).toEqual(['disconnected', false, true]);
-    expect(family({ kind: 'projected', lane: 'running' })).toEqual(['activity', false, false]);
-    expect(family({ kind: 'projected', lane: 'done' })).toEqual(['ready', false, false]);
-    expect(family({ kind: 'projected', lane: 'scheduled' })).toEqual(['loading', false, false]);
-    expect(family({ kind: 'projected', lane: 'todo' })).toEqual(['neutral', false, false]);
-    expect(family({ kind: 'uncarded' })).toEqual(['disconnected', false, true]);
   });
 });

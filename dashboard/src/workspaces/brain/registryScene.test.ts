@@ -100,11 +100,12 @@ describe('strikeFor', () => {
   });
 
   it('has no hop for a project without a drawn relation', () => {
-    expect(strikeFor(pulse('notes'), scene())?.hop).toEqual([]);
+    expect(strikeFor(pulse('notes'), scene())).toEqual({ touched: 'notes', hop: [], energy: 0.7, label: 'tool call' });
   });
 
   it('never treats liveness, unscoped events, hubs or undrawn projects as activity', () => {
     const built = scene();
+    expect(strikeFor(pulse('core'), built)?.touched).toBe('core');
     expect(strikeFor(pulse('core', 'heartbeat'), built)).toBeNull();
     expect(strikeFor(pulse(null), built)).toBeNull();
     expect(strikeFor(pulse('repo:/repos/core/.git'), built)).toBeNull();

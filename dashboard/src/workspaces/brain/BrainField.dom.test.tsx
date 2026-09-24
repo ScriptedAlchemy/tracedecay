@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProjectRegistryEntry, ProjectRepoGroup } from '../../contracts/generated.ts';
 import { BrainField, FieldLegend } from './BrainField.tsx';
 import { composeRegistryField } from './field.ts';
-import { buildRegistryScene } from './registryScene.ts';
+import { buildGraphScene, buildRegistryScene } from './registryScene.ts';
 
 const NOW = Date.now() / 1000;
 
@@ -102,12 +102,26 @@ describe('BrainField', () => {
     expect(onInspect).toHaveBeenLastCalledWith(null);
   });
 
-  it('names amber as admitted activity and cyan as inspection', () => {
-    render(<FieldLegend scene={SCENE} />);
-    expect(screen.getByText('admitted activity on the exact touched project and one drawn hop, 4.2 s half-life')).toBeTruthy();
-    expect(screen.getByText('inspection and focus, never activity')).toBeTruthy();
-    expect(screen.getByText('one indexed unit; stores ice at the core, artifacts by kind')).toBeTruthy();
-    // No crowded cell here, so no cluster frame is claimed.
-    expect(screen.queryByText(/crowded recency × mass cell/)).toBeNull();
+  it('claims amber activity only on the registry field and a cluster frame only for a crowded cell', () => {
+    const amber = () => screen.getByText('amber').nextElementSibling?.textContent;
+    const frame = () => screen.queryByText(/crowded recency × mass cell/);
+    const view = render(<FieldLegend scene={SCENE} />);
+    expect(amber()).toBe('admitted activity on the exact touched project and one drawn hop, 4.2 s half-life');
+    expect(frame()).toBeNull();
+
+    const crowd: ProjectRepoGroup[] = [
+      {
+        label: 'crowd',
+        git_common_dir: '/repos/crowd/.git',
+        project_count: 12,
+        branches: ['main'],
+        projects: Array.from({ length: 12 }, (_, index) => project(`c${String(index).padStart(2, '0')}`, 0.2, 1)),
+      },
+    ];
+    view.rerender(<FieldLegend scene={buildRegistryScene(composeRegistryField(crowd, NOW), crowd, NOW)} />);
+    expect(frame()?.textContent).toBe('a crowded recency × mass cell with its exact count; zoom or click to resolve');
+
+    view.rerender(<FieldLegend scene={buildGraphScene([{ id: 'a', label: 'a', kind: 'function', degree: 1, x: 0, y: 0 }], [])} />);
+    expect(amber()).toBe('none: no symbol-level activity is supplied, so nothing here blooms');
   });
 });

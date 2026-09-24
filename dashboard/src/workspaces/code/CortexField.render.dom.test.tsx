@@ -76,7 +76,8 @@ describe('the relief field', () => {
     const state = await screen.findByText(/this browser gave no 2D canvas, so the 250-symbol field/);
     expect(state.closest('[data-state]')?.getAttribute('data-state')).toBe('unavailable');
     const ledger = screen.getByRole('region', { name: 'Symbol ledger' });
-    await waitFor(() => expect(within(ledger).getAllByRole('button').length).toBeGreaterThan(0));
+    const rows = await within(ledger).findAllByRole('button');
+    expect(rows[0]!.textContent).toBe('01path1,840degfunctiongraph_api.rssrc/dashboard');
   });
 });
 

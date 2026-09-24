@@ -113,11 +113,9 @@ describe('placeLabels', () => {
     ]);
   });
 
-  it('never covers an obstacle belonging to another symbol', () => {
-    const blocked = placeLabels(
-      [[{ id: 'a', x: 0, y: 0, width: 10, height: 10 }]],
-      [{ id: 'b', x: 5, y: 5, width: 4, height: 4 }],
-    );
-    expect(blocked).toEqual([]);
+  it('never covers an obstacle belonging to another symbol, only its own', () => {
+    const label = { id: 'a', x: 0, y: 0, width: 10, height: 10 };
+    expect(placeLabels([[label]], [{ id: 'b', x: 5, y: 5, width: 4, height: 4 }])).toEqual([]);
+    expect(placeLabels([[label]], [{ id: 'a', x: 5, y: 5, width: 4, height: 4 }])).toEqual([label]);
   });
 });

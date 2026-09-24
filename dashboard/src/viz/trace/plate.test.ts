@@ -182,14 +182,9 @@ describe('plate connectors', () => {
     expect(elbowPath([[0, 0]])).toBe('');
   });
 
-  it('gives each kind a shape cue so kind never rests on hue alone', () => {
-    expect(['function', 'method', 'struct', 'trait', 'module'].map(kindShape)).toEqual([
-      'circle',
-      'diamond',
-      'square',
-      'triangle',
-      'bar',
-    ]);
-    expect(kindShape('enum')).toBe(kindShape('enum'));
+  it('gives a named kind its shape and hashes any other kind onto the same five', () => {
+    expect(kindShape('method')).toBe('diamond');
+    expect(kindShape('enum')).toBe('square');
+    expect(kindShape('Method')).toBe('bar');
   });
 });

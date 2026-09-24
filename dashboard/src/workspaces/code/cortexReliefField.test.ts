@@ -39,7 +39,7 @@ describe('reliefSurface', () => {
 
   it('rings a peak below its height and draws nothing above it', () => {
     const surface = reliefSurface([{ x: 0, y: 0, weight: 2 }], { x0: -40, y0: -40, x1: 40, y1: 40 }, 10, 4);
-    expect(contourSegments(surface, 1).length).toBeGreaterThan(0);
+    expect(contourSegments(surface, 1)).toHaveLength(80);
     expect(contourSegments(surface, 2.5).length).toBe(0);
   });
 });

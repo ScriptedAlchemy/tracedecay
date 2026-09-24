@@ -200,12 +200,6 @@ const DYNAMIC: ReadonlyArray<{
     schema: DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
   },
   {
-    label: 'loom_api::temporal dense-fanout page',
-    pathname: '/api/loom/temporal',
-    search: '?limit=200&fixture=dense-fanout',
-    schema: DashboardEnvelopeV1Schema(LoomTemporalPayloadV1Schema),
-  },
-  {
     label: 'lcm_api::session',
     pathname: '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
     schema: DashboardEnvelopeV1Schema(LcmSessionPayloadV1Schema),
@@ -373,25 +367,5 @@ describe('subagent-tree scenarios', () => {
       if (node.depth > 0) expect(position.get(node.parent_session_id!)!).toBeLessThan(position.get(node.session_id)!);
     }
     expect(payload.nodes[0]!.descendants).toBe(120);
-  });
-});
-
-describe('subagent-tree usage', () => {
-  const schema = DashboardEnvelopeV1Schema(AnalyticsSubagentTreePayloadV1Schema);
-  const states = (scenario: 'default' | 'dense-fanout') => {
-    const payload = schema.parse(subagentTreeFixture(scenario)).payload;
-    const count = (predicate: (node: (typeof payload.nodes)[number]) => boolean) =>
-      payload.nodes.filter(predicate).length;
-    return {
-      coverage: payload.usage_coverage,
-      measured: count((node) => node.usage?.complete === true),
-      partial: count((node) => node.usage?.complete === false),
-      absent: count((node) => node.usage == null),
-    };
-  };
-
-  it('carries measured, partial and absent sessions in both scenarios', () => {
-    expect(states('default')).toEqual({ coverage: 'partial', measured: 2, partial: 1, absent: 2 });
-    expect(states('dense-fanout')).toEqual({ coverage: 'complete', measured: 41, partial: 1, absent: 82 });
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
 import { INBOX } from '../../test/deliveryFixtures.ts';
-import { DENSE_LANE_LIMIT, ROW_HEIGHT, laneZoom, layoutLanes, zoomPatch } from './lanes.ts';
+import { DENSE_LANE_LIMIT, laneZoom, layoutLanes, zoomPatch } from './lanes.ts';
 import { buildUmbrellas } from './umbrella.ts';
 
 const VIEWPORT = { width: 900, height: 520 };
@@ -39,8 +39,7 @@ describe('layoutLanes', () => {
 
   it('gives every PR a 44px row band, however thin the drawn bar', () => {
     const layout = layoutLanes(INBOX, INBOX.pull_requests, buildUmbrellas(INBOX), VIEWPORT, PORTFOLIO);
-    expect(layout.rowHeight).toBe(ROW_HEIGHT);
-    expect(ROW_HEIGHT).toBe(44);
+    expect(layout.rowHeight).toBe(44);
     const ys = layout.lanes[0]!.bars.map((bar) => bar.y);
     expect(ys[1]! - ys[0]!).toBe(44);
   });

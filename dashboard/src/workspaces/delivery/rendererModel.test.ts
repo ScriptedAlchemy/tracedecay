@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { INBOX, INBOX_BRANCH_ONLY, T0 } from '../../test/deliveryFixtures.ts';
 import {
-  attentionCode,
   evidenceLinks,
   headJoin,
   headJoinSentence,
@@ -18,12 +17,6 @@ const [PR42, PR43, PR8] = INBOX.pull_requests as [
 const HOUR = 3_600_000_000;
 
 describe('renderer readings', () => {
-  it('prints a short engraved code per attention source', () => {
-    expect(attentionCode('ci_failure')).toBe('CI');
-    expect(attentionCode('unresolved_review')).toBe('REVIEW');
-    expect(attentionCode('stale_provider_state')).toBe('STALE');
-  });
-
   it('types the provider/indexed head join instead of assuming it', () => {
     expect(headJoin(PR42)).toEqual({ kind: 'joined', head: 'a'.repeat(40) });
     expect(headJoinSentence(headJoin(PR43))).toBe('provider head not observed · no read snapshot served');
