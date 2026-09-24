@@ -7,7 +7,7 @@ import {
   useApertureWidth,
   type TopologyInteraction,
 } from './DelegationTopology.tsx';
-import { neighbourhood, type FittedTopology, type TopologyMark } from './delegationTopology.ts';
+import { neighbourhood, subtree, type FittedTopology, type TopologyMark } from './delegationTopology.ts';
 import {
   layoutDelegationTimeline,
   timelineTickLabel,
@@ -15,7 +15,7 @@ import {
   type TimelineRow,
 } from './delegationTimeline.ts';
 import { subagentElapsedSeconds } from './subagentTree.ts';
-import { markHandlers } from './topologyVariant.tsx';
+import { markHandlers } from './agentsView.tsx';
 
 /**
  * The delegation timeline: recorded time across, the delegation hierarchy
@@ -53,6 +53,13 @@ export function DelegationTimeline({
         : null,
     [model, inspectedId],
   );
+  const lifted = useMemo(
+    () => (keep === null && selectedId !== null ? subtree(model, selectedId) : null),
+    [keep, model, selectedId],
+  );
+  const isDim = (id: string) => (keep !== null ? !keep.has(id) : lifted !== null && !lifted.has(id));
+  const linked = (a: string, b: string) =>
+    keep !== null ? keep.has(a) && keep.has(b) : lifted !== null && lifted.has(a) && lifted.has(b);
 
   const laneTop: number[] = [];
   let cursor = AXIS;
@@ -96,12 +103,12 @@ export function DelegationTimeline({
             {ticks?.ticks.map((at) => (
               <g key={at}>
                 <line x1={x(at)} x2={x(at)} y1={AXIS - 6} y2={height} stroke="var(--raw-graph-edge)" strokeOpacity={0.28} strokeDasharray="1 5" />
-                <text x={x(at)} y={AXIS - 12} textAnchor="middle" fill="var(--raw-graph-text)" fillOpacity={0.8} fontSize={11} fontFamily="var(--font-mono)">
+                <text x={x(at)} y={AXIS - 12} textAnchor="middle" fill="var(--raw-graph-text)" fillOpacity={0.8} style={{ fontSize: 'var(--text-2xs)' }} fontFamily="var(--font-mono)">
                   {timelineTickLabel(at, ticks.step)}
                 </text>
               </g>
             ))}
-            <text x={12} y={AXIS - 12} fill="var(--raw-graph-text)" fillOpacity={0.6} fontSize={10} fontFamily="var(--font-mono)" letterSpacing="0.12em">
+            <text x={12} y={AXIS - 12} fill="var(--raw-graph-text)" fillOpacity={0.6} style={{ fontSize: 'var(--text-3xs)' }} fontFamily="var(--font-mono)" letterSpacing="0.12em">
               UTC · RECORDED START → END
             </text>
             {timeline.lanes.map((lane) => {
@@ -137,8 +144,8 @@ export function DelegationTimeline({
             {timeline.brackets.map((bracket) => {
               const parent = timeline.rows[bracket.parentRow]!;
               const child = timeline.rows[bracket.childRow]!;
-              const lit = keep !== null && keep.has(parent.mark.id) && keep.has(child.mark.id);
-              const dim = keep !== null && !lit;
+              const lit = linked(parent.mark.id, child.mark.id);
+              const dim = (keep !== null || lifted !== null) && !lit;
               const at = x(bracket.at);
               const y1 = rowY(parent);
               const y2 = rowY(child);
@@ -171,11 +178,12 @@ export function DelegationTimeline({
                 row={row}
                 y={rowY(row)}
                 x={x}
-                domainEnd={domain?.end ?? null}
+                domain={domain}
                 hatchId={hatchId}
                 inspected={row.mark.id === inspectedId}
                 selected={row.mark.id === selectedId}
-                dim={keep !== null && !keep.has(row.mark.id)}
+                lifted={lifted !== null && lifted.has(row.mark.id) && row.mark.id !== selectedId}
+                dim={isDim(row.mark.id)}
               />
             ))}
           </svg>
@@ -197,7 +205,7 @@ export function DelegationTimeline({
                   top={rowY(row) - ROW / 2}
                   width={width}
                   interaction={interaction}
-                  dim={keep !== null && !keep.has(row.mark.id)}
+                  dim={isDim(row.mark.id)}
                 />
               </li>
             ))}
@@ -238,6 +246,15 @@ export function DelegationTimeline({
   );
 }
 
+/** Bar fill from recency within the loaded page: the latest-ending bar reads
+ * brightest, the earliest faintest. Relative to this reading's own extent,
+ * so it says "later in what was loaded", never "live". */
+export function timelineRecency(row: TimelineRow, domain: { start: number; end: number }): number {
+  const at = row.end ?? domain.end;
+  const fraction = Math.max(0, Math.min(1, (at - domain.start) / (domain.end - domain.start)));
+  return Math.round((0.1 + 0.3 * fraction) * 1000) / 1000;
+}
+
 function barTone(mark: TopologyMark): { stroke: string; fill: string } {
   if (mark.kind === 'bundle') return { stroke: 'var(--raw-graph-text)', fill: 'hatch' };
   switch (mark.node.link) {
@@ -259,26 +276,29 @@ function TimelineBar({
   row,
   y,
   x,
-  domainEnd,
+  domain,
   hatchId,
   inspected,
   selected,
+  lifted,
   dim,
 }: {
   row: TimelineRow;
   y: number;
   x: (at: number) => number;
-  domainEnd: number | null;
+  domain: { start: number; end: number } | null;
   hatchId: string;
   inspected: boolean;
   selected: boolean;
+  lifted: boolean;
   dim: boolean;
 }) {
+  const domainEnd = domain?.end ?? null;
   const tone = barTone(row.mark);
   const stub = row.mark.kind === 'session' && row.mark.parentId === null && row.mark.node.link !== 'root';
   if (row.start === null || domainEnd === null) {
     return (
-      <text x={GUTTER + 8} y={y + 4} fill="var(--raw-graph-text)" fillOpacity={dim ? 0.3 : 0.7} fontSize={11} fontFamily="var(--font-mono)" data-timeline-bar="unplaced">
+      <text x={GUTTER + 8} y={y + 4} fill="var(--raw-graph-text)" fillOpacity={dim ? 0.3 : 0.7} style={{ fontSize: 'var(--text-2xs)' }} fontFamily="var(--font-mono)" data-timeline-bar="unplaced">
         start absent · not placed on time
       </text>
     );
@@ -286,8 +306,10 @@ function TimelineBar({
   const x1 = x(row.start);
   const open = row.end === null;
   const x2 = Math.max(x1 + 3, x(row.end ?? domainEnd));
+  const recency = timelineRecency(row, domain!);
   return (
-    <g opacity={dim ? 0.3 : 1} data-timeline-bar={open ? 'open' : 'closed'}>
+    <g opacity={dim ? 0.3 : 1} data-timeline-bar={open ? 'open' : 'closed'} data-timeline-recency={recency}>
+      {lifted ? <rect x={x1 - 3} y={y - 8} width={x2 - x1 + 6} height={16} fill="none" stroke="var(--raw-graph-accent)" strokeOpacity={0.35} data-timeline-halo="true" /> : null}
       {selected ? <rect x={x1 - 4} y={y - 10} width={x2 - x1 + 8} height={20} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={2} /> : null}
       {inspected && !selected ? <rect x={x1 - 3} y={y - 9} width={x2 - x1 + 6} height={18} fill="none" stroke="var(--raw-graph-text)" strokeOpacity={0.5} /> : null}
       {stub ? (
@@ -299,13 +321,13 @@ function TimelineBar({
         width={x2 - x1}
         height={10}
         fill={tone.fill === 'hatch' ? `url(#${hatchId})` : tone.fill}
-        fillOpacity={tone.fill === 'hatch' ? 1 : open ? 0.08 : inspected || selected ? 0.34 : 0.2}
+        fillOpacity={tone.fill === 'hatch' ? 1 : open ? 0.08 : Math.min(0.55, recency + (inspected || selected ? 0.12 : 0))}
         stroke={tone.stroke}
         strokeWidth={1}
         strokeDasharray={open || row.mark.kind === 'bundle' ? '3 2' : undefined}
       />
       {open ? (
-        <text x={x2 + 6} y={y + 4} fill="var(--raw-graph-text)" fillOpacity={0.7} fontSize={10} fontFamily="var(--font-mono)">
+        <text x={x2 + 6} y={y + 4} fill="var(--raw-graph-text)" fillOpacity={0.7} style={{ fontSize: 'var(--text-3xs)' }} fontFamily="var(--font-mono)">
           open
         </text>
       ) : null}
@@ -357,7 +379,7 @@ function TimelineRowControl({
         className="flex min-w-0 flex-col"
         style={{ paddingLeft: 12 + row.mark.generation * INDENT, width: GUTTER - 8 }}
       >
-        <span className="truncate font-mono text-2xs tabular-nums">
+        <span className="truncate text-body leading-tight">
           {row.mark.kind === 'bundle' ? `${row.mark.sessions} × ${row.mark.label}` : row.mark.label}
         </span>
         <span className="truncate font-mono text-3xs tabular-nums opacity-70">{rowDetail(row.mark)}</span>

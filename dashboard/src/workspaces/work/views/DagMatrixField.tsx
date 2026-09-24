@@ -3,7 +3,7 @@ import { cn } from '../../../ui/cn.ts';
 import { hatchBackground, laneTreatment } from '../workLaneTreatment.ts';
 import { laneReading } from '../workLaneModel.ts';
 import { dsmStep, workDsm } from '../workDsmModel.ts';
-import type { DagFieldProps } from './dagVariant.ts';
+import type { DagFieldProps } from './dagField.ts';
 
 /**
  * The dependency structure matrix: every task on both axes in the layered
@@ -206,13 +206,13 @@ export function DagMatrixField({
           const onCritical = critical?.edges.has(cell.id) ?? false;
           const tone = cell.back ? 'var(--raw-state-conflicting)' : lit ? 'var(--raw-graph-accent)' : 'var(--raw-graph-text)';
           return (
-            <g key={cell.id} opacity={dimmed ? 0.25 : 1} data-work-dsm-cell={cell.id} data-work-dsm-back={cell.back ? 'true' : undefined}>
+            <g key={cell.id} opacity={dimmed ? 0.25 : 1} data-work-dsm-cell={cell.id} data-work-dsm-back={cell.back ? 'true' : undefined} data-work-dsm-intensity={cell.intensity}>
               {cell.kind === 'gating' ? (
-                <rect x={x + 5} y={y + 5} width={CELL - 10} height={CELL - 10} fill={tone} fillOpacity={cell.back ? 0.9 : 0.75} />
+                <rect x={x + 5} y={y + 5} width={CELL - 10} height={CELL - 10} fill={tone} fillOpacity={cell.back ? 0.9 : cell.intensity} />
               ) : cell.kind === 'informational' ? (
-                <rect x={x + 6} y={y + 6} width={CELL - 12} height={CELL - 12} fill="none" stroke={tone} strokeDasharray="3 2" />
+                <rect x={x + 6} y={y + 6} width={CELL - 12} height={CELL - 12} fill="none" stroke={tone} strokeOpacity={cell.intensity} strokeDasharray="3 2" />
               ) : (
-                <circle cx={x + CELL / 2} cy={y + CELL / 2} r={3.5} fill={tone} />
+                <circle cx={x + CELL / 2} cy={y + CELL / 2} r={3.5} fill={tone} fillOpacity={cell.intensity} />
               )}
               {cell.back ? <rect x={x + 2} y={y + 2} width={CELL - 4} height={CELL - 4} fill="none" stroke="var(--raw-state-conflicting)" strokeWidth={1.5} /> : null}
               {onCritical ? <rect x={x + 1.5} y={y + 1.5} width={CELL - 3} height={CELL - 3} fill="none" stroke="var(--raw-graph-alert)" strokeWidth={1.5} /> : null}
@@ -231,6 +231,7 @@ export function DagMatrixField({
         <li className="flex items-center gap-1.5"><span className="size-2.5 bg-state-conflicting outline outline-1 outline-offset-1 outline-state-conflicting" />back-edge · above the diagonal, inside a declared cycle</li>
         <li className="flex items-center gap-1.5"><span className="size-2.5 border border-alert" />amber ring · effort-weighted critical path</li>
         <li className="flex items-center gap-1.5"><span className="size-2.5 border border-edge-strong bg-accent/10" />diagonal block · one stratum</li>
+        <li>brighter · more relations name that column&apos;s task</li>
       </ul>
       {hover !== null ? (
         <div

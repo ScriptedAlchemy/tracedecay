@@ -20,7 +20,7 @@
 import { describe, expect, it } from 'vitest';
 import { z, type ZodType } from 'zod';
 
-import { resolveFixture } from './data.ts';
+import { resolveFixture, subagentTreeFixture } from './data.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
   AnalyticsAgentsPayloadV1Schema,
@@ -336,5 +336,30 @@ describe('memory geometry fixtures answer the request they were given', () => {
     expect(strict.total_pairs).toBe(79_800);
     expect(strict.score_distribution.bins.reduce((sum, bin) => sum + bin.count, 0)).toBe(79_800);
     expect(strict.score_distribution.bins[0]).toEqual({ start: -0.25, end: -0.188, count: 558 });
+  });
+});
+
+describe('subagent-tree scenarios', () => {
+  const schema = DashboardEnvelopeV1Schema(AnalyticsSubagentTreePayloadV1Schema);
+
+  it('keeps the default tree at five sessions and serves the dense fan-out only when asked', () => {
+    const route = '/api/plugins/analytics/subagent-tree';
+    expect(schema.parse(resolveFixture(route)).payload.nodes).toHaveLength(5);
+    expect(schema.parse(resolveFixture(route, '?fixture=dense-fanout')).payload.nodes).toHaveLength(124);
+  });
+
+  it('decodes the dense fan-out and reconciles its own counts', () => {
+    const payload = schema.parse(subagentTreeFixture('dense-fanout')).payload;
+    const agents = new Set(payload.nodes.map((node) => node.session_id));
+    expect(agents.size).toBe(124);
+    expect(payload.nodes.filter((node) => node.depth === 2)).toHaveLength(96);
+    expect(payload.nodes.filter((node) => node.link === 'missing_parent')).toHaveLength(payload.missing_parent_count);
+    expect(payload.nodes.filter((node) => node.ended_at === null)).toHaveLength(13);
+    // Pre-order: every child follows its parent, and `descendants` counts it.
+    const position = new Map(payload.nodes.map((node, index) => [node.session_id, index]));
+    for (const node of payload.nodes) {
+      if (node.depth > 0) expect(position.get(node.parent_session_id!)!).toBeLessThan(position.get(node.session_id)!);
+    }
+    expect(payload.nodes[0]!.descendants).toBe(120);
   });
 });

@@ -4,11 +4,11 @@ import { laneReading } from '../workLaneModel.ts';
 import type { WorkDagLayoutNode } from '../workDagLayout.ts';
 import type { WorkTaskView } from '../workProductView.ts';
 import type { WorkDagReading } from '../workViewsModel.ts';
-import type { CardWiring, DagFieldProps } from './dagVariant.ts';
+import type { CardWiring, DagFieldProps } from './dagField.ts';
 import { RelationLayer } from './DagRelationLayer.tsx';
 
 /**
- * The fitted board: the layered layout unchanged, framed by the field. The
+ * The dependency board: the layered layout unchanged, framed by the field. The
  * board fits the graph's width on load and on resize, never above 100% so the
  * 11px identity and 13px title stay the sizes they were set at, and centres it
  * on both axes, so a three-card graph sits in the middle of its aperture
@@ -108,7 +108,7 @@ export function FittedCard({
       onPointerEnter={wiring.onPointerEnter}
       onKeyDown={wiring.onKeyDown}
       className={cn(
-        'absolute flex flex-col gap-0.5 border px-2.5 py-1.5 text-left rounded-[var(--radius-panel)]',
+        'absolute flex min-h-[44px] flex-col gap-0.5 border px-2.5 py-1.5 text-left rounded-[var(--radius-panel)]',
         'td-raised transition-opacity duration-[var(--dur-state)]',
         'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
         selected ? 'border-accent' : 'border-edge-strong hover:border-text-muted',
@@ -145,7 +145,7 @@ export function FittedCard({
       {showLabels ? (
         <span
           className={cn(
-            'line-clamp-2 min-w-0 text-sm leading-[1.2] text-text-primary',
+            'line-clamp-2 min-w-0 text-body leading-[1.2] text-text-primary',
             treatment.family === 'disconnected' && 'text-text-secondary',
           )}
         >

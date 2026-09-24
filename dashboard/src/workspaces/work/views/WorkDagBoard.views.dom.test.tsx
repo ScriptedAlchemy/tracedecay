@@ -1,8 +1,8 @@
 /**
- * The dependency board's renderers over one graph version. Each is chosen
- * from the address, draws every task the layered board draws, and keeps the
- * board's grammar: hover inspects without moving the address, click or Enter
- * selects into it.
+ * The DAG camera draws the fitted dependency board; the Matrix camera draws
+ * the dependency structure matrix over the same layout. Both are projections
+ * in `?view`, and both keep the board's grammar: hover inspects without moving
+ * the address, click or Enter selects into it.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, waitFor } from '@testing-library/react';
@@ -75,20 +75,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('dependency board renderers', () => {
-  it('switches renderer through the address and keeps the choice there', async () => {
+describe('DAG and Matrix cameras', () => {
+  it('DAG draws the fitted board; cards wear the typed-state family of their lane', async () => {
     const container = await renderBoard('/work?view=dag');
-    expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-variant')).toBe('layered');
-    fireEvent.click(container.querySelector('[data-work-dag-variant-option="matrix"]')!);
-    await waitFor(() => expect(address.search).toContain('dag=matrix'));
-    expect(container.querySelector('[data-work-dag-matrix]')!.getAttribute('data-work-dag-matrix')).toBe('4');
-  });
-
-  it('fitted: cards wear the typed-state family of their lane', async () => {
-    const container = await renderBoard('/work?view=dag&dag=fitted');
+    expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-view')).toBe('graph');
     expect(container.querySelector('[data-work-dag-fitted]')).not.toBeNull();
     const family = (taskId: string) => inField(container, taskId).getAttribute('data-work-lane-family');
     expect(['root', 'middle', 'side', 'leaf'].map(family)).toEqual(['ready', 'ready', 'degraded', 'disconnected']);
+    expect(inField(container, 'side').style.backgroundImage).toContain('repeating-linear-gradient');
+    expect(inField(container, 'leaf').className).toContain('border-dashed');
     fireEvent.pointerEnter(inField(container, 'side'));
     expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-inspected')).toBe('side');
     expect(address.search).not.toContain('task=');
@@ -96,32 +91,38 @@ describe('dependency board renderers', () => {
     await waitFor(() => expect(address.search).toContain('task=side'));
   });
 
-  it('swimlane: one milestone lane, the deepest chain marked, and a holder lane that names its absence', async () => {
-    const container = await renderBoard('/work?view=dag&dag=swimlane');
-    expect(container.querySelector('[data-work-dag-swimlane]')!.getAttribute('data-work-dag-swimlane')).toBe('1');
-    expect(container.querySelector('[data-work-swimlane-chain]')!.textContent).toContain('3 deep');
-    expect(
-      [...container.querySelectorAll('[data-work-swimlane-chain-edge]')].map((node) => node.getAttribute('data-work-swimlane-edge')).sort(),
-    ).toEqual(['gating:middle->leaf', 'gating:root->middle']);
-    fireEvent.click(container.querySelector('[data-work-swimlane-key="holder"]')!);
-    expect(container.querySelector('[data-work-swimlane-lane]')!.getAttribute('data-work-swimlane-lane')).toBe('no handoff recorded');
+  it('Matrix is its own projection tab, kept in the address', async () => {
+    const container = await renderBoard('/work?view=dag');
+    const tab = [...container.querySelectorAll('[role="tab"]')].find((node) => node.textContent === 'Matrix')!;
+    fireEvent.click(tab);
+    await waitFor(() => expect(address.search).toBe('?view=matrix'));
+    expect(container.querySelector('[data-work-dag-matrix]')!.getAttribute('data-work-dag-matrix')).toBe('4');
   });
 
-  it('matrix: one listbox tab stop, arrows inspect, Enter selects', async () => {
-    const container = await renderBoard('/work?view=dag&dag=matrix');
+  it('Matrix: one listbox tab stop, cells lit by fan-in, arrows inspect, Enter selects', async () => {
+    const container = await renderBoard('/work?view=matrix');
     const matrix = container.querySelector<HTMLElement>('[data-work-dag-matrix]')!;
     expect(matrix.getAttribute('role')).toBe('listbox');
     expect(matrix.getAttribute('data-work-dag-matrix-back')).toBe('0');
-    expect(container.querySelectorAll('[data-work-dsm-cell]')).toHaveLength(4);
+    expect(
+      [...container.querySelectorAll('[data-work-dsm-cell]')].map((node) => [
+        node.getAttribute('data-work-dsm-cell'),
+        node.getAttribute('data-work-dsm-intensity'),
+      ]),
+    ).toEqual([
+      ['gating:root->middle', '0.95'],
+      ['gating:root->side', '0.95'],
+      ['gating:middle->leaf', '0.65'],
+      ['gating:side->leaf', '0.65'],
+    ]);
     expect(
       [...container.querySelectorAll('[data-work-dag-matrix] [role="option"]')].map((node) => node.getAttribute('tabindex')),
     ).toEqual(['-1', '-1', '-1', '-1']);
     fireEvent.focus(matrix);
+    expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-inspected')).toBe('root');
     fireEvent.keyDown(matrix, { key: 'ArrowDown' });
-    const inspected = container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-inspected');
-    expect(inspected).not.toBeNull();
-    expect(matrix.getAttribute('aria-activedescendant')).not.toBeNull();
+    expect(container.querySelector('[data-work-dag-field]')!.getAttribute('data-work-dag-inspected')).toBe('middle');
     fireEvent.keyDown(matrix, { key: 'Enter' });
-    await waitFor(() => expect(address.search).toContain(`task=${inspected}`));
+    await waitFor(() => expect(address.search).toContain('task=middle'));
   });
 });

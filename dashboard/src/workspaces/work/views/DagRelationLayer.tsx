@@ -1,6 +1,6 @@
 import { useId } from 'react';
 import type { WorkDagLayout, WorkDagLayoutEdge, WorkDagRelationKind } from '../workDagLayout.ts';
-import type { Emphasis } from './dagVariant.ts';
+import type { Emphasis } from './dagField.ts';
 
 /**
  * The relation paths beneath the layered cards: gating solid, informational
@@ -64,7 +64,7 @@ export function RelationLayer({
           x={6}
           y={stratum.y + 11}
           fill="var(--raw-graph-dim)"
-          fontSize={9}
+          style={{ fontSize: 'var(--text-3xs)' }}
           fontFamily="var(--font-mono)"
         >
           {String(stratum.depth).padStart(2, '0')}

@@ -2280,6 +2280,150 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
   };
 }
 
+/**
+ * Named scenarios for the subagent-tree route. `default` is the five-node tree
+ * above, which the Agents surface is audited against. `dense-fanout` is a
+ * synthetic 100+ agent delegation for dense-state rendering: one orchestrator
+ * over eight workstream leads, twelve subagents each, a grandchild under the
+ * first two of every lead, a few sessions still open, and three cut edges.
+ * Select it with `?fixture=dense-fanout` on the route, or through
+ * `subagentTreeFixture('dense-fanout')`; the default tree never changes.
+ */
+export type SubagentTreeScenario = 'default' | 'dense-fanout';
+
+const DENSE_WORKSTREAMS = [
+  'ingest',
+  'graph',
+  'rank',
+  'memory',
+  'export',
+  'review',
+  'release',
+  'docs',
+] as const;
+
+function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
+  const t0 = 1_760_000_000;
+  const nodes: Record<string, unknown>[] = [];
+  const session = (spec: {
+    id: string;
+    parent: string | null;
+    agent: string;
+    depth: number;
+    start: number;
+    end: number | null;
+    descendants: number;
+    link: 'root' | 'linked' | 'missing_parent';
+    provider?: string;
+  }) =>
+    nodes.push({
+      provider: spec.provider ?? 'codex',
+      session_id: spec.id,
+      parent_session_id: spec.parent,
+      agent: spec.agent,
+      title: null,
+      started_at: t0 + spec.start,
+      ended_at: spec.end === null ? null : t0 + spec.end,
+      is_subagent: spec.depth > 0 || spec.link === 'missing_parent',
+      parent_tool_use_id: spec.depth > 0 ? `toolu_${spec.id.replace(/\W/g, '_')}` : null,
+      depth: spec.depth,
+      descendants: spec.descendants,
+      link: spec.link,
+    });
+  const perLead = 12;
+  const grandchildrenPerLead = 2;
+  session({
+    id: 'session.dense.orchestrator',
+    parent: null,
+    agent: 'Codex',
+    depth: 0,
+    start: 0,
+    end: 14_400,
+    descendants: DENSE_WORKSTREAMS.length * (1 + perLead + grandchildrenPerLead),
+    link: 'root',
+  });
+  DENSE_WORKSTREAMS.forEach((stream, lead) => {
+    const leadId = `session.dense.${stream}-lead`;
+    const leadStart = 120 + lead * 900;
+    session({
+      id: leadId,
+      parent: 'session.dense.orchestrator',
+      agent: `${stream}-lead`,
+      depth: 1,
+      start: leadStart,
+      end: leadStart + 5_400,
+      descendants: perLead + grandchildrenPerLead,
+      link: 'linked',
+    });
+    for (let k = 0; k < perLead; k += 1) {
+      const id = `session.dense.${stream}-${String(k + 1).padStart(2, '0')}`;
+      const start = leadStart + 60 + k * 240;
+      const open = (lead * perLead + k) % 7 === 6;
+      session({
+        id,
+        parent: leadId,
+        agent: `${stream}-worker`,
+        depth: 2,
+        start,
+        end: open ? null : start + 600 + (k % 4) * 300,
+        descendants: k < grandchildrenPerLead ? 1 : 0,
+        link: 'linked',
+      });
+      if (k < grandchildrenPerLead) {
+        session({
+          id: `${id}.probe`,
+          parent: id,
+          agent: `${stream}-probe`,
+          depth: 3,
+          start: start + 120,
+          end: start + 420,
+          descendants: 0,
+          link: 'linked',
+        });
+      }
+    }
+  });
+  for (let cut = 0; cut < 3; cut += 1) {
+    session({
+      id: `session.dense.orphan-${cut + 1}`,
+      parent: `session.dense.never-ingested-${cut + 1}`,
+      agent: 'Claude',
+      provider: 'claude',
+      depth: 0,
+      start: 2_000 + cut * 1_500,
+      end: 2_600 + cut * 1_500,
+      descendants: 0,
+      link: 'missing_parent',
+    });
+  }
+  return {
+    available: true,
+    source: 'sessions',
+    error: null,
+    nodes,
+    sessions_read: nodes.length,
+    root_count: 1,
+    edge_count: nodes.filter((node) => (node['depth'] as number) > 0).length,
+    max_depth: 3,
+    missing_parent_count: 3,
+    cycle_count: 0,
+    truncated: false,
+  };
+}
+
+export function subagentTreeFixture(scenario: SubagentTreeScenario): Record<string, unknown> {
+  switch (scenario) {
+    case 'default':
+      return envelope(analyticsSubagentTreePayload());
+    case 'dense-fanout':
+      return envelope(analyticsSubagentTreeDenseFanoutPayload());
+    default: {
+      const unhandled: never = scenario;
+      return unhandled;
+    }
+  }
+}
+
 function analyticsHintsPayload(): Record<string, unknown> {
   return {
     available: true,
@@ -5620,6 +5764,12 @@ export function resolveFixture(pathname: string, search = ''): unknown {
   if (pathname === '/api/loom/temporal') {
     const params = new URLSearchParams(search);
     return loomTemporalPageEnvelope(params.get('limit'), params.get('offset'));
+  }
+  if (
+    pathname === '/api/plugins/analytics/subagent-tree' &&
+    new URLSearchParams(search).get('fixture') === 'dense-fanout'
+  ) {
+    return subagentTreeFixture('dense-fanout');
   }
   if (pathname in FIXTURES) return FIXTURES[pathname];
   for (const [prefix, payload] of FIXTURE_PREFIXES) {

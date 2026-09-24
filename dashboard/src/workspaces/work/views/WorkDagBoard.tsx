@@ -21,21 +21,11 @@ import {
   type WorkDagRelationKind,
 } from '../workDagLayout.ts';
 import { laneReading } from '../workLaneModel.ts';
-import { swimlaneWidth } from '../workSwimlaneLayout.ts';
 import type { WorkProductView, WorkTaskView } from '../workProductView.ts';
 import type { WorkDagReading } from '../workViewsModel.ts';
 import { DagFittedField } from './DagFittedField.tsx';
 import { DagMatrixField } from './DagMatrixField.tsx';
-import { RelationLayer } from './DagRelationLayer.tsx';
-import { DagSwimlaneField } from './DagSwimlaneField.tsx';
-import {
-  WORK_DAG_VARIANTS,
-  useDagVariant,
-  type CardWiring,
-  type DagFieldProps,
-  type Emphasis,
-  type WorkDagVariant,
-} from './dagVariant.ts';
+import type { CardWiring, DagFieldProps, Emphasis, WorkDagFieldView } from './dagField.ts';
 import { EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -112,11 +102,14 @@ export function WorkDagBoard({
   reading,
   selected,
   onSelect,
+  view = 'graph',
 }: {
   snapshot: WorkProductView;
   reading: WorkDagReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
+  /** The fitted graph (the DAG camera) or the matrix (the Matrix camera). */
+  view?: WorkDagFieldView;
 }) {
   const layout = useMemo(
     () => workDagLayout(reading, snapshot.projections),
@@ -131,7 +124,6 @@ export function WorkDagBoard({
   const [criticalOn, setCriticalOn] = useState(true);
   const [focusPath, setFocusPath] = useState<FocusPath>('none');
   const [zoom, setZoom] = useState(1);
-  const [variant, setVariant] = useDagVariant();
   const field = useRef<HTMLDivElement | null>(null);
   const cards = useRef(new Map<string, HTMLButtonElement>());
   const controlsId = useId();
@@ -167,25 +159,19 @@ export function WorkDagBoard({
     // The fitted renderer frames the graph with its own 24px margin and
     // stops at a readable floor; wider graphs scroll rather than shrink the
     // 11px identities below legibility.
-    switch (variant) {
-      case 'layered':
-        setZoom(Math.max(ZOOM_MIN, Math.min(1, width / layout.width)));
-        return;
-      case 'fitted':
+    switch (view) {
+      case 'graph':
         setZoom(Math.max(FITTED_FLOOR, Math.min(1, (width - 48) / layout.width)));
-        return;
-      case 'swimlane':
-        setZoom(Math.max(FITTED_FLOOR, Math.min(1, (width - 16) / swimlaneWidth(layout))));
         return;
       case 'matrix':
         setZoom(1);
         return;
       default: {
-        const unhandled: never = variant;
+        const unhandled: never = view;
         return unhandled;
       }
     }
-  }, [layout, variant]);
+  }, [layout, view]);
 
   // A graph wider than its field opens fitted, the 200%-zoom and narrow-
   // viewport focus mode, and re-fits when the graph version changes shape.
@@ -289,8 +275,7 @@ export function WorkDagBoard({
         zoom={zoom}
         onZoom={setZoom}
         onFit={fit}
-        variant={variant}
-        onVariant={setVariant}
+        view={view}
       />
 
       <div
@@ -300,63 +285,31 @@ export function WorkDagBoard({
         aria-describedby={`${controlsId}-legend`}
         className={cn(
           'td-optic td-grain td-scanlines relative max-h-[62vh] min-h-48 overflow-auto',
-          variant === 'fitted' && 'flex min-h-[22rem]',
+          view === 'graph' && 'flex min-h-[22rem]',
         )}
         data-work-dag-field
-        data-work-dag-variant={variant}
+        data-work-dag-view={view}
         data-work-dag-zoom={zoom.toFixed(2)}
         data-work-dag-inspected={inspected ?? undefined}
         onPointerLeave={() => setInspected(null)}
       >
-        {variant === 'layered' ? (
-          <div
-            className="relative z-[1]"
-            style={{ width: layout.width * zoom, height: layout.height * zoom }}
-          >
-            <div
-              className="absolute left-0 top-0 origin-top-left"
-              style={{ width: layout.width, height: layout.height, transform: `scale(${zoom})` }}
-            >
-              <RelationLayer layout={layout} isolation={isolation} critical={critical} />
-              {layout.nodes.map((node) => {
-                const task = tasks.get(node.taskId);
-                if (task === undefined) return null;
-                const dimmed = isolation !== null && !isolation.tasks.has(node.taskId);
-                return (
-                  <TaskCard
-                    key={node.taskId}
-                    node={node}
-                    task={task}
-                    reading={reading}
-                    selected={selected === node.taskId}
-                    dimmed={dimmed}
-                    onCritical={critical?.tasks.has(node.taskId) ?? false}
-                    showLabels={showLabels}
-                    wiring={card(node.taskId)}
-                  />
-                );
-              })}
-            </div>
-          </div>
-        ) : (
-          <VariantField
-            variant={variant}
-            props={{
-              layout,
-              reading,
-              tasks,
-              selected,
-              inspected,
-              isolation,
-              critical,
-              showLabels,
-              zoom,
-              onSelect,
-              onInspect: setInspected,
-              card,
-            }}
-          />
-        )}
+        <DagField
+          view={view}
+          props={{
+            layout,
+            reading,
+            tasks,
+            selected,
+            inspected,
+            isolation,
+            critical,
+            showLabels,
+            zoom,
+            onSelect,
+            onInspect: setInspected,
+            card,
+          }}
+        />
       </div>
 
       <Legend id={`${controlsId}-legend`} layout={layout} reading={reading} snapshot={snapshot} />
@@ -373,16 +326,14 @@ export function WorkDagBoard({
   );
 }
 
-function VariantField({ variant, props }: { variant: Exclude<WorkDagVariant, 'layered'>; props: DagFieldProps }) {
-  switch (variant) {
-    case 'fitted':
+function DagField({ view, props }: { view: WorkDagFieldView; props: DagFieldProps }) {
+  switch (view) {
+    case 'graph':
       return <DagFittedField {...props} />;
-    case 'swimlane':
-      return <DagSwimlaneField {...props} />;
     case 'matrix':
       return <DagMatrixField {...props} />;
     default: {
-      const unhandled: never = variant;
+      const unhandled: never = view;
       return unhandled;
     }
   }
@@ -423,8 +374,7 @@ function GraphControls({
   zoom,
   onZoom,
   onFit,
-  variant,
-  onVariant,
+  view,
 }: {
   id: string;
   showLabels: boolean;
@@ -438,10 +388,9 @@ function GraphControls({
   zoom: number;
   onZoom: (value: number) => void;
   onFit: () => void;
-  variant: WorkDagVariant;
-  onVariant: (value: WorkDagVariant) => void;
+  view: WorkDagFieldView;
 }) {
-  const zoomable = variant !== 'matrix';
+  const zoomable = view === 'graph';
   const effort = criticalReading.effort;
   const criticalDisabled = !effort.available || effort.value.taskIds.length === 0;
   const criticalNote = !effort.available
@@ -459,29 +408,13 @@ function GraphControls({
       <span className="td-legend text-text-secondary">graph controls</span>
       <span aria-hidden className="td-rule max-sm:hidden" />
 
-      {/* Every renderer reads the same longest-path strata; the choice is
-        * which axes carry them. */}
+      {/* The one layout this build has. Printed rather than offered as a
+        * select with one option, which would promise a second layout that
+        * does not exist. */}
       <span className="flex items-center gap-1.5 text-3xs text-text-muted">
         <span className="td-legend">layout</span>
-        <span role="radiogroup" aria-label="Graph renderer" className="flex items-center border border-edge-subtle rounded-[var(--radius-panel)]">
-          {WORK_DAG_VARIANTS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              role="radio"
-              aria-checked={variant === option.value}
-              onClick={() => onVariant(option.value)}
-              data-work-dag-variant-option={option.value}
-              className={cn(
-                'td-hit px-2 text-2xs',
-                variant === option.value
-                  ? 'bg-surface-2 text-text-primary shadow-[inset_0_-2px_0_var(--raw-accent)]'
-                  : 'text-text-muted hover:text-text-primary',
-              )}
-            >
-              {option.label}
-            </button>
-          ))}
+        <span className="td-value text-3xs text-text-secondary">
+          {view === 'graph' ? 'hierarchical · longest-path strata · fitted' : 'dependency matrix · strata order on both axes'}
         </span>
       </span>
 
@@ -570,110 +503,6 @@ function ZoomButton({
       className="td-hit border border-edge-subtle px-2 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:cursor-not-allowed disabled:text-text-muted"
     >
       {children}
-    </button>
-  );
-}
-
-function TaskCard({
-  node,
-  task,
-  reading,
-  selected,
-  dimmed,
-  onCritical,
-  showLabels,
-  wiring,
-}: {
-  node: WorkDagLayoutNode;
-  task: WorkTaskView;
-  reading: WorkDagReading;
-  selected: boolean;
-  dimmed: boolean;
-  onCritical: boolean;
-  showLabels: boolean;
-  wiring: CardWiring;
-}) {
-  const lane = laneReading(task.lane);
-  const source = reading.nodes.get(task.task_id);
-  const inbound = source?.dependencies.length ?? 0;
-  const outbound = source?.dependents.length ?? 0;
-  const label = [
-    task.title,
-    task.task_id,
-    lane.label.toLowerCase(),
-    `depth ${node.depth}`,
-    `${inbound} gating in`,
-    `${outbound} gating out`,
-    node.cyclic ? 'in a declared dependency cycle' : null,
-    onCritical ? 'on the effort-weighted critical path' : null,
-  ]
-    .filter((part) => part !== null)
-    .join(', ');
-  return (
-    <button
-      ref={wiring.ref}
-      type="button"
-      aria-label={label}
-      aria-pressed={selected}
-      tabIndex={wiring.tabIndex}
-      onClick={wiring.onClick}
-      onFocus={wiring.onFocus}
-      onBlur={wiring.onBlur}
-      onPointerEnter={wiring.onPointerEnter}
-      onKeyDown={wiring.onKeyDown}
-      className={cn(
-        'absolute flex min-h-[44px] flex-col justify-between gap-1 border px-2 py-1.5 text-left',
-        'td-raised transition-opacity duration-[var(--dur-state)]',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent',
-        selected ? 'border-accent' : 'border-edge-strong hover:border-text-muted',
-        node.cyclic && !selected && 'border-state-conflicting/70',
-        dimmed && 'opacity-40',
-      )}
-      style={{ left: node.x, top: node.y, width: node.width, height: node.height }}
-      data-work-task={task.task_id}
-      data-work-depth={node.depth}
-      data-work-dag-card={dimmed ? 'dimmed' : 'lit'}
-      data-work-dag-critical-node={onCritical ? 'true' : undefined}
-    >
-      {/* Selection is a cyan position bar; the critical path is an amber one.
-        * Both are marks a monochrome rendering still distinguishes by which
-        * edge they sit on. */}
-      {selected ? <span aria-hidden className="absolute inset-y-0 left-0 w-[3px] bg-accent" /> : null}
-      {onCritical ? <span aria-hidden className="absolute inset-x-0 top-0 h-[2px] bg-alert" /> : null}
-      <span className="flex min-w-0 items-center justify-between gap-2">
-        <span className="td-value truncate text-3xs text-text-muted">{task.task_id}</span>
-        <span className="flex shrink-0 items-center gap-1">
-          <span
-            aria-hidden
-            className={cn(
-              'size-1.5',
-              lane.swatch ?? 'border border-dashed border-text-muted bg-transparent',
-            )}
-          />
-          <span className="td-legend text-text-secondary">{lane.label}</span>
-        </span>
-      </span>
-      {showLabels ? (
-        <span className="min-w-0 truncate text-2xs text-text-primary">{task.title}</span>
-      ) : null}
-      {showLabels ? (
-        <span className="flex min-w-0 items-center gap-2 text-3xs text-text-muted">
-          <span className="td-value min-w-0 truncate text-3xs text-text-muted" title={task.hierarchy.milestone_id}>
-            {task.hierarchy.milestone_id}
-          </span>
-          <span aria-hidden className="td-rule min-w-1" />
-          <span className="td-value shrink-0 text-3xs" data-cell="numeric">
-            e{task.effort}
-          </span>
-          <span
-            className="td-value shrink-0 text-3xs"
-            data-cell="numeric"
-            title={`${inbound} gating in · ${outbound} gating out`}
-          >
-            ↑{inbound} ↓{outbound}
-          </span>
-        </span>
-      ) : null}
     </button>
   );
 }

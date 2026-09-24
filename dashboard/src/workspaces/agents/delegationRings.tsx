@@ -12,6 +12,16 @@ import type { TopologyMark } from './delegationTopology.ts';
  * is, not what it did.
  */
 
+/** Core fill opacity from sessions beneath, on the same log band as the
+ * radius: a leaf's core is a whisper, the widest subtree's reads as filled.
+ * Measured, never decorative, so a ring with nothing beneath never glows. */
+export function ringCoreAlpha(mark: TopologyMark, maxDescendants: number): number {
+  const beneath = mark.kind === 'bundle' ? mark.sessions + mark.descendants : mark.node.descendants;
+  const ceiling = Math.max(maxDescendants, beneath);
+  const fraction = ceiling <= 0 || beneath <= 0 ? 0 : Math.log1p(beneath) / Math.log1p(ceiling);
+  return Math.round((0.06 + 0.3 * fraction) * 1000) / 1000;
+}
+
 export const RING_GEOMETRY = {
   minRadius: 6,
   maxRadius: 20,
@@ -105,19 +115,25 @@ export function RingGlyph({
   mark,
   at,
   radius,
+  maxDescendants,
   hatchId,
   inspected,
   selected,
+  lifted,
   dim,
 }: {
   mark: TopologyMark;
   at: { x: number; y: number };
   radius: number;
+  maxDescendants: number;
   hatchId: string;
   inspected: boolean;
   selected: boolean;
+  /** Beneath the selection: a restrained cyan halo, no glow. */
+  lifted: boolean;
   dim: boolean;
 }) {
+  const core = ringCoreAlpha(mark, maxDescendants);
   const kind = ringKind(mark);
   const tone = ringTone(kind);
   return (
@@ -126,9 +142,13 @@ export function RingGlyph({
       className="transition-opacity duration-[var(--dur-state)]"
       data-topology-mark={mark.kind}
       data-topology-ring={kind}
+      data-topology-core={core}
     >
       {selected ? (
         <circle cx={at.x} cy={at.y} r={radius + 5} fill="none" stroke="var(--raw-graph-accent)" strokeWidth={2} data-topology-selected="true" />
+      ) : null}
+      {lifted ? (
+        <circle cx={at.x} cy={at.y} r={radius + 3.5} fill="none" stroke="var(--raw-graph-accent)" strokeOpacity={0.35} strokeWidth={1} data-topology-halo="true" />
       ) : null}
       {inspected && !selected ? (
         <circle cx={at.x} cy={at.y} r={radius + 4} fill="none" stroke="var(--raw-graph-text)" strokeOpacity={0.55} strokeWidth={1} />
@@ -138,7 +158,7 @@ export function RingGlyph({
         cy={at.y}
         r={radius * 0.72}
         fill={kind === 'cycle' ? `url(#${hatchId})` : tone.stroke}
-        fillOpacity={kind === 'cycle' ? 0.8 : inspected || selected ? 0.22 : 0.12}
+        fillOpacity={kind === 'cycle' ? 0.8 : inspected || selected ? Math.min(0.5, core + 0.1) : core}
       />
       <circle cx={at.x} cy={at.y} r={radius} fill="none" stroke={tone.stroke} strokeWidth={1.4} strokeDasharray={tone.dash} />
       {kind === 'bundle' ? (
@@ -186,7 +206,7 @@ export function RingHoverCard({ mark, at, radius }: { mark: TopologyMark; at: { 
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute z-10 flex min-w-52 flex-col gap-0.5 border border-edge-strong bg-surface-2 px-2 py-1.5 shadow-lg rounded-[var(--radius-panel)]"
+      className="pointer-events-none absolute z-10 flex min-w-56 flex-col gap-0.5 border border-edge-strong bg-surface-2 px-2 py-1.5 shadow-lg rounded-[var(--radius-panel)]"
       style={{ left: at.x + radius + 10, top: at.y + radius + 6 }}
       data-topology-hovercard={mark.id}
     >

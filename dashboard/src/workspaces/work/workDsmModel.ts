@@ -20,6 +20,9 @@ export interface DsmCell {
   readonly kind: WorkDagRelationKind;
   /** A gating cell above the diagonal, or one the layout marked as a climb. */
   readonly back: boolean;
+  /** Mark opacity from how many relations name this cell's column task: the
+   * work others lean on reads brightest. A measured count, never decoration. */
+  readonly intensity: number;
 }
 
 export interface DsmBlock {
@@ -40,19 +43,22 @@ export interface DsmModel {
 export function workDsm(layout: WorkDagLayout): DsmModel {
   const order = layout.nodes.map((node) => node.taskId);
   const index = new Map(order.map((taskId, position) => [taskId, position]));
-  const cells: DsmCell[] = [];
-  for (const edge of layout.edges) {
+  const placed = layout.edges.flatMap((edge) => {
     const row = index.get(edge.to);
     const column = index.get(edge.from);
-    if (row === undefined || column === undefined) continue;
-    cells.push({
-      id: edge.id,
-      row,
-      column,
-      kind: edge.kind,
-      back: edge.kind === 'gating' && (edge.climb || column > row),
-    });
-  }
+    return row === undefined || column === undefined ? [] : [{ edge, row, column }];
+  });
+  const fanIn = new Map<number, number>();
+  for (const { column } of placed) fanIn.set(column, (fanIn.get(column) ?? 0) + 1);
+  const busiest = Math.max(1, ...fanIn.values());
+  const cells: DsmCell[] = placed.map(({ edge, row, column }) => ({
+    id: edge.id,
+    row,
+    column,
+    kind: edge.kind,
+    back: edge.kind === 'gating' && (edge.climb || column > row),
+    intensity: Math.round((0.35 + (0.6 * fanIn.get(column)!) / busiest) * 1000) / 1000,
+  }));
   cells.sort((a, b) => a.row - b.row || a.column - b.column || a.kind.localeCompare(b.kind));
 
   const blocks: DsmBlock[] = [];

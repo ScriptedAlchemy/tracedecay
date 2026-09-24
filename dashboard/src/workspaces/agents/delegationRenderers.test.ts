@@ -3,13 +3,13 @@ import type {
   AnalyticsSubagentNodeV1,
   AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
-import { ringKind, ringRadius } from './delegationRings.tsx';
-import { cullLabels, layoutDelegationRadial, radialPitch } from './delegationRadial.ts';
+import { ringCoreAlpha, ringKind, ringRadius } from './delegationRings.tsx';
+import { timelineRecency } from './DelegationTimeline.tsx';
 import { layoutDelegationTimeline, timelineTickLabel, timelineTicks } from './delegationTimeline.ts';
-import { fitDelegationTopology, type TopologySessionMark } from './delegationTopology.ts';
+import { fitDelegationTopology, subtree, type TopologySessionMark } from './delegationTopology.ts';
 
 /**
- * The ring, timeline and radial renderers re-read one fitted topology. The
+ * The ring and timeline views re-read one fitted topology. The
  * reading is the story fixture's shape: a three-level Codex tree whose
  * grandchild never recorded an end, a Claude session whose parent was never
  * ingested, and one flat Cursor session.
@@ -79,6 +79,18 @@ describe('ring marks', () => {
       'origin',
     ]);
   });
+
+  it('brighten the core with sessions beneath, and a leaf stays a whisper', () => {
+    expect(ringCoreAlpha(mark('root'), model.maxDescendants)).toBe(0.36);
+    expect(ringCoreAlpha(mark('child'), model.maxDescendants)).toBe(0.249);
+    expect(ringCoreAlpha(mark('grandchild'), model.maxDescendants)).toBe(0.06);
+  });
+
+  it('lift a selection with its drawn subtree and nothing else', () => {
+    const lifted = [...subtree(model, mark('child').id)].map((id) => id.split(':')[1]);
+    expect(lifted).toEqual(['child', 'grandchild']);
+    expect(subtree(model, 'codex:not-drawn').size).toBe(0);
+  });
 });
 
 describe('layoutDelegationTimeline', () => {
@@ -116,43 +128,15 @@ describe('layoutDelegationTimeline', () => {
     expect([lane.peak, lane.measured, lane.unmeasured]).toEqual([2, 2, 1]);
   });
 
+  it('ramps bar fill by recency within the loaded page', () => {
+    const domain = timeline.domain!;
+    expect(timeline.rows.map((row) => timelineRecency(row, domain))).toEqual([0.4, 0.267, 0.4, 0.225, 0.308]);
+  });
+
   it('spaces ticks by label width and prints them in UTC', () => {
     const ticks = timelineTicks({ start: T0, end: T0 + 3_600 }, 600);
     expect(ticks.step).toBe(600);
     expect(ticks.ticks).toHaveLength(6);
     expect(timelineTickLabel(ticks.ticks[0]!, ticks.step)).toBe('09:00');
-  });
-});
-
-describe('layoutDelegationRadial', () => {
-  const radial = layoutDelegationRadial(model, 100);
-
-  it('centres the reading origin when there are several tops and rings generations', () => {
-    expect(radial.centre).toBe('origin');
-    expect(radial.rings).toEqual([100, 200, 300]);
-    const at = (id: string) => {
-      const placement = radial.placements.get(mark(id).id)!;
-      return [placement.radius, placement.x, placement.y];
-    };
-    expect(at('root')).toEqual([100, 86.6, -50]);
-    expect(at('child')).toEqual([200, 173.21, -100]);
-    expect(at('grandchild')).toEqual([300, 259.81, -150]);
-    expect(at('orphan')).toEqual([100, 0, 100]);
-    expect(at('solo')).toEqual([100, -86.6, -50]);
-    // Three equal sectors; the first widest one wins, halfway from root to orphan.
-    expect(radial.captionAngle).toBeCloseTo(0.52, 2);
-  });
-
-  it('draws a fan per drawn parent and nothing to the origin', () => {
-    expect(radial.fans.map((fan) => [fan.parentId.split(':')[1], fan.path])).toEqual([
-      ['root', 'M86.6,-50 L129.9,-75 M129.9,-75 L173.21,-100'],
-      ['child', 'M173.21,-100 L216.51,-125 M216.51,-125 L259.81,-150'],
-    ]);
-    expect(radialPitch(model, 640)).toBe(96);
-  });
-
-  it('culls colliding labels in priority order', () => {
-    const box = (id: string, x: number) => ({ id, x, y: 0, width: 50, height: 20 });
-    expect([...cullLabels([box('a', 0), box('b', 30), box('c', 60)])]).toEqual(['a', 'c']);
   });
 });

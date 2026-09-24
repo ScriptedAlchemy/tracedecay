@@ -1,3 +1,4 @@
+import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -543,7 +544,9 @@ function renderAgents() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <AgentsPage />
+      <MemoryRouter>
+        <AgentsPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
