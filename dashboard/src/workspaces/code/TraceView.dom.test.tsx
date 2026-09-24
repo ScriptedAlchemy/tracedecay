@@ -10,6 +10,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TraceView, type TraceFocus } from './TraceView.tsx';
@@ -46,14 +47,16 @@ function mockFetch(override?: (url: string) => Response | undefined) {
   );
 }
 
-function renderTrace(onClose = vi.fn()) {
+function renderTrace(onClose = vi.fn(), url = '/code?view=trace', onFocusChange?: (node: TraceFocus) => void) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   const utils = render(
-    <QueryClientProvider client={client}>
-      <TraceView focus={FOCUS} onClose={onClose} />
-    </QueryClientProvider>,
+    <MemoryRouter initialEntries={[url]}>
+      <QueryClientProvider client={client}>
+        <TraceView focus={FOCUS} onClose={onClose} {...(onFocusChange ? { onFocusChange } : {})} />
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
   return { ...utils, onClose };
 }
@@ -248,5 +251,76 @@ describe('TraceView', () => {
     });
     expect(screen.getByText(/call-edge result is unverified/i)).toBeTruthy();
     expect(screen.queryByText(/measured zero/i)).toBeNull();
+  });
+
+  describe('candidate renderers', () => {
+    beforeEach(() => {
+      // jsdom lays nothing out; give the host a real column width.
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+        width: 926,
+        height: 600,
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 926,
+        bottom: 600,
+        toJSON: () => ({}),
+      });
+    });
+
+    it('draws the anatomy plate from the same model, with every symbol focusable', async () => {
+      mockFetch();
+      const { container } = renderTrace(vi.fn(), '/code?view=trace&trace=plate');
+      await screen.findByText(/symbols on the field/i);
+      await waitFor(() => expect(container.querySelector('[data-trace-field="plate"] svg')).not.toBeNull());
+      const field = container.querySelector('[data-trace-field="plate"] svg')!;
+      expect(field.getAttribute('aria-label')).toMatch(/^Call neighbourhood of resolve_context as an anatomy plate/);
+      const targets = field.querySelectorAll('[data-node]');
+      const list = within(container.querySelector('ol')!).getAllByRole('listitem');
+      expect(targets.length).toBe(list.length);
+      expect(field.textContent).toContain('7 symbols · 45 sites');
+      expect(field.textContent).toContain('ONE SCALE · CALL SITES PER CHANNEL');
+      // The spring field and its motion control are not mounted.
+      expect(container.querySelector('canvas')).toBeNull();
+      expect(screen.queryByRole('radio', { name: 'Reduced' })).toBeNull();
+    });
+
+    it('inspects on hover and focus, and re-centres only on Enter', async () => {
+      mockFetch();
+      const onFocusChange = vi.fn();
+      const { container } = renderTrace(vi.fn(), '/code?view=trace&trace=radial', onFocusChange);
+      await waitFor(() => expect(container.querySelector('[data-trace-field="radial"] [data-ring="1"]')).not.toBeNull());
+      const node = container.querySelector<SVGGElement>('[data-trace-field="radial"] [data-ring="1"]')!;
+      const name = node.getAttribute('aria-label')!.split(' · ')[0]!;
+      const readout = container.querySelector('[data-trace-inspect]')!;
+      expect(readout.textContent).toMatch(/^hover or focus a symbol/);
+      const user = userEvent.setup();
+      await user.hover(node);
+      expect(readout.textContent).toMatch(new RegExp(`^${name} · `));
+      expect(onFocusChange).not.toHaveBeenCalled();
+      node.focus();
+      await user.keyboard('{Enter}');
+      expect(onFocusChange).toHaveBeenCalledWith(expect.objectContaining({ id: node.getAttribute('data-node'), name }));
+    });
+
+    it('bands the transit map by the strata read and prints unmeasured depth as such', async () => {
+      mockFetch();
+      const { container } = renderTrace(vi.fn(), '/code?view=trace&trace=transit');
+      await waitFor(() => expect(container.querySelector('[data-trace-field="transit"] svg')?.textContent).toContain('depth 4'));
+      expect(requested.some((url) => url.includes('/api/plugins/graph/strata'))).toBe(true);
+      const text = container.querySelector('[data-trace-field="transit"] svg')!.textContent ?? '';
+      expect(text).toContain('DEPTH UNMEASURED · FILE NOT IN THE STRATA READ');
+      expect(text).toContain('NO STATION');
+    });
+
+    it('switches renderer through the URL and back to the shipped field', async () => {
+      mockFetch();
+      const { container } = renderTrace(vi.fn(), '/code?view=trace&trace=plate');
+      await waitFor(() => expect(container.querySelector('[data-trace-field="plate"]')).not.toBeNull());
+      await userEvent.setup().click(screen.getByRole('radio', { name: 'Spring field' }));
+      await waitFor(() => expect(container.querySelector('[data-testid="trace-canvas"]')).not.toBeNull());
+      expect(container.querySelector('[data-trace-field]')).toBeNull();
+    });
   });
 });

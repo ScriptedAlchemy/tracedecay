@@ -631,6 +631,50 @@ export function coverageCaption(model: TraceModel): string {
   return parts.join(' · ');
 }
 
+/** A symbol a fetched list named that the field does not draw. */
+export interface UndrawnNeighbour {
+  readonly id: string;
+  readonly filePath: string | null;
+  /** 1 when the focus's own list named it, 2 when an expanded neighbour's did. */
+  readonly hop: 1 | 2;
+  /** Side of the drawn symbol whose list named it first. */
+  readonly side: 'up' | 'down';
+}
+
+/**
+ * The symbols behind `coverage.namedButNotDrawn`, with the file each row
+ * carried, so a renderer can print the omission where it happens instead of
+ * only as one total. Read from the same payloads `buildTraceModel` absorbed.
+ */
+export function undrawnNeighbours(
+  input: TraceModelInput,
+  model: TraceModel,
+): readonly UndrawnNeighbour[] {
+  const drawn = new Map(model.nodes.map((node) => [node.id, node.ring]));
+  const out = new Map<string, UndrawnNeighbour>();
+  const visit = (payload: NeighborsPayload, hop: 1 | 2, ownerRing: number) => {
+    for (const side of ['callers', 'callees'] as const) {
+      for (const row of rows(payload[side])) {
+        if (drawn.has(row.id) || out.has(row.id)) continue;
+        const up = hop === 1 ? side === 'callers' : ownerRing < 0;
+        out.set(row.id, {
+          id: row.id,
+          filePath: row.file_path ?? null,
+          hop,
+          side: up ? 'up' : 'down',
+        });
+      }
+    }
+  };
+  visit(input.root, 1, 0);
+  for (const [seed, payload] of input.expanded) {
+    const ring = drawn.get(seed);
+    if (ring === undefined || Math.abs(ring) !== 1) continue;
+    visit(payload, 2, ring);
+  }
+  return [...out.values()];
+}
+
 /** The `role="img"` description. Says what is drawn and what is left out. */
 export function fieldDescription(model: TraceModel): string {
   const focus = model.nodes.find((node) => node.id === model.focusId);

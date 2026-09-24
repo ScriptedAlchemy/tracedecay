@@ -35,11 +35,30 @@
  * the OS setting.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { ArrowLeft } from 'lucide-react';
 
+import {
+  StructureReadV12Schema as StrataReadSchema,
+  type StrataMeasurementV1,
+} from '../../contracts/generated.ts';
+import { useStructure } from '../../data/query/structure.ts';
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { buildTraceModel, type NeighborsPayload } from '../../viz/trace/model.ts';
+import {
+  buildTraceModel,
+  undrawnNeighbours,
+  type NeighborsPayload,
+} from '../../viz/trace/model.ts';
+import { PlateField } from '../../viz/trace/PlateField.tsx';
+import { RadialField } from '../../viz/trace/RadialField.tsx';
+import { TransitField } from '../../viz/trace/TransitField.tsx';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
+import {
+  parseTraceRenderer,
+  TRACE_RENDERER_LABELS,
+  TRACE_RENDERERS,
+  type TraceRenderer,
+} from '../../viz/trace/variants.ts';
 import { CallChain } from './CallChain.tsx';
 import { NodeEvidence } from './NodeEvidence.tsx';
 import { TraceCanvas } from './TraceCanvas.tsx';
@@ -182,23 +201,40 @@ function TraceField({
   expanding: boolean;
   onFocusChange?: (node: TraceFocus) => void;
 }) {
-  const model = useMemo(
-    () =>
-      buildTraceModel({
-        focus: {
-          id: focus.id,
-          kind: focus.kind,
-          name: focus.name ?? null,
-          qualified_name: focus.qualified_name ?? null,
-          file_path: focus.file_path ?? null,
-          start_line: focus.start_line ?? null,
-          degree: focus.degree ?? null,
-        },
-        root,
-        expanded,
-      }),
+  const input = useMemo(
+    () => ({
+      focus: {
+        id: focus.id,
+        kind: focus.kind,
+        name: focus.name ?? null,
+        qualified_name: focus.qualified_name ?? null,
+        file_path: focus.file_path ?? null,
+        start_line: focus.start_line ?? null,
+        degree: focus.degree ?? null,
+      },
+      root,
+      expanded,
+    }),
     [focus, root, expanded],
   );
+  const model = useMemo(() => buildTraceModel(input), [input]);
+  const undrawn = useMemo(() => undrawnNeighbours(input, model), [input, model]);
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const renderer = parseTraceRenderer(searchParams.get('trace'));
+  // Same key as the Strata panel, so the transit map costs no second read.
+  const strata = useStructure<StrataMeasurementV1>(
+    ['graph', 'strata'],
+    '/api/plugins/graph/strata',
+    StrataReadSchema,
+    { enabled: renderer === 'transit' },
+  );
+  const chooseRenderer = (next: TraceRenderer) => {
+    const params = new URLSearchParams(searchParams);
+    if (next === 'current') params.delete('trace');
+    else params.set('trace', next);
+    setSearchParams(params, { replace: true });
+  };
 
   const { reduced, preference, setPreference } = useReducedMotion();
   const [hovered, setHovered] = useState<string | null>(null);
@@ -210,36 +246,87 @@ function TraceField({
        * by `readoutCells`, which is the same record `TraceCanvas` draws. */}
       <TraceReadoutStrip model={model} expanding={expanding} />
 
-      <figure className="flex flex-col gap-1.5 border-b border-edge-subtle px-3 pb-2 pt-2">
-        <TraceCanvas
-          model={model}
-          reduced={reduced}
-          onHoverChange={setHovered}
-          onDragChange={setDragging}
-        />
-        {/* The key below the field. A single run-on `TRACE_ENCODINGS` line
-         * used to carry all of this; the legend says it as layout, and says
-         * what each channel is carrying right now, which prose could not. */}
-        <figcaption className="flex flex-col gap-2" data-testid="trace-key">
-          <TraceLegend model={model} />
-          <TraceFeltChannels model={model} />
-        </figcaption>
-      </figure>
-
-      <div className="flex flex-wrap items-center gap-2.5 border-b border-edge-subtle px-3 py-1.5">
-        <span className="td-legend shrink-0">motion</span>
-        <TraceMotionToggle preference={preference} reduced={reduced} onChange={setPreference} />
-        <span aria-hidden className="td-rule" />
-        <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
-          {reduced
-            ? 'settled once; tension drawn as rail thickness'
-            : hovered || dragging
-              ? `${dragging ? 'dragging' : 'hovering'} ${
-                  model.nodes.find((n) => n.id === (dragging ?? hovered))?.name ?? '—'
-                }`
-              : 'hover a symbol to feel its weight, drag it to deform its neighbourhood'}
-        </span>
+      <div
+        role="radiogroup"
+        aria-label="Trace renderer"
+        className="flex flex-wrap items-center gap-1 border-b border-edge-subtle px-3 py-1"
+      >
+        <span className="td-legend mr-1.5 shrink-0">renderer</span>
+        {TRACE_RENDERERS.map((option) => (
+          <button
+            key={option}
+            type="button"
+            role="radio"
+            aria-checked={renderer === option}
+            onClick={() => chooseRenderer(option)}
+            className={
+              renderer === option
+                ? 'td-hit border border-accent px-2 py-1 text-2xs text-text-primary'
+                : 'td-hit border border-edge-subtle px-2 py-1 text-2xs text-text-muted hover:text-text-primary'
+            }
+          >
+            {TRACE_RENDERER_LABELS[option]}
+          </button>
+        ))}
       </div>
+
+      {renderer === 'current' ? (
+        <>
+          <figure className="flex flex-col gap-1.5 border-b border-edge-subtle px-3 pb-2 pt-2">
+            <TraceCanvas
+              model={model}
+              reduced={reduced}
+              onHoverChange={setHovered}
+              onDragChange={setDragging}
+            />
+            {/* The key below the field. A single run-on `TRACE_ENCODINGS` line
+             * used to carry all of this; the legend says it as layout, and says
+             * what each channel is carrying right now, which prose could not. */}
+            <figcaption className="flex flex-col gap-2" data-testid="trace-key">
+              <TraceLegend model={model} />
+              <TraceFeltChannels model={model} />
+            </figcaption>
+          </figure>
+
+          <div className="flex flex-wrap items-center gap-2.5 border-b border-edge-subtle px-3 py-1.5">
+            <span className="td-legend shrink-0">motion</span>
+            <TraceMotionToggle preference={preference} reduced={reduced} onChange={setPreference} />
+            <span aria-hidden className="td-rule" />
+            <span className="td-legend shrink-0 normal-case tracking-normal text-text-muted">
+              {reduced
+                ? 'settled once; tension drawn as rail thickness'
+                : hovered || dragging
+                  ? `${dragging ? 'dragging' : 'hovering'} ${
+                      model.nodes.find((n) => n.id === (dragging ?? hovered))?.name ?? '—'
+                    }`
+                  : 'hover a symbol to feel its weight, drag it to deform its neighbourhood'}
+            </span>
+          </div>
+        </>
+      ) : (
+        <figure className="flex flex-col border-b border-edge-subtle pt-2">
+          {renderer === 'plate' ? (
+            <PlateField
+              model={model}
+              root={root}
+              meta={{ signature: focus.signature ?? null, endLine: focus.end_line ?? null }}
+              undrawn={undrawn}
+              reduced={reduced}
+              onPin={onFocusChange}
+            />
+          ) : renderer === 'transit' ? (
+            <TransitField
+              model={model}
+              undrawn={undrawn}
+              strata={strata.data}
+              reduced={reduced}
+              onPin={onFocusChange}
+            />
+          ) : (
+            <RadialField model={model} undrawn={undrawn} reduced={reduced} onPin={onFocusChange} />
+          )}
+        </figure>
+      )}
 
       {/* What is known about the focus beyond its call edges, and a route
        * through the neighbourhood the field can only show two hops of. Both
