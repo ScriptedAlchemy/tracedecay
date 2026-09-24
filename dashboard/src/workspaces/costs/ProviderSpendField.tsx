@@ -120,12 +120,12 @@ export function ProviderSpendField({
               </span>
             </span>
           </div>
-          <span className="text-3xs text-text-muted">{rangeNote}</span>
+          <span className="text-sm text-text-muted">{rangeNote}</span>
           {option ? (
             <Chart option={option} height={280} ariaLabel={describe} />
           ) : (
             <div
-              className="td-optic td-graticule flex min-h-[280px] items-center justify-center px-4 text-center text-2xs leading-relaxed text-text-secondary"
+              className="td-optic td-graticule flex min-h-[280px] items-center justify-center px-4 text-center text-body leading-relaxed text-text-secondary"
               role="img"
               aria-label={describe}
             >
@@ -174,7 +174,7 @@ function SeriesDisclosure({
     );
   }
   return (
-    <div className="flex flex-col gap-1.5 text-3xs leading-relaxed text-text-muted">
+    <div className="flex flex-col gap-1.5 text-sm leading-relaxed text-text-muted">
       {notes.length > 0 ? <p>{notes.join(' · ')}</p> : null}
       {series ? (
         <details className="group">
@@ -187,7 +187,7 @@ function SeriesDisclosure({
             aria-label="Priced spend series as a table"
             tabIndex={0}
           >
-            <table className="w-full min-w-max border-collapse text-2xs">
+            <table className="w-full min-w-max border-collapse text-sm">
               <thead className="sticky top-0 bg-surface-2">
                 <tr>
                   <th scope="col" className="td-legend px-2 py-1.5 text-left font-medium">
@@ -313,12 +313,12 @@ export function ProviderLegend({
       <div className="flex h-8 items-center gap-2 border-b border-edge-subtle px-2.5">
         <span className="td-legend">providers</span>
         <span aria-hidden className="td-rule" />
-        <span className="td-value text-3xs text-text-muted" data-cell="numeric">
+        <span className="td-value text-xs text-text-muted" data-cell="numeric">
           {rows.length.toLocaleString()}
         </span>
       </div>
       {rows.length === 0 ? (
-        <p className="px-2.5 py-3 text-2xs text-text-muted">
+        <p className="px-2.5 py-3 text-body text-text-muted">
           no provider recorded usage in this range
         </p>
       ) : (
@@ -345,7 +345,7 @@ export function ProviderLegend({
           ))}
         </ul>
       )}
-      <p className="border-t border-edge-subtle px-2.5 py-1.5 text-3xs leading-relaxed text-text-muted">
+      <p className="border-t border-edge-subtle px-2.5 py-1.5 text-sm leading-relaxed text-text-muted">
         {selected === null
           ? 'hover or focus inspects · Enter scopes · Escape clears'
           : `scoped to ${selected} · Escape clears`}
@@ -430,7 +430,7 @@ function LegendRow({
           <span className="min-w-0 truncate text-xs text-text-primary">{row.provider}</span>
           <span className="td-legend shrink-0 text-text-muted">{pricingClassLabel(row.pricing)}</span>
         </span>
-        <span className="flex items-baseline gap-2 text-2xs">
+        <span className="flex items-baseline gap-2 text-body">
           <span className="td-value text-text-secondary" data-cell="numeric">
             {formatUsd(row.pricedCostUsd)}
           </span>

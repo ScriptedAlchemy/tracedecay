@@ -52,7 +52,7 @@ export function RunLedger({
       footer={<LedgerFooter window={window} />}
     >
       {reading.rows.length === 0 ? (
-        <p className="px-3 py-3 text-2xs text-text-muted">
+        <p className="px-3 py-3 text-body text-text-muted">
           {reading.complete
             ? 'no automation runs are recorded in this ledger'
             : `Showing a partial list: ${reading.reason}.`}
@@ -60,7 +60,7 @@ export function RunLedger({
       ) : (
         <>
           {reading.complete ? null : (
-            <p role="status" className="border-b border-edge-subtle px-3 py-1.5 text-2xs leading-relaxed text-text-secondary">
+            <p role="status" className="border-b border-edge-subtle px-3 py-1.5 text-body leading-relaxed text-text-secondary">
               Showing a partial list: {reading.reason}.
             </p>
           )}
@@ -92,12 +92,12 @@ export function RunLedger({
 
 function LedgerFooter({ window }: { window: LedgerWindow }) {
   return (
-    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-3xs text-text-muted">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-sm text-text-muted">
       <span>
         ledger window: newest {window.loaded} {window.loaded === 1 ? 'run' : 'runs'} served by the daemon
         {window.bounded ? ' · bounded' : ' · complete'}
       </span>
-      <span className="td-value text-3xs text-text-muted">
+      <span className="td-value text-xs text-text-muted">
         {window.oldestStart !== null && window.newestStart !== null
           ? `${formatUtc(window.oldestStart)} → ${formatUtc(window.newestStart)} UTC`
           : window.loaded === 0
@@ -136,17 +136,17 @@ function RunLine({
       onSelect={onSelect}
       identity={
         <span className="flex min-w-0 flex-col gap-0.5">
-          <span className="td-value text-2xs text-text-primary">
+          <span className="td-value text-sm text-text-primary">
             {timing.kind === 'unparsed' ? timing.startedAt : formatUtc(timing.startedAt)}
           </span>
-          <span className="truncate text-3xs text-text-muted">{run.run_id}</span>
+          <span className="truncate text-sm text-text-muted">{run.run_id}</span>
         </span>
       }
     >
       <Cell>
         <span className="flex min-w-0 flex-col gap-0.5">
-          <span className="td-value truncate text-2xs text-text-primary">{run.task_key ?? run.task}</span>
-          <span className="truncate text-3xs text-text-muted">
+          <span className="td-value truncate text-sm text-text-primary">{run.task_key ?? run.task}</span>
+          <span className="truncate text-sm text-text-muted">
             {run.trigger} · {run.backend}
             {run.model ? ` · ${run.model}` : ''}
           </span>
@@ -158,7 +158,7 @@ function RunLine({
       <Cell>
         <span className="flex min-w-0 flex-col gap-0.5">
           <ToneWord tone={tone} word={run.status} />
-          <span className="td-value text-3xs text-text-muted">
+          <span className="td-value text-xs text-text-muted">
             {run.accepted_count} acc · {run.rejected_count} rej · {run.skipped_count} skip
           </span>
         </span>

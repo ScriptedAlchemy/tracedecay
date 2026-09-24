@@ -187,7 +187,7 @@ export function ExplorerPage() {
           >
             Clear
           </button>
-          <span className="ml-auto text-3xs text-text-muted" role="status">
+          <span className="ml-auto text-sm text-text-muted" role="status">
             {explorer.answeredLaneCount} of {explorer.lanes.length} lanes answered
             {explorer.anyPending ? ' · reading' : ''}
             {explorer.unansweredLanes.length > 0
@@ -274,7 +274,7 @@ function FilterSelect({
         value={value}
         aria-label={name}
         onChange={(event) => onChange(event.target.value)}
-        className="min-h-[calc(var(--touch-target-min)-2px)] min-w-0 max-w-[10rem] bg-transparent pr-1 text-xs text-text-primary outline-none"
+        className="min-h-[calc(var(--touch-target-min)-2px)] min-w-0 max-w-[10rem] bg-transparent pr-1 text-sm text-text-primary outline-none"
       >
         {options.map((option) => (
           <option key={option.value} value={option.value}>

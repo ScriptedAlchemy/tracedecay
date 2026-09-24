@@ -70,7 +70,7 @@ export function SchedulerBay({
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
             <div className="flex min-w-0 flex-col gap-1">
               <ToneWord tone={reading.tone} word={reading.word} className="text-base font-medium" />
-              <span className="text-3xs leading-relaxed text-text-muted">{reading.sentence}</span>
+              <span className="text-sm leading-relaxed text-text-muted">{reading.sentence}</span>
             </div>
             <SchedulerControl paused={status.paused} {...control} />
           </div>
@@ -91,11 +91,11 @@ export function SchedulerBay({
           <div className="flex min-w-0 flex-col gap-1 border-t border-edge-subtle pt-2">
             <span className="td-legend">observed scheduler run</span>
             {observed === null ? (
-              <span className="text-2xs text-text-muted">
+              <span className="text-body text-text-muted">
                 no scheduler-triggered run is recorded for any task, the status above is configuration, not liveness
               </span>
             ) : (
-              <span className="td-value text-2xs text-text-secondary">
+              <span className="td-value text-sm text-text-secondary">
                 {observed.task} · {observed.runId} · completed {formatUtc(observed.completedAt)} UTC
               </span>
             )}
@@ -104,7 +104,7 @@ export function SchedulerBay({
       </Panel>
 
       <Panel legend="Scheduler tasks · due window" elevation="well" bodyClassName="p-0">
-        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-b border-edge-subtle px-3 py-2 text-2xs">
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-b border-edge-subtle px-3 py-2 text-body">
           <span>
             <span className="td-value text-base text-text-primary">{due.due}</span>
             <span className="td-unit ml-1">of {due.total} due now</span>
@@ -113,7 +113,7 @@ export function SchedulerBay({
             <span className="td-value text-base text-text-primary">{due.skipped}</span>
             <span className="td-unit ml-1">with a skip reason</span>
           </span>
-          <span className="min-w-0 text-3xs text-text-muted">
+          <span className="min-w-0 text-sm text-text-muted">
             due timestamps are not served, the scheduler reports a due flag per tick
           </span>
         </div>
@@ -138,7 +138,7 @@ export function SchedulerBay({
           })}
         </LedgerTable>
         {status.tasks.length === 0 ? (
-          <p className="px-3 py-2 text-2xs text-text-muted">no scheduler task readings are available</p>
+          <p className="px-3 py-2 text-body text-text-muted">no scheduler task readings are available</p>
         ) : null}
       </Panel>
     </div>
@@ -172,12 +172,12 @@ function TaskLine({
       selected={selected}
       onInspect={onInspect}
       onSelect={onSelect}
-      identity={<span className="td-value truncate text-2xs text-text-primary">{task.task}</span>}
+      identity={<span className="td-value truncate text-sm text-text-primary">{task.task}</span>}
     >
       <Cell>{task.due ? <span className="text-accent">due</span> : <span className="text-text-muted">not due</span>}</Cell>
       <Cell>
         {task.skip_reason ? (
-          <span className="td-value text-2xs text-text-secondary">{task.skip_reason}</span>
+          <span className="td-value text-sm text-text-secondary">{task.skip_reason}</span>
         ) : (
           <Absent>none</Absent>
         )}
@@ -188,7 +188,7 @@ function TaskLine({
         ) : fallback ? (
           <span className="flex flex-col gap-0.5">
             <LastRunStamp completedAt={fallback.completed_at} />
-            <span className="text-3xs text-text-muted">from loaded ledger page</span>
+            <span className="text-sm text-text-muted">from loaded ledger page</span>
           </span>
         ) : (
           <Absent>none recorded</Absent>
@@ -252,14 +252,14 @@ function SchedulerControl({
       <span
         id="scheduler-control-scope"
         data-scope-writability={writability.state}
-        className="max-w-[16rem] text-right text-3xs leading-relaxed text-text-muted"
+        className="max-w-[16rem] text-right text-sm leading-relaxed text-text-muted"
       >
         {pending
           ? 'waiting for the daemon to re-read the scheduler…'
           : scopeWriteSentence(writability, { writable: (target) => `Applies to ${target}.` })}
       </span>
       {failure ? (
-        <span role="status" className="max-w-[16rem] text-right text-3xs leading-relaxed text-text-secondary">
+        <span role="status" className="max-w-[16rem] text-right text-sm leading-relaxed text-text-secondary">
           {failure}
         </span>
       ) : null}
@@ -290,7 +290,7 @@ function ControlButton({
     >
       <span
         className={cn(
-          'inline-flex h-6 items-center gap-1.5 border px-2 text-2xs',
+          'inline-flex h-6 items-center gap-1.5 border px-2 text-sm',
           active
             ? 'border-accent/60 bg-accent/10 text-text-primary group-hover:bg-accent/20'
             : 'border-edge-subtle text-text-muted group-hover:bg-surface-2',

@@ -284,23 +284,23 @@ function SectionRow({ section, count }: { section: ConfigSection; count: number 
         <OriginMark origin={section.origin} />
         <h2 className="text-xs font-semibold tracking-tight">{section.title}</h2>
         <span className="td-legend">{ORIGIN_WORD[section.origin]}</span>
-        <span className="hidden min-w-0 truncate text-3xs text-text-muted @min-[41rem]:inline">
+        <span className="hidden min-w-0 truncate text-sm text-text-muted @min-[41rem]:inline">
           {section.blurb}
         </span>
         {section.location ? (
-          <span className="td-value min-w-0 truncate text-3xs" title={section.location}>
+          <span className="td-value min-w-0 truncate text-xs" title={section.location}>
             <span className="text-text-secondary">{section.location}</span>
           </span>
         ) : null}
         {section.notes.map((note) => (
           <span
             key={note}
-            className="border border-edge-subtle px-1.5 py-px text-3xs text-text-secondary"
+            className="border border-edge-subtle px-1.5 py-px text-sm text-text-secondary"
           >
             {note}
           </span>
         ))}
-        <span className="td-value ml-auto shrink-0 text-3xs text-text-muted" data-cell="numeric">
+        <span className="td-value ml-auto shrink-0 text-xs text-text-muted" data-cell="numeric">
           {count}
         </span>
       </div>
@@ -380,7 +380,7 @@ function ConfigRowLine({
       />
       <Cell column="key">
         <span
-          className="td-value block min-w-0 text-2xs [overflow-wrap:anywhere]"
+          className="td-value block min-w-0 text-xs [overflow-wrap:anywhere]"
           title={row.row.description ?? undefined}
         >
           <KeyText value={row.key} query={query} />
@@ -389,7 +389,7 @@ function ConfigRowLine({
       <Cell column="value">
         <ValueCell row={row.row} query={query} />
         {proposed !== null ? (
-          <span className="mt-0.5 flex min-w-0 items-baseline gap-1.5 text-2xs">
+          <span className="mt-0.5 flex min-w-0 items-baseline gap-1.5 text-body">
             <span className="td-legend text-accent">proposed</span>
             <span className="td-value min-w-0 break-all text-text-primary">{proposed}</span>
           </span>
@@ -429,14 +429,14 @@ function Cell({ column, children }: { column: string; children: ReactNode }) {
 function OriginCell({ section }: { section: ConfigSection }) {
   if (!section.location) {
     return (
-      <span className="td-value text-2xs text-text-muted" title="origin not served">
+      <span className="td-value text-sm text-text-muted" title="origin not served">
         —<span className="sr-only">origin not served</span>
       </span>
     );
   }
   return (
     <span
-      className="td-value block min-w-0 truncate text-2xs text-text-secondary"
+      className="td-value block min-w-0 truncate text-sm text-text-secondary"
       title={section.location}
     >
       {elideStart(section.location, 26)}

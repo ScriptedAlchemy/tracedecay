@@ -386,7 +386,7 @@ function QueryRegister({
       data-costs-register
     >
       <RangeControl range={range} onRange={onRange} />
-      <span className="min-w-0 truncate text-3xs text-text-muted">{costsRangeNote(range)}</span>
+      <span className="min-w-0 truncate text-sm text-text-muted">{costsRangeNote(range)}</span>
       <span aria-hidden className="td-rule max-md:hidden" />
       <ul className="flex flex-wrap items-center gap-x-3 gap-y-1" aria-label="Costs authority states">
         {states.map((state) => (
@@ -397,7 +397,7 @@ function QueryRegister({
         ))}
         <li className="flex items-center gap-1.5" data-costs-selection={provider ?? 'all'}>
           <span className="td-legend">selection</span>
-          <span className="td-value text-2xs text-text-secondary">
+          <span className="td-value text-sm text-text-secondary">
             Costs / {provider ?? 'all'}
             {provider !== null && !selectedPresent ? (
               <span className="text-text-muted"> · not in this range</span>
@@ -406,7 +406,7 @@ function QueryRegister({
           {provider !== null ? (
             <button
               type="button"
-              className="td-hit -my-2 px-1 text-2xs text-text-secondary underline-offset-2 hover:underline"
+              className="td-hit -my-2 px-1 text-body text-text-secondary underline-offset-2 hover:underline"
               onClick={onClearProvider}
               aria-label={`Clear provider scope ${provider}`}
             >
@@ -484,7 +484,7 @@ function RangeControl({
             onClick={() => onRange(candidate)}
             onKeyDown={(event) => onKeyDown(event, position)}
             className={cn(
-              'flex min-h-[44px] items-center gap-2 whitespace-nowrap border px-3 text-2xs',
+              'flex min-h-[44px] items-center gap-2 whitespace-nowrap border px-3 text-body',
               'focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
               selected
                 ? 'border-edge-strong bg-surface-3 text-text-primary'
@@ -523,7 +523,7 @@ function UsageReadouts({
   const windows = savings?.available ? savings.ledger : null;
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-3xs leading-relaxed text-text-muted">
+      <p className="text-sm leading-relaxed text-text-muted">
         facts independent of price: counts and tokens the providers reported for this range
       </p>
       {ledger === null ? (
@@ -537,7 +537,7 @@ function UsageReadouts({
         <>
           <div className="flex flex-col gap-1.5">
             <Readout label="usage events" size="xl" value={ledger.usageEvents.toLocaleString()} />
-            <ul className="flex flex-col gap-0.5 text-3xs text-text-muted" data-usage-breakdown>
+            <ul className="flex flex-col gap-0.5 text-sm text-text-muted" data-usage-breakdown>
               <li>{ledger.pricedEvents.toLocaleString()} priced</li>
               <li>{ledger.unpricedEvents.toLocaleString()} unpriced</li>
               <li>{ledger.undatedEvents.toLocaleString()} undated</li>
@@ -545,7 +545,7 @@ function UsageReadouts({
           </div>
           <div className="flex flex-col gap-1.5">
             <Readout label="tokens consumed" size="xl" {...splitCount(tokens?.tokens, 1_000)} />
-            <p className="text-3xs leading-relaxed text-text-muted">
+            <p className="text-sm leading-relaxed text-text-muted">
               {tokens === null || tokens.reported === 0
                 ? 'no provider reported a token total'
                 : tokens.unreported > 0
@@ -581,7 +581,7 @@ function UsageReadouts({
         ) : (
           <SavedWindows windows={windows} range={range} />
         )}
-        <p className="text-3xs leading-relaxed text-text-muted">
+        <p className="text-sm leading-relaxed text-text-muted">
           Saved tokens are counts from the savings ledger. They are not priced: no authority prices
           the avoided usage on the same basis as the observed usage.
         </p>
@@ -623,7 +623,7 @@ function SavedWindows({
         {WINDOW_ORDER.map((entry) => {
           const window = windows[entry.key];
           return (
-            <li key={entry.key} className="flex items-center gap-2 text-2xs" data-saved-window={entry.key}>
+            <li key={entry.key} className="flex items-center gap-2 text-body" data-saved-window={entry.key}>
               <span className={cn('w-14 shrink-0 td-legend', entry.range === range && 'text-accent')}>
                 {entry.label}
               </span>

@@ -75,7 +75,7 @@ export function LedgerTable({
         ref={tableRef}
         onKeyDown={onKeyDown}
         onPointerLeave={leave}
-        className="w-full min-w-0 border-collapse text-2xs"
+        className="w-full min-w-0 border-collapse text-sm"
       >
         <caption className="sr-only">{caption}</caption>
         <thead>
@@ -173,7 +173,7 @@ export function Cell({
   return (
     <td
       data-cell={numeric ? 'numeric' : undefined}
-      className={cn('px-2 py-1 align-middle', numeric && 'td-value text-2xs', className)}
+      className={cn('px-2 py-1 align-middle', numeric && 'td-value text-xs', className)}
     >
       {children}
     </td>
@@ -252,7 +252,7 @@ export function Term({
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
       <dt className="td-legend">{label}</dt>
-      <dd className={cn('min-w-0 break-words text-2xs text-text-secondary', mono && 'td-value text-2xs')}>
+      <dd className={cn('min-w-0 break-words text-body text-text-secondary', mono && 'td-value text-sm')}>
         {children}
       </dd>
     </div>

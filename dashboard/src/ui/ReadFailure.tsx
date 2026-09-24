@@ -24,7 +24,7 @@ export function ReadFailure({
       className={
         band
           ? 'border-b border-state-error/30 bg-state-error/5 px-4 py-2 text-xs text-state-error'
-          : 'text-2xs leading-relaxed text-state-error'
+          : 'text-body leading-relaxed text-state-error'
       }
     >
       {label}

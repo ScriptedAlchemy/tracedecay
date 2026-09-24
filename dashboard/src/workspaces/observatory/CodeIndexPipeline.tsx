@@ -25,7 +25,7 @@ export function CodeIndexPipeline({
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Code-index pipeline">
-        <p className="text-2xs text-text-muted">reading code-index pipeline…</p>
+        <p className="text-body text-text-muted">reading code-index pipeline…</p>
       </section>
     );
   }
@@ -44,7 +44,7 @@ export function CodeIndexPipeline({
       <h2 className="td-legend">Code-index pipeline</h2>
       <CodeIndexReadinessList worktrees={worktrees} />
       {progress.length === 0 ? (
-        <p className="mt-2 text-2xs text-text-muted">no active code-index build</p>
+        <p className="mt-2 text-body text-text-muted">no active code-index build</p>
       ) : (
         <div className="mt-2 flex flex-col gap-2">
           {progress.map((build) => (
@@ -62,7 +62,7 @@ function CodeIndexReadinessList({
   worktrees: CodeIndexWorktreeFreshnessV1[];
 }) {
   if (worktrees.length === 0) {
-    return <p className="mt-2 text-2xs text-text-muted">no mounted code-index worktree</p>;
+    return <p className="mt-2 text-body text-text-muted">no mounted code-index worktree</p>;
   }
   return (
     <ul className="mt-2 flex flex-col gap-2">
@@ -71,7 +71,7 @@ function CodeIndexReadinessList({
           key={worktree.worktree_root}
           className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
         >
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-3xs">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
             <dt className="text-text-muted">Lexical readiness</dt>
             <dd className="text-right text-text-secondary">
               {lexicalReadinessLabel(worktree)}
@@ -121,7 +121,7 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
       className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
       data-code-index-generation={progress.generation_id}
     >
-      <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-2xs">
+      <p className="flex flex-wrap items-baseline justify-between gap-x-2 text-body">
         <span className="font-medium text-text-secondary">
           {`${codeIndexPhaseLabel(progress.phase)} · ${percentage.toFixed(1)}%`}
         </span>
@@ -132,7 +132,7 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
         max={100}
         value={percentage}
       />
-      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-3xs leading-snug">
+      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm leading-snug">
         <dt className="text-text-muted">generation</dt>
         <dd className="truncate text-right font-mono text-text-secondary" title={progress.generation_id}>
           {progress.generation_id}
@@ -160,7 +160,7 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
         </dd>
       </dl>
       {progress.blocked_reason ? (
-        <p className="mt-1.5 text-3xs text-state-warning">
+        <p className="mt-1.5 text-sm text-state-warning">
           blocked: {codeIndexBlockedReasonLabel(progress.blocked_reason)}
         </p>
       ) : null}

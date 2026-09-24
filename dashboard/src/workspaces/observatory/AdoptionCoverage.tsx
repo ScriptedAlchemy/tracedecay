@@ -115,7 +115,7 @@ function CoverageReadModel({
     <>
       {truth}
       <dl
-        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
+        className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-sm sm:grid-cols-2 xl:grid-cols-4"
         data-coverage-current={model.current ? 'true' : 'false'}
         data-coverage-measured={totals.measured}
         data-coverage-required={totals.required}
@@ -133,7 +133,7 @@ function CoverageReadModel({
       </dl>
 
       <div className="flex flex-col gap-4 px-4 py-3">
-        <p className="text-2xs leading-relaxed text-text-secondary" data-coverage-summary="">
+        <p className="text-body leading-relaxed text-text-secondary" data-coverage-summary="">
           {totals.measured} of {totals.required} required coverage dimensions carry a figure, and{' '}
           {failures.total === 0
             ? 'No metric published a denominator to audit, so no rate is published on this page.'
@@ -166,7 +166,7 @@ function CoverageReadModel({
             {eventDisplay.pair === undefined ? (
               <span className="flex flex-wrap items-center gap-2">
                 <StateChip kind={eventDisplay.state} />
-                <span className="min-w-0 text-2xs text-text-secondary">{eventDisplay.detail}</span>
+                <span className="min-w-0 text-body text-text-secondary">{eventDisplay.detail}</span>
               </span>
             ) : (
               <>
@@ -177,7 +177,7 @@ function CoverageReadModel({
                     {eventDisplay.pair.eligible.toLocaleString()} eligible
                   </span>
                 </span>
-                <span className="text-3xs text-text-muted">
+                <span className="text-sm text-text-muted">
                   {eventDisplay.detail}
                 </span>
               </>
@@ -189,7 +189,7 @@ function CoverageReadModel({
             {adoptionDisplay.pair === undefined ? (
               <span className="flex flex-wrap items-center gap-2">
                 <StateChip kind={adoptionDisplay.state} />
-                <span className="min-w-0 text-2xs text-text-secondary">
+                <span className="min-w-0 text-body text-text-secondary">
                   {adoptionDisplay.detail}
                 </span>
               </span>
@@ -213,15 +213,15 @@ function CoverageReadModel({
             <h3 className="td-legend truncate">suppression and publication floors</h3>
             <span aria-hidden className="td-rule" />
           </div>
-          <dl className="flex flex-col gap-1 text-3xs leading-snug text-text-muted">
+          <dl className="flex flex-col gap-1 text-sm leading-snug text-text-muted">
             {DECLARED_FLOORS.map((floor) => (
               <div key={floor.id} className="flex min-w-0 gap-1.5" data-coverage-floor={floor.id}>
-                <dt className="shrink-0 uppercase tracking-[0.08em]">{floor.label}</dt>
+                <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">{floor.label}</dt>
                 <dd className="min-w-0 break-words text-text-secondary">{floor.declared}</dd>
               </div>
             ))}
           </dl>
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             The first floor is enforced on every ledger cell on this page. The remaining three are
             evaluated only when the canonical read carries their required denominators and
             evidence; an unknown value is not treated as a passing grade.
@@ -241,7 +241,7 @@ function CoverageReadModel({
             kind={denominatorTruth.state}
             detail={denominatorTruth.detail}
           />
-          <p className="text-3xs leading-snug text-text-muted">
+          <p className="text-sm leading-snug text-text-muted">
             {failures.total === 0
               ? 'No metric payload reached this read, so an empty audit is unknown rather than a passing denominator check.'
               : `${failures.missing} measurement${failures.missing === 1 ? '' : 's'} publish no eligible population. Equal eligible and observed counts are retained as measured pairs because the dashboard does not infer denominator provenance from numeric equality.`}
@@ -374,15 +374,15 @@ function CoverageWindow({
         <span aria-hidden className="td-rule" />
       </div>
       <StateChip kind={metric.presentation} />
-      <dl className="flex flex-col gap-1 text-3xs leading-snug text-text-muted">
+      <dl className="flex flex-col gap-1 text-sm leading-snug text-text-muted">
         <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em]">event coverage</dt>
+          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">event coverage</dt>
           <dd className="min-w-0 break-words text-text-secondary">
             {metric.metricState} · frontier {model.current ? 'current' : 'not current'}
           </dd>
         </div>
         <div className="flex min-w-0 gap-1.5">
-          <dt className="shrink-0 uppercase tracking-[0.08em]">record window</dt>
+          <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">record window</dt>
           <dd className="min-w-0 break-words text-text-secondary">
             {diagnosticsCompleteness == null
               ? 'not read'
@@ -435,7 +435,7 @@ function CoverageFamilies({
           `${SUPPRESSION_FLOOR}-unit local suppression floor are withheld rather than printed.`
         }
       />
-      <p className="text-3xs leading-snug text-text-muted" data-coverage-withheld={withheld}>
+      <p className="text-sm leading-snug text-text-muted" data-coverage-withheld={withheld}>
         {withheld} of {rows.length} families are withheld above. That number is this view&apos;s own
         withholding, not a count of silent producers, the reading on each row says which it is.
       </p>

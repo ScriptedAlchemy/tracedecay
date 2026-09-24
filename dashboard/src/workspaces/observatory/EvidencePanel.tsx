@@ -185,7 +185,7 @@ export function EvidencePanel({
  * reason, and nothing drawn that could be mistaken for a measurement. */
 export function BlockedBody({ summary }: { summary: EvidenceSummary }) {
   return (
-    <p className="text-2xs leading-relaxed text-text-muted" data-evidence-blocked={summary.state}>
+    <p className="text-body leading-relaxed text-text-muted" data-evidence-blocked={summary.state}>
       <span className="text-text-secondary">{evidenceStateLabel(summary.state)}</span>
       {summary.stateDetail ? ` · ${summary.stateDetail}` : ''}
       {' · '}nothing is drawn in place of the reading

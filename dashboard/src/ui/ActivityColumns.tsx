@@ -29,7 +29,7 @@ export function ActivityColumns({
 
   return (
     <figure className={cn('flex flex-col gap-1', className)}>
-      <figcaption className="flex items-baseline justify-between text-2xs text-text-muted">
+      <figcaption className="flex items-baseline justify-between text-sm text-text-muted">
         {activeBucket ? (
           <>
             <span>{activeBucket.label}</span>
@@ -94,13 +94,13 @@ export function CapacityBar({
   // `ObservatoryPage` draws one bar per store.
   const hatchId = useId();
   if (usedBytes == null) {
-    return <span className="text-2xs text-text-muted">size unknown</span>;
+    return <span className="text-sm text-text-muted">size unknown</span>;
   }
   // An absent free-page figure is not zero free pages. Coercing it drew a
   // completely filled bar announcing "0.0% free pages", a measurement of a
   // full store, for a store whose pages nobody sampled.
   if (freeBytes == null) {
-    return <span className="text-2xs text-text-muted">free pages unknown</span>;
+    return <span className="text-sm text-text-muted">free pages unknown</span>;
   }
   const freeFraction = usedBytes > 0 ? Math.min(freeBytes / usedBytes, 1) : 0;
   return (

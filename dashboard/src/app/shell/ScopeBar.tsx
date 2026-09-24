@@ -96,7 +96,7 @@ export function ScopeBar({
               {annotation ? (
                 <span
                   data-scope-label-annotation={annotation}
-                  className="shrink-0 text-3xs text-text-secondary"
+                  className="shrink-0 text-xs text-text-secondary"
                 >
                   · {annotation}
                 </span>
@@ -105,7 +105,7 @@ export function ScopeBar({
             </span>
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="td-legend">ID</span>
-              <span className="td-value truncate text-3xs text-text-secondary" data-scope-id>
+              <span className="td-value truncate text-xs text-text-secondary" data-scope-id>
                 {scope.projectId}
               </span>
             </span>

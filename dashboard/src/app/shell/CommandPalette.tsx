@@ -187,7 +187,7 @@ export function CommandPalette({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Go to workspace or project…"
-              className="min-h-[var(--touch-target-min)] w-full bg-transparent text-sm outline-none placeholder:text-text-muted"
+              className="min-h-[var(--touch-target-min)] w-full bg-transparent text-body outline-none placeholder:text-text-muted"
               role="combobox"
               aria-expanded="true"
               aria-controls="td-palette-list"
@@ -204,7 +204,7 @@ export function CommandPalette({
             className="td-well max-h-72 overflow-auto"
           >
             {filtered.length === 0 ? (
-              <li className="px-3 py-6 text-center text-sm text-text-muted">No matches</li>
+              <li className="px-3 py-6 text-center text-body text-text-muted">No matches</li>
             ) : (
               filtered.map((entry, i) => (
                 <li
@@ -217,7 +217,7 @@ export function CommandPalette({
                   className={cn(
                     // The same selection grammar as the rail: a cyan position
                     // bar in the gutter and the raised face, never a glow.
-                    'relative flex min-h-[var(--touch-target-min)] cursor-pointer items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2.5 text-sm',
+                    'relative flex min-h-[var(--touch-target-min)] cursor-pointer items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2.5 text-body',
                     i === activeIndex
                       ? 'td-raised text-text-primary before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:bg-accent'
                       : 'text-text-secondary',
@@ -235,7 +235,7 @@ export function CommandPalette({
                     {entry.channel ?? ''}
                   </code>
                   <span className="min-w-0 flex-1 truncate">{entry.label}</span>
-                  <span className="flex shrink-0 items-center gap-2 text-2xs text-text-muted">
+                  <span className="flex shrink-0 items-center gap-2 text-sm text-text-muted">
                     {entry.hint}
                     {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
                   </span>

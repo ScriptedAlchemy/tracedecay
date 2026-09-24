@@ -34,13 +34,13 @@ export function RunHistory() {
           // The ledger route answers an absent ledger file with an empty list,
           // which is the truthful reading: no run has ever been recorded here.
           return reading.complete ? (
-            <p className="text-2xs text-text-muted">
+            <p className="text-body text-text-muted">
               no automation runs are recorded in this project&apos;s ledger
             </p>
           ) : (
             <p
               role="status"
-              className="text-2xs leading-relaxed text-text-secondary"
+              className="text-body leading-relaxed text-text-secondary"
             >
               Showing a partial list: {reading.reason}.
             </p>
@@ -51,7 +51,7 @@ export function RunHistory() {
             {reading.complete ? null : (
               <p
                 role="status"
-                className="pb-1.5 text-2xs leading-relaxed text-text-secondary"
+                className="pb-1.5 text-body leading-relaxed text-text-secondary"
               >
                 Showing a partial list: {reading.reason}.
               </p>
@@ -100,23 +100,23 @@ function RunLine({ run }: { run: AutomationRunRowV1 }) {
         <span className="min-w-0 flex-1 truncate text-xs">{run.task}</span>
         <span
           className={cn(
-            "shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs",
+            "shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-body",
             run.status === "failed" ? "text-state-error" : "text-text-muted",
           )}
         >
           {run.status}
         </span>
-        <span className="tabular shrink-0 text-2xs text-text-muted">
+        <span className="tabular shrink-0 text-sm text-text-muted">
           {run.accepted_count} accepted · {run.rejected_count} rejected
         </span>
         {/* The record's timestamp verbatim when it does not parse as epoch
          * seconds: a raw string is a truthful oddity, a blank is a lie. */}
-        <span className="tabular shrink-0 text-2xs text-text-muted">
+        <span className="tabular shrink-0 text-sm text-text-muted">
           {age ?? run.started_at}
         </span>
       </button>
       {run.error ? (
-        <p className="pb-1.5 pl-5 text-2xs leading-relaxed text-state-error">
+        <p className="pb-1.5 pl-5 text-body leading-relaxed text-state-error">
           {run.error}
         </p>
       ) : null}
@@ -140,7 +140,7 @@ function RunArtifacts({
   return (
     <div className="mb-1.5 ml-5 border-l border-edge-subtle pl-2.5">
       {recordedKinds.length === 0 ? (
-        <p className="py-1 text-2xs text-text-muted">
+        <p className="py-1 text-body text-text-muted">
           this run recorded no artifacts in its ledger entry
         </p>
       ) : (
@@ -165,7 +165,7 @@ function ArtifactList({ data }: { data: AutomationRunArtifactsPayloadV1 }) {
        * matches the published chain. Its words, not a green summary. */}
       <p
         className={cn(
-          "text-2xs leading-relaxed",
+          "text-body leading-relaxed",
           chain.integrity_status === "verified"
             ? "text-text-secondary"
             : "text-state-error",
@@ -198,15 +198,15 @@ function ArtifactLine({
         onClick={() => setOpen((value) => !value)}
         className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-left"
       >
-        <span className="shrink-0 text-2xs text-text-primary">
+        <span className="shrink-0 text-body text-text-primary">
           {open ? "Hide" : "Inspect"} {artifact.kind.replaceAll("_", " ")}
         </span>
         {artifact.summary ? (
-          <span className="min-w-0 flex-1 truncate text-2xs text-text-muted" title={artifact.summary}>
+          <span className="min-w-0 flex-1 truncate text-body text-text-muted" title={artifact.summary}>
             {artifact.summary}
           </span>
         ) : null}
-        <span className="tabular shrink-0 font-mono text-3xs text-text-muted" title={artifact.sha256}>
+        <span className="tabular shrink-0 font-mono text-xs text-text-muted" title={artifact.sha256}>
           {artifact.sha256.slice(0, 12)}
         </span>
       </button>
@@ -216,12 +216,12 @@ function ArtifactLine({
             artifactPayloadBelongsTo(data, runId, artifact) ? (
               <pre
                 aria-label={`${artifact.kind} artifact payload`}
-                className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-3xs text-text-secondary"
+                className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-xs text-text-secondary"
               >
                 {JSON.stringify(data.payload, null, 2)}
               </pre>
             ) : (
-              <p role="status" className="text-2xs text-state-error">
+              <p role="status" className="text-body text-state-error">
                 the artifact payload does not belong to this run and kind
               </p>
             )

@@ -26,10 +26,10 @@ import {
  */
 
 const INPUT_CLASS =
-  'min-h-[var(--touch-target-min)] rounded-panel border border-edge-subtle bg-surface-1 px-2 font-mono text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
+  'min-h-[var(--touch-target-min)] rounded-panel border border-edge-subtle bg-surface-1 px-2 font-mono text-sm text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
 
 const BUTTON_CLASS =
-  'min-h-[var(--touch-target-min)] rounded-panel border border-edge-subtle px-2.5 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted';
+  'min-h-[var(--touch-target-min)] rounded-panel border border-edge-subtle px-2.5 py-1 text-body text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted';
 
 const CELL = 'border border-edge-subtle p-1 align-top';
 const HEAD = `${CELL} td-legend whitespace-normal text-left text-text-muted`;
@@ -83,7 +83,7 @@ export function RunLookupPanel({
           onLookup(trimmed === '' ? null : trimmed);
         }}
       >
-        <label className="flex min-w-0 flex-1 flex-col gap-0.5 text-3xs text-text-muted" htmlFor={inputId}>
+        <label className="flex min-w-0 flex-1 flex-col gap-0.5 text-sm text-text-muted" htmlFor={inputId}>
           <span className="td-legend">Run id</span>
           <input
             id={inputId}
@@ -99,7 +99,7 @@ export function RunLookupPanel({
       </form>
 
       {runId === null ? (
-        <p className="text-3xs text-text-muted">
+        <p className="text-sm text-text-muted">
           No run is loaded. A run is read by its exact id; the registry does not list runs, and a
           loaded definition does not imply one exists.
         </p>
@@ -110,7 +110,7 @@ export function RunLookupPanel({
       ) : result.outcome === 'refused' ? (
         <div className="flex flex-col gap-1">
           <StateChip kind={result.state} detail={result.detail} />
-          <p className="text-3xs text-text-muted">
+          <p className="text-sm text-text-muted">
             Nothing is projected for <span className="td-value">{runId}</span>. A concealed, denied,
             or unavailable run is not an empty run.
           </p>
@@ -152,16 +152,16 @@ function RunProjectionView({
           {projection.run_id}
         </span>
         <span
-          className="inline-flex items-center gap-1.5 text-3xs"
+          className="inline-flex items-center gap-1.5 text-sm"
           data-run-status={projection.status}
         >
           <Lamp tone={runStatusTone(projection.status)} live={projection.status === 'running'} />
-          <span className="uppercase tracking-[0.1em] text-text-secondary">{projection.status}</span>
+          <span className="uppercase tracking-[0.1em] text-text-secondary text-3xs">{projection.status}</span>
         </span>
         <GradeTag grade="EXACT" source="run journal" />
       </div>
 
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-3xs">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
         <RunFact label="workflow">
           <span className="td-value break-all">{pinnedKey}</span>
           {listed ? (
@@ -173,7 +173,7 @@ function RunProjectionView({
                   projection.definition.definition_version,
                 )
               }
-              className="ml-1.5 border border-edge-subtle px-1 text-3xs text-accent hover:bg-surface-3"
+              className="ml-1.5 border border-edge-subtle px-1 text-sm text-accent hover:bg-surface-3"
             >
               select in registry
             </button>
@@ -247,7 +247,7 @@ function RunStepTable({ rows, runId }: { rows: RunStepRow[]; runId: string }) {
     <div className="flex min-w-0 flex-col gap-1 border-t border-edge-subtle pt-2">
       <span className="td-legend">decoded step sequence · {runId}</span>
       <div className="min-w-0 overflow-x-auto">
-        <table className="w-full border-collapse text-3xs" data-workflow-run-steps={rows.length}>
+        <table className="w-full border-collapse text-sm" data-workflow-run-steps={rows.length}>
           <caption className="sr-only">Steps of run {runId} in pinned definition order</caption>
           <thead>
             <tr>
@@ -281,14 +281,14 @@ function RunStepTable({ rows, runId }: { rows: RunStepRow[]; runId: string }) {
                   <span className="flex flex-col gap-0.5">
                     <span className="inline-flex items-center gap-1.5">
                       <Lamp tone={stepStatusTone(row.status)} />
-                      <span className="uppercase tracking-[0.08em] text-text-secondary">
+                      <span className="uppercase tracking-[0.08em] text-text-secondary text-3xs">
                         {row.status === 'absent' ? 'absent from projection' : row.status}
                       </span>
                     </span>
                     {row.effect === null ? (
                       <span className="text-text-muted">no effect receipt</span>
                     ) : (
-                      <span className="uppercase tracking-[0.08em] text-text-secondary">
+                      <span className="uppercase tracking-[0.08em] text-text-secondary text-3xs">
                         effect {row.effect}
                       </span>
                     )}
@@ -348,7 +348,7 @@ function RunJournal({ events }: { events: readonly WorkflowRunEvent[] }) {
     <div className="flex min-w-0 flex-col gap-1 border-t border-edge-subtle pt-2">
       <span className="td-legend">run journal · {events.length} events</span>
       {events.length === 0 ? (
-        <p className="text-3xs text-text-muted">The served projection carries no events.</p>
+        <p className="text-sm text-text-muted">The served projection carries no events.</p>
       ) : (
         <div
           role="region"
@@ -356,7 +356,7 @@ function RunJournal({ events }: { events: readonly WorkflowRunEvent[] }) {
           tabIndex={0}
           className="max-h-56 min-w-0 overflow-auto"
         >
-          <table className="w-full min-w-[20rem] border-collapse text-3xs" data-workflow-run-journal={events.length}>
+          <table className="w-full min-w-[20rem] border-collapse text-sm" data-workflow-run-journal={events.length}>
             <caption className="sr-only">Run journal events in sequence order</caption>
             <thead>
               <tr>

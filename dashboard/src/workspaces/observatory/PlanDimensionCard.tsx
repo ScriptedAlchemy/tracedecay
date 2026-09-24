@@ -55,13 +55,13 @@ export function PlanDimensionCard({ dimension }: { dimension: PlanDimensionPrese
       {dimension.reason != null ? (
         <div className="flex flex-wrap items-center gap-2">
           <StateChip kind={dimension.state} />
-          <span className="min-w-0 text-2xs text-text-secondary">{dimension.reason}</span>
+          <span className="min-w-0 text-body text-text-secondary">{dimension.reason}</span>
         </div>
       ) : null}
 
-      <p className="text-3xs leading-snug text-text-muted">{dimension.requirement}</p>
+      <p className="text-sm leading-snug text-text-muted">{dimension.requirement}</p>
 
-      <dl className="flex flex-col gap-1 text-3xs leading-snug text-text-muted">
+      <dl className="flex flex-col gap-1 text-sm leading-snug text-text-muted">
         <Row term="support" value={dimension.support} />
         <Row term="denominator" value={dimension.denominator} />
         <Row term="censoring" value={dimension.censoring} />
@@ -77,7 +77,7 @@ export function PlanDimensionCard({ dimension }: { dimension: PlanDimensionPrese
 function Row({ term, value }: { term: string; value: string }) {
   return (
     <div className="flex min-w-0 gap-1.5">
-      <dt className="shrink-0 uppercase tracking-[0.08em]">{term}</dt>
+      <dt className="shrink-0 uppercase tracking-[0.08em] text-3xs">{term}</dt>
       <dd className="min-w-0 break-words text-text-secondary">{value}</dd>
     </div>
   );
@@ -105,7 +105,7 @@ export function PlanDimensionGrid({
       <div className="flex min-w-0 items-center gap-2">
         <h3 className="td-legend truncate">{label}</h3>
         <span aria-hidden className="td-rule" />
-        <span className="shrink-0 text-3xs text-text-muted tabular">
+        <span className="shrink-0 text-xs text-text-muted tabular">
           {measured} of {dimensions.length} measured
         </span>
       </div>

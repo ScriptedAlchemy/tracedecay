@@ -87,7 +87,7 @@ export function CanonicalReadModelSection<T>({
             />
             <OmissionReasons coverage={envelope.coverage} />
             <dl
-              className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-3xs sm:grid-cols-2 xl:grid-cols-4"
+              className="mx-4 mt-3 grid gap-x-4 gap-y-1 border border-edge-subtle bg-surface-1 px-3 py-2 text-sm sm:grid-cols-2 xl:grid-cols-4"
               {...horizonAttributes(model)}
             >
               {horizonFields(model)}

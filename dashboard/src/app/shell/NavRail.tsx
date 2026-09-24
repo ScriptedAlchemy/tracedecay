@@ -163,7 +163,7 @@ function RailLink({
             {channelNumber(path)}
           </span>
           <Icon aria-hidden size={14} strokeWidth={1.5} className="shrink-0" />
-          <span className="truncate text-sm">{label}</span>
+          <span className="truncate text-body">{label}</span>
           {health ? <DoctorDot health={health} /> : null}
         </>
       )}

@@ -27,7 +27,7 @@ export function CloneIndexStatus({
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Clone index">
-        <p className="text-2xs text-text-muted">reading clone-index coverage…</p>
+        <p className="text-body text-text-muted">reading clone-index coverage…</p>
       </section>
     );
   }
@@ -46,7 +46,7 @@ export function CloneIndexStatus({
     >
       <h2 className="td-legend">Clone index</h2>
       {worktrees.length === 0 ? (
-        <p className="mt-2 text-2xs text-text-muted">
+        <p className="mt-2 text-body text-text-muted">
           {result?.outcome === 'envelope'
             ? result.envelope.payload.note
             : 'clone-index status is unavailable'}
@@ -86,9 +86,9 @@ function CloneIndexCard({
     >
       <div className="flex flex-wrap items-center gap-2">
         <StateChip kind={cloneIndexState(status)} />
-        <span className="text-2xs text-text-secondary">{cloneIndexDetail(status)}</span>
+        <span className="text-body text-text-secondary">{cloneIndexDetail(status)}</span>
       </div>
-      <p className="mt-1 truncate font-mono text-3xs text-text-muted" title={worktree}>
+      <p className="mt-1 truncate font-mono text-xs text-text-muted" title={worktree}>
         {worktree}
       </p>
       {observation ? <CloneIndexObservation observation={observation} /> : null}
@@ -101,7 +101,7 @@ function CloneIndexObservation({ observation }: { observation: CodeCloneIndexObs
   const resources = observation.resources;
   return (
     <>
-      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-3xs leading-snug sm:grid-cols-4">
+      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-sm leading-snug sm:grid-cols-4">
         <Field label="eligible bodies">
           {ratio(coverage.eligible_source_bodies, coverage.source_bodies)}
         </Field>
@@ -125,7 +125,7 @@ function CloneIndexObservation({ observation }: { observation: CodeCloneIndexObs
         <Field label="coverage exclusions">{coverageExclusionSummary(coverage)}</Field>
         <Field label="rename limitations">{renameLimitationSummary(coverage)}</Field>
       </dl>
-      <div className="mt-2 grid gap-2 text-3xs sm:grid-cols-2">
+      <div className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
         <section className="rounded-[var(--radius-chip)] bg-surface-1 p-2">
           <h3 className="font-medium text-text-secondary">Candidate and verification budgets</h3>
           <p className="mt-1 text-text-muted">
@@ -160,7 +160,7 @@ function CloneIndexObservation({ observation }: { observation: CodeCloneIndexObs
           </p>
         </section>
       </div>
-      <p className="mt-2 truncate font-mono text-3xs text-text-muted" title={observation.generation_id}>
+      <p className="mt-2 truncate font-mono text-xs text-text-muted" title={observation.generation_id}>
         {observation.generation_id} · artifact v
         {observation.artifact_format_revision ?? 'unknown'} · normalization{' '}
         {observation.conservative_normalization_revision}/

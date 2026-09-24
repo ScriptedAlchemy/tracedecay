@@ -364,7 +364,7 @@ function VolumeField({
           {powerTicks(max).map((value) => (
             <span
               key={value}
-              className="td-value absolute right-1 translate-y-1/2 text-3xs leading-none text-text-muted"
+              className="td-value absolute right-1 translate-y-1/2 text-xs leading-none text-text-muted"
               style={{ bottom: `${logHeight(value, max)}%` }}
               data-cell="numeric"
             >
@@ -449,7 +449,7 @@ function VolumeField({
           <span
             key={index}
             className={cn(
-              'td-value absolute top-0 -translate-x-1/2 whitespace-nowrap text-3xs leading-none text-text-muted',
+              'td-value absolute top-0 -translate-x-1/2 whitespace-nowrap text-xs leading-none text-text-muted',
               // Every other label yields below `md`, where the field is too
               // narrow to hold them all; the exact-bucket table keeps every key.
               position % 2 === 1 && 'max-md:hidden',
@@ -460,7 +460,7 @@ function VolumeField({
           </span>
         ))}
       </div>
-      <p role="status" className="td-value text-2xs text-text-secondary tabular">
+      <p role="status" className="td-value text-sm text-text-secondary tabular">
         {status}
       </p>
       <div className="td-legend flex flex-wrap items-center gap-x-3 gap-y-1 whitespace-normal">
@@ -510,17 +510,17 @@ function ExactBuckets({ buckets }: { buckets: readonly LcmTimelineBucketV1[] }) 
           <tbody>
             {rows.map((row) => (
               <tr key={row.bucket} data-bucket-row={row.bucket} className="border-b border-edge-subtle">
-                <td className="td-value py-0.5 pr-2 text-2xs text-text-primary">{row.bucket}</td>
-                <td className="td-value py-0.5 pr-2 text-right text-2xs" data-cell="numeric">
+                <td className="td-value py-0.5 pr-2 text-sm text-text-primary">{row.bucket}</td>
+                <td className="td-value py-0.5 pr-2 text-right text-sm" data-cell="numeric">
                   {row.count.toLocaleString()}
                 </td>
-                <td className="td-value py-0.5 pr-2 text-right text-2xs" data-cell="numeric">
+                <td className="td-value py-0.5 pr-2 text-right text-sm" data-cell="numeric">
                   {row.known_message_count.toLocaleString()}
                 </td>
-                <td className="td-value py-0.5 pr-2 text-right text-2xs" data-cell="numeric">
+                <td className="td-value py-0.5 pr-2 text-right text-sm" data-cell="numeric">
                   {row.unknown_message_count.toLocaleString()}
                 </td>
-                <td className="td-value py-0.5 text-2xs text-text-muted">
+                <td className="td-value py-0.5 text-sm text-text-muted">
                   {tokenCountLabel(row.token_count, row.token_count_provenance) ??
                     'token count unavailable'}
                 </td>
@@ -536,7 +536,7 @@ function ExactBuckets({ buckets }: { buckets: readonly LcmTimelineBucketV1[] }) 
 function TimelineFooter({ envelope }: { envelope: DashboardEnvelopeV1<LcmTimelinePayloadV1> }) {
   const { coverage: timelineCoverage, undated } = envelope.payload;
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-3xs text-text-muted">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-muted">
       {timelineCoverage ? (
         <span>
           {timelineCoverage.returned_buckets.toLocaleString()} of{' '}

@@ -225,7 +225,7 @@ function SettingsSurface({
               scrollRef={scrollRef}
             />
           )}
-          <p className="shrink-0 border-t border-edge-subtle px-3 py-1.5 text-3xs leading-relaxed text-text-muted">
+          <p className="shrink-0 border-t border-edge-subtle px-3 py-1.5 text-sm leading-relaxed text-text-muted">
             Showing effective configuration only. Origins are shown only when the server names
             them; otherwise a key's provenance is <span className="td-value">unserved</span>. Hover
             or focus a row to inspect it; Enter or click opens its review; Escape closes.
@@ -331,7 +331,7 @@ function SettingsRegister({
           </button>
         ) : null}
       </div>
-      <p className="td-value shrink-0 text-3xs text-text-muted" aria-live="polite">
+      <p className="td-value shrink-0 text-xs text-text-muted" aria-live="polite">
         {query === '' ? `${total} settings` : `${shown} of ${total} settings`}
       </p>
       <dl className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -361,7 +361,7 @@ function Register({
   return (
     <div className="flex items-baseline gap-2" {...data}>
       <dt className="td-legend">{label}</dt>
-      <dd className={cn('td-value text-2xs', tone)}>{children}</dd>
+      <dd className={cn('td-value text-sm', tone)}>{children}</dd>
     </div>
   );
 }

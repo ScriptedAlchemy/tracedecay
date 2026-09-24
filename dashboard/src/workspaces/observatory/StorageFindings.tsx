@@ -64,7 +64,7 @@ function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatu
             data-storage-source-kind={status.kind}
             data-storage-source-state={status.state}
           >
-            <p className="flex items-center gap-1.5 text-2xs font-medium text-text-secondary">
+            <p className="flex items-center gap-1.5 text-body font-medium text-text-secondary">
               <span
                 aria-hidden
                 className={`size-1.5 shrink-0 rounded-full ${presentation.dotClass}`}
@@ -72,9 +72,9 @@ function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatu
               <span>{storageFindingLabel(status.kind)}</span>
               <span className={presentation.tokenClass}>· {presentation.label}</span>
             </p>
-            <p className="mt-1 text-2xs text-text-muted">{status.reason}</p>
+            <p className="mt-1 text-body text-text-muted">{status.reason}</p>
             {status.observed_entries > 0 ? (
-              <p className="mt-1 text-3xs text-text-muted tabular">
+              <p className="mt-1 text-xs text-text-muted tabular">
                 {status.observed_entries} observed{' '}
                 {status.observed_entries === 1 ? 'entry' : 'entries'}
               </p>
@@ -98,7 +98,7 @@ function StorageFindingCard({ entry }: { entry: DoctorReportEntryV1 }) {
         data-storage-finding-kind={storageKind ?? 'unclassified'}
       >
         <span
-          className={`inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium ${presentation.tokenClass}`}
+          className={`inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-body font-medium ${presentation.tokenClass}`}
           data-evidence-state={finding.state}
         >
           <span aria-hidden className={`size-1.5 rounded-full ${presentation.dotClass}`} />
@@ -115,7 +115,7 @@ function StorageFindingCard({ entry }: { entry: DoctorReportEntryV1 }) {
               // Indexed like the finding cards above: references are
               // server-authored rows, not unique identities.
               key={`${evidence.family}:${evidence.reference}:${index}`}
-              className="break-all font-mono text-2xs text-text-muted"
+              className="break-all font-mono text-sm text-text-muted"
             >
               {evidence.reference}
             </li>
