@@ -36,7 +36,7 @@ use tracedecay_domain::{
     ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
     QueryNormalizationRevision, RepositoryDirtyStateV1, RepositoryId, RetrievalBudget,
     RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverCoverage,
-    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    RetrieverBatch, RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1,
     SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace,
     TemporalModeV1, UtcMicros, VectorWatermark,
@@ -53,7 +53,7 @@ use tracedecay_query::retrieval::lexical::{
     CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
     CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
-    LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1, LexicalSpellingVariantV1,
+    LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1, LexicalSpellingVariantV1,
     MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_FUZZY_TERM_EXPANSIONS_V1,
     MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1,
     VerifiedCodeLexicalArtifactV1,
@@ -2230,6 +2230,42 @@ fn extracted_qualified_names_search_reopened_artifacts() {
     }
 }
 
+/// Each candidate as its canonical symbol name and the fields that scored it,
+/// read back through the artifact's own occurrence row.
+fn scored_fields(
+    reader: &CodeLexicalArtifactReaderV1,
+    batch: &RetrieverBatch<LexicalLaneEvidence>,
+) -> Vec<(String, Vec<LexicalFieldV1>)> {
+    batch
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let evidence = &batch.evidence_by_occurrence[&candidate.source_occurrence_id];
+            let occurrence = reader
+                .occurrence_by_chunk(
+                    evidence
+                        .binding
+                        .occurrence
+                        .chunk
+                        .as_ref()
+                        .expect("chunk binding"),
+                )
+                .expect("read canonical occurrence")
+                .expect("matched occurrence");
+            let fields = evidence
+                .field_scores_micros
+                .iter()
+                .filter(|(_, score)| *score > 0)
+                .map(|(field, _)| *field)
+                .collect();
+            (
+                occurrence.qualified_name.unwrap_or(occurrence.logical_path),
+                fields,
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
     let fixture = real_lexical_source_fixture_from_sources(vec![(
@@ -2252,28 +2288,32 @@ fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
         .rebuild_and_finalize(&mut fixture.open_source(128), &control)
         .expect("build from parser-attested pages");
     drop(builder);
-    let artifact = LexicalLane::new(
-        CodeLexicalArtifactReaderV1::open_with_control(
-            &path,
-            &verified,
-            &fixture.metadata,
-            CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-            &control,
-        )
-        .expect("reopen lexical fields"),
-    );
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        &fixture.metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen lexical fields");
+    let artifact = LexicalLane::new(reader.clone());
 
     let run = |query: &str,
                whole_terms: &[&str],
                phrases: &[&str],
-               field: LexicalFieldV1,
+               filter: Option<LexicalFieldV1>,
                proximities: Vec<LexicalProximityV1>| {
         let mut request = lexical_request(query, whole_terms, &[], phrases, 0, 32);
         request.generation = fixture.metadata.generation.clone();
-        request.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
-            field,
-            include: true,
-        }]);
+        request.field_filters = Cow::Owned(
+            filter
+                .into_iter()
+                .map(|field| LexicalFieldFilterV1 {
+                    field,
+                    include: true,
+                })
+                .collect(),
+        );
         request.proximities = Cow::Owned(proximities);
         complete(
             artifact
@@ -2282,19 +2322,66 @@ fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
         )
     };
 
-    for (query, field) in [
-        ("cached", LexicalFieldV1::SymbolName),
-        ("client", LexicalFieldV1::Path),
-        ("budget", LexicalFieldV1::Signature),
-        ("response", LexicalFieldV1::QualifiedName),
+    const STRUCT: &str = "src/http-cache/client-store.rs::CachedResponse";
+    const LOADER: &str = "src/http-cache/client-store.rs::loadCachedResponse";
+    let both = [STRUCT, STRUCT, LOADER, LOADER];
+    let scored = |names: &[&str], field| {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), vec![field]))
+            .collect::<Vec<_>>()
+    };
+    // Each query scores in `field` only, and the same query under `other`
+    // scores there instead, so ignoring the filter would widen both readings.
+    for (query, field, drawn, other, drawn_elsewhere) in [
+        (
+            "cached",
+            LexicalFieldV1::SymbolName,
+            &both[..],
+            LexicalFieldV1::QualifiedName,
+            &both[..],
+        ),
+        (
+            "client",
+            LexicalFieldV1::Path,
+            &both[..],
+            LexicalFieldV1::QualifiedName,
+            &both[..],
+        ),
+        (
+            "budget",
+            LexicalFieldV1::Signature,
+            &[LOADER][..],
+            LexicalFieldV1::SymbolName,
+            &[][..],
+        ),
+        (
+            "response",
+            LexicalFieldV1::QualifiedName,
+            &both[..],
+            LexicalFieldV1::SymbolName,
+            &both[..],
+        ),
     ] {
-        assert!(
-            !run(query, &[query], &[], field, Vec::new())
-                .candidates
-                .is_empty(),
-            "{query} must recover from its field vocabulary"
+        assert_eq!(
+            scored_fields(&reader, &run(query, &[query], &[], Some(field), Vec::new())),
+            scored(drawn, field),
+            "{query} under {field:?}"
+        );
+        assert_eq!(
+            scored_fields(&reader, &run(query, &[query], &[], Some(other), Vec::new())),
+            scored(drawn_elsewhere, other),
+            "{query} under {other:?}"
         );
     }
+    assert_eq!(
+        scored_fields(&reader, &run("client", &["client"], &[], None, Vec::new()))[0],
+        (
+            STRUCT.to_owned(),
+            vec![LexicalFieldV1::QualifiedName, LexicalFieldV1::Path]
+        ),
+        "without a filter the path term also scores the qualified name"
+    );
     let mut typo = lexical_request("budgt", &["budgt"], &[], &[], 1, 32);
     typo.generation = fixture.metadata.generation.clone();
     typo.field_filters = Cow::Owned(vec![LexicalFieldFilterV1 {
@@ -2318,7 +2405,7 @@ fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
         "durable cache",
         &[],
         &["durable cache"],
-        LexicalFieldV1::Documentation,
+        Some(LexicalFieldV1::Documentation),
         Vec::new(),
     );
     assert_eq!(phrase.candidates.len(), 1);
@@ -2332,7 +2419,7 @@ fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
             "durable owner",
             &[],
             &[],
-            LexicalFieldV1::Documentation,
+            Some(LexicalFieldV1::Documentation),
             vec![proximity],
         )
         .candidates
@@ -2348,7 +2435,7 @@ fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
             "durable owner",
             &[],
             &[],
-            LexicalFieldV1::Documentation,
+            Some(LexicalFieldV1::Documentation),
             vec![too_narrow],
         )
         .candidates
@@ -2829,17 +2916,67 @@ fn annotation_uses_mint_no_lexical_artifact_documents() {
         &control,
     )
     .expect("open artifact");
-    let artifact = LexicalLane::new(reader);
-    for (query, terms) in [
-        ("must_use inline", &["must_use", "inline"][..]),
-        ("derive Debug", &["derive", "debug"][..]),
-        ("annotated_probe", &["annotated_probe"][..]),
+    let artifact = LexicalLane::new(reader.clone());
+    let probe = |name: &str, fields: &[LexicalFieldV1], terms: &[&str]| {
+        (
+            format!("src/annotated.rs::{name}"),
+            fields.to_vec(),
+            terms.iter().map(|term| (*term).to_owned()).collect::<Vec<_>>(),
+        )
+    };
+    let body = [LexicalFieldV1::BodyText];
+    for (query, terms, drawn) in [
+        (
+            "must_use inline",
+            &["must_use", "inline"][..],
+            vec![
+                probe("annotated_probe", &body, &["inline", "must_use"]),
+                probe("annotated_probe", &body, &["inline"]),
+            ],
+        ),
+        (
+            "derive Debug",
+            &["derive", "debug"][..],
+            vec![
+                probe("AnnotatedProbe", &body, &["debug", "derive"]),
+                probe("AnnotatedProbe", &body, &["debug", "derive"]),
+            ],
+        ),
+        (
+            "annotated_probe",
+            &["annotated_probe"][..],
+            vec![
+                probe(
+                    "annotated_probe",
+                    &[
+                        LexicalFieldV1::SymbolName,
+                        LexicalFieldV1::BodyText,
+                        LexicalFieldV1::ExactTerm,
+                    ],
+                    &["annotated_probe"],
+                ),
+                probe(
+                    "annotated_probe",
+                    &[LexicalFieldV1::SymbolName, LexicalFieldV1::Signature],
+                    &["annotated_probe"],
+                ),
+            ],
+        ),
     ] {
         let mut request = lexical_request(query, terms, &[], &[], 0, 8);
         request.generation = fixture.metadata.generation.clone();
         let expected = complete(artifact.retrieve_lexical(&request).expect("artifact query"));
-        assert!(
-            !expected.candidates.is_empty(),
+        let matched = scored_fields(&reader, &expected)
+            .into_iter()
+            .zip(&expected.candidates)
+            .map(|((name, fields), candidate)| {
+                let terms = &expected.evidence_by_occurrence[&candidate.source_occurrence_id]
+                    .matched_whole_terms;
+                (name, fields, terms.clone())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matched, drawn,
             "{query}: attribute text stays searchable through the item it annotates"
         );
         assert_eq!(
