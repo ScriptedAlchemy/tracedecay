@@ -521,7 +521,7 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     );
 
     drop(server);
-    fixture.harness.shutdown().await;
+    fixture.shutdown().await;
 
     let markdown_fixture = production_composition_fixture().await;
     let markdown_server = markdown_fixture
@@ -548,7 +548,7 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
         "expected the empty event count in markdown: {text}"
     );
     drop(markdown_server);
-    markdown_fixture.harness.shutdown().await;
+    markdown_fixture.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
