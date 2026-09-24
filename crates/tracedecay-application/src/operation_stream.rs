@@ -1185,13 +1185,26 @@ impl OperationEventAuthority {
         })
     }
 
-    /// Drops all memory-retained frontiers. Existing streams close; reconnects
-    /// receive `FrontierExpired` rather than a fabricated snapshot.
-    #[hotpath::measure(label = "usecases.operation.expire_all", future = true)]
-    pub async fn expire_all(&self) {
+    /// Drops every memory-retained frontier that no live producer still
+    /// writes. Streams on those operations close; reconnects receive
+    /// `FrontierExpired` rather than a fabricated snapshot.
+    ///
+    /// A record whose `OperationEmitter` is still alive is kept. The
+    /// process-global authority is shared by every daemon composition in the
+    /// process and by the project workflow handlers that begin managed test
+    /// runs outside any composition, so one composition's shutdown must not
+    /// truncate a stream another producer is between admission and its first
+    /// result on. The emitter is the only holder of the cancellation
+    /// receiver, so its receiver count is the producer liveness signal.
+    #[hotpath::measure(label = "usecases.operation.expire_idle", future = true)]
+    pub async fn expire_idle(&self) {
         let mut state = self.inner.state.lock().await;
-        state.operations.clear();
-        state.insertion_order.clear();
+        let AuthorityState {
+            operations,
+            insertion_order,
+        } = &mut *state;
+        operations.retain(|_, record| record.cancellation.receiver_count() > 0);
+        insertion_order.retain(|operation_id| operations.contains_key(operation_id));
     }
 
     #[hotpath::measure(label = "usecases.operation.emit_progress", future = true)]
@@ -1788,7 +1801,8 @@ mod tests {
     use super::{
         CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
         ManagedTestRunStaleReason, ManagedTestRunUnavailableReason, OperationCancelOutcome,
-        OperationEventAuthority, OperationEventError, OperationId,
+        OperationEventAuthority, OperationEventError, OperationEventItem, OperationId,
+        StreamEventKind,
     };
 
     #[test]
@@ -1869,6 +1883,73 @@ mod tests {
         assert_eq!(snapshot.completed, 1);
         assert_eq!(snapshot.termination, Some(OperationTermination::Completed));
         assert_eq!(snapshot.receipt, Some(receipt));
+    }
+
+    /// A daemon composition shutting down in the same process (the harness
+    /// runs many) expires the shared authority between a managed run's
+    /// admission and its first result. The accepted record must survive
+    /// while its producer is alive; only producer-less frontiers expire.
+    #[tokio::test]
+    async fn operation_history_keeps_the_accepted_record_for_a_live_producer_across_expiry() {
+        let authority = OperationEventAuthority::default();
+        let live_request = RequestId::new("request.test-run.live-producer").expect("request id");
+        let live = authority
+            .begin_managed_test_run(
+                "file:///workspace/live".to_owned(),
+                live_request.clone(),
+                None,
+                None,
+                BTreeMap::new(),
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+            .await
+            .expect("live managed test run");
+        drop(
+            authority
+                .begin_managed_test_run(
+                    "file:///workspace/abandoned".to_owned(),
+                    RequestId::new("request.test-run.abandoned-producer").expect("request id"),
+                    None,
+                    None,
+                    BTreeMap::new(),
+                    Deadline::new(UtcMicros(10_000)).expect("deadline"),
+                )
+                .await
+                .expect("abandoned managed test run"),
+        );
+
+        authority.expire_idle().await;
+
+        let first_result = live
+            .test_result("suite::first".to_owned(), true)
+            .await
+            .expect("first result after a peer composition expired idle frontiers");
+        assert_eq!(first_result.sequence, 1);
+        let state = authority.inner.state.lock().await;
+        let history = &state.operations[&OperationId::from_request(live_request)].history;
+        assert!(
+            matches!(
+                history.front().map(|event| (event.sequence, &event.kind)),
+                Some((0, StreamEventKind::Item(OperationEventItem::Accepted { .. })))
+            ),
+            "the accepted record must precede the first result: {history:?}"
+        );
+        assert_eq!(history.len(), 2);
+        assert!(
+            !state.operations.contains_key(&OperationId::from_request(
+                RequestId::new("request.test-run.abandoned-producer").expect("request id"),
+            )),
+            "a frontier without a live producer expires"
+        );
+        assert_eq!(state.insertion_order.len(), 1);
+        drop(state);
+        assert_eq!(
+            authority
+                .latest_managed_test_run("file:///workspace/abandoned")
+                .await
+                .err(),
+            Some(OperationEventError::FrontierExpired)
+        );
     }
 
     #[tokio::test]

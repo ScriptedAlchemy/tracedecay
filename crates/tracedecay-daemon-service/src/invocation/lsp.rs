@@ -378,8 +378,10 @@ impl DaemonInvocationService {
         let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
         step("project_runtimes_shut_down");
         self.session_holder_databases.lock().await.clear();
-        self.operation_events.expire_all().await;
-        step("operation_events_expired");
+        // The operation-event authority is process-global, not owned by this
+        // composition: only frontiers without a live producer expire here.
+        self.operation_events.expire_idle().await;
+        step("idle_operation_events_expired");
         let lease_shutdown_clean = lease_shutdown.is_ok();
         if let Err(problem) = lease_shutdown {
             tracing::error!(
