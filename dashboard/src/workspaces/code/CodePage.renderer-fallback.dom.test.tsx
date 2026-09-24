@@ -10,10 +10,9 @@ import { CodePage } from './CodePage.tsx';
  * Renderer parity/fallback: renderer-neutral interaction and fallback
  * contract.
  *
- * The sibling suites mock GraphCanvas because the canvas is not their
- * subject. Here it IS the subject, and jsdom's missing WebGL context is not
- * an obstacle but the exact browser this contract exists for: one with no
- * usable GPU context. The default renderer (Sigma) must degrade to a stated
+ * Here the canvas IS the subject, and jsdom's missing 2D context is not an
+ * obstacle but the exact browser this contract exists for: one that hands
+ * back no drawing context. The relief field must degrade to a stated
  * truthful reading, never a blank rectangle, while the semantic surfaces
  * beside it (hub list, search results, inspector) keep carrying the same
  * stable-ID selection model on their own. The canvas is supplementary; the
@@ -50,18 +49,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('a browser without a WebGL context', () => {
+describe('a browser without a 2D canvas context', () => {
   it('states the undrawable canvas and points at the text alternative', async () => {
     mockFetch();
     renderCode();
 
-    // The truthful reading: the canvas names its own absence and the caller's
-    // fallback description, instead of mounting Sigma into a dead context or
-    // rendering an empty box that reads as "no graph".
-    expect(await screen.findByText(/no WebGL context/i)).toBeTruthy();
-    expect(
-      screen.getByText(/symbol list and inspector beside this field remain available/i),
-    ).toBeTruthy();
+    // The truthful reading: the field names its own absence and where every
+    // symbol still is, instead of rendering an empty box that reads as "no
+    // graph". The fixture answers the 250-symbol request whole.
+    const state = await screen.findByText(
+      'this browser gave no 2D canvas, so the 250-symbol field is not drawn; the symbol list and inspector beside it carry every symbol',
+    );
+    expect(state.closest('[data-state]')?.getAttribute('data-state')).toBe('unavailable');
   });
 
   it('keeps the accessible hub list rendering the same graph', async () => {

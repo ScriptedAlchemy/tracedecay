@@ -1,7 +1,7 @@
 /**
- * Browser wiring shared by the Cortex field's canvas renderers.
+ * Browser wiring for the Cortex field's canvas.
  *
- * One canvas, one camera and one interaction model, whichever painter draws:
+ * One canvas, one camera and one interaction model around a pure painter:
  * hover inspects without changing selection, click pins, the wheel zooms about
  * the pointer, a drag pans, and the keyboard walks the symbols in the ledger's
  * own order with a visible 2px cyan outline on the field and a bracket on the
@@ -16,9 +16,9 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
-import { GraphUnavailable } from '../../viz/graph/GraphCanvas.tsx';
 import type { ActivationField } from '../../viz/graph/activation.ts';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
+import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
 import { cn } from '../../ui/cn';
 import {
   fitCamera,
@@ -196,7 +196,6 @@ export function CortexSceneCanvas<L>({
     return () => observer.disconnect();
   }, [schedule]);
 
-  const layoutBox = painter.relayoutOnResize ? box : null;
   const hasBox = box.width > 0 && box.height > 0;
   useEffect(() => {
     if (noContext || !hasBox) return;
@@ -221,8 +220,7 @@ export function CortexSceneCanvas<L>({
     return () => {
       cancelled = true;
     };
-    // `layoutBox` is the box only for a painter whose geometry is the box.
-  }, [scene, painter, noContext, hasBox, layoutBox?.width, layoutBox?.height]);
+  }, [scene, painter, noContext, hasBox]);
 
   // Fit on a fresh layout or a resized box; keep the reader's camera otherwise.
   useEffect(() => {
@@ -231,7 +229,7 @@ export function CortexSceneCanvas<L>({
     const previousFit = fitKRef.current;
     fitKRef.current = fit.k;
     const camera = cameraRef.current;
-    if (camera === null || painter.relayoutOnResize) {
+    if (camera === null) {
       cameraRef.current = fit;
       setZoomPercent(100);
     } else {
@@ -483,19 +481,19 @@ export function CortexSceneCanvas<L>({
 
   if (noContext) {
     return (
-      <GraphUnavailable>
+      <FieldUnavailable>
         this browser gave no 2D canvas, so the {scene.nodes.length.toLocaleString()}-symbol field
         is not drawn; the symbol list and inspector beside it carry every symbol
-      </GraphUnavailable>
+      </FieldUnavailable>
     );
   }
   if (layoutState.status === 'failed') {
     return (
-      <GraphUnavailable>
+      <FieldUnavailable>
         the {painter.name} layout could not be completed ({layoutState.reason}), so the{' '}
         {scene.nodes.length.toLocaleString()}-symbol field has no positions to draw; the symbol
         list and inspector beside it carry every symbol
-      </GraphUnavailable>
+      </FieldUnavailable>
     );
   }
   return (
@@ -588,5 +586,29 @@ function CameraButton({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * A field that is not being drawn. Distinct from an empty field on purpose:
+ * it wears the dashed `unknown` evidence pattern rather than the aperture, so
+ * a failure never looks like a sparse graph.
+ */
+function FieldUnavailable({ children }: { children: ReactNode }) {
+  return (
+    <div
+      data-state="unavailable"
+      role="status"
+      aria-live="polite"
+      className="flex flex-col items-center gap-2 border-y border-dashed border-edge-strong bg-surface-1 p-6 text-center"
+    >
+      <span
+        aria-hidden
+        className="h-1 w-full max-w-40 opacity-70"
+        style={{ backgroundImage: 'var(--ev-unknown)' }}
+      />
+      <p className="text-sm text-text-secondary">{children}</p>
+      <EvidencePattern quality="unknown" />
+    </div>
   );
 }

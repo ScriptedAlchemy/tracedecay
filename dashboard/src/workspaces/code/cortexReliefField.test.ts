@@ -73,6 +73,37 @@ describe('reliefLayout', () => {
     }
   });
 
+  it('raises each directory relief from its own symbols only', () => {
+    // lib/c's one symbol carries one relation; src/a's five carry six ends.
+    const heights = layout.modules.map((m) => [m.module, Number(layout.surfaces.get(m)!.max.toFixed(3))]);
+    expect(heights).toEqual([
+      ['src/a', 3.137],
+      ['src/b', 1.603],
+      ['lib/c', 0.982],
+    ]);
+    expect(layout.interval).toBe(1);
+  });
+
+  it('keeps a silent directory flat however busy its neighbour is', () => {
+    const quiet = reliefLayout(
+      sceneFromSlice(
+        [...['a1', 'a2', 'a3'].map((id) => node(id, 'src/a/x.rs', 3)), node('q', 'src/q/y.rs')],
+        [edge('a1', 'a2'), edge('a2', 'a3'), edge('a1', 'a3')],
+      ),
+      2,
+    );
+    const q = quiet.modules.find((m) => m.module === 'src/q')!;
+    expect(quiet.surfaces.get(q)!.max).toBe(0);
+    expect(quiet.surfaces.get(q)!.contours).toEqual([]);
+  });
+
+  it('aggregates relations across directories into one counted trunk per pair', () => {
+    expect(layout.trunks.map((t) => [t.a.module, t.b.module, t.count])).toEqual([
+      ['src/a', 'src/b', 1],
+      ['lib/c', 'src/b', 1],
+    ]);
+  });
+
   it('is deterministic for the same slice', () => {
     const again = reliefLayout(sceneFromSlice(nodes, edges), 2);
     expect([...again.positions]).toEqual([...layout.positions]);
