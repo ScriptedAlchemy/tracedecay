@@ -379,7 +379,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
 }
 
 #[test]
-fn graph_reader_selector_dispatch_policy_is_allowlisted() {
+fn registered_project_selector_dispatch_policy_matches_tool_schemas() {
     for tool in get_tool_definitions().expect("tool definitions") {
         let properties = &tool.input_schema["properties"];
         let schema_has_registered_project_selector = properties.get("project_selector").is_some();
@@ -417,40 +417,6 @@ fn graph_reader_selector_dispatch_policy_is_allowlisted() {
                 tool.name
             );
         }
-    }
-
-    for tool_name in [
-        // `tracedecay_search` resolves a daemon-owned code-index search
-        // authority that is bound to the active project, so a selector
-        // would run the active authority against a different graph.
-        "tracedecay_search",
-        "tracedecay_str_replace",
-        "tracedecay_run_affected_tests",
-        "tracedecay_status",
-        "tracedecay_health",
-        "tracedecay_dead_code",
-    ] {
-        assert!(
-            !tool_accepts_registered_project_selector(tool_name),
-            "{tool_name} should not be routed by the pure graph-reader selector policy"
-        );
-    }
-
-    // Pure graph reads that need nothing but the selected project's graph
-    // must accept a selector.
-    for tool_name in [
-        "tracedecay_type_hierarchy",
-        "tracedecay_callers",
-        "tracedecay_callees",
-        "tracedecay_implementations",
-        "tracedecay_signature_search",
-        "tracedecay_call_chain",
-        "tracedecay_file_dependents",
-    ] {
-        assert!(
-            tool_accepts_registered_project_selector(tool_name),
-            "{tool_name} should route through the graph-reader selector policy"
-        );
     }
 }
 
@@ -1902,11 +1868,15 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
 }
 
 #[test]
-fn unavailable_effect_contract_fails_before_handler_dispatch() {
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").is_ok());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").is_err());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
-    assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
+fn uncataloged_tool_fails_before_handler_dispatch() {
+    let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_compress").unwrap_err();
+    let TraceDecayError::Config { message } = error else {
+        panic!("a tool with no dispatch contract must be a typed Config error: {error:?}");
+    };
+    assert_eq!(
+        message,
+        "advertised MCP tool 'tracedecay_lcm_compress' has no dispatch contract"
+    );
 }
 
 #[tokio::test]

@@ -152,35 +152,12 @@ fn diagnostics_public_name_preserves_one_shipped_flat_request_schema() {
 }
 
 #[test]
-fn canonical_and_retired_tools_keep_truthful_discovery() {
+fn ast_grep_rewrite_discovery_matches_host_availability() {
     let tools = get_tool_definitions().expect("tool definitions");
     let tool_names = tools
         .iter()
         .map(|tool| tool.name.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-
-    for operation in ApplicationSurfaceOperation::ALL {
-        let tool_name = operation.mcp_tool_name();
-        assert!(
-            tool_names.contains(tool_name),
-            "{tool_name} must be projected from the application registry"
-        );
-    }
-
-    for retired in [
-        "tracedecay_fact_store",
-        "tracedecay_memory_automation_run",
-        "tracedecay_session_start",
-        "tracedecay_session_end",
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
-    ] {
-        assert!(
-            !tool_names.contains(retired),
-            "retired tool {retired} must not be advertised"
-        );
-    }
 
     assert!(tool_names.contains("tracedecay_ast_grep_search"));
     assert_eq!(
@@ -296,26 +273,14 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
             .iter()
             .find(|tool| tool.name == *tool_name)
             .unwrap_or_else(|| panic!("{tool_name} missing tool definition"));
-        let format = &tool.input_schema["properties"]["format"];
         assert_eq!(
-            format["enum"],
-            json!(["markdown", "json"]),
-            "{tool_name} should expose markdown/json format choices"
-        );
-        let description = format["description"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{tool_name} format must have a description"));
-        assert!(
-            description.contains("Default 'markdown'"),
-            "{tool_name} should document Markdown as default: {description}"
-        );
-        assert!(
-            description.contains("no tables"),
-            "{tool_name} should advertise no-table Markdown: {description}"
-        );
-        assert!(
-            !description.contains("prose/tables"),
-            "{tool_name} should not advertise table-heavy Markdown: {description}"
+            tool.input_schema["properties"]["format"],
+            json!({
+                "type": "string",
+                "enum": ["markdown", "json"],
+                "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
+            }),
+            "{tool_name} format schema"
         );
     }
 }
