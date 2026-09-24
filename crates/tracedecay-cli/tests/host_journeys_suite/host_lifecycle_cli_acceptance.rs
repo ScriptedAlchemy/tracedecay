@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -11,7 +11,7 @@ use tracedecay_agent_hosts::agents::host_bundle::{
     latest_host_component_set_receipt_at,
 };
 use tracedecay_agent_hosts::agents::host_bundle_registry::unsupported_host_component_set_reason;
-use tracedecay_agent_hosts::agents::load_jsonc_file_strict;
+use tracedecay_agent_hosts::agents::{load_jsonc_file_strict, parse_jsonc};
 
 #[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
 mod native_plugin_fixture;
@@ -62,7 +62,7 @@ const ZED_SETTINGS_RELATIVE: &str = ".config/zed/settings.json";
 const ZED_CONFIGS: &[(&str, &[u8])] = &[(
     ZED_SETTINGS_RELATIVE,
     br#"{
-  // preserve through the byte-exact uninstall snapshot
+  // operator comment
   "context_servers": {"foreign": {"command": "foreign-bin"}},
   "theme": "dark"
 }
@@ -472,6 +472,45 @@ fn assert_seeded_bytes(cli: &IsolatedCli, originals: &BTreeMap<PathBuf, Vec<u8>>
     }
 }
 
+/// Uninstall strips only TraceDecay's entries from the JSON host configs it
+/// rewrote. No copy of the operator's original is kept, so those keep every
+/// operator value but not its formatting; every other seeded file stays
+/// byte-exact.
+fn assert_seeded_values_after_uninstall(
+    case: HostCase,
+    cli: &IsolatedCli,
+    originals: &BTreeMap<PathBuf, Vec<u8>>,
+) {
+    for (relative, expected) in originals {
+        let path = cli.home.path().join(relative);
+        let rewritten_json_config = case
+            .configs
+            .iter()
+            .any(|(config, _)| Path::new(config) == relative)
+            && matches!(
+                relative
+                    .extension()
+                    .and_then(|extension| extension.to_str()),
+                Some("json" | "jsonc")
+            );
+        if rewritten_json_config {
+            assert_eq!(
+                load_jsonc_file_strict(&path).unwrap(),
+                parse_jsonc(std::str::from_utf8(expected).unwrap()),
+                "uninstall changed an operator value in {}",
+                relative.display()
+            );
+        } else {
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                *expected,
+                "native host file changed: {}",
+                relative.display()
+            );
+        }
+    }
+}
+
 fn latest_receipt(cli: &IsolatedCli, host: HostKindV1) -> HostComponentSetReceiptV1 {
     latest_host_component_set_receipt_at(&cli.lifecycle_root(), host)
         .unwrap()
@@ -830,7 +869,7 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             "uninstall",
             cli.run(&["uninstall", "--agent", case.id]),
         );
-        assert_seeded_bytes(&cli, &originals);
+        assert_seeded_values_after_uninstall(case, &cli, &originals);
         let uninstall_receipt = latest_receipt(&cli, case.host);
         assert!(
             uninstall_receipt
@@ -1237,10 +1276,12 @@ fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
             "foreign marketplace {name}"
         );
     }
-    let active_native_state = [
-        fs::read(&settings_path).unwrap(),
-        fs::read(&marketplaces_path).unwrap(),
-    ];
+    let native_values = || {
+        [&settings_path, &marketplaces_path].map(|path| {
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap()
+        })
+    };
+    let converged_activation = native_values();
 
     let cache_manifest = home
         .join(".claude/plugins/cache/tracedecay/tracedecay")
@@ -1260,6 +1301,17 @@ fn claude_lifecycle_activates_through_the_stock_cli_inside_the_transaction() {
         fs::read(&cache_manifest).unwrap(),
         fs::read(&source_manifest).unwrap()
     );
+    // The re-driven `claude plugin install` rewrites these host-owned files in
+    // the host's own serialization; only their values are TraceDecay's to keep.
+    assert_eq!(
+        native_values(),
+        converged_activation,
+        "re-driving the stock plugin CLI changed the converged Claude activation state"
+    );
+    let active_native_state = [
+        fs::read(&settings_path).unwrap(),
+        fs::read(&marketplaces_path).unwrap(),
+    ];
     assert_success(case.id, "catalog repair", cli.run(&["reinstall"]));
     for (phase, entrypoint, fixture) in native_feedback(case) {
         assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
