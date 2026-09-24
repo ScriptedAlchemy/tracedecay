@@ -13,12 +13,15 @@ use tracedecay_mcp::response_handles::{
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
+/// Logging is deprecated by MCP SEP-2577 and the server emits no log
+/// notifications, so the advertised capabilities are exactly tools and
+/// resources: `initialize` must not invite `logging/setLevel`.
 #[tokio::test]
 async fn test_initialize() {
     let (server, _dir) = setup_server().await;
     let responses = run_server_with_messages(server, vec![spec_initialize_request(json!(1))]).await;
 
-    assert!(!responses.is_empty(), "should have at least one response");
+    assert_eq!(responses.len(), 1, "{responses:?}");
     let resp = parse_response(&responses[0]);
     assert_eq!(resp["id"], 1);
     assert_eq!(
@@ -26,11 +29,21 @@ async fn test_initialize() {
         "rmcp keeps the client's supported protocol version: {resp}"
     );
     assert_eq!(
-        resp["result"]["capabilities"]["tools"]["listChanged"],
-        json!(true)
+        resp["result"]["capabilities"],
+        json!({"tools": {"listChanged": true}, "resources": {}}),
+        "{resp}"
     );
-    assert_eq!(resp["result"]["serverInfo"]["name"], "tracedecay");
-    assert!(resp["result"]["serverInfo"]["version"].is_string());
+    assert!(
+        resp["result"]["capabilities"].get("logging").is_none(),
+        "initialize must not advertise logging: {resp}"
+    );
+    assert_eq!(
+        resp["result"]["serverInfo"],
+        json!({
+            "name": "tracedecay",
+            "version": tracedecay_project::version::build_version().unwrap()
+        })
+    );
 }
 
 #[tokio::test]
@@ -55,18 +68,28 @@ async fn test_any_notification_without_id_produces_no_response() {
         1,
         "only the request with id=901 should produce a response, got {responses:?}"
     );
-    let resp = parse_response(&responses[0]);
-    assert_eq!(resp["id"], 901);
-    assert!(resp["error"].is_null(), "ping request should succeed");
+    assert_eq!(
+        parse_response(&responses[0]),
+        json!({"jsonrpc": "2.0", "id": 901, "result": {}})
+    );
 }
 
 /// MCP forbids a null request id. It is still answered, with a typed
 /// `InvalidRequest` carrying the null id, never dropped as a notification.
 fn assert_null_id_refused(responses: &[String], label: &str) {
     assert_eq!(responses.len(), 1, "{label}: {responses:?}");
-    let resp = response_with_id(responses, json!(null));
-    assert_eq!(resp["error"]["code"], -32600, "{label}: {resp}");
-    assert!(resp["result"].is_null(), "{label}: {resp}");
+    assert_eq!(
+        parse_response(&responses[0]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {
+                "code": -32600,
+                "message": "invalid JSON-RPC request: MCP request id must be a string or number, not null"
+            }
+        }),
+        "{label}"
+    );
 }
 
 #[tokio::test]
@@ -104,32 +127,105 @@ async fn test_tools_call_explicit_null_id_is_refused_before_dispatch() {
     );
 }
 
+/// The advertised schema is the contract a host validates arguments against,
+/// so the listed `tracedecay_retrieve` schema is pinned whole and then called
+/// with arguments it admits, against a handle stored in the fixture project.
 #[tokio::test]
 async fn test_tools_list() {
     let (server, _dir) = setup_server().await;
+    let now = current_timestamp();
+    let stored =
+        store_response_handle(server.cg().await.project_root(), "{\"items\":[1,2,3]}", now)
+            .unwrap();
     let responses = run_server_with_messages(
         server,
-        vec![jsonrpc_request(json!(20), "tools/list", json!({}))],
+        vec![
+            jsonrpc_request(json!(20), "tools/list", json!({})),
+            jsonrpc_request(
+                json!(21),
+                "tools/call",
+                json!({
+                    "name": "tracedecay_retrieve",
+                    "arguments": {
+                        "handle": stored.handle,
+                        "offset": 2,
+                        "max_chars": 5,
+                        "format": "json"
+                    }
+                }),
+            ),
+        ],
     )
     .await;
 
-    assert!(!responses.is_empty());
-    let resp = parse_response(&responses[0]);
-    assert_eq!(resp["id"], 20);
-    let tools = resp["result"]["tools"].as_array().unwrap();
-    assert!(!tools.is_empty(), "tools list should not be empty");
-    let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(
-        tool_names.contains(&"tracedecay_search"),
-        "should have tracedecay_search"
+    let listed = response_with_id(&responses, json!(20));
+    let retrieve = listed["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list result: {listed}"))
+        .iter()
+        .find(|tool| tool["name"] == "tracedecay_retrieve")
+        .unwrap_or_else(|| panic!("tracedecay_retrieve must be listed: {listed}"));
+    assert_eq!(
+        retrieve["inputSchema"],
+        json!({
+            "type": "object",
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "The required `handle` argument copied exactly from a truncated MCP response envelope."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Character offset into the immutable stored response. Use the prior page's next_offset."
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 15000,
+                    "description": "Maximum characters requested for this page. Values above the safe response-frame budget are clamped."
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["markdown", "json"],
+                    "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
+                },
+                "project_selector": {
+                    "type": "object",
+                    "description": "Optional registered project selector. Omit to use the active project.",
+                    "properties": {
+                        "project_id": {
+                            "type": "string",
+                            "description": "Registered project id to query."
+                        }
+                    },
+                    "required": ["project_id"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["handle"],
+            "additionalProperties": false
+        })
     );
-    assert!(
-        tool_names.contains(&"tracedecay_status"),
-        "should have tracedecay_status"
-    );
-    assert!(
-        tool_names.contains(&"tracedecay_context"),
-        "should have tracedecay_context"
+
+    let called = response_with_id(&responses, json!(21));
+    let page: Value = serde_json::from_str(successful_tool_text(&called, "tracedecay_retrieve"))
+        .expect("retrieve page JSON");
+    assert_eq!(
+        page,
+        json!({
+            "handle": stored.handle,
+            "expired": false,
+            "original_chars": 17,
+            "total_chars": 17,
+            "offset": 2,
+            "next_offset": 7,
+            "has_more": true,
+            "created_at": now,
+            "expires_at": now + RESPONSE_HANDLE_TTL_SECS,
+            "content": "items"
+        })
     );
 }
 
@@ -285,22 +381,28 @@ async fn test_tools_call_timings_enabled_by_default() {
 
 #[tokio::test]
 async fn test_tools_call_timings_can_be_disabled() {
-    let (server, _dir) = setup_server().await;
+    let (server, dir) = setup_server().await;
     server.set_timings_enabled(false);
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(
             json!(32),
             "tools/call",
-            json!({"name": "tracedecay_status", "arguments": {"admission_only": true}}),
+            json!({
+                "name": "tracedecay_status",
+                "arguments": {"admission_only": true, "format": "json"}
+            }),
         )],
     )
     .await;
-    let resp = parse_response(
-        responses
-            .iter()
-            .find(|r| parse_response(r)["id"] == 32)
-            .expect("response with id 32"),
+    let resp = response_with_id(&responses, json!(32));
+    let payload: Value =
+        serde_json::from_str(successful_tool_text(&resp, "status")).expect("status result JSON");
+    assert_eq!(payload["project_admitted"], true, "{payload}");
+    assert_eq!(
+        payload["project_root"],
+        json!(dir.path().canonicalize().unwrap()),
+        "{payload}"
     );
     assert!(
         resp["result"]["_meta"]["duration_us"].is_null(),
@@ -613,19 +715,9 @@ async fn test_tools_call_status() {
     )
     .await;
 
-    let resp_str = responses
-        .iter()
-        .find(|r| {
-            let v = parse_response(r);
-            v["id"] == 40
-        })
-        .expect("should have a response for id=40");
-    let resp = parse_response(resp_str);
-    assert!(resp["error"].is_null(), "status should not error");
-    let text = resp["result"]["content"][0]["text"]
-        .as_str()
-        .expect("status result text");
-    let payload: Value = serde_json::from_str(text).expect("status result JSON");
+    let resp = response_with_id(&responses, json!(40));
+    let payload: Value =
+        serde_json::from_str(successful_tool_text(&resp, "status")).expect("status result JSON");
     assert_eq!(payload["graph_statistics"]["state"], "unavailable");
     assert_eq!(
         payload["graph_statistics"]["reason"],
@@ -654,20 +746,14 @@ async fn test_tools_call_missing_params() {
     )
     .await;
 
-    assert!(!responses.is_empty());
-    let resp = parse_response(&responses[0]);
-    assert_eq!(resp["id"], 50);
-    assert!(resp["error"].is_object(), "should have an error");
+    assert_eq!(responses.len(), 1, "{responses:?}");
     assert_eq!(
-        resp["error"]["code"], -32602,
-        "should be InvalidParams error"
-    );
-    assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("missing params"),
-        "error message should mention missing params"
+        parse_response(&responses[0]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 50,
+            "error": {"code": -32602, "message": "missing params for tools/call"}
+        })
     );
 }
 
@@ -687,25 +773,9 @@ async fn test_tools_call_missing_name() {
     )
     .await;
 
-    let resp_str = responses
-        .iter()
-        .find(|r| {
-            let v = parse_response(r);
-            v["id"] == 60
-        })
-        .expect("should have a response for id=60");
-    let resp = parse_response(resp_str);
-    assert!(resp["error"].is_object(), "should have an error");
     assert_eq!(
-        resp["error"]["code"], -32602,
-        "should be InvalidParams error"
-    );
-    assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("missing 'name'"),
-        "error message should mention missing name"
+        response_with_id(&responses, json!(60))["error"],
+        json!({"code": -32602, "message": "missing 'name' in tools/call params"})
     );
 }
 
@@ -725,17 +795,18 @@ async fn test_tracedecay_retrieve_missing_handle_argument_is_invalid_params_with
     )
     .await;
 
-    let resp = response_with_id(&responses, json!(61));
-    assert_eq!(resp["error"]["code"], -32602);
     assert_eq!(
-        resp["error"]["data"]["reason_code"],
-        "missing_handle_argument"
-    );
-    assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("requires the `handle` argument")
+        response_with_id(&responses, json!(61))["error"],
+        json!({
+            "code": -32602,
+            "message": "tracedecay_retrieve requires the `handle` argument copied from a truncated MCP response envelope.",
+            "data": {
+                "tool": "tracedecay_retrieve",
+                "reason_code": "missing_handle_argument",
+                "retryable": false,
+                "retry_instruction": "Call `tracedecay_retrieve` again with the exact `handle` value emitted by the truncated response envelope."
+            }
+        })
     );
 }
 
@@ -755,14 +826,18 @@ async fn test_tracedecay_retrieve_invalid_handle_is_invalid_params_with_reason_c
     )
     .await;
 
-    let resp = response_with_id(&responses, json!(62));
-    assert_eq!(resp["error"]["code"], -32602);
-    assert_eq!(resp["error"]["data"]["reason_code"], "invalid_handle");
-    assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("invalid response handle")
+    assert_eq!(
+        response_with_id(&responses, json!(62))["error"],
+        json!({
+            "code": -32602,
+            "message": "invalid response handle: expected `rh_` followed by 24 hex characters copied from a truncated MCP response envelope",
+            "data": {
+                "tool": "tracedecay_retrieve",
+                "reason_code": "invalid_handle",
+                "retryable": false,
+                "retry_instruction": "Pass the exact `handle` string from a truncated MCP response envelope; do not shorten or edit it."
+            }
+        })
     );
 }
 
@@ -791,18 +866,18 @@ async fn test_tracedecay_retrieve_corrupt_handle_record_returns_actionable_inter
     )
     .await;
 
-    let resp = response_with_id(&responses, json!(63));
-    assert_eq!(resp["error"]["code"], -32603);
     assert_eq!(
-        resp["error"]["data"]["reason_code"],
-        "corrupt_handle_record"
-    );
-    assert_eq!(resp["error"]["data"]["retryable"], true);
-    assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("cached response handle record is unreadable")
+        response_with_id(&responses, json!(63))["error"],
+        json!({
+            "code": -32603,
+            "message": "tool execution failed: cached response handle record is unreadable.",
+            "data": {
+                "tool": "tracedecay_retrieve",
+                "reason_code": "corrupt_handle_record",
+                "retryable": true,
+                "retry_instruction": "Re-run the original MCP tool in this project to regenerate the full response and a fresh handle."
+            }
+        })
     );
 }
 
@@ -829,16 +904,23 @@ async fn test_tracedecay_retrieve_handle_read_failure_returns_actionable_interna
     )
     .await;
 
-    let resp = response_with_id(&responses, json!(64));
-    assert_eq!(resp["error"]["code"], -32603);
-    assert_eq!(resp["error"]["data"]["reason_code"], "handle_read_failed");
-    assert_eq!(resp["error"]["data"]["retryable"], true);
-    assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("failed to read cached response handle")
+    assert_eq!(
+        response_with_id(&responses, json!(64))["error"],
+        handle_read_failed_error()
     );
+}
+
+fn handle_read_failed_error() -> Value {
+    json!({
+        "code": -32603,
+        "message": "tool execution failed: failed to read cached response handle.",
+        "data": {
+            "tool": "tracedecay_retrieve",
+            "reason_code": "handle_read_failed",
+            "retryable": true,
+            "retry_instruction": "Fix the local project cache/filesystem issue, then re-run the original MCP tool to regenerate the full response and a fresh handle."
+        }
+    })
 }
 
 #[tokio::test]
@@ -850,13 +932,14 @@ async fn test_unknown_method() {
     )
     .await;
 
-    assert!(!responses.is_empty());
-    let resp = parse_response(&responses[0]);
-    assert_eq!(resp["id"], 70);
-    assert!(resp["error"].is_object(), "should have an error");
+    assert_eq!(responses.len(), 1, "{responses:?}");
     assert_eq!(
-        resp["error"]["code"], -32601,
-        "should be MethodNotFound error"
+        parse_response(&responses[0]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 70,
+            "error": {"code": -32601, "message": "method not found: some/unknown/method"}
+        })
     );
 }
 
@@ -873,33 +956,21 @@ async fn test_malformed_json() {
     )
     .await;
 
-    assert!(
-        responses.len() >= 2,
-        "should have at least 2 responses (parse error + ping), got {}",
-        responses.len()
-    );
-
-    let error_resp = parse_response(&responses[0]);
-    assert!(
-        error_resp["error"].is_object(),
-        "first response should be an error"
+    assert_eq!(responses.len(), 2, "parse error + ping: {responses:?}");
+    assert_eq!(
+        parse_response(&responses[0]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": {
+                "code": -32700,
+                "message": "failed to parse JSON-RPC request: expected ident at line 1 column 2"
+            }
+        })
     );
     assert_eq!(
-        error_resp["error"]["code"], -32700,
-        "should be ParseError (-32700)"
-    );
-
-    let ping_resp = responses
-        .iter()
-        .find(|r| {
-            let v = parse_response(r);
-            v["id"] == 80
-        })
-        .expect("should have a ping response after malformed JSON");
-    let ping = parse_response(ping_resp);
-    assert!(
-        ping["error"].is_null(),
-        "ping after malformed JSON should succeed"
+        parse_response(&responses[1]),
+        json!({"jsonrpc": "2.0", "id": 80, "result": {}})
     );
 }
 
@@ -935,18 +1006,31 @@ async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
     .await;
 
     assert_eq!(responses.len(), 5, "{responses:?}");
-    for id in [501, 502, 503] {
-        let rejected = response_with_id(&responses, json!(id));
-        assert_eq!(rejected["error"]["code"], -32600, "{rejected}");
-        assert!(rejected["result"].is_null(), "{rejected}");
+    let invalid_request = |id: Value, reason: &str| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32600, "message": format!("invalid JSON-RPC request: {reason}")}
+        })
+    };
+    for (id, reason) in [
+        (json!(501), r#"jsonrpc must be "2.0", got "1.0""#),
+        (json!(502), r#"jsonrpc must be "2.0", got 2.0"#),
+        (json!(503), "missing jsonrpc member"),
+        (Value::Null, r#"jsonrpc must be "2.0", got "1.0""#),
+    ] {
+        assert_eq!(
+            response_with_id(&responses, id.clone()),
+            invalid_request(id, reason)
+        );
     }
-    let rejected_notification = response_with_id(&responses, Value::Null);
-    assert_eq!(
-        rejected_notification["error"]["code"], -32600,
-        "{rejected_notification}"
-    );
     let tools_list = response_with_id(&responses, json!(504));
-    assert!(tools_list["error"].is_null(), "{tools_list}");
+    assert!(
+        tools_list["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "tracedecay_status")),
+        "{tools_list}"
+    );
 
     let stats = stats_view.server_stats_json().await;
     assert_eq!(
@@ -954,8 +1038,9 @@ async fn test_foreign_protocol_version_is_rejected_before_dispatch() {
         "only the tools/list is work: {stats}"
     );
     assert_eq!(stats["tool_calls"], 0, "{stats}");
-    assert!(
-        stats["method_call_counts"].get("tools/call").is_none(),
+    assert_eq!(
+        stats["method_call_counts"],
+        json!({"tools/list": 1}),
         "{stats}"
     );
 }
@@ -975,18 +1060,14 @@ async fn test_blank_lines_skipped() {
     )
     .await;
 
-    let ping_responses: Vec<&String> = responses
-        .iter()
-        .filter(|r| {
-            let v: Value = serde_json::from_str(r).unwrap_or(json!(null));
-            v["id"] == 90
-        })
-        .collect();
     assert_eq!(
-        ping_responses.len(),
+        responses.len(),
         1,
-        "should get exactly 1 response (ping only), got {}",
-        responses.len()
+        "blank lines are not frames: {responses:?}"
+    );
+    assert_eq!(
+        parse_response(&responses[0]),
+        json!({"jsonrpc": "2.0", "id": 90, "result": {}})
     );
 }
 
@@ -1100,16 +1181,15 @@ async fn test_server_stats_include_response_handle_metrics() {
         json!({ "handle": broken.handle }),
     )
     .await;
-    assert!(
-        !broken_result["error"].is_null(),
+    assert_eq!(
+        broken_result["error"],
+        handle_read_failed_error(),
         "broken handle fixture should increment retrieve failure telemetry"
     );
     fs::remove_dir(&broken_path).unwrap();
 
-    assert!(
-        store_response_handle(cg.project_root(), "{\"expires\":true}", current_timestamp()).is_ok(),
-        "direct store should succeed so cleanup has something to expire"
-    );
+    store_response_handle(cg.project_root(), "{\"expires\":true}", current_timestamp())
+        .expect("direct store should succeed so cleanup has something to expire");
     let expired_removed = cleanup_expired_response_handles(
         cg.project_root(),
         current_timestamp() + RESPONSE_HANDLE_TTL_SECS + 1,
@@ -1124,22 +1204,15 @@ async fn test_server_stats_include_response_handle_metrics() {
     let failure_handle_root = resolve_response_handle_root(failure_root.path()).unwrap();
     fs::create_dir_all(failure_handle_root.parent().unwrap()).unwrap();
     fs::write(&failure_handle_root, "not-a-directory").unwrap();
-    assert!(
-        store_response_handle(
-            failure_root.path(),
-            "store failure telemetry",
-            current_timestamp()
-        )
-        .is_err(),
-        "store failure fixture should increment failure telemetry"
-    );
+    store_response_handle(
+        failure_root.path(),
+        "store failure telemetry",
+        current_timestamp(),
+    )
+    .expect_err("store failure fixture should increment failure telemetry");
 
     let after = server.server_stats_json().await;
     let handles = &after["response_handles"];
-    assert!(
-        handles.is_object(),
-        "server stats should include response_handles section"
-    );
     assert!(
         handles["truncation_total"].as_u64().unwrap_or(0) > baseline_counter("truncation_total")
     );
@@ -1162,9 +1235,18 @@ async fn test_server_stats_include_response_handle_metrics() {
             .unwrap_or(0)
             >= baseline_counter("cleanup_removed_expired_total") + expired_removed as u64
     );
-    assert!(
-        handles["on_disk"]["file_count"].is_number(),
-        "response handle cache stats should expose on-disk file counts"
+    // The cleanup ran past every stored handle's expiry, so the project's
+    // on-disk cache is empty.
+    assert_eq!(
+        handles["on_disk"],
+        json!({
+            "available": true,
+            "file_count": 0,
+            "total_bytes": 0,
+            "oldest_expires_at": null,
+            "newest_expires_at": null
+        }),
+        "{handles}"
     );
 
     if let Some((fact_id, expected_last_event_id)) = last_fact {
@@ -1209,51 +1291,43 @@ async fn test_server_stats_after_run() {
                 "tools/call",
                 json!({
                     "name": "tracedecay_status",
-                    "arguments": {}
+                    "arguments": {"format": "json"}
                 }),
             ),
         ],
     )
     .await;
 
-    let status_resp_str = responses
-        .iter()
-        .find(|r| {
-            let v = parse_response(r);
-            v["id"] == 202
-        })
-        .expect("should have a response for id=202");
-    let resp = parse_response(status_resp_str);
-    assert!(resp["error"].is_null(), "status should not error");
-    let content = resp["result"]["content"].as_array().unwrap();
-    let text = content
-        .iter()
-        .filter_map(|c| c["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("");
-    // The server stats should be embedded in the status response and reflect
-    // that requests have been processed.
-    assert!(
-        text.contains("server") || text.contains("total_requests") || text.contains("tool_calls"),
-        "status response should contain server stats, got: {}",
-        text
+    // The status call is counted before it runs, so its embedded server stats
+    // include itself whatever the order of the concurrent earlier requests.
+    let resp = response_with_id(&responses, json!(202));
+    let payload: Value =
+        serde_json::from_str(successful_tool_text(&resp, "status")).expect("status result JSON");
+    assert_eq!(payload["server"]["tool_calls"], 1, "{payload}");
+    assert_eq!(
+        payload["server"]["tool_call_counts"],
+        json!({"tracedecay_status": 1}),
+        "{payload}"
     );
 
     let stats = server_handle.server_stats_json().await;
     assert_eq!(stats["jsonrpc_messages"], 4);
-    assert_eq!(stats["method_call_counts"]["initialize"], 1);
-    assert_eq!(stats["method_call_counts"]["tools/list"], 1);
-    assert_eq!(stats["method_call_counts"]["resources/read"], 1);
-    assert_eq!(stats["method_call_counts"]["tools/call"], 1);
-    assert_eq!(stats["resource_read_counts"]["tracedecay://status"], 1);
-    assert_eq!(stats["tool_call_counts"]["tracedecay_status"], 1);
+    assert_eq!(
+        stats["method_call_counts"],
+        json!({"initialize": 1, "tools/list": 1, "resources/read": 1, "tools/call": 1})
+    );
+    assert_eq!(
+        stats["resource_read_counts"],
+        json!({"tracedecay://status": 1})
+    );
+    assert_eq!(stats["tool_call_counts"], json!({"tracedecay_status": 1}));
     assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.25);
 }
 
 #[tokio::test]
 async fn test_error_tracking() {
     let (server, _dir) = setup_server().await;
-    // Send an unknown method (which produces an error), then check status.
+    let stats_view = Arc::clone(&server);
     let responses = run_server_with_messages(
         server,
         vec![
@@ -1263,58 +1337,23 @@ async fn test_error_tracking() {
                 "tools/call",
                 json!({
                     "name": "tracedecay_status",
-                    "arguments": { "format": "json" }
+                    "arguments": {"admission_only": true, "format": "json"}
                 }),
             ),
         ],
     )
     .await;
 
-    let error_resp_str = responses
-        .iter()
-        .find(|r| {
-            let v = parse_response(r);
-            v["id"] == 300
-        })
-        .expect("should have a response for id=300");
-    let error_resp = parse_response(error_resp_str);
-    assert!(
-        error_resp["error"].is_object(),
-        "unknown method should produce error"
+    assert_eq!(
+        response_with_id(&responses, json!(300))["error"],
+        json!({"code": -32601, "message": "method not found: unknown/method"})
     );
-
-    let status_resp_str = responses
-        .iter()
-        .find(|r| {
-            let v = parse_response(r);
-            v["id"] == 301
-        })
-        .expect("should have a response for id=301");
-    let status_resp = parse_response(status_resp_str);
-    assert!(status_resp["error"].is_null(), "status should not error");
-    let content = status_resp["result"]["content"].as_array().unwrap();
-    let text = content
-        .iter()
-        .filter_map(|c| c["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("");
-    let payload: Value = serde_json::from_str(&text).expect("status result JSON");
-    assert!(
-        payload["server"]["errors"].as_u64().unwrap_or(0) >= 1,
-        "errors should be at least 1 after sending unknown method: {payload}"
-    );
-}
-
-#[tokio::test]
-async fn test_initialize_has_resources_capability() {
-    let (server, _dir) = setup_server().await;
-    let responses = run_server_with_messages(server, vec![spec_initialize_request(json!(1))]).await;
-
-    let resp = parse_response(&responses[0]);
-    assert!(
-        resp["result"]["capabilities"]["resources"].is_object(),
-        "initialize should advertise resources capability"
-    );
+    let status = response_with_id(&responses, json!(301));
+    let payload: Value =
+        serde_json::from_str(successful_tool_text(&status, "status")).expect("status result JSON");
+    assert_eq!(payload["project_admitted"], true, "{payload}");
+    let stats = stats_view.server_stats_json().await;
+    assert_eq!(stats["errors"], 1, "only the unknown method errs: {stats}");
 }
 
 #[tokio::test]
@@ -1326,47 +1365,48 @@ async fn test_resources_list() {
     )
     .await;
 
-    let resp = parse_response(&responses[0]);
-    assert_eq!(resp["id"], 400);
-    assert!(resp["error"].is_null(), "resources/list should not error");
-    let resources = resp["result"]["resources"]
-        .as_array()
-        .expect("should have resources array");
-    assert_eq!(resources.len(), 5, "should expose 5 resources");
-
-    let uris: Vec<&str> = resources.iter().filter_map(|r| r["uri"].as_str()).collect();
-    assert!(
-        uris.contains(&"tracedecay://status"),
-        "should have status resource"
+    assert_eq!(responses.len(), 1, "{responses:?}");
+    assert_eq!(
+        parse_response(&responses[0]),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 400,
+            "result": {
+                "resources": [
+                    {
+                        "uri": "tracedecay://status",
+                        "name": "Graph Status",
+                        "description": "Code graph statistics: node/edge/file counts, languages, DB size, and index freshness.",
+                        "mimeType": "application/json"
+                    },
+                    {
+                        "uri": "tracedecay://files",
+                        "name": "File List",
+                        "description": "All indexed project files grouped by directory with symbol counts.",
+                        "mimeType": "text/plain"
+                    },
+                    {
+                        "uri": "tracedecay://overview",
+                        "name": "Project Overview",
+                        "description": "High-level project summary: language distribution, largest modules, and top entry points.",
+                        "mimeType": "text/plain"
+                    },
+                    {
+                        "uri": "tracedecay://branches",
+                        "name": "Tracked Branches",
+                        "description": "List of tracked branches with DB sizes, parent branch, and last sync time. Empty if multi-branch is not active.",
+                        "mimeType": "application/json"
+                    },
+                    {
+                        "uri": "tracedecay://schema",
+                        "name": "SQLite Schema",
+                        "description": "Installed project-store DDL for this binary, generated from the fresh-store shape create_schema admits. Code topology is not in these tables.",
+                        "mimeType": "text/markdown"
+                    }
+                ]
+            }
+        })
     );
-    assert!(
-        uris.contains(&"tracedecay://files"),
-        "should have files resource"
-    );
-    assert!(
-        uris.contains(&"tracedecay://overview"),
-        "should have overview resource"
-    );
-    assert!(
-        uris.contains(&"tracedecay://branches"),
-        "should have branches resource"
-    );
-    assert!(
-        uris.contains(&"tracedecay://schema"),
-        "should have schema resource"
-    );
-
-    for resource in resources {
-        assert!(resource["name"].is_string(), "resource should have name");
-        assert!(
-            resource["description"].is_string(),
-            "resource should have description"
-        );
-        assert!(
-            resource["mimeType"].is_string(),
-            "resource should have mimeType"
-        );
-    }
 }
 
 #[tokio::test]
@@ -1384,16 +1424,7 @@ async fn test_resources_read_status() {
     )
     .await;
 
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 410)
-        .expect("should have response for id=410");
-    let resp = parse_response(resp_str);
-    assert!(
-        resp["error"].is_null(),
-        "resources/read status should not error"
-    );
-
+    let resp = response_with_id(&responses, json!(410));
     let contents = resp["result"]["contents"]
         .as_array()
         .expect("should have contents array");
@@ -1425,33 +1456,21 @@ async fn test_resources_read_files() {
     )
     .await;
 
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 420)
-        .expect("should have response for id=420");
-    let resp = parse_response(resp_str);
-    assert!(
-        resp["error"].is_null(),
-        "resources/read files should not error"
-    );
-
-    let contents = resp["result"]["contents"]
-        .as_array()
-        .expect("should have contents array");
-    assert_eq!(contents.len(), 1);
-    assert_eq!(contents[0]["uri"], "tracedecay://files");
-    assert_eq!(contents[0]["mimeType"], "text/plain");
-
-    let text = contents[0]["text"].as_str().unwrap();
     assert_eq!(
-        text,
-        "status: unavailable\nreason: verified_generation_file_inventory_not_admitted"
+        response_with_id(&responses, json!(420))["result"],
+        json!({
+            "contents": [{
+                "uri": "tracedecay://files",
+                "mimeType": "text/plain",
+                "text": "status: unavailable\nreason: verified_generation_file_inventory_not_admitted"
+            }]
+        })
     );
 }
 
 #[tokio::test]
 async fn test_resources_read_overview() {
-    let (server, _dir) = setup_server().await;
+    let (server, dir) = setup_server().await;
     let responses = run_server_with_messages(
         server,
         vec![jsonrpc_request(
@@ -1464,33 +1483,18 @@ async fn test_resources_read_overview() {
     )
     .await;
 
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 430)
-        .expect("should have response for id=430");
-    let resp = parse_response(resp_str);
-    assert!(
-        resp["error"].is_null(),
-        "resources/read overview should not error"
-    );
-
-    let contents = resp["result"]["contents"]
-        .as_array()
-        .expect("should have contents array");
-    assert_eq!(contents.len(), 1);
-    assert_eq!(contents[0]["uri"], "tracedecay://overview");
-    assert_eq!(contents[0]["mimeType"], "text/plain");
-
-    let text = contents[0]["text"].as_str().unwrap();
-    assert!(
-        text.contains("Project:"),
-        "overview should start with Project:"
-    );
-    assert!(
-        text.contains(
-            "Graph statistics: unavailable (sealed generation statistics are not published)"
-        ),
-        "overview must report unavailable graph statistics truthfully: {text}"
+    assert_eq!(
+        response_with_id(&responses, json!(430))["result"],
+        json!({
+            "contents": [{
+                "uri": "tracedecay://overview",
+                "mimeType": "text/plain",
+                "text": format!(
+                    "Project: {}\nGraph statistics: unavailable (sealed generation statistics are not published)",
+                    dir.path().canonicalize().unwrap().display()
+                )
+            }]
+        })
     );
 }
 
@@ -1509,18 +1513,9 @@ async fn test_resources_read_unknown_uri() {
     )
     .await;
 
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 440)
-        .expect("should have response for id=440");
-    let resp = parse_response(resp_str);
-    assert!(
-        resp["error"].is_object(),
-        "unknown URI should produce error"
-    );
     assert_eq!(
-        resp["error"]["code"], -32602,
-        "should be InvalidParams error"
+        response_with_id(&responses, json!(440))["error"],
+        json!({"code": -32602, "message": "unknown resource URI: tracedecay://nonexistent"})
     );
 }
 
@@ -1533,41 +1528,9 @@ async fn test_resources_read_missing_uri() {
     )
     .await;
 
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 450)
-        .expect("should have response for id=450");
-    let resp = parse_response(resp_str);
-    assert!(
-        resp["error"].is_object(),
-        "missing URI should produce error"
-    );
     assert_eq!(
-        resp["error"]["code"], -32602,
-        "should be InvalidParams error"
-    );
-}
-
-/// Logging is deprecated by MCP SEP-2577 and the server emits no log
-/// notifications, so `initialize` must not invite `logging/setLevel`.
-#[tokio::test]
-async fn test_initialize_does_not_advertise_logging_capability() {
-    let (server, _dir) = setup_server().await;
-    let responses =
-        run_server_with_messages(server, vec![spec_initialize_request(json!(800))]).await;
-
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == 800)
-        .expect("missing initialize response");
-    let resp = parse_response(resp_str);
-    assert!(
-        resp["result"]["capabilities"].is_object(),
-        "initialize must return capabilities, got: {resp}"
-    );
-    assert!(
-        resp["result"]["capabilities"].get("logging").is_none(),
-        "initialize must not advertise logging capability, got: {resp}"
+        response_with_id(&responses, json!(450))["error"],
+        json!({"code": -32602, "message": "missing 'uri' in resources/read params"})
     );
 }
 
@@ -1631,17 +1594,9 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     )
     .await;
     for id in [2_i64, 3] {
-        let resp = responses
-            .iter()
-            .map(|r| parse_response(r))
-            .find(|r| r["id"] == json!(id))
-            .unwrap_or_else(|| panic!("missing response for id={id}"));
-        assert!(
-            resp["error"].is_null(),
-            "lcm_status id={id} should not error"
-        );
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        let envelope: Value = serde_json::from_str(text).unwrap();
+        let resp = response_with_id(&responses, json!(id));
+        let envelope: Value =
+            serde_json::from_str(successful_tool_text(&resp, "lcm_status")).unwrap();
         assert_eq!(
             envelope.pointer("/outcome/outcome").and_then(Value::as_str),
             Some("evidence"),
@@ -1711,14 +1666,6 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
         ],
     )
     .await;
-    for id in [2_i64, 3] {
-        let resp = responses
-            .iter()
-            .map(|r| parse_response(r))
-            .find(|r| r["id"] == json!(id))
-            .unwrap_or_else(|| panic!("missing response for id={id} in second session"));
-        assert!(resp["error"].is_null(), "second-session lcm call id={id}");
-    }
     for id in [2_i64, 3] {
         let resp = response_with_id(&responses, json!(id));
         let envelope: Value =

@@ -132,15 +132,6 @@ pub(crate) fn jsonrpc_notification(method: &str) -> String {
     .unwrap()
 }
 
-pub(crate) fn jsonrpc_notification_with_params(method: &str, params: Value) -> String {
-    serde_json::to_string(&json!({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params
-    }))
-    .unwrap()
-}
-
 pub(crate) fn parse_response(s: &str) -> Value {
     serde_json::from_str(s).unwrap()
 }
