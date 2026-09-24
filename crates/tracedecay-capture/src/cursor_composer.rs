@@ -11,7 +11,10 @@ use tracedecay_domain::{
 use tracedecay_store::cursor_dispatch::cursor_model_string;
 
 use crate::git_facts::append_diff_and_pull_request_facts;
-use crate::{ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse::sha256_hex};
+use crate::{
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse::sha256_hex,
+    parse_rfc3339_timestamp_micros,
+};
 
 const PROVIDER: &str = "cursor";
 
@@ -67,7 +70,7 @@ fn normalize_composer_bubble_record(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let timestamp = epoch_ms_to_secs(native.get("createdAt").and_then(Value::as_i64));
+    let timestamp = composer_created_at_secs(native.get("createdAt"));
     let mut relations = CanonicalObservationRelationsV1::new(
         SessionId::new(composer_id)
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
@@ -158,6 +161,24 @@ fn normalize_composer_bubble_record(
                     .get("status")
                     .and_then(Value::as_str)
                     .and_then(composer_tool_result_success),
+            });
+        }
+        if let Some(path) = composer_edit_tool_path(tool) {
+            let mut content = serde_json::Map::new();
+            content.insert(
+                "type".to_string(),
+                Value::String("toolFormerData".to_string()),
+            );
+            if let Some(name) = tool.get("name").filter(|name| name.is_string()) {
+                content.insert("name".to_string(), name.clone());
+            }
+            if let Some(edited_at_micros) = composer_created_at_micros(native.get("createdAt")) {
+                content.insert("edited_at_micros".to_string(), Value::from(edited_at_micros));
+            }
+            facts.push(CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some(path),
+                content: Some(Value::Object(content)),
             });
         }
     }
@@ -384,7 +405,7 @@ fn normalize_composer_envelope_record(
     range: tracedecay_domain::ObservationSourceRangeV1,
     position: u64,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
-    let timestamp = epoch_ms_to_secs(native.get("createdAt").and_then(Value::as_i64));
+    let timestamp = composer_created_at_secs(native.get("createdAt"));
     let mut relations = CanonicalObservationRelationsV1::new(
         SessionId::new(composer_id)
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
@@ -408,8 +429,8 @@ fn normalize_composer_envelope_record(
                     .get("name")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                started_at: epoch_ms_to_secs(native.get("createdAt").and_then(Value::as_i64)),
-                ended_at: epoch_ms_to_secs(native.get("lastUpdatedAt").and_then(Value::as_i64)),
+                started_at: composer_created_at_secs(native.get("createdAt")),
+                ended_at: composer_created_at_secs(native.get("lastUpdatedAt")),
                 source: Some("cursor_composer".to_string()),
                 native_source: Some("cursor".to_string()),
                 profile: None,
@@ -578,4 +599,45 @@ pub fn cursor_composer_envelope_native_record_id(
 
 fn epoch_ms_to_secs(ms: Option<i64>) -> Option<i64> {
     ms.filter(|value| *value > 0).map(|value| value / 1_000)
+}
+
+/// Bubble and envelope `createdAt` / `lastUpdatedAt`: epoch milliseconds in
+/// older snapshots, RFC3339 text in current ones.
+fn composer_created_at_micros(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(millis) => millis
+            .as_i64()
+            .filter(|millis| *millis > 0)?
+            .checked_mul(1_000),
+        Value::String(text) => parse_rfc3339_timestamp_micros(text),
+        _ => None,
+    }
+}
+
+fn composer_created_at_secs(value: Option<&Value>) -> Option<i64> {
+    composer_created_at_micros(value).map(|micros| micros / 1_000_000)
+}
+
+/// Composer tools whose completed `toolFormerData.params.relativeWorkspacePath`
+/// names the file they changed (`edit_file_v2`, `delete_file`, and the other
+/// edit/write/patch/replace tools). Read-only tools name their target under
+/// other keys and never match.
+fn composer_edit_tool_path(tool: &Value) -> Option<String> {
+    let name = tool.get("name").and_then(Value::as_str)?.to_ascii_lowercase();
+    if !["edit", "write", "patch", "replace", "delete"]
+        .iter()
+        .any(|needle| name.contains(needle))
+        || tool.get("status").and_then(Value::as_str) != Some("completed")
+    {
+        return None;
+    }
+    let params = match tool.get("params")? {
+        Value::String(raw) => serde_json::from_str::<Value>(raw).ok()?,
+        params => params.clone(),
+    };
+    params
+        .get("relativeWorkspacePath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
 }

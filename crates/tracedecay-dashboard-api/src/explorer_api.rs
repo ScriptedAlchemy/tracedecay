@@ -26,6 +26,7 @@ use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
     DashboardLcmCanonicalSummaryV1, DashboardLcmReadOutcomeV1, DashboardLcmReadRequestV1,
     DashboardLcmReadStateV1, LcmMessageV1, LcmSummaryNodeV1, LcmTokenCountProvenanceV1,
+    message_tool_use_id,
 };
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
@@ -1194,6 +1195,7 @@ fn explorer_lcm_message(message: DashboardLcmCanonicalMessageV1) -> LcmMessageV1
         message_id: message.message_id,
         ordinal: Some(message.ordinal),
         storage_kind: Some("canonical_temporal".to_owned()),
+        tool_use_id: message_tool_use_id(message.metadata_json.as_deref()),
         metadata_json: message.metadata_json,
         tool_name: message.tool_names,
         pinned: None,

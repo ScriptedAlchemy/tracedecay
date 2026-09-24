@@ -9,7 +9,9 @@ use tracedecay_domain::{
     ProviderUsageScopeV1, SessionId,
 };
 
-use crate::{ObservationRecordParseErrorV1, parse_rfc3339_timestamp};
+use crate::{
+    ObservationRecordParseErrorV1, parse_rfc3339_timestamp, parse_rfc3339_timestamp_micros,
+};
 
 const PROVIDER: &str = "claude";
 
@@ -300,18 +302,35 @@ fn append_tool_use_result_facts(
     if let Some(branch) = native.get("gitBranch").cloned() {
         content.insert("gitBranch".to_owned(), branch);
     }
-    if tool_use_result
+    if let Some(path) = tool_use_result
         .get("filePath")
         .and_then(Value::as_str)
-        .is_some_and(|path| !path.is_empty())
+        .filter(|path| !path.is_empty())
     {
+        // The edit rollup reads these keys from the fact content; each is
+        // present only when Claude recorded it (`Write` reports `type`,
+        // `Edit`/`Write`/`MultiEdit` report `structuredPatch` hunks).
+        let mut edit = content.clone();
+        if let Some(edited_at_micros) = native
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_timestamp_micros)
+        {
+            edit.insert("edited_at_micros".to_owned(), Value::from(edited_at_micros));
+        }
+        if let Some(change_type) = tool_use_result.get("type").and_then(Value::as_str) {
+            edit.insert("change_type".to_owned(), Value::String(change_type.to_owned()));
+        }
+        if let Some(hunks) = tool_use_result
+            .get("structuredPatch")
+            .and_then(Value::as_array)
+        {
+            edit.insert("hunks".to_owned(), Value::from(hunks.len()));
+        }
         facts.push(CanonicalObservationFactV1::Git {
             evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
-            reference: tool_use_result
-                .get("filePath")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            content: Some(Value::Object(content.clone())),
+            reference: Some(path.to_owned()),
+            content: Some(Value::Object(edit)),
         });
     }
     if tool_use_result

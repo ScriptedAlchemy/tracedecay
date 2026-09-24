@@ -21,5 +21,5 @@ pub use parse::{
 };
 pub use timestamp::{
     normalize_timestamp_secs, parse_cursor_human_timestamp, parse_rfc3339_timestamp,
-    parse_yyyy_mm_dd_utc_start,
+    parse_rfc3339_timestamp_micros, parse_yyyy_mm_dd_utc_start,
 };

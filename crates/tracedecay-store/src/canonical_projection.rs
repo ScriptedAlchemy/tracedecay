@@ -136,7 +136,17 @@ fn derive_canonical_projection_for(
         .and_then(|fields| fields.project_path.clone())
         .unwrap_or(fallback_project_path);
     let session_metadata = canonical_session_metadata_map(&provider, session_fields.as_ref());
-    let session_metadata_json = serialize_metadata_map(&session_metadata)?;
+    // The edit rollup is a session-level fact: it lands on the session row
+    // and stays out of the per-message metadata copy below.
+    let mut session_row_metadata = session_metadata.clone();
+    let edited_files = canonical_edited_files(&envelope);
+    if !edited_files.is_empty() {
+        session_row_metadata.insert(
+            EDITED_FILES_KEY.to_owned(),
+            serde_json::Value::Array(edited_files),
+        );
+    }
+    let session_metadata_json = serialize_metadata_map(&session_row_metadata)?;
     let session = SessionRecord {
         provider: provider.clone(),
         session_id: session_id.clone(),
@@ -351,6 +361,76 @@ fn canonical_session_metadata_map(
     metadata
 }
 
+/// `sessions.metadata_json` key of the provider-native edited-file rollup:
+/// `[{path, edited_at_micros?, change_type?, hunks?}]`, one entry per file-edit
+/// fact. The store reconciles the arrays of a session's records by union.
+pub const EDITED_FILES_KEY: &str = "edited_files";
+
+/// Message `metadata_json` key carrying the host's tool-use identifier for the
+/// record's tool invocation (see [`host_tool_use_id`]). Absent when the host
+/// recorded none.
+pub const TOOL_USE_ID_KEY: &str = "tool_use_id";
+
+/// One rollup entry per `Git { FileEdit }` fact that names its path. The time,
+/// change type, and hunk count are copied only when the capture recorded them
+/// from the host (`edited_at_micros`, `change_type`, `hunks` in the fact
+/// content); nothing is derived from session bounds or neighbouring records.
+fn canonical_edited_files(envelope: &CanonicalObservationEnvelopeV1) -> Vec<serde_json::Value> {
+    envelope
+        .facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some(path),
+                content,
+            } if !path.is_empty() => {
+                let mut entry = serde_json::Map::new();
+                entry.insert("path".to_owned(), serde_json::Value::String(path.clone()));
+                let content = content.as_ref().and_then(serde_json::Value::as_object);
+                for key in ["edited_at_micros", "change_type", "hunks"] {
+                    if let Some(value) = content.and_then(|content| content.get(key)) {
+                        entry.insert(key.to_owned(), value.clone());
+                    }
+                }
+                Some(serde_json::Value::Object(entry))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The host's own identifier of the record's tool invocation, for a fork or
+/// tool result to bind to. Every capture falls back to the record's stable id
+/// (or `{stable_id}:tool:{index}`) when the host wrote none, so an invocation
+/// id rooted in the stable id is the capture's, not the host's, and is never
+/// served. A subagent dispatch wins over other invocations on the same record
+/// because that is the call a child session's `parent_tool_use_id` names.
+fn host_tool_use_id(envelope: &CanonicalObservationEnvelopeV1) -> Option<&str> {
+    let stable_record_id = envelope.stable_record_id().as_str();
+    let synthesized_prefix = format!("{stable_record_id}:tool:");
+    let mut invocations = envelope.facts().iter().filter_map(|fact| match fact {
+        CanonicalObservationFactV1::ToolInvocation {
+            invocation_id,
+            name,
+            ..
+        } if invocation_id.as_str() != stable_record_id
+            && !invocation_id.as_str().starts_with(&synthesized_prefix) =>
+        {
+            Some((invocation_id.as_str(), name.as_str()))
+        }
+        _ => None,
+    });
+    let first = invocations.next()?;
+    Some(
+        std::iter::once(first)
+            .chain(invocations)
+            .find(|(_, name)| is_subagent_dispatch_tool(name))
+            .unwrap_or(first)
+            .0,
+    )
+}
+
 fn serialize_metadata_map(
     metadata: &serde_json::Map<String, serde_json::Value>,
 ) -> ProjectionStoreResult<Option<String>> {
@@ -403,10 +483,33 @@ fn canonical_message_metadata_for(
     if let Some(session_metadata) = session_metadata {
         metadata.extend(session_metadata.clone());
     }
-    if let Some(normalize) =
-        tool_metadata_normalizer(metadata.get("source").and_then(serde_json::Value::as_str))
-    {
+    let source = metadata
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let normalizer = tool_metadata_normalizer(source.as_deref());
+    if let Some(normalize) = normalizer {
         normalize(&mut metadata, envelope.facts())?;
+    }
+    let tool_use_id = match rendering {
+        CanonicalRendering::Current => host_tool_use_id(envelope),
+        // Released rows carried the first subagent dispatch id of a Cursor
+        // transcript record, including the capture fallback.
+        CanonicalRendering::ShippedRelease => normalizer
+            .and_then(|_| envelope.facts().iter().find_map(|fact| match fact {
+                CanonicalObservationFactV1::ToolInvocation {
+                    invocation_id,
+                    name,
+                    ..
+                } if is_subagent_dispatch_tool(name) => Some(invocation_id.as_str()),
+                _ => None,
+            })),
+    };
+    if let Some(tool_use_id) = tool_use_id {
+        metadata.insert(
+            TOOL_USE_ID_KEY.to_owned(),
+            serde_json::Value::String(tool_use_id.to_owned()),
+        );
     }
     if let Some(CanonicalObservationFactV1::Message { role, content, .. }) = envelope
         .facts()
@@ -1310,7 +1413,134 @@ mod tests {
             "tool-metadata normalization belongs to the cursor transcript source only"
         );
         assert!(other_metadata.get("tool_events").is_none());
-        assert!(other_metadata.get("tool_use_id").is_none());
+        assert_eq!(
+            other_metadata["tool_use_id"], "tool.dispatch",
+            "the host tool-use id is provider-neutral"
+        );
+    }
+
+    #[test]
+    fn tool_use_id_is_the_host_id_never_the_capture_fallback() {
+        // A capture that found no host id falls back to the record's stable
+        // id (or `{stable}:tool:{index}`); neither is served as a tool-use id.
+        for synthesized in ["record.fixture", "record.fixture:tool:0"] {
+            let fallback = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: ObservationId::new(synthesized).unwrap(),
+                name: "Read".to_owned(),
+                arguments: json!({}),
+            }]);
+            assert_eq!(host_tool_use_id(&fallback), None, "{synthesized}");
+            assert!(canonical_message_metadata(&fallback, None).unwrap().is_none());
+        }
+
+        // The subagent dispatch binds a fork even when it is not first.
+        let dispatching = envelope(vec![
+            CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: ObservationId::new("toolu_read").unwrap(),
+                name: "Read".to_owned(),
+                arguments: json!({}),
+            },
+            CanonicalObservationFactV1::ToolInvocation {
+                invocation_id: ObservationId::new("toolu_task").unwrap(),
+                name: "Task".to_owned(),
+                arguments: json!({"prompt": "explore"}),
+            },
+        ]);
+        assert_eq!(host_tool_use_id(&dispatching), Some("toolu_task"));
+
+        let exec = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: ObservationId::new("call_abc").unwrap(),
+            name: "exec".to_owned(),
+            arguments: json!({}),
+        }]);
+        let metadata: serde_json::Value =
+            serde_json::from_str(&canonical_message_metadata(&exec, None).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(metadata, json!({"tool_use_id": "call_abc"}));
+    }
+
+    #[test]
+    fn file_edit_facts_roll_up_on_the_session_row_only() {
+        let edits = envelope(vec![
+            CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::User,
+                content: json!("edited"),
+                model: None,
+                timestamp: Some(42),
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some("/work/src/lib.rs".to_owned()),
+                content: Some(json!({
+                    "type": "FileChange",
+                    "edited_at_micros": 1_700_000_000_123_456i64,
+                    "change_type": "update",
+                    "hunks": 2,
+                    "unified_diff": "never copied"
+                })),
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::FileEdit,
+                reference: Some("/work/src/new.rs".to_owned()),
+                content: None,
+            },
+            CanonicalObservationFactV1::Git {
+                evidence_kind: CanonicalGitEvidenceKindV1::Commit,
+                reference: Some("abc123".to_owned()),
+                content: None,
+            },
+        ]);
+        assert_eq!(
+            serde_json::Value::Array(canonical_edited_files(&edits)),
+            json!([
+                {
+                    "path": "/work/src/lib.rs",
+                    "edited_at_micros": 1_700_000_000_123_456i64,
+                    "change_type": "update",
+                    "hunks": 2
+                },
+                {"path": "/work/src/new.rs"}
+            ]),
+            "each recorded key is copied; absent keys stay absent"
+        );
+
+        let projection =
+            derive_canonical_projection(&observation_without_native_record_id(&provider_envelope(
+                "claude",
+                edits.facts().to_vec(),
+            )))
+            .unwrap();
+        let output = projection.messages().next().unwrap();
+        let session_metadata: serde_json::Value =
+            serde_json::from_str(output.session().metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(session_metadata["edited_files"][1]["path"], "/work/src/new.rs");
+        assert!(
+            output.message().metadata_json.is_none(),
+            "the rollup is session evidence, not message metadata: {:?}",
+            output.message().metadata_json
+        );
+
+        let no_edits = provider_envelope(
+            "claude",
+            vec![CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Assistant,
+                content: json!("no edits"),
+                model: None,
+                timestamp: Some(43),
+            }],
+        );
+        let projection =
+            derive_canonical_projection(&observation_without_native_record_id(&no_edits)).unwrap();
+        assert!(
+            projection
+                .messages()
+                .next()
+                .unwrap()
+                .session()
+                .metadata_json
+                .is_none(),
+            "a record without edit facts records no edited_files array"
+        );
     }
 
     #[test]

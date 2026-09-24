@@ -292,6 +292,102 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
     );
 }
 
+/// Current composer bubbles record a completed edit as `toolFormerData`
+/// (`edit_file_v2`, `params.relativeWorkspacePath`, `toolCallId`) and stamp the
+/// bubble with an RFC3339 `createdAt`. The session rollup carries that path
+/// and time; the tool row carries Cursor's own `toolCallId`. A two-line
+/// `toolCallId` is not canonical text and yields no tool_use_id, and a read
+/// tool records no edit.
+#[tokio::test]
+async fn composer_completed_edit_records_edit_time_and_tool_call_id() {
+    let tmp = TempDir::new().unwrap();
+    let project = init_project(&tmp);
+    let home = tmp.path().join("home");
+    let edited = project.join("src/auth/mod.rs").to_string_lossy().into_owned();
+
+    let edit_bubble = serde_json::json!({
+        "type": 2,
+        "createdAt": "2026-06-02T06:53:42.994Z",
+        "toolFormerData": {
+            "tool": 38,
+            "toolIndex": 0,
+            "toolCallId": "call_2jug3QnkUS9kwSbiI4oSDy5a",
+            "status": "completed",
+            "name": "edit_file_v2",
+            "params": format!(
+                "{{\"relativeWorkspacePath\":\"{edited}\",\"noCodeblock\":true,\"cloudAgentEdit\":false}}"
+            ),
+            "result": "{\"diff\":\"...\"}"
+        }
+    });
+    let read_bubble = serde_json::json!({
+        "type": 2,
+        "createdAt": "2026-06-02T06:53:40.100Z",
+        "toolFormerData": {
+            "tool": 40,
+            "toolCallId": "call_9zFdmJsgGaH1vh3CTngFjF9Z\nfc_01ea5a7f47a9ffd6",
+            "status": "completed",
+            "name": "read_file_v2",
+            "params": "{\"targetFile\":\"/elsewhere/SKILL.md\",\"charsLimit\":1000000}",
+            "result": "{\"contents\":\"...\"}"
+        }
+    });
+    let env = envelope("comp-edit", &project, &["b-read", "b-edit"]);
+    let rows = vec![
+        kv("composerData:comp-edit", &env),
+        kv("bubbleId:comp-edit:b-read", &read_bubble),
+        kv("bubbleId:comp-edit:b-edit", &edit_bubble),
+    ];
+    write_state_vscdb(&home, &rows).await;
+    let db = open_project_session_db(&project).await.unwrap();
+    CursorComposerSource::with_home(&home)
+        .ingest(
+            &db.runtime().facade(),
+            &project,
+            db.project_id().clone(),
+            CAP,
+        )
+        .await
+        .expect("composer sweep");
+
+    let session = db.get_session("cursor", "comp-edit").await.unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["edited_files"],
+        serde_json::json!([{ "path": edited, "edited_at_micros": 1_780_383_222_994_000i64 }]),
+        "the completed edit_file_v2 call is the edit; the read is not"
+    );
+
+    let edit = db
+        .get_session_message("cursor", "comp-edit:b-edit")
+        .await
+        .expect("edit tool row");
+    assert_eq!(edit.kind.as_deref(), Some("tool_invocation"));
+    assert_eq!(
+        edit.timestamp,
+        Some(1_780_383_222),
+        "an RFC3339 bubble createdAt dates the row"
+    );
+    let edit_metadata: serde_json::Value =
+        serde_json::from_str(edit.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        edit_metadata["tool_use_id"],
+        "call_2jug3QnkUS9kwSbiI4oSDy5a"
+    );
+
+    let read = db
+        .get_session_message("cursor", "comp-edit:b-read")
+        .await
+        .expect("read tool row");
+    let read_metadata: serde_json::Value =
+        serde_json::from_str(read.metadata_json.as_deref().unwrap()).unwrap();
+    assert!(
+        read_metadata.get("tool_use_id").is_none(),
+        "a toolCallId that is not canonical text is not served: {read_metadata}"
+    );
+}
+
 /// The JSONL sweep skips any session id owned by the composer store, so the two
 /// Cursor sources never double-ingest the same session.
 #[tokio::test]

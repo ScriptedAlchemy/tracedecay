@@ -385,9 +385,17 @@ async fn claude_transcript_populates_searchable_messages() {
     // Anthropic-style `message.usage` counters belong to the immutable
     // provider-usage observation family, never conversational metadata.
     for hit in &results {
-        let metadata: serde_json::Value =
-            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        assert!(metadata.get("usage").is_none(), "{metadata}");
+        let metadata = hit
+            .message
+            .metadata_json
+            .as_deref()
+            .map(|metadata| serde_json::from_str::<serde_json::Value>(metadata).unwrap());
+        assert!(
+            metadata
+                .as_ref()
+                .is_none_or(|metadata| metadata.get("usage").is_none()),
+            "{metadata:?}"
+        );
     }
 
     // Privacy contract: Message facts carry only authored text. Tool use is a
@@ -739,6 +747,160 @@ async fn claude_tool_use_stays_out_of_searchable_message_text() {
         !assistant.message.text.contains("tool_use"),
         "tool_use must stay typed facts/metadata, not searchable message text"
     );
+    let metadata: serde_json::Value =
+        serde_json::from_str(assistant.message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["tool_use_id"], "toolu_1",
+        "the assistant row carries Claude's own tool_use.id"
+    );
+    // A Bash call edits nothing: the session records no edited_files array.
+    let session = db.get_session("claude", "claude-tool-sess").await.unwrap();
+    let recorded = session
+        .metadata_json
+        .as_deref()
+        .map(|metadata| serde_json::from_str::<serde_json::Value>(metadata).unwrap());
+    assert!(
+        recorded
+            .as_ref()
+            .is_none_or(|metadata| metadata.get("edited_files").is_none()),
+        "no edit result, no edited_files: {recorded:?}"
+    );
+}
+
+/// Writes the two records Claude Code appends for one `Edit` call: the
+/// assistant `tool_use` block (with Claude's `toolu_…` id) and the user
+/// `tool_result` record whose `toolUseResult` names the edited `filePath`
+/// and its `structuredPatch` hunks.
+fn write_claude_edit_transcript(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    session: &str,
+) -> std::path::PathBuf {
+    let dir = home.join(".claude/projects/-some-slug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{session}.jsonl"));
+    let cwd = project.to_string_lossy();
+    let file_path = project.join("src/lib.rs").to_string_lossy().into_owned();
+    let contents = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "edit-a1",
+            "parentUuid": null,
+            "isSidechain": false,
+            "timestamp": "2026-01-01T00:00:00.500Z",
+            "message": {
+                "id": "msg_edit_1",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [
+                    {"type": "text", "text": "Renaming the exported helper."},
+                    {"type": "tool_use", "id": "toolu_01DBxBP9umzsnpVGUjGSUeGk", "name": "Edit",
+                     "input": {"file_path": file_path, "old_string": "fn old()", "new_string": "fn renamed()"}}
+                ]
+            }
+        }),
+        serde_json::json!({
+            "type": "user",
+            "cwd": cwd,
+            "sessionId": session,
+            "uuid": "edit-u1",
+            "parentUuid": "edit-a1",
+            "isSidechain": false,
+            "sourceToolAssistantUUID": "edit-a1",
+            "timestamp": "2026-01-01T00:00:01.250Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_01DBxBP9umzsnpVGUjGSUeGk",
+                     "content": format!("The file {file_path} has been updated.")}
+                ]
+            },
+            "toolUseResult": {
+                "filePath": file_path,
+                "oldString": "fn old()",
+                "newString": "fn renamed()",
+                "originalFile": "fn old() {}\n",
+                "structuredPatch": [
+                    {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1,
+                     "lines": ["-fn old() {}", "+fn renamed() {}"]}
+                ],
+                "userModified": false,
+                "replaceAll": false
+            }
+        }),
+    );
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn claude_edit_result_records_edit_time_and_tool_use_id() {
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    write_claude_edit_transcript(&home, &project, "claude-edit-sess");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    let source = ClaudeSource::with_home(&home);
+    let stats = try_ingest_claude_source(&db, &source, &project)
+        .await
+        .unwrap();
+    assert_eq!(stats.messages_upserted, 2);
+
+    let session = db.get_session("claude", "claude-edit-sess").await.unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["edited_files"],
+        serde_json::json!([{
+            "path": project.join("src/lib.rs").to_string_lossy(),
+            "edited_at_micros": 1_767_225_601_250_000i64,
+            "hunks": 1
+        }]),
+        "the rollup carries the result record's own timestamp; Edit reports no change type"
+    );
+
+    let assistant = db
+        .search_session_messages("claude", None, "exported helper", 10)
+        .await;
+    assert_eq!(assistant.len(), 1);
+    let tool_use: serde_json::Value =
+        serde_json::from_str(assistant[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(tool_use["tool_use_id"], "toolu_01DBxBP9umzsnpVGUjGSUeGk");
+
+    let result = db
+        .search_session_messages("claude", None, "has been updated", 10)
+        .await;
+    assert_eq!(result.len(), 1);
+    let result_metadata = result[0]
+        .message
+        .metadata_json
+        .as_deref()
+        .map(|metadata| serde_json::from_str::<serde_json::Value>(metadata).unwrap());
+    assert!(
+        result_metadata
+            .as_ref()
+            .is_none_or(|metadata| metadata.get("tool_use_id").is_none()),
+        "the tool_result row is not a tool use: {result_metadata:?}"
+    );
+    assert!(
+        result_metadata
+            .as_ref()
+            .is_none_or(|metadata| metadata.get("edited_files").is_none()),
+        "the rollup lives on the session row, not the message: {result_metadata:?}"
+    );
+
+    // Re-ingesting the same transcript does not duplicate the entry.
+    let again = try_ingest_claude_source(&db, &source, &project)
+        .await
+        .unwrap();
+    assert_eq!(again.messages_upserted, 0);
+    let session = db.get_session("claude", "claude-edit-sess").await.unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(session.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["edited_files"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

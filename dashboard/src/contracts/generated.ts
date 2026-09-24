@@ -3271,6 +3271,7 @@ export const LcmMessageV1Schema = z.object({
   token_count: z.number().int().safe().nullable(),
   token_count_provenance: z.union([z.lazy(() => LcmTokenCountProvenanceV1Schema), z.null()]),
   tool_name: z.string().nullable(),
+  tool_use_id: z.string().nullable().optional(),
 });
 export type LcmMessageV1 = z.infer<typeof LcmMessageV1Schema>;
 

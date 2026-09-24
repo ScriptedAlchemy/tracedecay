@@ -17,6 +17,7 @@ use super::read_model::{
 };
 use super::util::{JsonPath, JsonQuery};
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use tracedecay_store::TOOL_USE_ID_KEY;
 
 mod aggregates;
 
@@ -184,10 +185,25 @@ pub(super) struct LcmMessageV1 {
     pub(super) storage_kind: Option<String>,
     pub(super) metadata_json: Option<String>,
     pub(super) tool_name: Option<String>,
+    /// The host's own identifier of this message's tool invocation (Claude
+    /// `tool_use.id`, Codex `call_id`, Cursor composer `toolCallId`), the value
+    /// a child session's `parent_tool_use_id` names. Absent when the host
+    /// recorded none; never synthesized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tool_use_id: Option<String>,
     pub(super) pinned: Option<i64>,
     pub(super) summary_node_ids: Vec<String>,
     #[serde(default)]
     pub(super) snippet: Option<String>,
+}
+
+/// The typed `tool_use_id` a stored message row carries in its metadata.
+pub(super) fn message_tool_use_id(metadata_json: Option<&str>) -> Option<String> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json?).ok()?;
+    metadata
+        .get(TOOL_USE_ID_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]

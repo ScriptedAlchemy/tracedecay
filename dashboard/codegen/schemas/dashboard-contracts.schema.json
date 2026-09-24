@@ -14461,6 +14461,13 @@
             "string",
             "null"
           ]
+        },
+        "tool_use_id": {
+          "description": "The host's own identifier of this message's tool invocation (Claude\n`tool_use.id`, Codex `call_id`, Cursor composer `toolCallId`), the value\na child session's `parent_tool_use_id` names. Absent when the host\nrecorded none; never synthesized.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

@@ -3,9 +3,10 @@ use std::collections::{BTreeSet, HashMap};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1, PayloadDigestV1};
 use tracedecay_store::{
-    ObservationProjection, ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SessionMessageProjection, SessionMessageRecord, SessionRecord, message_output_digest,
+    EDITED_FILES_KEY, ObservationProjection, ProjectionCheckpoint, ProjectionStoreError,
+    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, SessionMessageRecord,
+    SessionRecord, message_output_digest,
 };
 
 use tracedecay_lcm::raw::stored_message_record_select_columns;
@@ -1272,6 +1273,18 @@ fn reconcile_metadata(
                     *actual_value = merged;
                 }
             }
+            // Each record contributes its own file-edit entries; the session
+            // row keeps the union in first-seen order (re-applying a record
+            // adds nothing).
+            Some(serde_json::Value::Array(actual_files)) if key == EDITED_FILES_KEY => {
+                if let serde_json::Value::Array(expected_files) = expected_value {
+                    for file in expected_files {
+                        if !actual_files.contains(&file) {
+                            actual_files.push(file);
+                        }
+                    }
+                }
+            }
             // Host ingest keeps the first annotation (`merge_session_metadata`).
             // A later observation's source, cwd, or hook label is not a different
             // session. Session identity stays on provider and session id.
@@ -1446,6 +1459,47 @@ mod reconcile_tests {
             agent_id: None,
             parent_tool_use_id: None,
         }
+    }
+
+    /// Each record's file-edit rollup joins the session row's array: the union
+    /// keeps every distinct edit, a re-applied record adds nothing, and the
+    /// other first-annotation-wins keys are untouched.
+    #[test]
+    fn edited_files_rollups_union_across_records() {
+        let with_metadata = |metadata: serde_json::Value| SessionRecord {
+            metadata_json: Some(metadata.to_string()),
+            ..record("/work/project")
+        };
+        let first_edit = serde_json::json!({"path": "/work/a.rs", "edited_at_micros": 1_000});
+        let second_edit = serde_json::json!({"path": "/work/b.rs", "edited_at_micros": 2_000});
+        let later_a = serde_json::json!({"path": "/work/a.rs", "edited_at_micros": 3_000});
+        let actual = with_metadata(serde_json::json!({
+            "source": "claude_transcript",
+            "edited_files": [first_edit.clone()]
+        }));
+        let expected = with_metadata(serde_json::json!({
+            "source": "other",
+            "edited_files": [second_edit.clone(), first_edit.clone(), later_a.clone()]
+        }));
+
+        let merged = reconcile_session_rows_detailed(&actual, &expected).unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(merged.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            metadata["edited_files"],
+            serde_json::json!([first_edit, second_edit, later_a]),
+            "distinct edits of one path are separate events, duplicates collapse"
+        );
+        assert_eq!(metadata["source"], "claude_transcript");
+
+        let again = reconcile_session_rows_detailed(&merged, &expected).unwrap();
+        assert_eq!(again.metadata_json, merged.metadata_json);
+
+        let no_edits = with_metadata(serde_json::json!({"source": "other"}));
+        let merged = reconcile_session_rows_detailed(&no_edits, &actual).unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(merged.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(metadata["edited_files"].as_array().unwrap().len(), 1);
     }
 
     #[cfg(unix)]

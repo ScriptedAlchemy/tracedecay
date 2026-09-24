@@ -492,3 +492,148 @@ async fn codex_jsonl_path_relocation_keeps_session_identity_on_production_observ
         1
     );
 }
+
+/// Codex records an applied patch as an `item_completed` `FileChange` item
+/// (`status`, `changes` keyed by path, `completed_at_ms`) and a tool call as a
+/// `function_call` with its `call_id`. The session rollup carries each
+/// completed change with the host's completion time; the tool-call message
+/// carries the host's call id; a failed apply and a call-id-less record
+/// record nothing.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn codex_file_change_items_record_edit_times_and_call_ids() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    let session = "codex-file-change";
+    let dir = home.join(".codex/sessions/2026/01/01");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cwd = project.to_string_lossy();
+    write_jsonl(
+        &dir.join(format!("rollout-2026-01-01T00-00-20-{session}.jsonl")),
+        &[
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:20.000Z",
+                "type": "session_meta",
+                "payload": {"id": session, "cwd": cwd, "model_provider": "openai"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:21.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "Port the checklist"}
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:22.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call", "name": "exec_command", "call_id": "call_9zFdmJsg",
+                    "arguments": "{\"cmd\":\"cargo check\"}", "status": "completed"
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:23.035Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed", "thread_id": session, "turn_id": "turn-1",
+                    "started_at_ms": 1_767_225_622_900i64, "completed_at_ms": 1_767_225_623_035i64,
+                    "item": {
+                        "type": "FileChange", "id": "exec-78bd940e", "status": "completed",
+                        "stdout": "Success. Updated the following files:\nA checklist.md\nM notes.md\n",
+                        "stderr": "",
+                        "changes": {
+                            "/work/checklist.md": {"type": "add", "content": "# Rollout\n"},
+                            "/work/notes.md": {
+                                "type": "update", "move_path": null,
+                                "unified_diff": "@@ -2,3 +2,3 @@\n-old\n+new\n@@ -9,1 +9,1 @@\n-a\n+b\n"
+                            }
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:24.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed", "thread_id": session, "turn_id": "turn-1",
+                    "completed_at_ms": 1_767_225_624_000i64,
+                    "item": {
+                        "type": "FileChange", "id": "exec-failed", "status": "failed",
+                        "stdout": "", "stderr": "patch did not apply",
+                        "changes": {"/work/never.md": {"type": "update", "unified_diff": "@@ -1 +1 @@\n-x\n+y\n", "move_path": null}}
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-01-01T00:00:25.000Z",
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "Patch landed cleanly."}
+            }),
+        ],
+    );
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
+
+    let session_row = db.get_session("codex", session).await.unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(session_row.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        metadata["edited_files"],
+        serde_json::json!([
+            {
+                "path": "/work/checklist.md",
+                "edited_at_micros": 1_767_225_623_035_000i64,
+                "change_type": "add"
+            },
+            {
+                "path": "/work/notes.md",
+                "edited_at_micros": 1_767_225_623_035_000i64,
+                "change_type": "update",
+                "hunks": 2
+            }
+        ]),
+        "completed changes carry the item's completed_at_ms; the failed apply records nothing"
+    );
+
+    // The tool-call row is reachable through its indexed tool name.
+    let hits = db
+        .search_session_messages("codex", None, "exec_command", 10)
+        .await;
+    let summary: Vec<_> = hits
+        .iter()
+        .map(|hit| {
+            (
+                hit.message.message_id.clone(),
+                hit.message.kind.clone(),
+                hit.message.tool_names.clone(),
+                hit.message.text.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(hits.len(), 1, "{summary:?}");
+    assert_eq!(hits[0].message.tool_names.as_deref(), Some("exec_command"));
+    let tool_call: serde_json::Value =
+        serde_json::from_str(hits[0].message.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(tool_call["tool_use_id"], "call_9zFdmJsg");
+
+    let reply = db
+        .search_session_messages("codex", None, "landed cleanly", 10)
+        .await;
+    assert_eq!(reply.len(), 1);
+    let no_tool = reply[0]
+        .message
+        .metadata_json
+        .as_deref()
+        .map(|metadata| serde_json::from_str::<serde_json::Value>(metadata).unwrap());
+    assert!(
+        no_tool
+            .as_ref()
+            .is_none_or(|metadata| metadata.get("tool_use_id").is_none()),
+        "a message without a tool call carries no tool_use_id: {no_tool:?}"
+    );
+}
