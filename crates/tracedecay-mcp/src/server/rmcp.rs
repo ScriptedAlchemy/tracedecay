@@ -837,13 +837,16 @@ where
                 .await;
             return Ok(CustomResult::new(json!({})));
         }
+        // `rmcp` lifts `params._meta` into the request context; the object it
+        // leaves empty is a request that carried no params of its own (the
+        // stdio proxy creates `params` only to hold that context).
+        let params = request
+            .params
+            .as_ref()
+            .filter(|params| params.as_object().is_none_or(|object| !object.is_empty()));
         rmcp_response_result(
-            self.dispatch(
-                context,
-                &request.method,
-                McpDispatchParams::Raw(request.params.as_ref()),
-            )
-            .await?,
+            self.dispatch(context, &request.method, McpDispatchParams::Raw(params))
+                .await?,
         )
         .map(CustomResult::new)
     }
