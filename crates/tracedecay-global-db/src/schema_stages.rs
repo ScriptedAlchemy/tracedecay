@@ -464,6 +464,32 @@ async fn classify_registered_schema_authorities(
     })
 }
 
+/// Authority named by the typed reset an existing store receives when the
+/// composed authority schema (observation, projection, and anchor tables with
+/// their invariant triggers) drifted from the contract. No such shape migrates
+/// in place: the store stays untouched for the operator's reset decision. A
+/// fresh install failing the same check is a programming error and keeps its
+/// storage classification.
+const AUTHORITY_SCHEMA_AUTHORITY: &str = "authority schema";
+
+async fn validate_admitted_authority_schema(
+    conn: &impl QueryExecutor,
+    is_fresh: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    validate_authority_schema_contract(conn)
+        .await
+        .map_err(|error| {
+            if is_fresh {
+                error
+            } else {
+                tracedecay_domain::errors::TraceDecayError::reset_required(
+                    AUTHORITY_SCHEMA_AUTHORITY,
+                    error.to_string(),
+                )
+            }
+        })
+}
+
 /// Installs the minimum schema and write guards required before a registered
 /// runtime may be published. Historical convergence remains separately
 /// resumable so daemon admission never waits for whole-store scans.
@@ -512,7 +538,7 @@ pub async fn ensure_registered_schema_for_admission(
                 global_db_operation_error("initialize LCM status performance indexes", error)
             })?;
     }
-    validate_authority_schema_contract(installation).await?;
+    validate_admitted_authority_schema(installation, is_fresh).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh,
@@ -942,7 +968,7 @@ pub async fn ensure_attached_registered_schema(
         })?;
         transaction.commit().await?;
     }
-    validate_authority_schema_contract(&read_connection).await?;
+    validate_admitted_authority_schema(&read_connection, configuration_fresh.is_some()).await?;
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh: configuration_fresh.is_some(),
