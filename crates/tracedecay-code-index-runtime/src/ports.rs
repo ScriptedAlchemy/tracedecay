@@ -8,7 +8,7 @@ use tokio::time::{Duration, timeout};
 
 /// Watcher knobs the git-metadata watcher needs from resolved sync config.
 ///
-/// Root maps `tracedecay::config::SyncConfig` into this type at construction.
+/// Root maps `tracedecay_configuration::SyncConfig` into this type at construction.
 /// The usecases `SyncConfig` is a different, smaller PR-autotrack type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWatchSyncConfigV1 {
