@@ -702,7 +702,6 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
     for object in [
         "lcm_summary_convergence_invalidation_work",
         "lcm_summary_convergence_dirty_raw_seed",
-        "idx_lcm_summary_sources_source_node",
     ] {
         let mut rows = conn
             .query(

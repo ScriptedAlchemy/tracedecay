@@ -4,7 +4,9 @@ use tracedecay_session_temporal_store::SessionTemporalAccess;
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LcmLineageFaultForTest {
-    CorruptCompatibilitySummaryText {
+    /// Rewrites a stored summary body without touching its hash so readers
+    /// must fail closed on the mismatch.
+    CorruptSummaryText {
         node_id: String,
         text: String,
     },
@@ -303,7 +305,7 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> Result<()> {
         let statement = if enabled {
             "CREATE TRIGGER abort_late_summary_projection
-             BEFORE INSERT ON lcm_summary_nodes
+             BEFORE INSERT ON session_summary_sources
              BEGIN
                 SELECT RAISE(ABORT, 'forced late summary projection failure');
              END;"
@@ -341,7 +343,7 @@ impl HostAdmissionTestRuntimeV1 {
         let transaction = database.begin_write_transaction().await?;
         transaction
             .execute(
-                "DELETE FROM lcm_summary_sources WHERE node_id = ?1",
+                "DELETE FROM session_summary_sources WHERE summary_id = ?1",
                 (node_id,),
             )
             .await
@@ -360,7 +362,7 @@ impl HostAdmissionTestRuntimeV1 {
         let transaction = database.begin_write_transaction().await?;
         transaction
             .execute(
-                "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+                "INSERT INTO session_summary_sources (summary_id, source_kind, source_id, ordinal)
                  VALUES (?1, 'summary_node', ?2, 0)",
                 (node_id, source_node_id),
             )
@@ -576,10 +578,10 @@ impl HostAdmissionTestRuntimeV1 {
             .begin_write_transaction()
             .await?;
         let result = match fault {
-            LcmLineageFaultForTest::CorruptCompatibilitySummaryText { node_id, text } => {
+            LcmLineageFaultForTest::CorruptSummaryText { node_id, text } => {
                 transaction
                     .execute(
-                        "UPDATE lcm_summary_nodes SET summary_text = ?2 WHERE node_id = ?1",
+                        "UPDATE session_summary_nodes SET summary_text = ?2 WHERE summary_id = ?1",
                         tracedecay_runtime_core::db::engine::params![node_id, text],
                     )
                     .await
@@ -759,6 +761,10 @@ impl HostAdmissionTestRuntimeV1 {
         fault: &LcmLineageFaultForTest,
     ) -> Result<()> {
         let (statement, operation) = match fault {
+            LcmLineageFaultForTest::CorruptSummaryText { .. } => (
+                "DROP TRIGGER IF EXISTS session_summary_nodes_immutable_update_v1",
+                "prepare corrupt lcm summary text fixture",
+            ),
             LcmLineageFaultForTest::ReplaceGenerationWatermarks { .. } => (
                 "DROP TRIGGER IF EXISTS session_temporal_generations_state_guard_v1",
                 "prepare changed lcm watermarks fixture",
@@ -1345,7 +1351,7 @@ impl HostAdmissionTestRuntimeV1 {
     async fn set_lcm_summary_insert_abort_trigger_for_test(&self, enabled: bool) -> Result<()> {
         let statement = if enabled {
             "CREATE TRIGGER fail_codex_summary_successor
-             BEFORE INSERT ON lcm_summary_nodes
+             BEFORE INSERT ON session_summary_nodes
              BEGIN
                 SELECT RAISE(ABORT, 'forced summary successor failure');
              END;"

@@ -1916,11 +1916,12 @@ mod tests {
             Executor::execute(
                 &writer,
                 "INSERT INTO session_summary_nodes (
-                    summary_id, session_id, summary_anchor_id, summary_text,
-                    index_text, source_horizon_json, publication_json, created_at
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, publication_json, created_at
                  ) VALUES (
-                    'summary-authority', 'session-1', ?1, 'authority',
-                    'authority', '{}', ?2, 1
+                    'summary-authority', 'session-1', 'test', 'session-1', 0, ?1,
+                    'authority', 'hash', 1, 1, '{}', ?2, 1
                  )",
                 params![authority_anchor.anchor_id().as_str(), authority_publication],
             )
@@ -2000,9 +2001,11 @@ mod tests {
             Executor::execute(
                 &writer,
                 "INSERT INTO session_summary_nodes (
-                    summary_id, session_id, summary_anchor_id, summary_text,
-                    index_text, source_horizon_json, publication_json, created_at
-                 ) VALUES ('summary-1', 'session-1', ?1, ?2, ?2, '{}', ?3, 1)",
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, publication_json, created_at
+                 ) VALUES ('summary-1', 'session-1', 'test', 'session-1', 0, ?1, ?2, 'hash',
+                           1, 1, '{}', ?3, 1)",
                 params![
                     summary_anchor.anchor_id().as_str(),
                     summary_payload,

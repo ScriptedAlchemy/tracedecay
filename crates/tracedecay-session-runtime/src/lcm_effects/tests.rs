@@ -713,7 +713,7 @@ async fn transcript_ingest_persists_native_compaction_raw_range() {
     let mut rows = snapshot
         .query(
             "SELECT summary_text, json_extract(metadata_json, '$.summary_route')
-                 FROM lcm_summary_nodes
+                 FROM session_summary_nodes
                  WHERE provider = 'codex' AND session_id = ?1",
             params![session_id],
         )
@@ -1024,8 +1024,8 @@ done
         let snapshot = db.read_snapshot().await.unwrap();
         let mut rows = snapshot
             .query(
-                "SELECT node_id, summary_text
-                     FROM lcm_summary_nodes
+                "SELECT summary_id, summary_text
+                     FROM session_summary_nodes
                      WHERE provider = 'codex' AND session_id = ?1",
                 params![session_id],
             )
@@ -1040,8 +1040,8 @@ done
         drop(rows);
         let mut sources = snapshot
             .query(
-                "SELECT source_id FROM lcm_summary_sources
-                     WHERE node_id = ?1 AND source_kind = 'raw_message'
+                "SELECT source_id FROM session_summary_sources
+                     WHERE summary_id = ?1 AND source_kind = 'raw_message'
                      ORDER BY ordinal",
                 params![node_id],
             )
@@ -1582,13 +1582,23 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
         .unwrap();
     let transaction = db.begin_write_transaction().await.unwrap();
     transaction
+        .execute_batch(
+            "INSERT INTO retrieval_anchors (
+                     anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('synthetic-fairness-anchor', '{}', '{}', 'test');",
+        )
+        .await
+        .unwrap();
+    transaction
         .execute(
-            "INSERT INTO lcm_summary_nodes(
-                     node_id, provider, conversation_id, session_id, depth,
-                     summary_text, summary_hash, summary_token_count, source_token_count
+            "INSERT INTO session_summary_nodes(
+                     summary_id, session_id, provider, conversation_id, depth,
+                     summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                     source_token_count, source_horizon_json, created_at
                  ) VALUES (
-                     'synthetic-fairness-dependent', 'cursor', ?1, ?1, 0,
-                     'second dependent summary', 'synthetic-fairness-hash', 3, 4
+                     'synthetic-fairness-dependent', ?1, 'cursor', ?1, 0,
+                     'synthetic-fairness-anchor', 'second dependent summary',
+                     'synthetic-fairness-hash', 3, 4, '{}', 1
                  )",
             params![large_session],
         )
@@ -1596,7 +1606,7 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
         .unwrap();
     transaction
         .execute(
-            "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+            "INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  VALUES ('synthetic-fairness-dependent', 'raw_message', CAST(?1 AS TEXT), 0)",
             params![first_store_id],
         )
@@ -1980,9 +1990,9 @@ fn retained_pages_never_reuse_unbound_session_wide_native_text() {
         let mut rows = snapshot
             .query(
                 "SELECT summary_text
-                     FROM lcm_summary_nodes
+                     FROM session_summary_nodes
                      WHERE provider = 'cursor' AND session_id = ?1 AND depth = 0
-                     ORDER BY created_at, node_id
+                     ORDER BY created_at, summary_id
                      LIMIT 2",
                 params![session_id],
             )
@@ -2057,7 +2067,7 @@ fn protected_in_place_revision_stales_old_summary_before_reconvergence() {
             let snapshot = db.read_snapshot().await.unwrap();
             let mut rows = snapshot
                 .query(
-                    "SELECT node_id FROM lcm_summary_nodes
+                    "SELECT summary_id FROM session_summary_nodes
                          WHERE provider = 'cursor' AND session_id = ?1",
                     params![session_id],
                 )
@@ -2225,12 +2235,12 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
         let snapshot = db.read_snapshot().await.unwrap();
         let mut rows = snapshot
             .query(
-                "SELECT node.node_id, MIN(CAST(source.source_id AS INTEGER))
-                     FROM lcm_summary_nodes AS node
-                     JOIN lcm_summary_sources AS source ON source.node_id = node.node_id
+                "SELECT node.summary_id, MIN(CAST(source.source_id AS INTEGER))
+                     FROM session_summary_nodes AS node
+                     JOIN session_summary_sources AS source ON source.summary_id = node.summary_id
                      WHERE node.provider = 'cursor' AND node.session_id = ?1
                        AND node.depth = 0 AND source.source_kind = 'raw_message'
-                     GROUP BY node.node_id
+                     GROUP BY node.summary_id
                      ORDER BY MIN(CAST(source.source_id AS INTEGER))
                      LIMIT 2",
                 params![session_id],
@@ -2356,8 +2366,8 @@ fn disjoint_published_summary_revisions_both_reconverge_across_restart() {
                            ON availability.session_id = generation.session_id
                           AND availability.generation = generation.generation
                           AND availability.availability = 'available'
-                         JOIN lcm_summary_sources AS source
-                           ON source.node_id = availability.summary_id
+                         JOIN session_summary_sources AS source
+                           ON source.summary_id = availability.summary_id
                           AND source.source_kind = 'raw_message'
                          WHERE generation.session_id = ?1
                            AND generation.state = 'active'
@@ -2456,7 +2466,7 @@ fn retained_summary_rejects_a_role_revision_during_model_generation() {
         let snapshot = db.read_snapshot().await.unwrap();
         let mut rows = snapshot
             .query(
-                "SELECT summary_text FROM lcm_summary_nodes
+                "SELECT summary_text FROM session_summary_nodes
                      WHERE provider = 'cursor' AND session_id = ?1",
                 params![session_id],
             )

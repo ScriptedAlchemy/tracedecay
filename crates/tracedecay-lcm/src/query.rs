@@ -683,7 +683,17 @@ async fn count_summary_nodes(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<i64, LcmError> {
-    util::count_by_provider_session(conn, "lcm_summary_nodes", provider, session_id).await
+    util::fetch_i64(
+        conn,
+        &format!(
+            "SELECT COUNT(*) FROM session_summary_nodes n
+             WHERE n.provider = ?1 AND (?2 IS NULL OR n.session_id = ?2) AND {}",
+            schema::SUMMARY_VISIBLE_SQL
+        ),
+        params![provider, util::opt_text(session_id)],
+        "summary count query returned no rows",
+    )
+    .await
 }
 
 async fn count_external_payloads(
@@ -1093,9 +1103,6 @@ mod tests {
         )
         .await
         .expect("session schema");
-        conn.execute_batch(test_support::SESSION_GENERATION_SCHEMA)
-            .await
-            .expect("session generation schema");
         schema::ensure_lcm_schema(&conn).await.expect("LCM schema");
         conn.execute(
             "INSERT INTO sessions(provider, session_id, project_key, project_path)
@@ -1726,8 +1733,8 @@ mod tests {
             let summary_text = format!("summary {ordinal}");
             let summary_hash = crate::retrieval_content::projected_content_hash(&summary_text);
             conn.execute(
-                "INSERT INTO lcm_summary_nodes (
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
+                "INSERT INTO session_summary_nodes (
+                    summary_id, provider, conversation_id, session_id, depth, summary_text,
                     summary_hash, summary_token_count, source_token_count
                  ) VALUES (?1, 'cursor', 'conversation-a', 'session-a', 0, ?2, ?3, 1, 1)",
                 params![
@@ -1738,6 +1745,7 @@ mod tests {
             )
             .await
             .expect("summary node");
+            test_support::mark_summary_available(&conn, "session-a", &node_id).await;
             node_ids.push(node_id);
         }
 
@@ -1776,8 +1784,8 @@ mod tests {
     ) {
         let summary_hash = crate::retrieval_content::projected_content_hash(summary_text);
         conn.execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth, summary_text,
+            "INSERT INTO session_summary_nodes (
+                summary_id, provider, conversation_id, session_id, depth, summary_text,
                 summary_hash, summary_token_count, source_token_count, created_at
              ) VALUES (?1, 'cursor', 'conversation-a', 'session-a', ?2, ?3, ?4, 1, 1, ?5)",
             params![
@@ -1797,7 +1805,7 @@ mod tests {
                 LcmSourceRef::SummaryNode { node_id } => ("summary_node", node_id.clone()),
             };
             conn.execute(
-                "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+                "INSERT INTO session_summary_sources (summary_id, source_kind, source_id, ordinal)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![node_id, source_kind, source_id.as_str(), ordinal as i64],
             )
@@ -1929,8 +1937,8 @@ mod tests {
         .expect("foreign session");
         let foreign_text = "foreign child summary";
         conn.execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth, summary_text,
+            "INSERT INTO session_summary_nodes (
+                summary_id, provider, conversation_id, session_id, depth, summary_text,
                 summary_hash, summary_token_count, source_token_count, created_at
              ) VALUES ('child-foreign', 'cursor', 'conversation-b', 'session-foreign', 0, ?1, ?2,
                        1, 1, 10)",

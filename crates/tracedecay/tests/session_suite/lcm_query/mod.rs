@@ -7,7 +7,9 @@ use tracedecay_lcm::{
     LcmSessionReplayRequest, LcmSourceRef, LcmStorageKind, LcmSummaryNodeDraft,
     MAX_DERIVED_SNIPPET_CHARS,
 };
-use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_project::test_support::host_admission::{
+    HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
+};
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
@@ -193,17 +195,10 @@ async fn replace_summary_content_without_updating_hash(
     node_id: &str,
     replacement: &str,
 ) {
-    let database = db
-        .registered_database(HostAdmissionScope::Profile)
-        .expect("registered profile database");
-    let writer = database
-        .writer_connection()
-        .expect("registered profile writer");
-    Executor::execute(
-        &writer,
-        "UPDATE lcm_summary_nodes SET summary_text = ?1 WHERE node_id = ?2",
-        params![replacement, node_id],
-    )
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::CorruptSummaryText {
+        node_id: node_id.to_string(),
+        text: replacement.to_string(),
+    })
     .await
     .expect("summary fixture should be tampered");
 }
@@ -238,3 +233,4 @@ mod grep_ranking;
 mod load_session;
 mod sessions;
 mod status;
+mod visibility;

@@ -191,9 +191,8 @@ async fn wait_for_schema_convergence(
     .expect("registered schema convergence must reach a terminal state")
 }
 
-const LCM_STATUS_PERFORMANCE_INDEX_NAMES: [&str; 3] = [
+const LCM_STATUS_PERFORMANCE_INDEX_NAMES: [&str; 2] = [
     "idx_lcm_raw_lossy_ingest",
-    "idx_lcm_summary_nodes_depth_tokens",
     "idx_lcm_external_payloads_owner_bytes",
 ];
 const SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX: &str = "idx_lcm_external_payloads_owner";
@@ -793,7 +792,6 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
                SET applied_at = 123
                WHERE name = 'lcm';
            DROP INDEX idx_lcm_raw_lossy_ingest;
-           DROP INDEX idx_lcm_summary_nodes_depth_tokens;
            DROP INDEX idx_lcm_external_payloads_owner_bytes;
            CREATE INDEX idx_lcm_external_payloads_owner
                ON lcm_external_payloads(provider, session_id);",

@@ -10,8 +10,8 @@
 //!
 //! A raw row is *projection-durable* when a summary node's lineage covers it,
 //! i.e. its `store_id` appears as a `raw_message` source in
-//! `lcm_summary_sources` (see
-//! `tracedecay_session_temporal_store::operations::summary_projection`, which persists
+//! `session_summary_sources` (see
+//! `tracedecay_session_temporal_store::operations::publication`, which persists
 //! `LcmSourceRef::RawMessage { store_id }` as `('raw_message', store_id)`).
 //! Only projection-durable rows are ever acted on. Rows with no summary lineage
 //! are live, un-projected evidence and are **never** touched, this is the
@@ -61,7 +61,7 @@ const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 /// the raw row's `store_id` is covered by a durable summary node's lineage.
 /// `source_id` for a `raw_message` source is the `store_id` rendered as text.
 const PROJECTION_DURABLE: &str = "EXISTS (
-        SELECT 1 FROM lcm_summary_sources s
+        SELECT 1 FROM session_summary_sources s
         WHERE s.source_kind = 'raw_message'
           AND s.source_id = CAST(r.store_id AS TEXT)
     )";

@@ -21,11 +21,12 @@ async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('fresh-anchor', '{}', '{}', 'test');
          INSERT INTO session_summary_nodes (
-            summary_id, session_id, summary_anchor_id, summary_text, index_text,
+            summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+            summary_text, summary_hash, summary_token_count, source_token_count,
             source_horizon_json, created_at
          ) VALUES (
-            'fresh-summary', 'fresh-session', 'fresh-anchor',
-            'fresh summary text', 'quokka migration notes', '{}', 100
+            'fresh-summary', 'fresh-session', 'test', 'fresh-session', 0, 'fresh-anchor',
+            'fresh summary text quokka migration notes', 'hash', 1, 1, '{}', 100
          );",
     )
     .await
@@ -51,7 +52,7 @@ async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
         (
             "fresh-summary".to_string(),
             "fresh-session".to_string(),
-            "fresh summary text".to_string(),
+            "fresh summary text quokka migration notes".to_string(),
             100,
         )
     );
@@ -449,15 +450,21 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
                 SELECT value + 1 FROM sequence WHERE value < {end}
              )
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, created_at
              )
              SELECT
                 printf('root-summary-%06d', value),
                 printf('root-session-%02d', value % 8),
+                'test',
+                printf('root-session-%02d', value % 8),
+                0,
                 'root-anchor',
                 'root summary',
-                'root summary',
+                'hash',
+                1,
+                1,
                 '{{}}',
                 value / 8
              FROM sequence;"
@@ -727,11 +734,12 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('fts-anchor', '{}', '{}', 'test');
          INSERT INTO session_summary_nodes (
-            summary_id, session_id, summary_anchor_id, summary_text, index_text,
+            summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+            summary_text, summary_hash, summary_token_count, source_token_count,
             source_horizon_json, created_at
          ) VALUES (
-            'fts-summary', 'fts-session', 'fts-anchor',
-            'existing summary', 'migration-search summary', '{}', 100
+            'fts-summary', 'fts-session', 'test', 'fts-session', 0, 'fts-anchor',
+            'existing summary', 'hash', 1, 1, '{}', 100
          );",
     )
     .await

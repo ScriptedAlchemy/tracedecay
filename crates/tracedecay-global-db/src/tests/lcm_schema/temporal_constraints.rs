@@ -1288,11 +1288,12 @@ async fn temporal_schema_keeps_append_only_authority_immutable() {
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES ('append-anchor', '{}', '{}', 'test');
          INSERT INTO session_summary_nodes (
-            summary_id, session_id, summary_anchor_id, summary_text, index_text,
+            summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+            summary_text, summary_hash, summary_token_count, source_token_count,
             source_horizon_json, created_at
          ) VALUES (
-            'append-summary', 'append-session', 'append-anchor',
-            'summary', 'summary', '{}', 100
+            'append-summary', 'append-session', 'test', 'append-session', 0, 'append-anchor',
+            'summary', 'hash', 1, 1, '{}', 100
          );
          INSERT INTO session_temporal_generations (
             session_id, generation, state, frozen_watermarks_json, created_at

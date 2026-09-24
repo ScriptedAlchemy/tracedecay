@@ -1647,14 +1647,19 @@ mod global_retention_tests {
                     INSERT INTO retention_delete_receipts(deleted_message_id)
                     VALUES (OLD.message_id);
                  END;
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('retention-summary-anchor', '{}', '{}', 'test');
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_horizon_json, created_at
                  ) VALUES (
-                    'retention-summary', 'claude', 'retention-session', 'retention-session', 0,
-                    'retention summary', 'retention-summary-hash', 1, 1
+                    'retention-summary', 'retention-session', 'claude', 'retention-session', 0,
+                    'retention-summary-anchor', 'retention summary', 'retention-summary-hash',
+                    1, 1, '{}', 1
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  SELECT 'retention-summary', 'raw_message', CAST(store_id AS TEXT), 0
                  FROM lcm_raw_messages
                  WHERE provider = 'claude' AND message_id = 'retention-message';",

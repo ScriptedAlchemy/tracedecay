@@ -702,24 +702,26 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                     'needle candidate derived needle outside'
                 );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES
                 (
-                    'summary-plan-inside', 'session-plan-inside', 'anchor-plan-summary',
-                    'needle summary inside newest', 'needle summary inside newest', '{}',
+                    'summary-plan-inside', 'session-plan-inside', 'claude',
+                    'session-plan-inside', 0, 'anchor-plan-summary',
+                    'needle summary inside newest', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 25
                 ),
                 (
-                    'summary-plan-inside-old', 'session-plan-inside',
-                    'anchor-plan-summary-old',
-                    'needle summary inside older', 'needle summary inside older', '{}',
+                    'summary-plan-inside-old', 'session-plan-inside', 'claude',
+                    'session-plan-inside', 0, 'anchor-plan-summary-old',
+                    'needle summary inside older', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 15
                 ),
                 (
-                    'summary-plan-outside', 'session-plan-outside',
-                    'anchor-plan-summary-outside',
-                    'needle summary outside', 'needle summary outside', '{}',
+                    'summary-plan-outside', 'session-plan-outside', 'claude',
+                    'session-plan-outside', 0, 'anchor-plan-summary-outside',
+                    'needle summary outside', 'hash', 1, 1, '{}',
                     '{\"provider\":\"claude\"}', 35
                 );
              INSERT INTO session_summary_availability (
@@ -1212,11 +1214,12 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 7, 'index'
              );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES (
-                'summary-provider', 'session-snapshot', 'anchor-summary-provider',
-                'summary', 'summary',
+                'summary-provider', 'session-snapshot', 'test', 'session-snapshot', 0,
+                'anchor-summary-provider', 'summary', 'hash', 1, 1,
                 '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );
              INSERT INTO session_summary_availability (
@@ -1285,17 +1288,18 @@ impl HostAdmissionRetrievalFixture for HostAdmissionTestRuntimeV1 {
                 NULL, 'summary-source-at-10', '{}'
              );
              INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
                 source_horizon_json, publication_json, created_at
              ) VALUES
                 (
-                    'historical-summary', 'session-snapshot', 'historical-summary-anchor',
-                    'historical', 'historical',
+                    'historical-summary', 'session-snapshot', 'test', 'session-snapshot', 0,
+                    'historical-summary-anchor', 'historical', 'hash', 1, 1,
                     '{\"knowledge_through\":5,\"valid_through\":5}', NULL, 5
                 ),
                 (
-                    'successor-summary', 'session-snapshot', 'successor-summary-anchor',
-                    'successor', 'successor',
+                    'successor-summary', 'session-snapshot', 'test', 'session-snapshot', 0,
+                    'successor-summary-anchor', 'successor', 'hash', 1, 1,
                     '{\"knowledge_through\":10,\"valid_through\":10}', NULL, 10
                 );
              INSERT INTO session_summary_availability (

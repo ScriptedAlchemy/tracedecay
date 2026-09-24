@@ -686,7 +686,7 @@ impl HostAdmissionTestRuntimeV1 {
                        ON raw.store_id = lcm_raw_messages_fts.rowid
                      WHERE raw.provider = ?1 AND raw.session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts),
-                    (SELECT COUNT(*) FROM lcm_summary_nodes
+                    (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM parse_offsets
                      WHERE file_path = ?3)",

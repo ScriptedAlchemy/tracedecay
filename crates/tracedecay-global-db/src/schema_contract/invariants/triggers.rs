@@ -1219,8 +1219,8 @@ const SESSION_TEMPORAL_FTS: &[Trigger] = &[
         table: "session_summary_nodes",
         create_sql: "CREATE TRIGGER session_summary_nodes_fts_insert_v1
             AFTER INSERT ON session_summary_nodes BEGIN
-                INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+                INSERT INTO session_summary_nodes_fts(rowid, summary_text)
+                VALUES (NEW.rowid, NEW.summary_text);
             END",
     },
     Trigger {
@@ -1229,22 +1229,22 @@ const SESSION_TEMPORAL_FTS: &[Trigger] = &[
         create_sql: "CREATE TRIGGER session_summary_nodes_fts_delete_v1
             AFTER DELETE ON session_summary_nodes BEGIN
                 INSERT INTO session_summary_nodes_fts(
-                    session_summary_nodes_fts, rowid, summary_text, index_text
+                    session_summary_nodes_fts, rowid, summary_text
                 )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
+                VALUES ('delete', OLD.rowid, OLD.summary_text);
             END",
     },
     Trigger {
         name: "session_summary_nodes_fts_update_v1",
         table: "session_summary_nodes",
         create_sql: "CREATE TRIGGER session_summary_nodes_fts_update_v1
-            AFTER UPDATE OF summary_text, index_text ON session_summary_nodes BEGIN
+            AFTER UPDATE OF summary_text ON session_summary_nodes BEGIN
                 INSERT INTO session_summary_nodes_fts(
-                    session_summary_nodes_fts, rowid, summary_text, index_text
+                    session_summary_nodes_fts, rowid, summary_text
                 )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.index_text);
-                INSERT INTO session_summary_nodes_fts(rowid, summary_text, index_text)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.index_text);
+                VALUES ('delete', OLD.rowid, OLD.summary_text);
+                INSERT INTO session_summary_nodes_fts(rowid, summary_text)
+                VALUES (NEW.rowid, NEW.summary_text);
             END",
     },
 ];

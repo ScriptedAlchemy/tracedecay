@@ -999,9 +999,18 @@ pub(super) const TABLES: &[Table] = &[
         [
             column("summary_id", "TEXT", false, None, 1),
             column("session_id", "TEXT", true, None, 0),
+            column("provider", "TEXT", true, None, 0),
+            column("conversation_id", "TEXT", true, None, 0),
+            column("depth", "INTEGER", true, None, 0),
             column("summary_anchor_id", "TEXT", true, None, 0),
             column("summary_text", "TEXT", true, None, 0),
-            column("index_text", "TEXT", true, None, 0),
+            column("summary_hash", "TEXT", true, None, 0),
+            column("summary_token_count", "INTEGER", true, None, 0),
+            column("source_token_count", "INTEGER", true, None, 0),
+            column("source_time_start", "INTEGER", false, None, 0),
+            column("source_time_end", "INTEGER", false, None, 0),
+            column("expand_hint", "TEXT", false, None, 0),
+            column("metadata_json", "TEXT", false, None, 0),
             column("source_horizon_json", "TEXT", true, None, 0),
             column("publication_json", "TEXT", false, None, 0),
             column("created_at", "INTEGER", true, None, 0),
@@ -1010,6 +1019,21 @@ pub(super) const TABLES: &[Table] = &[
             "summary_anchor_id",
             "retrieval_anchors",
             "anchor_id",
+            "NO ACTION"
+        )]
+    ),
+    table!(
+        "session_summary_sources",
+        [
+            column("summary_id", "TEXT", true, None, 1),
+            column("ordinal", "INTEGER", true, None, 2),
+            column("source_kind", "TEXT", true, None, 0),
+            column("source_id", "TEXT", true, None, 0),
+        ],
+        [foreign_key(
+            "summary_id",
+            "session_summary_nodes",
+            "summary_id",
             "NO ACTION"
         )]
     ),
@@ -2030,6 +2054,40 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["created_at", "session_id", "summary_id"],
+    },
+    Index {
+        table: "session_summary_nodes",
+        name: Some("idx_session_summary_nodes_session_depth_time"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "provider",
+            "session_id",
+            "depth",
+            "source_time_start",
+            "source_time_end",
+            "created_at",
+        ],
+    },
+    Index {
+        table: "session_summary_nodes",
+        name: Some("idx_session_summary_nodes_depth_tokens"),
+        unique: false,
+        origin: "c",
+        columns: &[
+            "provider",
+            "session_id",
+            "depth",
+            "summary_token_count",
+            "source_token_count",
+        ],
+    },
+    Index {
+        table: "session_summary_sources",
+        name: Some("idx_session_summary_sources_source"),
+        unique: false,
+        origin: "c",
+        columns: &["source_kind", "source_id", "summary_id"],
     },
     Index {
         table: "session_external_payload_manifests",

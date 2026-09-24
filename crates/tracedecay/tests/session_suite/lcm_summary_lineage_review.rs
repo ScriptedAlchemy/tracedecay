@@ -154,12 +154,6 @@ async fn exact_replay_uses_only_frozen_canonical_authority() {
         .await
         .unwrap();
 
-    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::CorruptCompatibilitySummaryText {
-        node_id: "summary.replay.canonical".into(),
-        text: "corrupt legacy projection".into(),
-    })
-    .await
-    .unwrap();
     db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ShiftRawMessageTimestamp {
         store_id: store_ids[0],
         delta: 999_999,
@@ -186,7 +180,7 @@ async fn exact_replay_uses_only_frozen_canonical_authority() {
     let replay = db
         .lcm_publish_immutable_summary(requested)
         .await
-        .expect("legacy, anchor, and active-generation evolution must not affect exact replay");
+        .expect("anchor and active-generation evolution must not affect exact replay");
     assert_eq!(
         replay.disposition,
         LcmSummaryPublicationDisposition::ExactReplay

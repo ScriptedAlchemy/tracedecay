@@ -827,7 +827,7 @@ impl HostAdmissionTestRuntimeV1 {
                        ON raw.store_id = lcm_raw_messages_fts.rowid
                      WHERE raw.provider = ?1 AND raw.session_id = ?2),
                     (SELECT COUNT(*) FROM lcm_raw_messages_fts),
-                    (SELECT COUNT(*) FROM lcm_summary_nodes
+                    (SELECT COUNT(*) FROM session_summary_nodes
                      WHERE provider = ?1 AND session_id = ?2),
                     (SELECT COUNT(*) FROM parse_offsets
                      WHERE file_path = ?3)",
@@ -1049,30 +1049,48 @@ impl HostAdmissionTestRuntimeV1 {
                     'canonical external payload',
                     '{external_message_metadata}'
                  );
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count,
-                    source_time_start, source_time_end, expand_hint, metadata_json, created_at
+                 INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES ('summary-child-anchor', '{{}}', '{{}}', 'test'),
+                          ('summary-parent-anchor', '{{}}', '{{}}', 'test');
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_time_start, source_time_end, expand_hint,
+                    metadata_json, source_horizon_json, created_at
                  ) VALUES (
-                    'summary-child', 'codex', 'session-a', 'session-a', 0,
-                    'canonical child summary', '{child_summary_hash}', 3, 3,
-                    11, 11, NULL, NULL, 13
+                    'summary-child', 'session-a', 'codex', 'session-a', 0,
+                    'summary-child-anchor', 'canonical child summary',
+                    '{child_summary_hash}', 3, 3, 11, 11, NULL, NULL, '{{}}', 13
                  );
-                 INSERT INTO lcm_summary_nodes(
-                    node_id, provider, conversation_id, session_id, depth, summary_text,
-                    summary_hash, summary_token_count, source_token_count,
-                    source_time_start, source_time_end, expand_hint, metadata_json, created_at
+                 INSERT INTO session_summary_nodes(
+                    summary_id, session_id, provider, conversation_id, depth,
+                    summary_anchor_id, summary_text, summary_hash, summary_token_count,
+                    source_token_count, source_time_start, source_time_end, expand_hint,
+                    metadata_json, source_horizon_json, created_at
                  ) VALUES (
-                    'summary-parent', 'codex', 'session-a', 'session-a', 1,
-                    'canonical parent summary', '{parent_summary_hash}', 3, 6,
-                    11, 12, NULL, NULL, 14
+                    'summary-parent', 'session-a', 'codex', 'session-a', 1,
+                    'summary-parent-anchor', 'canonical parent summary',
+                    '{parent_summary_hash}', 3, 6, 11, 12, NULL, NULL, '{{}}', 14
                  );
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  VALUES ('summary-child', 'raw_message', '11', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
                  VALUES ('summary-parent', 'summary_node', 'summary-child', 0);
-                 INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
-                 VALUES ('summary-parent', 'raw_message', '12', 1);",
+                 INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
+                 VALUES ('summary-parent', 'raw_message', '12', 1);
+                 INSERT INTO session_temporal_generations(
+                    session_id, generation, state, frozen_watermarks_json, created_at
+                 ) VALUES ('session-a', 1, 'building', '{{}}', 10);
+                 UPDATE session_temporal_generations SET state = 'ready', ready_at = 10
+                  WHERE session_id = 'session-a' AND generation = 1;
+                 UPDATE session_temporal_generations SET state = 'active', activated_at = 10
+                  WHERE session_id = 'session-a' AND generation = 1;
+                 INSERT INTO session_summary_availability(
+                    session_id, generation, summary_id, availability,
+                    source_horizon_json, checked_at
+                 ) VALUES ('session-a', 1, 'summary-child', 'available', '{{}}', 13),
+                          ('session-a', 1, 'summary-parent', 'available', '{{}}', 14);",
                 byte_count = external_content.len(),
                 char_count = external_content.chars().count(),
             ))

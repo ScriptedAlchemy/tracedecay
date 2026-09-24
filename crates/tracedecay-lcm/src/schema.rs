@@ -20,16 +20,37 @@ use super::util;
 /// message projection into `lcm_raw_messages`: each message body is stored
 /// once, beside the session-only columns (`kind`, `model`, `tool_names`,
 /// `source_path`, `source_offset`), and one FTS index serves both LCM grep and
-/// session message search. Older stores require a profile reset.
-pub const LCM_SCHEMA_VERSION: i64 = 12;
+/// session message search. Version 13 removes the LCM summary tables: every
+/// summary read joins the canonical `session_summary_nodes` /
+/// `session_summary_sources` authority (session temporal schema) through
+/// [`SUMMARY_VISIBLE_SQL`]. Older stores require a profile reset.
+pub const LCM_SCHEMA_VERSION: i64 = 13;
+
+/// Visibility rule for every LCM summary read, over a `session_summary_nodes`
+/// row aliased `n`: a summary surfaces iff its availability in the session's
+/// active generation is `available`. Retirement writes `unavailable` (and
+/// supersession or a raw revision writes `stale`), so the immutable row stays
+/// for audit while grep, describe, expand, replay, status, and the DAG stop
+/// returning it. There is no other deletion signal.
+pub const SUMMARY_VISIBLE_SQL: &str = "EXISTS (
+    SELECT 1
+    FROM session_temporal_generations visible_generation
+    JOIN session_summary_availability visible_availability
+      ON visible_availability.session_id = visible_generation.session_id
+     AND visible_availability.generation = visible_generation.generation
+    WHERE visible_generation.session_id = n.session_id
+      AND visible_generation.state = 'active'
+      AND visible_availability.summary_id = n.summary_id
+      AND visible_availability.availability = 'available'
+)";
 
 const MIGRATION_NAME: &str = "lcm";
 
 /// Indexes that keep expensive LCM reads off the message-body table pages.
 ///
 /// `lcm_status` aggregates whole-store counts on every probe. Without these
-/// indexes four of its components scan the full `lcm_raw_messages` /
-/// `lcm_summary_nodes` / `lcm_external_payloads` records, multi-gigabyte
+/// indexes its components scan the full `lcm_raw_messages` /
+/// `lcm_external_payloads` records, multi-gigabyte
 /// body reads on a long-lived profile store for a one-row answer (issue #767
 /// measured 10.65 s daemon-side). Each entry is one independently committed
 /// idempotent batch. Fresh stores install the final index shape with the
@@ -57,10 +78,6 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_direct_user_candidate
          ON lcm_raw_messages(provider, store_id)
          WHERE role = 'user';",
-    "CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_depth_tokens
-         ON lcm_summary_nodes(
-             provider, session_id, depth, summary_token_count, source_token_count
-         );",
     // The byte-count variant covers the status COUNT+SUM without touching
     // payload metadata rows and fully supersedes the plain owner index
     // (same leading columns), so the replacement and the drop commit as one
@@ -218,9 +235,13 @@ pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
 }
 
 /// Test-only convenience wrapper: production schema creation runs through
-/// [`ensure_lcm_schema_in_transaction`] inside the callers' own transactions.
+/// [`ensure_lcm_schema_in_transaction`] inside the callers' own transactions,
+/// after the session temporal schema this crate's summary reads join against;
+/// unit fixtures install that fixture shape here.
 #[cfg(test)]
 pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
+    conn.execute_batch(crate::test_support::SESSION_GENERATION_SCHEMA)
+        .await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -367,72 +388,6 @@ pub async fn ensure_lcm_schema_in_transaction(
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS lcm_summary_nodes (
-            node_id TEXT PRIMARY KEY,
-            provider TEXT NOT NULL,
-            conversation_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            depth INTEGER NOT NULL,
-            summary_text TEXT NOT NULL,
-            summary_hash TEXT NOT NULL,
-            summary_token_count INTEGER NOT NULL,
-            source_token_count INTEGER NOT NULL,
-            source_time_start INTEGER,
-            source_time_end INTEGER,
-            expand_hint TEXT,
-            metadata_json TEXT,
-            created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-            FOREIGN KEY(provider, session_id)
-                REFERENCES sessions(provider, session_id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS lcm_summary_sources (
-            node_id TEXT NOT NULL,
-            source_kind TEXT NOT NULL CHECK(source_kind IN ('raw_message', 'summary_node')),
-            source_id TEXT NOT NULL,
-            ordinal INTEGER NOT NULL,
-            PRIMARY KEY(node_id, ordinal),
-            FOREIGN KEY(node_id) REFERENCES lcm_summary_nodes(node_id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_lcm_summary_nodes_session_depth_time
-            ON lcm_summary_nodes(
-                provider, session_id, depth, source_time_start, source_time_end, created_at
-            );
-        CREATE INDEX idx_lcm_summary_nodes_codex_pending_session_order
-            ON lcm_summary_nodes(
-                session_id,
-                (CASE
-                    WHEN json_valid(metadata_json) THEN
-                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                        AND COALESCE(
-                              json_extract(metadata_json, '$.tracedecay_summary_source'),
-                              ''
-                            ) <> 'codex_app_server'
-                    ELSE 0
-                 END),
-                depth DESC,
-                created_at DESC,
-                node_id
-            )
-            WHERE provider = 'codex';
-        CREATE INDEX idx_lcm_summary_nodes_codex_pending_root_order
-            ON lcm_summary_nodes(
-                (CASE
-                    WHEN json_valid(metadata_json) THEN
-                        json_extract(metadata_json, '$.source') = 'codex_context_compacted'
-                        AND COALESCE(
-                              json_extract(metadata_json, '$.tracedecay_summary_source'),
-                              ''
-                            ) <> 'codex_app_server'
-                    ELSE 0
-                 END),
-                created_at DESC,
-                depth DESC,
-                node_id,
-                session_id
-            )
-            WHERE provider = 'codex';
-        CREATE INDEX IF NOT EXISTS idx_lcm_summary_sources_source
-            ON lcm_summary_sources(source_kind, source_id);
         CREATE TABLE IF NOT EXISTS lcm_lifecycle_state (
             provider TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
@@ -461,33 +416,7 @@ pub async fn ensure_lcm_schema_in_transaction(
                 REFERENCES lcm_lifecycle_state(provider, conversation_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_lcm_maintenance_debt_kind
-            ON lcm_maintenance_debt(provider, debt_kind, created_at);
-        CREATE VIRTUAL TABLE IF NOT EXISTS lcm_summary_nodes_fts USING fts5(
-            summary_text, expand_hint, metadata_json,
-            content='lcm_summary_nodes',
-            content_rowid='rowid'
-        );
-        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_insert
-            AFTER INSERT ON lcm_summary_nodes BEGIN
-                INSERT INTO lcm_summary_nodes_fts(rowid, summary_text, expand_hint, metadata_json)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.expand_hint, NEW.metadata_json);
-            END;
-        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_delete
-            AFTER DELETE ON lcm_summary_nodes BEGIN
-                INSERT INTO lcm_summary_nodes_fts(
-                    lcm_summary_nodes_fts, rowid, summary_text, expand_hint, metadata_json
-                )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.expand_hint, OLD.metadata_json);
-            END;
-        CREATE TRIGGER IF NOT EXISTS lcm_summary_nodes_fts_update
-            AFTER UPDATE ON lcm_summary_nodes BEGIN
-                INSERT INTO lcm_summary_nodes_fts(
-                    lcm_summary_nodes_fts, rowid, summary_text, expand_hint, metadata_json
-                )
-                VALUES ('delete', OLD.rowid, OLD.summary_text, OLD.expand_hint, OLD.metadata_json);
-                INSERT INTO lcm_summary_nodes_fts(rowid, summary_text, expand_hint, metadata_json)
-                VALUES (NEW.rowid, NEW.summary_text, NEW.expand_hint, NEW.metadata_json);
-            END;",
+            ON lcm_maintenance_debt(provider, debt_kind, created_at);",
     )
     .await?;
     ensure_raw_identity_schema(conn).await?;
@@ -975,7 +904,7 @@ mod tests {
 
         for index in [
             "idx_lcm_raw_lossy_ingest",
-            "idx_lcm_summary_nodes_depth_tokens",
+            "idx_lcm_raw_direct_user_candidate",
             "idx_lcm_external_payloads_owner_bytes",
         ] {
             assert!(
@@ -1088,9 +1017,6 @@ mod tests {
         )
         .await
         .map_err(|error| error.to_string())?;
-        conn.execute_batch(crate::test_support::SESSION_GENERATION_SCHEMA)
-            .await
-            .map_err(|error| error.to_string())?;
         ensure_lcm_schema(&conn)
             .await
             .map_err(|error| error.to_string())?;

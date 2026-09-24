@@ -629,7 +629,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
     ));
 
     // Transcript persistence never projects summary nodes: a `kind = "summary"`
-    // transcript message is durable raw evidence, and `lcm_summary_nodes` rows
+    // transcript message is durable raw evidence, and `session_summary_nodes` rows
     // are only ever written by the immutable-summary publication path
     // (`lcm_publish_immutable_summary_guarded`, which LCM compression reaches
     // through `dag::insert_summary_node`). See
@@ -652,7 +652,7 @@ async fn concurrent_full_batches_converge_without_split_brain_or_partial_writes(
 /// summarization pipeline recognizes. `native_summary_evidence` scans
 /// `session_messages` for a non-empty body plus `kind = "summary"` and the
 /// provider's metadata discriminators, and only a recognized row reaches
-/// compression, the sole production writer of `lcm_summary_nodes`. Dropping
+/// compression, the sole production writer of `session_summary_nodes`. Dropping
 /// or rewriting either column at persist time would strand every host
 /// compaction with no failing count to show for it.
 #[tokio::test]

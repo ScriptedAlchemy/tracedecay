@@ -53,6 +53,7 @@ async fn test_store() -> Result<TestStore, String> {
     )
     .await
     .map_err(|err| format!("insert session: {err}"))?;
+    crate::test_support::seed_active_generation(&runtime, SESSION).await;
     Ok(TestStore {
         conn,
         _runtime: runtime,
@@ -116,8 +117,8 @@ async fn make_projection_durable(
     let node_id = format!("node-{store_id}");
     let summary_hash = crate::retrieval_content::projected_content_hash(SUMMARY_TEXT);
     conn.execute(
-        "INSERT INTO lcm_summary_nodes(
-            node_id, provider, conversation_id, session_id, depth, summary_text,
+        "INSERT INTO session_summary_nodes(
+            summary_id, provider, conversation_id, session_id, depth, summary_text,
             summary_hash, summary_token_count, source_token_count
          )
          VALUES (?1, ?2, 'conv', ?3, 0, ?4, ?5, 1, 1)",
@@ -132,12 +133,19 @@ async fn make_projection_durable(
     .await
     .map_err(|err| format!("insert summary node: {err}"))?;
     conn.execute(
-        "INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal)
+        "INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal)
          VALUES (?1, 'raw_message', ?2, 0)",
         params![node_id.as_str(), store_id.to_string()],
     )
     .await
     .map_err(|err| format!("insert summary source: {err}"))?;
+    conn.execute(
+        "INSERT INTO session_summary_availability(session_id, generation, summary_id, availability)
+         VALUES (?1, ?2, ?3, 'available')",
+        params![SESSION, crate::test_support::FIXTURE_GENERATION, node_id.as_str()],
+    )
+    .await
+    .map_err(|err| format!("insert summary availability: {err}"))?;
     Ok(node_id)
 }
 
@@ -268,7 +276,7 @@ async fn expansion_survives_sources_dropped_by_retention() -> Result<(), String>
     );
     assert_eq!(count(conn, "lcm_raw_messages").await?, 0);
     assert_eq!(
-        count(conn, "lcm_summary_sources").await?,
+        count(conn, "session_summary_sources").await?,
         1,
         "lineage still points at the dropped store_id"
     );

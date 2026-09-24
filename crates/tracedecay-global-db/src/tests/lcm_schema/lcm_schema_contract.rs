@@ -104,13 +104,6 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
                      'lossy body', 'lossy-hash', 'inline',
                      '{"ingest_protection":{"lossy":true}}'
                  );
-             INSERT INTO lcm_summary_nodes (
-                 node_id, provider, conversation_id, session_id, depth,
-                 summary_text, summary_hash, summary_token_count, source_token_count
-             ) VALUES (
-                 'summary-node', 'cursor', 'conversation', 'status-index-session', 2,
-                 'summary body', 'summary-hash', 3, 5
-             );
              INSERT INTO lcm_external_payloads (
                  payload_ref, provider, session_id, message_id, kind,
                  content_hash, byte_count, char_count
@@ -119,7 +112,6 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
                  'payload-hash', 11, 7
              );
              DROP INDEX idx_lcm_raw_lossy_ingest;
-             DROP INDEX idx_lcm_summary_nodes_depth_tokens;
              DROP INDEX idx_lcm_external_payloads_owner_bytes;
              CREATE INDEX idx_lcm_external_payloads_owner
                  ON lcm_external_payloads(provider, session_id);"#,
@@ -138,13 +130,6 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
             "short-lived convergence did not build {index}; raw message indexes: {raw_indexes:?}"
         );
     }
-    let summary_indexes = table_index_names(&reopened, "lcm_summary_nodes").await;
-    assert!(
-        summary_indexes
-            .iter()
-            .any(|name| name == "idx_lcm_summary_nodes_depth_tokens"),
-        "short-lived convergence did not build the summary depth/token index: {summary_indexes:?}"
-    );
     let payload_indexes = table_index_names(&reopened, "lcm_external_payloads").await;
     assert!(
         payload_indexes
@@ -167,12 +152,6 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
                AND metadata_json IS NOT NULL
                AND json_valid(metadata_json)
                AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true'",
-        ),
-        (
-            "idx_lcm_summary_nodes_depth_tokens",
-            "SELECT COUNT(*)
-             FROM lcm_summary_nodes INDEXED BY idx_lcm_summary_nodes_depth_tokens
-             WHERE provider = ?1 AND session_id = ?2",
         ),
         (
             "idx_lcm_external_payloads_owner_bytes",

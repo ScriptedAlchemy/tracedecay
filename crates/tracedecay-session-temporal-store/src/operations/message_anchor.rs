@@ -1043,11 +1043,14 @@ mod tests {
         // is testing something the store cannot produce.
         conn.execute(
             "INSERT INTO session_summary_nodes (
-                summary_id, session_id, summary_anchor_id, summary_text,
-                index_text, source_horizon_json, publication_json, created_at
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
+                source_horizon_json, publication_json, created_at
              )
-             SELECT 'summary.message-anchor.malformed', session_id, summary_anchor_id,
-                    summary_text, index_text, '{}', publication_json, created_at
+             SELECT 'summary.message-anchor.malformed', session_id, provider,
+                    conversation_id, depth, summary_anchor_id, summary_text, summary_hash,
+                    summary_token_count, source_token_count, '{}', publication_json,
+                    created_at
                FROM session_summary_nodes
               WHERE summary_id = 'summary.message-anchor'",
             (),

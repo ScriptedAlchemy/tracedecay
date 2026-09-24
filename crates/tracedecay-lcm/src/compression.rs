@@ -1875,26 +1875,28 @@ async fn load_condensation_candidates(
     let mut rows = conn
         .query(
             "WITH source_order AS (
-               SELECT lcm_summary_sources.node_id, MIN(CAST(source_id AS INTEGER)) AS first_source_id
-               FROM lcm_summary_sources
+               SELECT session_summary_sources.summary_id,
+                      MIN(CAST(source_id AS INTEGER)) AS first_source_id
+               FROM session_summary_sources
                WHERE source_kind = 'raw_message'
-               GROUP BY lcm_summary_sources.node_id
+               GROUP BY session_summary_sources.summary_id
              ),
              unparented AS (
-               SELECT n.node_id, n.provider, n.conversation_id, n.session_id, n.depth, n.summary_text,
-                      n.summary_hash, n.summary_token_count, n.source_token_count, n.source_time_start,
-                      n.source_time_end, n.expand_hint, n.metadata_json, n.created_at,
+               SELECT n.summary_id, n.provider, n.conversation_id, n.session_id, n.depth,
+                      n.summary_text, n.summary_hash, n.summary_token_count,
+                      n.source_token_count, n.source_time_start, n.source_time_end,
+                      n.expand_hint, n.metadata_json, n.created_at,
                       source_order.first_source_id
-               FROM lcm_summary_nodes n
+               FROM session_summary_nodes n
                JOIN session_temporal_generations generation
                  ON generation.session_id = n.session_id
                 AND generation.state = 'active'
                JOIN session_summary_availability availability
                  ON availability.session_id = generation.session_id
                 AND availability.generation = generation.generation
-                AND availability.summary_id = n.node_id
+                AND availability.summary_id = n.summary_id
                 AND availability.availability = 'available'
-               LEFT JOIN source_order ON source_order.node_id = n.node_id
+               LEFT JOIN source_order ON source_order.summary_id = n.summary_id
                WHERE n.provider = ?1 AND n.session_id = ?2
                  -- Fail closed only while a raw revision's invalidation
                  -- closure is partially applied: the walk enqueues
@@ -1912,14 +1914,14 @@ async fn load_condensation_candidates(
                  )
                  AND NOT EXISTS (
                    SELECT 1
-                   FROM lcm_summary_sources s
+                   FROM session_summary_sources s
                    JOIN session_summary_availability parent_availability
                      ON parent_availability.session_id = generation.session_id
                     AND parent_availability.generation = generation.generation
-                    AND parent_availability.summary_id = s.node_id
+                    AND parent_availability.summary_id = s.summary_id
                     AND parent_availability.availability = 'available'
                    WHERE s.source_kind = 'summary_node'
-                     AND s.source_id = n.node_id
+                     AND s.source_id = n.summary_id
                  )
              ),
              eligible_depth AS (
@@ -1931,14 +1933,14 @@ async fn load_condensation_candidates(
                ORDER BY depth
                LIMIT 1
              )
-             SELECT node_id, provider, conversation_id, session_id, depth, summary_text,
+             SELECT summary_id, provider, conversation_id, session_id, depth, summary_text,
                     summary_hash, summary_token_count, source_token_count, source_time_start,
                     source_time_end, expand_hint, metadata_json, created_at
              FROM unparented
              WHERE depth = (SELECT depth FROM eligible_depth)
              ORDER BY source_time_start IS NULL, source_time_start,
                       first_source_id IS NULL, first_source_id,
-                      created_at, node_id
+                      created_at, summary_id
              LIMIT ?3",
             params![
                 provider,
@@ -2768,21 +2770,10 @@ mod authority_tests {
         .unwrap();
         schema::ensure_lcm_schema(&conn).await.unwrap();
         conn.execute_batch(
-            "CREATE TABLE session_temporal_generations (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                state TEXT NOT NULL
-             );
-             CREATE TABLE session_summary_availability (
-                session_id TEXT NOT NULL,
-                generation INTEGER NOT NULL,
-                summary_id TEXT NOT NULL,
-                availability TEXT NOT NULL
-             );
-             INSERT INTO session_temporal_generations(session_id, generation, state)
+            "INSERT INTO session_temporal_generations(session_id, generation, state)
              VALUES ('active-condensation', 2, 'active');
-             INSERT INTO lcm_summary_nodes(
-                node_id, provider, conversation_id, session_id, depth,
+             INSERT INTO session_summary_nodes(
+                summary_id, provider, conversation_id, session_id, depth,
                 summary_text, summary_hash, summary_token_count, source_token_count,
                 created_at
              ) VALUES
@@ -2790,7 +2781,7 @@ mod authority_tests {
                  'current summary', 'current-hash', 2, 4, 1),
                 ('stale-parent', 'cursor', 'active-condensation', 'active-condensation', 1,
                  'stale summary', 'stale-hash', 2, 4, 2);
-             INSERT INTO lcm_summary_sources(node_id, source_kind, source_id, ordinal) VALUES
+             INSERT INTO session_summary_sources(summary_id, source_kind, source_id, ordinal) VALUES
                 ('current', 'raw_message', '1', 0),
                 ('stale-parent', 'summary_node', 'current', 0);
              INSERT INTO session_summary_availability(

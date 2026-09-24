@@ -196,11 +196,12 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
     let lifecycle_where = lifecycle.where_clause();
     let lifecycle_and = lifecycle.and_clause();
     let debt_where = debt.where_clause();
+    let visible = schema::SUMMARY_VISIBLE_SQL;
     let sql = format!(
         "SELECT
              CASE WHEN
                  EXISTS (SELECT 1 FROM lcm_raw_messages {content_where})
-                 OR EXISTS (SELECT 1 FROM lcm_summary_nodes {content_where})
+                 OR EXISTS (SELECT 1 FROM session_summary_nodes n WHERE {visible}{content_and})
                  OR EXISTS (SELECT 1 FROM lcm_external_payloads {content_where})
                  OR EXISTS (SELECT 1 FROM lcm_lifecycle_state {lifecycle_where})
              THEN 1 ELSE 0 END,
@@ -208,8 +209,8 @@ fn status_counts_query(provider: &str, session_id: Option<&str>) -> (String, Vec
                 FROM lcm_raw_messages
                 {content_where}),
              (SELECT COUNT(*)
-                FROM lcm_summary_nodes
-                {content_where}),
+                FROM session_summary_nodes n
+               WHERE {visible}{content_and}),
              (SELECT COUNT(*)
                 FROM lcm_maintenance_debt d
                 JOIN lcm_lifecycle_state s
@@ -749,17 +750,19 @@ async fn store_message_count(
     Ok(row.get(0)?)
 }
 
-/// DAG depth rollup, covered by `idx_lcm_summary_nodes_depth_tokens` so the
-/// aggregate never reads `summary_text` records.
+/// DAG depth rollup over visible summaries, scoped through
+/// `idx_session_summary_nodes_depth_tokens` so the aggregate never reads
+/// `summary_text` records.
 fn dag_status_query(provider: &str, session_id: Option<&str>) -> (String, Vec<Value>) {
-    let scope = LcmScopeSql::new("provider", "session_id", provider, session_id);
+    let scope = LcmScopeSql::new("n.provider", "n.session_id", provider, session_id);
     let sql = format!(
-        "SELECT depth, COUNT(*), SUM(summary_token_count), SUM(source_token_count)
-         FROM lcm_summary_nodes
-         {scope}
-         GROUP BY depth
-         ORDER BY depth",
-        scope = scope.where_clause()
+        "SELECT n.depth, COUNT(*), SUM(n.summary_token_count), SUM(n.source_token_count)
+         FROM session_summary_nodes n
+         WHERE {visible}{scope}
+         GROUP BY n.depth
+         ORDER BY n.depth",
+        visible = schema::SUMMARY_VISIBLE_SQL,
+        scope = scope.and_clause(),
     );
     (sql, scope.into_values())
 }
@@ -946,13 +949,13 @@ mod tests {
         .await
         .expect("insert raw message");
         conn.execute(
-            "INSERT INTO lcm_summary_nodes (
-                 node_id, provider, conversation_id, session_id, depth,
+            "INSERT INTO session_summary_nodes (
+                 summary_id, provider, conversation_id, session_id, depth,
                  summary_text, summary_hash, summary_token_count, source_token_count
              )
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                node_id,
+                node_id.clone(),
                 provider.clone(),
                 conversation_id.clone(),
                 session_id.clone(),
@@ -965,6 +968,8 @@ mod tests {
         )
         .await
         .expect("insert summary node");
+        crate::test_support::seed_active_generation(conn, &session_id).await;
+        crate::test_support::mark_summary_available(conn, &session_id, &node_id).await;
         conn.execute(
             "INSERT INTO lcm_lifecycle_state (
                  provider, conversation_id, current_session_id,
@@ -1418,7 +1423,7 @@ mod tests {
         for line in plan {
             for table in [
                 "lcm_raw_messages",
-                "lcm_summary_nodes",
+                "session_summary_nodes",
                 "lcm_external_payloads",
             ] {
                 if line.contains(table) && line.contains("SCAN") && !line.contains("INDEX") {
@@ -1542,8 +1547,8 @@ mod tests {
                 "WITH RECURSIVE fixture(value) AS (
                      SELECT 1 UNION ALL SELECT value + 1 FROM fixture WHERE value < {summaries}
                  )
-                 INSERT INTO lcm_summary_nodes (
-                     node_id, provider, conversation_id, session_id, depth,
+                 INSERT INTO session_summary_nodes (
+                     summary_id, provider, conversation_id, session_id, depth,
                      summary_text, summary_hash, summary_token_count, source_token_count
                  )
                  SELECT printf('node-%09d', value),
@@ -1561,6 +1566,16 @@ mod tests {
         )
         .await
         .expect("seed summary nodes");
+        conn.execute_batch(
+            "INSERT INTO session_temporal_generations(session_id, generation, state)
+             SELECT DISTINCT session_id, 1, 'active' FROM session_summary_nodes;
+             INSERT INTO session_summary_availability(
+                 session_id, generation, summary_id, availability
+             )
+             SELECT session_id, 1, summary_id, 'available' FROM session_summary_nodes;",
+        )
+        .await
+        .expect("seed summary availability");
         conn.execute(
             &format!(
                 "WITH RECURSIVE fixture(value) AS (
@@ -1690,7 +1705,7 @@ mod tests {
                  (SELECT COUNT(*) FROM lcm_raw_messages
                    WHERE (?1 = 'all' OR provider = ?1)
                      AND (?2 IS NULL OR session_id = ?2)),
-                 (SELECT COUNT(*) FROM lcm_summary_nodes
+                 (SELECT COUNT(*) FROM session_summary_nodes
                    WHERE (?1 = 'all' OR provider = ?1)
                      AND (?2 IS NULL OR session_id = ?2)),
                  (SELECT COUNT(*) FROM lcm_raw_messages
@@ -1746,7 +1761,6 @@ mod tests {
 
         conn.execute_batch(
             "DROP INDEX IF EXISTS idx_lcm_raw_lossy_ingest;
-             DROP INDEX IF EXISTS idx_lcm_summary_nodes_depth_tokens;
              DROP INDEX IF EXISTS idx_lcm_external_payloads_owner_bytes;
              CREATE INDEX idx_lcm_external_payloads_owner
                  ON lcm_external_payloads(provider, session_id);",

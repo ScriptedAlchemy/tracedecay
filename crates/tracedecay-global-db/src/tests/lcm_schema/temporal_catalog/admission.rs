@@ -614,7 +614,7 @@ async fn temporal_schema_rejects_transition_storage_without_mutating_it() {
 }
 
 #[tokio::test]
-async fn temporal_schema_rejects_retired_summary_sources_without_mutation() {
+async fn temporal_schema_rejects_foreign_summary_namespace_tables_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     let db = open_global_db(&db_path)
@@ -625,8 +625,8 @@ async fn temporal_schema_rejects_retired_summary_sources_without_mutation() {
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
     conn.execute_batch(
-        "CREATE TABLE session_summary_sources (retired_row INTEGER NOT NULL);
-         INSERT INTO session_summary_sources(retired_row) VALUES (91);",
+        "CREATE TABLE session_summary_source_bindings (retired_row INTEGER NOT NULL);
+         INSERT INTO session_summary_source_bindings(retired_row) VALUES (91);",
     )
     .await
     .unwrap();
@@ -636,25 +636,25 @@ async fn temporal_schema_rejects_retired_summary_sources_without_mutation() {
     let before_version = temporal_schema_version(&db_path).await;
 
     let error = match open_global_db(&db_path).await {
-        Ok(_) => panic!("retired summary-source storage must require reset"),
+        Ok(_) => panic!("foreign summary-namespace storage must require reset"),
         Err(error) => error,
     };
     let (authority, reason) = error
         .reset_required_context()
-        .expect("retired summary-source storage must return typed reset-required");
+        .expect("foreign summary-namespace storage must return typed reset-required");
     assert_eq!(authority, "session temporal");
     assert!(
-        reason.contains("session_summary_sources"),
+        reason.contains("session_summary_source_bindings"),
         "unexpected reason: {reason}"
     );
     assert!(
-        table_exists(&db_path, "session_summary_sources").await,
-        "typed refusal must not delete retired summary-source storage"
+        table_exists(&db_path, "session_summary_source_bindings").await,
+        "typed refusal must not delete foreign summary-namespace storage"
     );
     assert_eq!(
-        row_count(&db_path, "session_summary_sources").await,
+        row_count(&db_path, "session_summary_source_bindings").await,
         1,
-        "typed refusal must not rewrite retired summary-source rows"
+        "typed refusal must not rewrite foreign summary-namespace rows"
     );
     assert_eq!(temporal_schema_version(&db_path).await, before_version);
     assert_eq!(

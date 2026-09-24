@@ -156,7 +156,7 @@ fn retention_eligibility(table: RetentionTable) -> &'static str {
         RetentionTable::AnalyticsEvents => "1 = 1",
         RetentionTable::LcmRawMessages => {
             "EXISTS (
-                SELECT 1 FROM lcm_summary_sources AS source
+                SELECT 1 FROM session_summary_sources AS source
                 WHERE source.source_kind = 'raw_message'
                   AND source.source_id = CAST(lcm_raw_messages.store_id AS TEXT)
             )"
@@ -501,14 +501,14 @@ mod tests {
                 message_id TEXT NOT NULL,
                 timestamp INTEGER
              );
-             CREATE TABLE lcm_summary_sources (
+             CREATE TABLE session_summary_sources (
                 source_kind TEXT NOT NULL,
                 source_id TEXT NOT NULL
              );
              INSERT INTO lcm_raw_messages VALUES
                 (1, 'claude', 'durable', 1),
                 (2, 'claude', 'live', 1);
-             INSERT INTO lcm_summary_sources VALUES ('raw_message', '1');",
+             INSERT INTO session_summary_sources VALUES ('raw_message', '1');",
         )
         .await
         .unwrap();

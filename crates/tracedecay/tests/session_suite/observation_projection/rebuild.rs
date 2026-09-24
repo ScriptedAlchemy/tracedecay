@@ -75,20 +75,24 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let anchor_store_id = raw_store_ids_before[0].1;
     let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
     raw_conn
-        .execute(
-            "INSERT INTO lcm_summary_nodes (
-                node_id, provider, conversation_id, session_id, depth, summary_text,
-                summary_hash, summary_token_count, source_token_count
+        .execute_batch(
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES ('summary.rebuild-store-id.anchor', '{}', '{}', 'test');
+             INSERT INTO session_summary_nodes (
+                summary_id, session_id, provider, conversation_id, depth, summary_anchor_id,
+                summary_text, summary_hash, summary_token_count, source_token_count,
+                source_horizon_json, created_at
              ) VALUES (
-                'summary.rebuild-store-id', 'claude', 'session-rebuild',
-                'session-rebuild', 0, 'stable raw identity summary', 'hash.fixture', 4, 8
+                'summary.rebuild-store-id', 'session-rebuild', 'claude', 'session-rebuild', 0,
+                'summary.rebuild-store-id.anchor', 'stable raw identity summary',
+                'hash.fixture', 4, 8, '{}', 1
              )",
-            (),
         )
         .unwrap();
     raw_conn
         .execute(
-            "INSERT INTO lcm_summary_sources (node_id, source_kind, source_id, ordinal)
+            "INSERT INTO session_summary_sources (summary_id, source_kind, source_id, ordinal)
              VALUES ('summary.rebuild-store-id', 'raw_message', ?1, 0)",
             rusqlite::params![anchor_store_id.to_string()],
         )
@@ -118,11 +122,11 @@ async fn reordered_delivery_then_frozen_frontier_rebuild_converges() {
     let identity = raw_conn
         .query_row(
             "SELECT source.source_id, lifecycle.current_frontier_store_id
-             FROM lcm_summary_sources AS source
+             FROM session_summary_sources AS source
              JOIN lcm_lifecycle_state AS lifecycle
                ON lifecycle.provider = 'claude'
               AND lifecycle.conversation_id = 'session-rebuild'
-             WHERE source.node_id = 'summary.rebuild-store-id'",
+             WHERE source.summary_id = 'summary.rebuild-store-id'",
             (),
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )
