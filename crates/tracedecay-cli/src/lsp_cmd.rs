@@ -556,7 +556,7 @@ mod tests {
         let binding = initialize_binding(&frame).expect("initialize binding");
         assert_eq!(
             binding.project_root,
-            root.path().canonicalize().expect("canonical workspace")
+            tracedecay_runtime_core::path_safety::canonical_root_identity(root.path())
         );
         let forwarded: Value =
             serde_json::from_str(&binding.frame).expect("forwarded initialize frame");
@@ -630,11 +630,8 @@ mod tests {
         assert!(binding.workspace_folders.is_sorted());
         assert_eq!(
             binding.project_root,
-            first
-                .path()
-                .canonicalize()
-                .unwrap()
-                .min(second.path().canonicalize().unwrap())
+            tracedecay_runtime_core::path_safety::canonical_root_identity(first.path())
+                .min(tracedecay_runtime_core::path_safety::canonical_root_identity(second.path()))
         );
         let forwarded: Value = serde_json::from_str(&binding.frame).unwrap();
         assert_eq!(
