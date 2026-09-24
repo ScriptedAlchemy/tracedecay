@@ -140,28 +140,36 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
                 ),
             });
         }
-        lock.lock().map_err(|error| TraceDecayError::Config {
-            message: format!("failed to lock host config {}: {error}", path.display()),
-        })?;
         let locked = Handle::from_file(lock).map_err(|error| TraceDecayError::Config {
             message: format!(
                 "failed to identify host config lock {}: {error}",
                 parent.join(&lock_name).display()
             ),
         })?;
+        locked
+            .as_file()
+            .lock()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("failed to lock host config {}: {error}", path.display()),
+            })?;
         // A prior holder may have unlinked the inode we waited on; the lock is
         // valid only while the directory entry still names the locked file.
         let current = match directory.open_with(&lock_name, &probe) {
-            Ok(file) => {
-                Handle::from_file(file.into_std()).map_err(|error| TraceDecayError::Config {
-                    message: format!(
-                        "failed to identify host config lock {}: {error}",
-                        parent.join(&lock_name).display()
-                    ),
-                })?
+            Ok(file) => Handle::from_file(file.into_std()).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
+        match current {
+            Ok(Some(current)) if current == locked => {
+                return Ok(HostFileWriteLock {
+                    directory,
+                    lock_name,
+                    handle: locked,
+                });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Ok(_) => release_abandoned_lock(&locked, &lock_name),
             Err(error) => {
+                release_abandoned_lock(&locked, &lock_name);
                 return Err(TraceDecayError::Config {
                     message: format!(
                         "failed to inspect host config lock {}: {error}",
@@ -169,13 +177,6 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
                     ),
                 });
             }
-        };
-        if current == locked {
-            return Ok(HostFileWriteLock {
-                directory,
-                lock_name,
-                handle: locked,
-            });
         }
     }
     Err(TraceDecayError::Config {
@@ -184,6 +185,18 @@ pub(super) fn lock_host_file_write(path: &Path) -> Result<HostFileWriteLock> {
             parent.join(&lock_name).display()
         ),
     })
+}
+
+/// Closing does not release an `flock` while a forked child still shares the
+/// descriptor, so a lock that is not kept must be unlocked explicitly.
+fn release_abandoned_lock(locked: &Handle, lock_name: &str) {
+    if let Err(error) = locked.as_file().unlock() {
+        tracing::warn!(
+            lock_name = %lock_name,
+            error = %error,
+            "abandoned host config lock could not be released"
+        );
+    }
 }
 
 #[cfg(unix)]
