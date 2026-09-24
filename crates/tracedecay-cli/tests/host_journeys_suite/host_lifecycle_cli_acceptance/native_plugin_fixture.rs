@@ -90,7 +90,7 @@ import sys
 
 home = pathlib.Path(os.environ["HOME"])
 args = sys.argv[1:]
-if len(args) == 3 and args[:2] == ["plugin", "add"] and args[2].startswith("tracedecay@"):
+if args[:2] == ["plugin", "add"] and len(args) >= 3 and args[2].startswith("tracedecay@") and args[3:] in ([], ["--json"]):
     marketplace = args[2].split("@", 1)[1]
     source = home / ".codex/plugins/tracedecay"
     manifest = json.loads((source / ".codex-plugin/plugin.json").read_text())
