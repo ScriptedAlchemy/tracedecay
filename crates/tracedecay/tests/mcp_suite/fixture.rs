@@ -36,10 +36,14 @@ use crate::common::GLOBAL_DB_ENV;
 /// Shared on-disk template identity. Keyed on the admitted final-shape
 /// fingerprint, not `SCHEMA_VERSION` or a hand-maintained revision: a required
 /// table can land in the final shape without a version bump, and a warm
-/// target must not reuse the previous template.
+/// target must not reuse the previous template. The LCM tables in the same
+/// store are admitted by `LCM_SCHEMA_VERSION` alone, so it is part of the key.
 fn template_dir_name() -> Option<String> {
     match tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint() {
-        Ok(fingerprint) => Some(format!("mcp-suite-store-template-{fingerprint}")),
+        Ok(fingerprint) => Some(format!(
+            "mcp-suite-store-template-{fingerprint}-lcm{}",
+            tracedecay_lcm::schema::LCM_SCHEMA_VERSION
+        )),
         Err(error) => {
             eprintln!("[mcp_suite::fixture] schema fingerprint unavailable: {error}");
             None
