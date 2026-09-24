@@ -673,15 +673,7 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
         let pagination = capability
             .pagination()
             .expect("direct callable code query is resumable");
-        let expected_default_page_size = match kind {
-            CallableCodeOperationKind::Callees => 100,
-            _ => 10,
-        };
-        assert_eq!(
-            pagination.default_page_size(),
-            expected_default_page_size,
-            "{kind:?}"
-        );
+        assert_eq!(pagination.default_page_size(), 10, "{kind:?}");
         assert_eq!(pagination.maximum_page_size(), 1_000);
         assert_eq!(pagination.cursor_ttl_millis(), 15 * 60 * 1_000);
         let Some((_, surface_operation)) = reachable

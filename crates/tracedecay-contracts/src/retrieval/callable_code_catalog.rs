@@ -300,14 +300,12 @@ fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
     }
 }
 
-/// MCP and CLI callers cannot choose a page size, so callee traversal defaults
-/// to a page that holds a typical answer; `meta.cursor` continues.
-pub(crate) const fn callable_code_default_page_size(kind: CallableCodeOperationKind) -> u32 {
-    match kind {
-        CallableCodeOperationKind::Callees => 100,
-        _ => 10,
-    }
-}
+/// The page every callable-code query serves when the caller omits one.
+///
+/// Callee traversal runs through the graph retrieval lane, whose candidate
+/// budget is 32 per lane, so a wider default page would never fill and the
+/// continuation would never mint; `meta.cursor` continues past this page.
+pub(crate) const CALLABLE_CODE_DEFAULT_PAGE_SIZE: u32 = 10;
 
 fn code_query_capability_id(
     kind: CallableCodeOperationKind,
@@ -358,7 +356,7 @@ fn code_query_capability(
             ])?,
             deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
             pagination: Some(PaginationContract::new(
-                callable_code_default_page_size(kind),
+                CALLABLE_CODE_DEFAULT_PAGE_SIZE,
                 1_000,
                 15 * 60 * 1_000,
             )?),

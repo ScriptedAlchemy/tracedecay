@@ -19,8 +19,7 @@ use crate::capability_manifest::{
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::retrieval::CallableCodeOperationKind;
-use crate::retrieval::callable_code_catalog::callable_code_default_page_size;
+use crate::retrieval::callable_code_catalog::CALLABLE_CODE_DEFAULT_PAGE_SIZE;
 use crate::retrieval::primitive_surface::{
     ContextResultV1, ContextSurfaceRequestV1, ImpactResultV1, NodeDepthSurfaceRequestV1,
     NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1, PortOrderSurfaceRequestV1,
@@ -88,18 +87,18 @@ pub fn application_catalog_contributions()
 }
 
 /// Resolves the page size an omitted transport control receives from the
-/// canonical primitive or callable-code descriptor.
+/// canonical primitive descriptor.
 ///
-/// Operations outside these families retain the inert page envelope's
-/// established value of 10.
+/// Operations outside this primitive family, the callable-code queries
+/// included, retain the inert page envelope's established value of
+/// [`CALLABLE_CODE_DEFAULT_PAGE_SIZE`].
 pub fn application_operation_default_page_size(operation: ApplicationSurfaceOperation) -> u32 {
-    if operation == ApplicationSurfaceOperation::CodeCallees {
-        return callable_code_default_page_size(CallableCodeOperationKind::Callees);
-    }
     PRIMITIVE_READ_SPECS
         .iter()
         .find(|spec| spec.operation == operation.as_str())
-        .map_or(10, |spec| spec.default_page_size)
+        .map_or(CALLABLE_CODE_DEFAULT_PAGE_SIZE, |spec| {
+            spec.default_page_size
+        })
 }
 
 struct PrimitiveReadSpec {
