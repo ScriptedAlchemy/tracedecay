@@ -16,6 +16,7 @@ import {
 } from './delegationTimeline.ts';
 import { subagentElapsedSeconds } from './subagentTree.ts';
 import { markHandlers } from './agentsView.tsx';
+import { UsageCoverageLegend, UsageLabel } from './sessionUsage.tsx';
 
 /**
  * The delegation timeline: recorded time across, the delegation hierarchy
@@ -240,6 +241,7 @@ export function DelegationTimeline({
           {timeline.unplaced} unplaced · start absent
         </span>
         <span data-timeline-open={timeline.open}>{timeline.open} open · end absent</span>
+        <UsageCoverageLegend coverage={model.usageCoverage} />
       </div>
       <OpenedStrip model={model} onToggleExpanded={interaction.onToggleExpanded} />
     </div>
@@ -382,7 +384,10 @@ function TimelineRowControl({
         <span className="truncate text-body leading-tight">
           {row.mark.kind === 'bundle' ? `${row.mark.sessions} × ${row.mark.label}` : row.mark.label}
         </span>
-        <span className="truncate font-mono text-3xs tabular-nums opacity-70">{rowDetail(row.mark)}</span>
+        <span className="flex min-w-0 items-center gap-1 text-3xs opacity-80">
+          <UsageLabel mark={row.mark} />
+          <span className="truncate font-mono tabular-nums opacity-90">· {rowDetail(row.mark)}</span>
+        </span>
       </span>
     </button>
   );

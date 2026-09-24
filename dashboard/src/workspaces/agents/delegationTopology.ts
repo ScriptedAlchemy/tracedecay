@@ -2,6 +2,7 @@ import type {
   AnalyticsSubagentNodeV1,
   AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
+import { usageCoverage, type UsageCoverage } from './sessionUsage.tsx';
 import { subagentLabel } from './subagentTree.ts';
 
 /**
@@ -134,6 +135,8 @@ export interface DelegationTopologyModel {
   readonly maxDescendants: number;
   /** Bundles of top sessions the reader opened; they hang off no parent mark. */
   readonly openedTopBundles: readonly OpenedBundle[];
+  /** Whether the provider-usage read behind every node's `usage` completed. */
+  readonly usageCoverage: UsageCoverage;
 }
 
 export function markId(node: AnalyticsSubagentNodeV1): string {
@@ -455,6 +458,7 @@ export function layoutDelegationTopology(
     bundledSessions,
     maxDescendants,
     openedTopBundles,
+    usageCoverage: usageCoverage(payload),
   };
 }
 

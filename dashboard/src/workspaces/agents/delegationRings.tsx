@@ -1,5 +1,7 @@
+import type { ReactNode } from 'react';
 import { subagentElapsedSeconds } from './subagentTree.ts';
 import type { TopologyMark } from './delegationTopology.ts';
+import { UsageLabel } from './sessionUsage.tsx';
 
 /**
  * The ring mark: the plate's hollow, descendant-scaled ring with a faint
@@ -186,12 +188,13 @@ export function ringCountLine(mark: TopologyMark): string {
 
 /** Hover inspects: the exact counts behind the ring, beside the mark. */
 export function RingHoverCard({ mark, at, radius }: { mark: TopologyMark; at: { x: number; y: number }; radius: number }) {
-  const rows: [string, string][] =
+  const rows: [string, ReactNode][] =
     mark.kind === 'bundle'
       ? [
           ['sessions', mark.sessions.toLocaleString()],
           ['beneath them', mark.descendants.toLocaleString()],
           ['basis', mark.basis],
+          ['tokens', <UsageLabel mark={mark} />],
         ]
       : [
           ['beneath', mark.node.descendants.toLocaleString()],
@@ -201,7 +204,7 @@ export function RingHoverCard({ mark, at, radius }: { mark: TopologyMark; at: { 
             const elapsed = subagentElapsedSeconds(mark.node);
             return elapsed === null ? 'absent' : `${elapsed.toLocaleString()} s`;
           })()],
-          ['tokens', 'absent'],
+          ['tokens', <UsageLabel mark={mark} />],
         ];
   return (
     <div

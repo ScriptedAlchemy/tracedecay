@@ -2212,6 +2212,18 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
         depth: 0,
         descendants: 2,
         link: 'root',
+        usage: {
+          usage_events: 64,
+          complete: true,
+          counters: {
+            input_tokens: 182_400,
+            output_tokens: 24_310,
+            cache_read_tokens: 1_204_800,
+            cache_write_tokens: 96_000,
+            reasoning_tokens: 8_120,
+            total_tokens: 1_515_630,
+          },
+        },
       },
       {
         provider: 'codex',
@@ -2226,6 +2238,19 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
         depth: 1,
         descendants: 1,
         link: 'linked',
+        // The provider stopped reporting mid-session: a floor, not a total.
+        usage: {
+          usage_events: 11,
+          complete: false,
+          counters: {
+            input_tokens: 41_200,
+            output_tokens: 6_050,
+            cache_read_tokens: 310_000,
+            cache_write_tokens: null,
+            reasoning_tokens: null,
+            total_tokens: 357_250,
+          },
+        },
       },
       {
         provider: 'codex',
@@ -2254,6 +2279,18 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
         depth: 0,
         descendants: 0,
         link: 'missing_parent',
+        usage: {
+          usage_events: 9,
+          complete: true,
+          counters: {
+            input_tokens: 12_900,
+            output_tokens: 3_400,
+            cache_read_tokens: 88_000,
+            cache_write_tokens: 4_100,
+            reasoning_tokens: null,
+            total_tokens: 108_400,
+          },
+        },
       },
       {
         provider: 'cursor',
@@ -2277,6 +2314,9 @@ function analyticsSubagentTreePayload(): Record<string, unknown> {
     missing_parent_count: 1,
     cycle_count: 0,
     truncated: false,
+    // The grandchild and the Cursor session carry no usage row; the child's
+    // aggregate is incomplete, so the read as a whole is partial.
+    usage_coverage: 'partial',
   };
 }
 
@@ -2315,6 +2355,8 @@ function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
     descendants: number;
     link: 'root' | 'linked' | 'missing_parent';
     provider?: string;
+    total?: number;
+    complete?: boolean;
   }) =>
     nodes.push({
       provider: spec.provider ?? 'codex',
@@ -2329,6 +2371,7 @@ function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
       depth: spec.depth,
       descendants: spec.descendants,
       link: spec.link,
+      ...(spec.total === undefined ? {} : { usage: denseUsage(spec.total, spec.complete ?? true) }),
     });
   const perLead = 12;
   const grandchildrenPerLead = 2;
@@ -2341,6 +2384,7 @@ function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
     end: 14_400,
     descendants: DENSE_WORKSTREAMS.length * (1 + perLead + grandchildrenPerLead),
     link: 'root',
+    total: 2_480_000,
   });
   DENSE_WORKSTREAMS.forEach((stream, lead) => {
     const leadId = `session.dense.${stream}-lead`;
@@ -2354,6 +2398,7 @@ function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
       end: leadStart + 5_400,
       descendants: perLead + grandchildrenPerLead,
       link: 'linked',
+      total: 400_000 + lead * 25_000,
     });
     for (let k = 0; k < perLead; k += 1) {
       const id = `session.dense.${stream}-${String(k + 1).padStart(2, '0')}`;
@@ -2368,6 +2413,10 @@ function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
         end: open ? null : start + 600 + (k % 4) * 300,
         descendants: k < grandchildrenPerLead ? 1 : 0,
         link: 'linked',
+        // Every third worker reports usage; `ingest-02` stopped mid-session.
+        ...(k % 3 === 0 || (lead === 0 && k === 1)
+          ? { total: 20_000 + lead * 1_000 + k * 250, complete: !(lead === 0 && k === 1) }
+          : {}),
       });
       if (k < grandchildrenPerLead) {
         session({
@@ -2408,6 +2457,25 @@ function analyticsSubagentTreeDenseFanoutPayload(): Record<string, unknown> {
     missing_parent_count: 3,
     cycle_count: 0,
     truncated: false,
+    usage_coverage: 'complete',
+  };
+}
+
+/** One synthetic usage aggregate: a fixed input/output/cache split of `total`. */
+function denseUsage(total: number, complete: boolean): Record<string, unknown> {
+  const input = Math.round(total * 0.3);
+  const output = Math.round(total * 0.1);
+  return {
+    usage_events: Math.max(1, Math.round(total / 8_000)),
+    complete,
+    counters: {
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_tokens: total - input - output,
+      cache_write_tokens: 0,
+      reasoning_tokens: null,
+      total_tokens: total,
+    },
   };
 }
 

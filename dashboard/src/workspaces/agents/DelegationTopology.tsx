@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { cn } from '../../ui/cn';
 import { subagentElapsedSeconds } from './subagentTree.ts';
 import { RingGlyph, RingHoverCard, ringCountLine, ringRadius } from './delegationRings.tsx';
+import { UsageCoverageLegend, UsageLabel } from './sessionUsage.tsx';
 import {
   TOPOLOGY_GEOMETRY,
   columnPitchFor,
@@ -461,6 +462,9 @@ function MarkControl({
           <span className="td-legend" style={{ color: 'var(--raw-graph-text)', opacity: 0.75 }}>
             {countLine} · open
           </span>
+          <span className="truncate text-3xs opacity-80">
+            <UsageLabel mark={mark} />
+          </span>
         </span>
       </button>
     );
@@ -507,7 +511,10 @@ function MarkControl({
           <span className="truncate font-mono text-2xs tabular-nums" title={mark.node.session_id}>
             {mark.label}
           </span>
-          <span className="truncate font-mono text-3xs tabular-nums opacity-75">{detail}</span>
+          <span className="flex min-w-0 items-center gap-1 text-3xs opacity-80">
+            <UsageLabel mark={mark} />
+            <span className="truncate font-mono tabular-nums opacity-90">· {detail}</span>
+          </span>
         </span>
       </button>
       {mark.foldedDescendants > 0 ? (
@@ -576,7 +583,7 @@ function RingLegend({ model, fit }: { model: DelegationTopologyModel; fit: Fitte
         <circle cx={12} cy={8} r={5} fill="none" stroke="var(--raw-graph-text)" strokeWidth={1.2} strokeDasharray="3 2" />
         <circle cx={12} cy={8} r={7} fill="none" stroke="var(--raw-graph-text)" strokeOpacity={0.5} strokeWidth={0.8} strokeDasharray="3 2" />
       </Swatch>
-      <span>tokens per session · absent on this contract</span>
+      <UsageCoverageLegend coverage={model.usageCoverage} />
       <span>hover shows exact counts · click selects</span>
     </div>
   );

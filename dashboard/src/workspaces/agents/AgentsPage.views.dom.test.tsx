@@ -61,7 +61,7 @@ describe('agents views', () => {
     const card = document.querySelector('[data-topology-hovercard="codex:session.codex.child"]')!;
     expect(card.textContent).toContain('beneath1');
     expect(card.textContent).toContain('span1,400 s');
-    expect(card.textContent).toContain('tokensabsent');
+    expect(card.textContent).toContain('tokens357,250 tokenspartial');
     expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('inspecting');
     expect(control('codex:session.codex.child').getAttribute('aria-pressed')).toBe('false');
   });
