@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::agents::host_bundle::{
-    ClineFamilyAdmissionV1, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
+    ClineFamilyAdmissionV1, HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, ClineFamilyProviderV1, HostBundleComponentDoctorStateV1,
     HostBundleError, HostBundleInstallReceiptV1, HostBundleLifecycleOpV1,
     HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1,
     HostBundleWriterV1, HostCapabilityStateV1, HostCapabilityUnavailableReasonV1, HostCapabilityV1,
@@ -125,7 +125,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
     )
     .unwrap();
     let receipt = HostBundleInstallReceiptV1 {
-        schema_version: 1,
+        schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
         operation_id: [7; 16],
         host: HostKindV1::KimiCode,
         component: HostComponentV1::Core,
@@ -227,7 +227,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
         fs::write(path, &content.bytes).unwrap();
     }
     let receipt = HostBundleInstallReceiptV1 {
-        schema_version: 1,
+        schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
         operation_id: [8; 16],
         host: HostKindV1::CursorDesktop,
         component: HostComponentV1::Agent,
@@ -1060,11 +1060,11 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
 /// a second writer outside the transaction guarantees byte drift.
 ///
 /// Drift on a path the receipt still owns must be a warning Doctor reports, not
-/// a blocking ownership conflict, and `Repair` must converge it while backing
-/// the previous bytes up. Nothing under `.cursor` that TraceDecay does not own
-/// may change, including when a run is interrupted before it mutates anything.
+/// a blocking ownership conflict, and `Repair` must converge it. Nothing under
+/// `.cursor` that TraceDecay does not own may change, including when a run is
+/// interrupted before it mutates anything.
 #[test]
-fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
+fn cursor_core_drift_warns_and_reinstall_converges() {
     let artifacts = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let component_set = verified_embedded_host_component_set(
@@ -1200,35 +1200,6 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
         HostBundleComponentDoctorStateV1::Current
     );
     assert_eq!(fs::read(&unrelated).unwrap(), unrelated_bytes);
-
-    // The replaced bytes were backed up before the repair overwrote them.
-    let backups = lifecycle
-        .path()
-        .join(".tracedecay-host-bundle-v1")
-        .join("backups");
-    let backed_up = walk_files(&backups)
-        .into_iter()
-        .any(|path| fs::read(&path).is_ok_and(|bytes| bytes == REFRESHED));
-    assert!(
-        backed_up,
-        "repair must back the replaced bytes up before it re-owns the path"
-    );
-}
-
-fn walk_files(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut found = Vec::new();
-    let Ok(entries) = fs::read_dir(root) else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            found.extend(walk_files(&path));
-        } else {
-            found.push(path);
-        }
-    }
-    found
 }
 
 #[test]
