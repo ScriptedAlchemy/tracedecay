@@ -54,12 +54,6 @@ pub use self::projection::{
     VerifiedCodeLexicalArtifactV1, code_lexical_artifact_build_memory_budget_for,
     code_lexical_artifact_content_key,
 };
-#[cfg(feature = "search-eval")]
-pub use self::projection::{
-    CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1,
-    CodeLexicalProjectionBuildV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
-    lexical_projection_build_deadline_micros,
-};
 pub use self::routes::{
     LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorV1, LexicalRouteErrorV1,
     LexicalRouteKindV1, LexicalRouteMatchV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1,

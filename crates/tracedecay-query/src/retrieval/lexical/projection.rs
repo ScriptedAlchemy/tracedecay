@@ -22,8 +22,6 @@ use crate::retrieval::ports::{
 };
 
 mod artifact;
-#[cfg(feature = "search-eval")]
-mod in_memory;
 
 pub use artifact::{
     CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
@@ -49,12 +47,6 @@ pub use artifact::{
     MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1, PreparedCodeLexicalArtifactBatchV1,
     PreparedCodeLexicalArtifactPageV1, VerifiedCodeLexicalArtifactV1,
     code_lexical_artifact_build_memory_budget_for, code_lexical_artifact_content_key,
-};
-#[cfg(feature = "search-eval")]
-pub use in_memory::{
-    CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1,
-    CodeLexicalProjectionBuildV1, LEXICAL_PROJECTION_BUILD_DEADLINE_MICROS_V1,
-    lexical_projection_build_deadline_micros,
 };
 
 const BM25_K1_MILLIS: u64 = 1_200;
@@ -687,7 +679,7 @@ impl LexicalFieldTextV1 for ProjectedChunkV1 {
     }
 }
 
-/// Row identity shared by the in-memory projection and the artifact reader.
+/// Row identity the artifact builder and reader share.
 trait LexicalIndexedRow {
     fn chunk_id(&self) -> &CodeSearchChunkId;
     fn anchor(&self) -> &CodeSearchChunkAnchorV1;
@@ -889,8 +881,8 @@ fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, 
         .or_insert(score);
 }
 
-/// Shared exact/fuzzy/phrase/proximity scoring for the in-memory projection
-/// and the artifact reader. Callers supply term frequencies and BM25 inputs;
+/// Exact/fuzzy/phrase/proximity scoring for artifact rows. Callers supply
+/// term frequencies and BM25 inputs;
 /// the loop, fuzzy discount, phrase boost, and echo penalty stay one place.
 #[allow(clippy::too_many_arguments)]
 fn score_lexical_row(

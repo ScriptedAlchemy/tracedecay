@@ -9,12 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::chunks::{
-    DeterministicCodeChunker, ExtractionAdmittedCodeSearchChunkV1, content_digest,
-};
+use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::clones::CloneNormalizationClassV1;
-use tracedecay_code_index::extract::{LanguageExtractor, NeverCancelled, TreeSitterExtractor};
-use tracedecay_code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -25,26 +21,25 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalCursorV1, VerifiedSealedLexicalPageBatchBoundsV1,
     VerifiedSealedLexicalPageBatchReadV1, VerifiedSealedLexicalPageReadV1,
     VerifiedSealedLexicalPageSourceV1, VerifiedSealedLexicalPageV1,
-    VerifiedSealedLexicalSourceReceiptV1, VerifiedSealedLexicalSymbolDisplayV1,
+    VerifiedSealedLexicalSourceReceiptV1,
 };
 use tracedecay_code_index::projection::{
     ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
     ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
 use tracedecay_domain::{
-    BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
-    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComponentRevision, ContentDigest,
+    ChunkerRevision, CodeGenerationId, CompactCandidate, ComponentRevision,
     EphemeralSanitizedQueryViewV1, ExactAdmissionProof, ExactAdmissionRuleRevision,
-    ExactAdmissionValidator, ExactFieldV1, ExactTechnicalTermKindV1, ExactTechnicalTermV1,
-    FileOccurrenceId, FreshnessCompatibilityV1, LanguageDescriptorRevision, ManifestDigest,
+    ExactAdmissionValidator, ExactFieldV1, ExactTechnicalTermKindV1,
+    FileOccurrenceId, FreshnessCompatibilityV1, ManifestDigest,
     PolicyRevisionId, PrincipalId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1,
     ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
     QueryNormalizationRevision, RepositoryDirtyStateV1, RepositoryId, RetrievalBudget,
     RetrievalError, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverCoverage,
     RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, ScoreDomainId, SensitivityDecision, SensitivityLevelV1, SingleRootScopeV1,
-    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace, SourceSpan,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, ValidatedCodeFileV1, VectorWatermark,
+    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1,
+    SnapshotFileDispositionV1, SourceFreshness, SourceInstanceKey, SourceNamespace,
+    TemporalModeV1, UtcMicros, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,
@@ -57,7 +52,6 @@ use tracedecay_query::retrieval::lexical::{
     CloneFingerprintPartialReasonV1, CloneNearMatchExtentV1, CloneSelectedBlockContainmentClassV1,
     CloneSelectedBlockV1, CodeLexicalArtifactBatchLimitV1, CodeLexicalArtifactBuilderV1,
     CodeLexicalArtifactErrorV1, CodeLexicalArtifactFinalizationStepV1, CodeLexicalArtifactReaderV1,
-    CodeLexicalProjectionAdapterV1, CodeLexicalProjectionBuildStepV1, CodeLexicalProjectionBuildV1,
     CodeLexicalCloneRouteV1, CodeLexicalProjectionMetadataV1, LexicalFieldFilterV1, LexicalFieldV1, LexicalLane,
     LexicalLaneRequest, LexicalLaneRetriever, LexicalProximityV1, LexicalSpellingVariantV1,
     MAX_CLONE_EXACT_PAGE_MEMBERS_V1, MAX_FUZZY_TERM_EXPANSIONS_V1,
@@ -402,12 +396,11 @@ impl CodeIndexExecutionControlV1 for BudgetExhaustedAtObservation {
 /// A partitioned sealed generation held in memory: the manifest, its content
 /// address, and every published segment under its digest.
 #[derive(Clone)]
-struct RealLexicalSourceFixture {
+pub(crate) struct RealLexicalSourceFixture {
     manifest: Vec<u8>,
     segments: Arc<BTreeMap<String, Vec<u8>>>,
     state_digest: ManifestDigest,
-    generation: Arc<CodeIndexPublishedGenerationV1>,
-    metadata: CodeLexicalProjectionMetadataV1,
+    pub(crate) metadata: CodeLexicalProjectionMetadataV1,
 }
 
 impl RealLexicalSourceFixture {
@@ -433,34 +426,6 @@ impl RealLexicalSourceFixture {
 
 fn real_lexical_source_fixture() -> RealLexicalSourceFixture {
     real_lexical_source_fixture_with_files(1)
-}
-
-/// The in-memory projection over every admitted chunk of `generation`,
-/// carrying the generation's own extracted qualified names, the same
-/// authority the sealed-page artifact path reads per chunk.
-fn generation_backed_projection(
-    metadata: CodeLexicalProjectionMetadataV1,
-    generation: &CodeIndexPublishedGenerationV1,
-) -> CodeLexicalProjectionAdapterV1 {
-    let chunks = generation
-        .admitted_chunks()
-        .expect("published generation admitted chunks")
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let symbol_displays = generation
-        .symbols()
-        .symbols
-        .iter()
-        .map(|symbol| {
-            (
-                symbol.occurrence.clone(),
-                VerifiedSealedLexicalSymbolDisplayV1::from(symbol.as_ref()),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    CodeLexicalProjectionAdapterV1::new_admitted(metadata, chunks, symbol_displays)
-        .expect("generation-backed lexical projection")
 }
 
 /// One real production corpus with `file_count` TypeScript files. The first
@@ -495,7 +460,7 @@ fn real_lexical_source_fixture_with_files(file_count: usize) -> RealLexicalSourc
     real_lexical_source_fixture_from_sources(sources)
 }
 
-fn real_lexical_source_fixture_from_sources(
+pub(crate) fn real_lexical_source_fixture_from_sources(
     source_inputs: Vec<(String, String, Vec<u8>)>,
 ) -> RealLexicalSourceFixture {
     assert!(!source_inputs.is_empty(), "fixture needs at least one file");
@@ -635,7 +600,6 @@ fn real_lexical_source_fixture_from_sources(
         manifest,
         segments: Arc::new(segments),
         state_digest,
-        generation,
         metadata,
     }
 }
@@ -655,16 +619,6 @@ fn real_verified_pages_with_maximum_page_chunks(
         "production source emits parser-validated import evidence"
     );
     (fixture, pages, receipt)
-}
-
-fn page_symbol_displays(
-    pages: &[VerifiedSealedLexicalPageV1],
-) -> BTreeMap<SymbolOccurrenceId, VerifiedSealedLexicalSymbolDisplayV1> {
-    pages
-        .iter()
-        .flat_map(|page| page.symbol_displays().iter().flatten())
-        .map(|display| (display.occurrence().clone(), display.clone()))
-        .collect()
 }
 
 fn drain_verified_pages(
@@ -716,6 +670,112 @@ fn build_clone_artifact(
     )
     .expect("open clone artifact");
     (directory, pages, reader)
+}
+
+/// A production lexical artifact sealed from a real corpus and reopened for
+/// serving, with the metadata it was sealed under.
+pub(crate) struct SealedArtifactFixture {
+    _directory: tempfile::TempDir,
+    pub(crate) metadata: CodeLexicalProjectionMetadataV1,
+    pub(crate) reader: CodeLexicalArtifactReaderV1,
+}
+
+impl SealedArtifactFixture {
+    pub(crate) fn lane(&self) -> LexicalLane<CodeLexicalArtifactReaderV1> {
+        LexicalLane::new(self.reader.clone())
+    }
+
+    /// [`lexical_request`] bound to this artifact's generation.
+    pub(crate) fn request(
+        &self,
+        query: &str,
+        whole_terms: &[&str],
+        subtokens: &[&str],
+        phrases: &[&str],
+        fuzzy_budget: u32,
+        max_candidates: u32,
+    ) -> LexicalLaneRequest<'static> {
+        let mut request = lexical_request(
+            query,
+            whole_terms,
+            subtokens,
+            phrases,
+            fuzzy_budget,
+            max_candidates,
+        );
+        request.generation = self.metadata.generation.clone();
+        request
+    }
+}
+
+/// Seal `fixture`'s verified pages under `metadata` and reopen the artifact.
+pub(crate) fn sealed_artifact(
+    fixture: &RealLexicalSourceFixture,
+    metadata: CodeLexicalProjectionMetadataV1,
+) -> SealedArtifactFixture {
+    let directory = tempfile::tempdir().expect("artifact directory");
+    let path = directory.path().join("lexical.sqlite");
+    let control = ArtifactControl { cancelled: false };
+    let mut builder =
+        CodeLexicalArtifactBuilderV1::create(&path, metadata.clone()).expect("create artifact");
+    let verified = builder
+        .rebuild_and_finalize(&mut fixture.open_source(128), &control)
+        .expect("build from parser-attested pages");
+    drop(builder);
+    let reader = CodeLexicalArtifactReaderV1::open_with_control(
+        &path,
+        &verified,
+        &metadata,
+        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
+        &control,
+    )
+    .expect("reopen sealed artifact");
+    SealedArtifactFixture {
+        _directory: directory,
+        metadata,
+        reader,
+    }
+}
+
+/// Rust files `src/fixture_{ordinal}.rs` with file ids `file.fixture.{ordinal}`.
+pub(crate) fn rust_source_fixture(sources: &[&str]) -> RealLexicalSourceFixture {
+    real_lexical_source_fixture_from_sources(
+        sources
+            .iter()
+            .enumerate()
+            .map(|(ordinal, source)| {
+                (
+                    format!("file.fixture.{ordinal}"),
+                    format!("src/fixture_{ordinal}.rs"),
+                    source.as_bytes().to_vec(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// [`rust_source_fixture`] sealed into one reopened artifact.
+pub(crate) fn rust_artifact(sources: &[&str]) -> SealedArtifactFixture {
+    let fixture = rust_source_fixture(sources);
+    sealed_artifact(&fixture, fixture.metadata.clone())
+}
+
+/// The fixture file ordinals a batch's candidates came from.
+pub(crate) fn candidate_files(candidates: &[CompactCandidate]) -> BTreeSet<usize> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            candidate
+                .file_occurrence_id
+                .as_ref()
+                .expect("code candidate names its file")
+                .as_str()
+                .strip_prefix("file.fixture.")
+                .expect("fixture file id")
+                .parse()
+                .expect("fixture file ordinal")
+        })
+        .collect()
 }
 
 fn real_verified_pages() -> (
@@ -1016,249 +1076,8 @@ pub(crate) fn projection_metadata(
     }
 }
 
-pub(crate) fn chunk(
-    generation: &CodeGenerationId,
-    ordinal: u32,
-    grain: CodeSearchChunkGrainV1,
-    text: &str,
-    terms: &[(ExactTechnicalTermKindV1, &str)],
-    subtokens: &[&str],
-) -> CodeSearchChunkV1 {
-    let symbol = matches!(
-        grain,
-        CodeSearchChunkGrainV1::SymbolSignature
-            | CodeSearchChunkGrainV1::SymbolBody
-            | CodeSearchChunkGrainV1::SymbolMember
-    )
-    .then(|| id::<SymbolOccurrenceId>(&format!("symbol.{ordinal}")));
-    let mut exact_terms: Vec<ExactTechnicalTermV1> = terms
-        .iter()
-        .map(|(kind, term)| {
-            let start = text
-                .find(term)
-                .unwrap_or_else(|| panic!("term {term:?} is present in {text:?}"));
-            let span = SourceSpan {
-                start_byte: start as u64,
-                end_byte: (start + term.len()) as u64,
-            };
-            if *kind == ExactTechnicalTermKindV1::WholeSymbol {
-                ExactTechnicalTermV1::untrusted_whole_symbol_candidate(
-                    term.as_bytes().to_vec(),
-                    span,
-                    symbol.clone().expect("symbol grain"),
-                )
-            } else if matches!(
-                kind,
-                ExactTechnicalTermKindV1::CompilerErrorText
-                    | ExactTechnicalTermKindV1::RuntimeErrorText
-            ) {
-                ExactTechnicalTermV1::untrusted_contextual_text_candidate(
-                    *kind,
-                    term.as_bytes().to_vec(),
-                    span,
-                )
-            } else {
-                ExactTechnicalTermV1::technical(*kind, term.as_bytes().to_vec(), span)
-            }
-            .expect("valid exact-term fixture")
-        })
-        .collect();
-    exact_terms.sort_by(|left, right| {
-        (
-            left.span().start_byte,
-            left.span().end_byte,
-            left.kind(),
-            left.canonical_bytes(),
-            left.original_bytes(),
-        )
-            .cmp(&(
-                right.span().start_byte,
-                right.span().end_byte,
-                right.kind(),
-                right.canonical_bytes(),
-                right.original_bytes(),
-            ))
-    });
-    CodeSearchChunkV1 {
-        id: id::<CodeSearchChunkId>(&format!("chunk.{ordinal}")),
-        anchor: CodeSearchChunkAnchorV1 {
-            generation_id: generation.clone(),
-            file_occurrence_id: id::<FileOccurrenceId>(&format!("file.{ordinal}")),
-            symbol_occurrence_id: symbol,
-            parent_chunk_id: None,
-            source_span: SourceSpan {
-                start_byte: 0,
-                end_byte: text.len() as u64,
-            },
-            grain,
-            ordinal,
-        },
-        content_digest: digest_id::<ContentDigest>(
-            char::from_digit((ordinal % 10) + 1, 16).expect("hex digit"),
-        ),
-        language_descriptor_revision: id::<LanguageDescriptorRevision>("language.rust.v1"),
-        chunker_revision: id::<ChunkerRevision>("chunker.v1"),
-        sanitizer_revision: id("sanitizer.v1"),
-        sensitivity: SensitivityDecision {
-            level: SensitivityLevelV1::Internal,
-            policy_revision: id::<PolicyRevisionId>("policy.fixture.v1"),
-        },
-        exact_terms,
-        subtokens: subtokens.iter().map(|value| (*value).to_owned()).collect(),
-        sanitized_text: BoundedSanitizedText::new(text).expect("bounded fixture text"),
-    }
-}
-
-fn admitted_rust_chunk(
-    generation: &CodeGenerationId,
-    ordinal: u32,
-    source: &str,
-    grain: CodeSearchChunkGrainV1,
-    symbol_name: &str,
-) -> ExtractionAdmittedCodeSearchChunkV1 {
-    let registry = StaticLanguageRegistry::new();
-    let descriptor = registry
-        .descriptor(&id("rust"))
-        .expect("rust descriptor")
-        .clone();
-    let sanitizer_revision = id::<SanitizerRevision>("sanitizer.v1");
-    let file = SanitizedCodeFileV1 {
-        file_occurrence_id: id(&format!("file.admitted.{ordinal}")),
-        logical_path: format!("src/admitted_{ordinal}.rs"),
-        language: Some(id("rust")),
-        content_digest: content_digest(source.as_bytes()),
-        disposition: SnapshotFileDispositionV1::Present,
-    };
-    let intake =
-        SanitizedCodeIntake::new(registry, sanitizer_revision.clone(), UtcMicros(1_000_000));
-    let snapshot = intake
-        .admit(SanitizedCodeSnapshotV1 {
-            repository: id("repo.fixture"),
-            worktree: None,
-            reference: None,
-            source_revision: None,
-            sanitizer_revision: sanitizer_revision.clone(),
-            sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.fixture")],
-            content_identity: content_digest(source.as_bytes()),
-            captured_at: UtcMicros(1_000_000),
-            files: vec![file.clone()],
-        })
-        .expect("snapshot admission");
-    let file = intake
-        .bind_file(
-            &snapshot,
-            &id::<ProjectId>("project.fixture"),
-            ValidatedCodeFileV1 {
-                generation_id: generation.clone(),
-                file,
-                snapshot_digest: snapshot.snapshot().intake_digest.clone(),
-                sanitized_bytes: source.as_bytes().to_vec(),
-            },
-        )
-        .expect("file admission");
-    let batch = TreeSitterExtractor::new()
-        .extract(&file, &descriptor, &NeverCancelled)
-        .expect("extract rust fixture");
-    let chunker = DeterministicCodeChunker::new(
-        generation.clone(),
-        id("repo.fixture"),
-        sanitizer_revision,
-        id("policy.fixture.v1"),
-        id("chunker.v1"),
-    );
-    let (artifacts, authority) = chunker
-        .index_file_with_authority_from_extraction(
-            &file,
-            &batch,
-            &descriptor,
-            SensitivityLevelV1::Public,
-            &NeverCancelled,
-        )
-        .expect("chunk with exact authority");
-    let chunk = artifacts
-        .chunks
-        .chunks
-        .into_iter()
-        .find(|chunk| {
-            chunk.anchor.grain == grain
-                && chunk.exact_terms.iter().any(|term| {
-                    term.kind() == ExactTechnicalTermKindV1::WholeSymbol
-                        && term.original_bytes() == symbol_name.as_bytes()
-                })
-        })
-        .expect("requested parser-minted symbol chunk");
-    authority.admit(chunk).expect("exact extraction admission")
-}
-
 #[test]
-fn retained_lexical_projection_preserves_progress_across_bounded_windows() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let chunks = (0..3)
-        .map(|ordinal| {
-            let symbol = format!("retained_symbol_{ordinal}");
-            admitted_rust_chunk(
-                &generation,
-                ordinal,
-                &format!("pub fn {symbol}() -> usize {{ {ordinal} }}\n"),
-                CodeSearchChunkGrainV1::SymbolSignature,
-                &symbol,
-            )
-        })
-        .collect::<Vec<_>>();
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks.clone(),
-        BTreeMap::new(),
-    )
-    .expect("one-shot retained lexical projection");
-    let mut build = CodeLexicalProjectionBuildV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks,
-        BTreeMap::new(),
-    )
-    .expect("start retained lexical projection");
-
-    assert!(matches!(
-        build.advance(1).expect("first bounded window"),
-        CodeLexicalProjectionBuildStepV1::Pending {
-            completed_documents: 1,
-            total_documents: 3,
-        }
-    ));
-    assert!(matches!(
-        build.advance(1).expect("second bounded window"),
-        CodeLexicalProjectionBuildStepV1::Pending {
-            completed_documents: 2,
-            total_documents: 3,
-        }
-    ));
-    let projection = loop {
-        match build.advance(1).expect("finish bounded projection") {
-            CodeLexicalProjectionBuildStepV1::Pending { .. } => {}
-            CodeLexicalProjectionBuildStepV1::Ready(projection) => break *projection,
-        }
-    };
-    let request = lexical_request("retained_symbol_2", &["retained_symbol_2"], &[], &[], 0, 8);
-    let outcome = LexicalLane::new(projection)
-        .retrieve_lexical(&request)
-        .expect("query completed retained projection");
-    let one_shot_outcome = LexicalLane::new(one_shot)
-        .retrieve_lexical(&request)
-        .expect("query completed one-shot projection");
-    assert_eq!(outcome, one_shot_outcome);
-    let RetrieverOutcome::Complete(batch) = outcome else {
-        panic!("completed retained projection must serve lexical query");
-    };
-    assert!(
-        batch
-            .candidates
-            .iter()
-            .any(|candidate| candidate.file_occurrence_id.as_ref() == Some(&id("file.admitted.2")))
-    );
-}
-
-#[test]
-fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
+fn disk_artifact_resume_and_reopen_serve_lexical_results() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let generation = metadata.generation.clone();
@@ -1266,12 +1085,6 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         .iter()
         .flat_map(|page| page.chunks().iter().cloned())
         .collect::<Vec<_>>();
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
-        metadata.clone(),
-        chunks.clone(),
-        page_symbol_displays(&pages),
-    )
-    .expect("one-shot lexical projection");
     let import_evidence = pages
         .iter()
         .flat_map(|page| page.imports())
@@ -1366,13 +1179,17 @@ fn disk_artifact_resume_reopen_and_lexical_results_match_one_shot_projection() {
         8,
     );
     request.generation = generation;
-    let artifact = LexicalLane::new(reader)
-        .retrieve_lexical(&request)
-        .expect("artifact lexical query");
-    let expected = LexicalLane::new(one_shot)
-        .retrieve_lexical(&request)
-        .expect("one-shot lexical query");
-    assert_eq!(artifact, expected);
+    let artifact = complete(
+        LexicalLane::new(reader)
+            .retrieve_lexical(&request)
+            .expect("artifact lexical query"),
+    );
+    assert!(
+        artifact.evidence_by_occurrence.values().any(|evidence| evidence
+            .matched_phrases
+            .contains(&"return value".to_owned())),
+        "the resumed artifact serves the source's phrase"
+    );
 }
 
 #[test]
@@ -2255,24 +2072,12 @@ fn hot_only_fingerprints_are_partial_while_exact_digest_reads_still_work() {
 /// with the typed cancellation error and stops consulting the control at that
 /// checkpoint, far short of the candidate set, while the same request under
 /// an active control completes, agrees byte-for-byte between the sealed
-/// artifact and the in-memory projection, and is stable across runs.
+/// artifact reopened for serving, and is stable across runs.
 #[test]
-fn lexical_scan_cancellation_unwinds_artifact_and_in_memory_sources_before_completion() {
+fn lexical_scan_cancellation_unwinds_the_artifact_before_completion() {
     let fixture = real_lexical_source_fixture_with_files(24);
     let (pages, source_receipt) = drain_verified_pages(&fixture, 128);
     let metadata = fixture.metadata.clone();
-    let chunks = pages
-        .iter()
-        .flat_map(|page| page.chunks().iter().cloned())
-        .collect::<Vec<_>>();
-    let in_memory = LexicalLane::new(
-        CodeLexicalProjectionAdapterV1::new_admitted(
-            metadata.clone(),
-            chunks,
-            page_symbol_displays(&pages),
-        )
-        .expect("in-memory lexical projection"),
-    );
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("cancellable-lexical.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -2308,10 +2113,6 @@ fn lexical_scan_cancellation_unwinds_artifact_and_in_memory_sources_before_compl
     let artifact_complete = artifact
         .retrieve_lexical(&request)
         .expect("uncancelled artifact scan completes");
-    let in_memory_complete = in_memory
-        .retrieve_lexical(&request)
-        .expect("uncancelled in-memory scan completes");
-    assert_eq!(artifact_complete, in_memory_complete);
     let candidates = complete(artifact_complete.clone()).candidates.len();
     assert!(
         candidates >= 24,
@@ -2326,33 +2127,27 @@ fn lexical_scan_cancellation_unwinds_artifact_and_in_memory_sources_before_compl
     );
 
     let cancel_at = 6;
-    let lanes: [(&dyn LexicalLaneRetriever, &str); 2] =
-        [(&artifact, "artifact"), (&in_memory, "in-memory")];
-    for (lane, source) in lanes {
-        let cancelled = CancelAtObservation::new(cancel_at);
-        assert_eq!(
-            lane.retrieve_lexical(&widget_request(generation, &cancelled)),
-            Err(RetrievalPortError::Cancelled),
-            "{source}: a cancelled scan unwinds with the typed cancellation error"
-        );
-        assert_eq!(
-            cancelled.observations(),
-            cancel_at,
-            "{source}: the scan stops at the cancelling checkpoint instead of visiting the \
-             remaining {candidates} candidates"
-        );
-    }
+    let cancelled = CancelAtObservation::new(cancel_at);
+    assert_eq!(
+        artifact.retrieve_lexical(&widget_request(generation, &cancelled)),
+        Err(RetrievalPortError::Cancelled),
+        "a cancelled scan unwinds with the typed cancellation error"
+    );
+    assert_eq!(
+        cancelled.observations(),
+        cancel_at,
+        "the scan stops at the cancelling checkpoint instead of visiting the \
+         remaining {candidates} candidates"
+    );
 }
 
 #[test]
-fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
+fn extracted_qualified_names_search_reopened_artifacts() {
     let fixture = real_lexical_source_fixture_from_sources(vec![(
         "file.qualified".to_owned(),
         "src/qualified.rs".to_owned(),
         b"pub struct VectorWatermark;\nimpl VectorWatermark { pub fn merge_max(&self) {} }\npub struct UnrelatedContainer;\nimpl UnrelatedContainer { pub fn merge_max(&self) {} }\n".to_vec(),
     )]);
-    let generation = Arc::clone(&fixture.generation);
-    let memory = generation_backed_projection(fixture.metadata.clone(), &generation);
     let directory = tempfile::tempdir().expect("artifact directory");
     let path = directory.path().join("qualified.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -2395,12 +2190,6 @@ fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
                 .read_lexical_postings(&request)
                 .expect("artifact query"),
         );
-        let in_memory = complete(
-            memory
-                .read_lexical_postings(&request)
-                .expect("memory query"),
-        );
-        assert_eq!(disk, in_memory, "{query} must use the same search fields");
         if let Some(expected_name) = expected_name {
             assert!(!disk.candidates.is_empty(), "missing {query}");
             for candidate in &disk.candidates {
@@ -2442,7 +2231,7 @@ fn extracted_qualified_names_match_in_memory_and_reopened_artifacts() {
 }
 
 #[test]
-fn vocabulary_fields_phrase_and_proximity_match_in_memory_and_reopened_artifacts() {
+fn vocabulary_fields_phrase_and_proximity_search_reopened_artifacts() {
     let fixture = real_lexical_source_fixture_from_sources(vec![(
         "file.vocabulary".to_owned(),
         "src/http-cache/client-store.rs".to_owned(),
@@ -2454,11 +2243,6 @@ fn vocabulary_fields_phrase_and_proximity_match_in_memory_and_reopened_artifacts
           }\n"
         .to_vec(),
     )]);
-    let generation = Arc::clone(&fixture.generation);
-    let memory = LexicalLane::new(generation_backed_projection(
-        fixture.metadata.clone(),
-        &generation,
-    ));
     let directory = tempfile::tempdir().expect("artifact directory");
     let path = directory.path().join("vocabulary.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -2491,14 +2275,11 @@ fn vocabulary_fields_phrase_and_proximity_match_in_memory_and_reopened_artifacts
             include: true,
         }]);
         request.proximities = Cow::Owned(proximities);
-        let disk = artifact
-            .retrieve_lexical(&request)
-            .expect("artifact lexical query");
-        let in_memory = memory
-            .retrieve_lexical(&request)
-            .expect("in-memory lexical query");
-        assert_eq!(disk, in_memory, "{query} must agree across readers");
-        complete(disk)
+        complete(
+            artifact
+                .retrieve_lexical(&request)
+                .expect("artifact lexical query"),
+        )
     };
 
     for (query, field) in [
@@ -2520,14 +2301,11 @@ fn vocabulary_fields_phrase_and_proximity_match_in_memory_and_reopened_artifacts
         field: LexicalFieldV1::Signature,
         include: true,
     }]);
-    let disk_typo = artifact
-        .retrieve_lexical(&typo)
-        .expect("artifact typo query");
-    let memory_typo = memory
-        .retrieve_lexical(&typo)
-        .expect("in-memory typo query");
-    assert_eq!(disk_typo, memory_typo);
-    let disk_typo = complete(disk_typo);
+    let disk_typo = complete(
+        artifact
+            .retrieve_lexical(&typo)
+            .expect("artifact typo query"),
+    );
     assert_eq!(
         disk_typo.evidence_by_occurrence[&disk_typo.candidates[0].source_occurrence_id]
             .spelling_variants,
@@ -2584,16 +2362,6 @@ fn disk_artifact_seals_one_ngram_list_per_distinct_key_without_staging() {
     let (fixture, pages, source_receipt) = real_verified_pages();
     let metadata = fixture.metadata.clone();
     let generation = metadata.generation.clone();
-    let chunks = pages
-        .iter()
-        .flat_map(|page| page.chunks().iter().cloned())
-        .collect::<Vec<_>>();
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
-        metadata.clone(),
-        chunks,
-        page_symbol_displays(&pages),
-    )
-    .expect("one-shot lexical projection");
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("ngram-bitmap-shards.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -2650,13 +2418,16 @@ fn disk_artifact_seals_one_ngram_list_per_distinct_key_without_staging() {
         8,
     );
     request.generation = generation;
-    assert_eq!(
+    let served = complete(
         LexicalLane::new(reader)
             .retrieve_lexical(&request)
             .expect("bitmap artifact lexical query"),
-        LexicalLane::new(one_shot)
-            .retrieve_lexical(&request)
-            .expect("one-shot lexical query")
+    );
+    assert!(
+        served.evidence_by_occurrence.values().any(|evidence| evidence
+            .matched_phrases
+            .contains(&"return value".to_owned())),
+        "the sealed n-gram lists serve the source's phrase"
     );
 }
 
@@ -2882,7 +2653,7 @@ fn reader_rejects_unsupported_open_revisions_and_accepts_current() {
 }
 
 #[test]
-fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
+fn absent_terms_leave_common_term_artifact_candidates_unchanged() {
     let files = 128;
     let functions_per_file = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / files + 1;
     let fixture = real_lexical_source_fixture_from_sources(
@@ -2901,14 +2672,14 @@ fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
             })
             .collect(),
     );
-    let generation = Arc::clone(&fixture.generation);
-    let memory = LexicalLane::new(generation_backed_projection(
-        fixture.metadata.clone(),
-        &generation,
-    ));
-    let mut common = lexical_request("shared_candidate", &["shared_candidate"], &[], &[], 0, 8);
-    common.generation = fixture.metadata.generation.clone();
-    let baseline = complete(memory.retrieve_lexical(&common).expect("common term query"));
+    let artifact = sealed_artifact(&fixture, fixture.metadata.clone());
+    let common = artifact.request("shared_candidate", &["shared_candidate"], &[], &[], 0, 8);
+    let baseline = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&common)
+            .expect("common term query"),
+    );
     assert_eq!(baseline.candidates.len(), 8);
     assert!(
         baseline.coverage.eligible > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 as u64,
@@ -2922,41 +2693,22 @@ fn absent_and_common_terms_match_in_memory_and_reopened_artifacts() {
         0,
         8,
     );
-    mixed.generation = fixture.metadata.generation.clone();
-    let expected = complete(memory.retrieve_lexical(&mixed).expect("mixed term query"));
-    assert_eq!(expected.candidates, baseline.candidates);
-    assert_eq!(expected.coverage.eligible, baseline.coverage.eligible);
-
-    let directory = tempfile::tempdir().expect("artifact directory");
-    let control = ArtifactControl { cancelled: false };
-    let path = directory.path().join("common.sqlite");
-    let mut builder = CodeLexicalArtifactBuilderV1::create(&path, fixture.metadata.clone())
-        .expect("create artifact");
-    let verified = builder
-        .rebuild_and_finalize(&mut fixture.open_source(128), &control)
-        .expect("build canonical pages");
-    drop(builder);
-    let reader = CodeLexicalArtifactReaderV1::open_with_control(
-        &path,
-        &verified,
-        &fixture.metadata,
-        CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1,
-        &control,
-    )
-    .expect("reopen artifact");
-    let actual = complete(
-        LexicalLane::new(reader)
+    mixed.generation = artifact.metadata.generation.clone();
+    let mixed = complete(
+        artifact
+            .lane()
             .retrieve_lexical(&mixed)
-            .expect("mixed artifact query"),
+            .expect("mixed term query"),
     );
     assert_eq!(
-        actual, expected,
-        "the artifact must preserve canonical candidate parity"
+        mixed.candidates, baseline.candidates,
+        "an absent term must not change the common term's candidates"
     );
+    assert_eq!(mixed.coverage.eligible, baseline.coverage.eligible);
 }
 
 #[test]
-fn case_sensitive_quoted_literals_match_in_memory_and_reopened_artifacts() {
+fn case_sensitive_quoted_literals_match_reopened_artifacts() {
     let sources = [
         "pub fn fooBarValue() -> u32 { 1 }\n",
         "pub fn foobarvalue() -> u32 { 2 }\n",
@@ -2976,8 +2728,6 @@ fn case_sensitive_quoted_literals_match_in_memory_and_reopened_artifacts() {
             })
             .collect(),
     );
-    let generation = Arc::clone(&fixture.generation);
-    let memory = generation_backed_projection(fixture.metadata.clone(), &generation);
     let directory = tempfile::tempdir().expect("artifact directory");
     let control = ArtifactControl { cancelled: false };
     let path = directory.path().join("case.sqlite");
@@ -3016,27 +2766,22 @@ fn case_sensitive_quoted_literals_match_in_memory_and_reopened_artifacts() {
             generation: fixture.metadata.generation.clone(),
             budget: budget(8),
         };
-        let expected = memory
-            .exact_adapter(authority())
-            .read_exact_postings(&request)
-            .expect("in-memory exact query");
-        let RetrieverOutcome::Complete(batch) = &expected else {
-            panic!("in-memory exact query must complete");
-        };
-        assert_eq!(!batch.candidates.is_empty(), expected_matches, "{query}");
-        assert_eq!(
+        let batch = complete(
             reader
                 .exact_adapter(authority())
                 .read_exact_postings(&request)
                 .expect("artifact exact query"),
-            expected,
-            "{query}: the artifact must admit every case-sensitive raw match"
+        );
+        assert_eq!(
+            !batch.candidates.is_empty(),
+            expected_matches,
+            "{query}: the artifact must admit exactly the case-sensitive raw matches"
         );
     }
 }
 
 #[test]
-fn annotation_uses_mint_no_lexical_documents_in_either_projection() {
+fn annotation_uses_mint_no_lexical_artifact_documents() {
     let fixture = real_lexical_source_fixture_from_sources(vec![(
         "file.annotated.001".to_owned(),
         "src/annotated.rs".to_owned(),
@@ -3056,11 +2801,6 @@ fn annotation_uses_mint_no_lexical_documents_in_either_projection() {
         "the fixture's attributes must reach the lexical source as annotation-use chunks"
     );
 
-    let generation = Arc::clone(&fixture.generation);
-    let memory = LexicalLane::new(generation_backed_projection(
-        fixture.metadata.clone(),
-        &generation,
-    ));
     let directory = tempfile::tempdir().expect("artifact directory");
     let path = directory.path().join("annotated.sqlite");
     let control = ArtifactControl { cancelled: false };
@@ -3096,12 +2836,7 @@ fn annotation_uses_mint_no_lexical_documents_in_either_projection() {
     ] {
         let mut request = lexical_request(query, terms, &[], &[], 0, 8);
         request.generation = fixture.metadata.generation.clone();
-        let expected = complete(memory.retrieve_lexical(&request).expect("memory query"));
-        let actual = complete(artifact.retrieve_lexical(&request).expect("artifact query"));
-        assert_eq!(
-            actual, expected,
-            "{query}: both projections admit the same documents"
-        );
+        let expected = complete(artifact.retrieve_lexical(&request).expect("artifact query"));
         assert!(
             !expected.candidates.is_empty(),
             "{query}: attribute text stays searchable through the item it annotates"
@@ -5958,73 +5693,6 @@ fn exact_candidate_scan_stops_before_the_next_batch_after_cancellation() {
 }
 
 #[test]
-fn in_memory_rebuilds_observe_cancellation_at_phase_and_batch_boundaries() {
-    let fixture = real_lexical_source_fixture_with_files(256);
-    let (pages, _) = drain_verified_pages(&fixture, 128);
-    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        fixture.metadata.clone(),
-        pages
-            .iter()
-            .flat_map(|page| page.chunks().iter().cloned())
-            .collect::<Vec<_>>(),
-        page_symbol_displays(&pages),
-    )
-    .expect("real admitted in-memory projection");
-
-    // Empty rebuilds must still consult the phase boundary. For the wide
-    // fixture, cancellation occurs after enough observations to enter a later
-    // rebuild batch; entry and final checks alone cannot trigger it.
-    for (term, cancel_at, has_matches) in [("absentzzxyz", 2, false), ("widget", 10, true)] {
-        let control = CancelAtObservation::new(cancel_at);
-        let mut request = lexical_request(term, &[term], &[], &[], 0, 1024);
-        request.generation = fixture.metadata.generation.clone();
-        let baseline = complete(
-            projection
-                .read_lexical_postings(&request)
-                .expect("active lexical read"),
-        );
-        assert_eq!(baseline.candidates.len() > 128, has_matches);
-        request.control = &control;
-        assert_eq!(
-            projection.read_lexical_postings(&request),
-            Err(RetrievalPortError::Cancelled)
-        );
-        assert_eq!(control.observations(), cancel_at);
-    }
-
-    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
-    let exact = projection.exact_adapter(authority.clone());
-    for (query, cancel_at, has_matches) in [
-        (r#""absentzzxyz""#, 3, false),
-        (r#""return value""#, 9, true),
-    ] {
-        let control = CancelAtObservation::new(cancel_at);
-        let view = query_view(query);
-        let base = base_request(query, 1024);
-        let mut request = ExactLaneRequest {
-            literals: authority.parse_literals(&view, &base),
-            base,
-            query_view: &view,
-            generation: fixture.metadata.generation.clone(),
-            budget: budget(1024),
-            control: &ACTIVE_CONTROL,
-        };
-        let baseline = complete(
-            exact
-                .read_exact_postings(&request)
-                .expect("active exact read"),
-        );
-        assert_eq!(baseline.candidates.len() > 128, has_matches);
-        request.control = &control;
-        assert_eq!(
-            exact.read_exact_postings(&request),
-            Err(RetrievalPortError::Cancelled)
-        );
-        assert_eq!(control.observations(), cancel_at);
-    }
-}
-
-#[test]
 fn disk_artifact_ledger_charges_stay_page_local_across_corpus_scaling() {
     let control = ArtifactControl { cancelled: false };
     let mut max_charges = Vec::new();
@@ -6085,16 +5753,6 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
     let generation = metadata.generation.clone();
     let control = ArtifactControl { cancelled: false };
     let (pages, _) = drain_verified_pages(&fixture, 128);
-    let chunks = pages
-        .iter()
-        .flat_map(|page| page.chunks().iter().cloned())
-        .collect::<Vec<_>>();
-    let one_shot = CodeLexicalProjectionAdapterV1::new_admitted(
-        metadata.clone(),
-        chunks,
-        page_symbol_displays(&pages),
-    )
-    .expect("one-shot lexical projection");
     let directory = tempfile::tempdir().expect("artifact tempdir");
     let artifact_path = directory.path().join("top-k.sqlite");
     let mut builder =
@@ -6146,17 +5804,6 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
             .retrieve_lexical(&request)
             .expect("artifact lexical lane"),
     );
-    let memory_lane = complete(
-        LexicalLane::new(one_shot.clone())
-            .retrieve_lexical(&request)
-            .expect("one-shot lexical lane"),
-    );
-    assert_eq!(
-        artifact_lane, memory_lane,
-        "the K=7 lexical lane batch (candidates, evidence, coverage, continuation) must \
-         match the one-shot projection exactly; a pre-capped port must not surface as \
-         eligible=K/capped=0/exhausted"
-    );
     assert_eq!(
         artifact_lane.coverage.capped,
         artifact_lane.coverage.eligible - 7,
@@ -6184,7 +5831,7 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
         "the port's bounded selection already uses the lane's canonical tie order"
     );
 
-    // Exact-lane parity under the same K=7: every document matches the
+    // The exact lane under the same K=7: every document matches the
     // quoted literal once, so the cut again runs through a tie.
     let authority =
         CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
@@ -6218,17 +5865,6 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
             .retrieve_exact(&exact_request)
             .expect("artifact exact lane"),
     );
-    let memory_exact = complete(
-        ExactLane::new(authority.clone(), one_shot.exact_adapter(authority))
-            .retrieve_exact(&exact_request)
-            .expect("one-shot exact lane"),
-    );
-    assert_eq!(
-        artifact_exact, memory_exact,
-        "the K=7 exact lane batch (candidates, evidence, coverage, continuation) must \
-         match the one-shot projection exactly; a pre-capped port must not surface as \
-         eligible=K/capped=0/exhausted"
-    );
     assert_eq!(
         artifact_exact.coverage.capped,
         artifact_exact.coverage.eligible - 7,
@@ -6242,67 +5878,6 @@ fn disk_artifact_reader_selects_bounded_top_k_with_lane_tie_order_and_coverage()
             .exhausted,
         "a capped exact search must not be reported exhausted"
     );
-}
-
-#[test]
-fn retained_lexical_projection_bounds_marginal_owned_byte_growth_for_repeated_tokens() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let small_repeated = "retained_token ".repeat(1_000);
-    let large_repeated = "retained_token ".repeat(3_000);
-    let small_source = format!(
-        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {small_repeated} retained_token }}\n"
-    );
-    let large_source = format!(
-        "pub fn retained_symbol() -> usize {{ let retained_token = 1; {large_repeated} retained_token }}\n"
-    );
-    let small_projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        vec![admitted_rust_chunk(
-            &generation,
-            0,
-            &small_source,
-            CodeSearchChunkGrainV1::SymbolBody,
-            "retained_symbol",
-        )],
-        BTreeMap::new(),
-    )
-    .expect("build small repeated-token projection");
-    let large_projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        vec![admitted_rust_chunk(
-            &generation,
-            0,
-            &large_source,
-            CodeSearchChunkGrainV1::SymbolBody,
-            "retained_symbol",
-        )],
-        BTreeMap::new(),
-    )
-    .expect("build large repeated-token projection");
-
-    let small_retained = small_projection.retained_owned_bytes();
-    let large_retained = large_projection.retained_owned_bytes();
-    let marginal_retained = large_retained
-        .checked_sub(small_retained)
-        .expect("large projection must not retain fewer owned bytes than small projection");
-    let marginal_source = large_source
-        .len()
-        .checked_sub(small_source.len())
-        .expect("large source must not be smaller than small source");
-    assert!(
-        marginal_retained <= marginal_source * 2,
-        "projection retained {marginal_retained} marginal owned bytes for {marginal_source} marginal source bytes"
-    );
-
-    let request = lexical_request("retained_token", &["retained_token"], &[], &[], 0, 8);
-    let RetrieverOutcome::Complete(batch) = LexicalLane::new(large_projection)
-        .retrieve_lexical(&request)
-        .expect("query repeated-token projection")
-    else {
-        panic!("repeated-token projection must be current");
-    };
-    assert_eq!(batch.candidates.len(), 1);
-    assert!(batch.candidates[0].raw_score.micros() > 0);
 }
 
 pub(crate) fn lexical_request(
@@ -6336,39 +5911,6 @@ pub(crate) fn complete<T: fmt::Debug>(outcome: RetrieverOutcome<T>) -> T {
         RetrieverOutcome::Complete(value) => value,
         other => panic!("expected complete retrieval, got {other:?}"),
     }
-}
-
-#[test]
-fn matching_symbol_occurrence_does_not_admit_raw_or_json_exact_terms() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let raw = chunk(
-        &generation,
-        1,
-        CodeSearchChunkGrainV1::SymbolSignature,
-        "fn forged_symbol",
-        &[(ExactTechnicalTermKindV1::WholeSymbol, "forged_symbol")],
-        &["forged", "symbol"],
-    );
-    assert_eq!(
-        raw.exact_terms[0].symbol_occurrence_id(),
-        raw.anchor.symbol_occurrence_id.as_ref()
-    );
-    let metadata = projection_metadata(&generation, FreshnessCompatibilityV1::Current);
-    assert!(
-        CodeLexicalProjectionAdapterV1::new(metadata.clone(), vec![raw.clone()]).is_err(),
-        "public raw-parts construction cannot admit WholeSymbol evidence"
-    );
-
-    let decoded: CodeSearchChunkV1 =
-        serde_json::from_slice(&serde_json::to_vec(&raw).unwrap()).unwrap();
-    assert_eq!(
-        decoded.exact_terms[0].symbol_occurrence_id(),
-        decoded.anchor.symbol_occurrence_id.as_ref()
-    );
-    assert!(
-        CodeLexicalProjectionAdapterV1::new(metadata, vec![decoded]).is_err(),
-        "JSON chunks remain untrusted even when occurrence ids match"
-    );
 }
 
 #[test]
@@ -6416,39 +5958,14 @@ fn central_exact_authority_classifies_every_protected_term() {
 }
 
 #[test]
-fn exact_projection_emits_only_authority_minted_proofs() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let text = "std::collections::HashMap src/main.rs E0308 --release cargo tracedecay.data.dir commit:deadbee";
-    let source = chunk(
-        &generation,
-        1,
-        CodeSearchChunkGrainV1::SymbolBody,
-        text,
-        &[
-            (
-                ExactTechnicalTermKindV1::QualifiedName,
-                "std::collections::HashMap",
-            ),
-            (ExactTechnicalTermKindV1::Path, "src/main.rs"),
-            (ExactTechnicalTermKindV1::CompilerErrorCode, "E0308"),
-            (ExactTechnicalTermKindV1::CliFlag, "--release"),
-            (ExactTechnicalTermKindV1::ToolName, "cargo"),
-            (
-                ExactTechnicalTermKindV1::ConfigurationKey,
-                "tracedecay.data.dir",
-            ),
-            (ExactTechnicalTermKindV1::CommitIdentifier, "commit:deadbee"),
-        ],
-        &["reserve", "stock"],
-    );
+fn exact_artifact_emits_only_authority_minted_proofs() {
+    let artifact = rust_artifact(&[
+        "use std::collections::HashMap;\n/// Fails with \"connection refused\" when built without --release.\npub fn connect(map: HashMap<u32, u32>) -> usize { map.len() }\n",
+        "pub fn unrelated() -> u32 { 7 }\n",
+    ]);
     let authority =
         CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1"));
-    let projection = CodeLexicalProjectionAdapterV1::new(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        vec![source],
-    )
-    .expect("projection builds");
-    let query = r#"std::collections::HashMap src/main.rs E0308 --release cargo tracedecay.data.dir commit:deadbee"#;
+    let query = r#"std::collections::HashMap "connection refused" --release"#;
     let base = base_request(query, 16);
     let query_view = query_view(query);
     let request = ExactLaneRequest {
@@ -6456,99 +5973,77 @@ fn exact_projection_emits_only_authority_minted_proofs() {
         literals: authority.parse_literals(&query_view, &base),
         base,
         query_view: &query_view,
-        generation,
+        generation: artifact.metadata.generation.clone(),
         budget: budget(16),
     };
-    let lane = ExactLane::new(authority.clone(), projection.exact_adapter(authority));
+    let lane = ExactLane::new(authority.clone(), artifact.reader.exact_adapter(authority));
 
     let batch = complete(
         lane.retrieve_exact(&request)
-            .expect("exact projection query succeeds"),
+            .expect("exact artifact query succeeds"),
     );
 
-    assert_eq!(batch.candidates.len(), 1);
-    assert_eq!(batch.coverage.examined, 1);
-    assert_eq!(batch.coverage.eligible, 1);
-    assert_eq!(batch.coverage.excluded, 0);
-    let candidate = &batch.candidates[0];
-    let proof = candidate
-        .exact_admission_proof
-        .as_ref()
-        .expect("exact candidate carries an authority proof");
-    proof
-        .validate_for_request(&request.base)
-        .expect("proof remains request-bound");
-    let evidence = &batch.evidence_by_occurrence[&candidate.source_occurrence_id];
-    assert_eq!(evidence.matched_literals.len(), 7);
+    assert!(!batch.candidates.is_empty(), "the literals exist in file 0");
+    assert_eq!(candidate_files(&batch.candidates), BTreeSet::from([0]));
+    for candidate in &batch.candidates {
+        candidate
+            .exact_admission_proof
+            .as_ref()
+            .expect("exact candidate carries an authority proof")
+            .validate_for_request(&request.base)
+            .expect("proof remains request-bound");
+        assert!(
+            !batch.evidence_by_occurrence[&candidate.source_occurrence_id]
+                .matched_literals
+                .is_empty()
+        );
+    }
 }
 
 #[test]
 fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let chunks = vec![
-        admitted_rust_chunk(
-            &generation,
-            1,
-            "pub fn reserve_stock() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "reserve_stock",
-        ),
-        admitted_rust_chunk(
-            &generation,
-            2,
-            "pub fn reserve() { let stock_inventory = 1; }\n",
-            CodeSearchChunkGrainV1::SymbolBody,
-            "reserve",
-        ),
-    ];
-    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks,
-        BTreeMap::new(),
-    )
-    .expect("projection builds");
-    let whole_request = lexical_request("reserve_stock", &["reserve_stock"], &[], &[], 0, 8);
+    let artifact = rust_artifact(&[
+        "pub fn reserve_stock() {}\n",
+        "pub fn reserve() { let stock_inventory = 1; }\n",
+    ]);
+    let lane = artifact.lane();
 
     let whole = complete(
-        LexicalLane::new(projection.clone())
-            .retrieve_lexical(&whole_request)
+        lane.retrieve_lexical(&artifact.request("reserve_stock", &["reserve_stock"], &[], &[], 0, 8))
             .expect("whole-term retrieval succeeds"),
     );
-
-    assert_eq!(whole.candidates.len(), 1);
-    let evidence = &whole.evidence_by_occurrence[&whole.candidates[0].source_occurrence_id];
-    assert!(
+    assert_eq!(candidate_files(&whole.candidates), BTreeSet::from([0]));
+    assert!(whole.evidence_by_occurrence.values().all(|evidence| {
         evidence
             .matched_whole_terms
             .contains(&"reserve_stock".to_owned())
-    );
-    assert!(evidence.matched_subtokens.is_empty());
-    assert!(
+            && evidence.matched_subtokens.is_empty()
+    }));
+    assert!(whole.evidence_by_occurrence.values().any(|evidence| {
         evidence
             .field_scores_micros
             .iter()
             .any(|(field, _)| *field == LexicalFieldV1::SymbolName)
-    );
+    }));
 
-    let whole_subtoken_text = lexical_request("reserve", &["reserve"], &[], &[], 0, 8);
     let whole_only = complete(
-        LexicalLane::new(projection.clone())
-            .retrieve_lexical(&whole_subtoken_text)
+        lane.retrieve_lexical(&artifact.request("reserve", &["reserve"], &[], &[], 0, 8))
             .expect("whole-term/subtoken boundary retrieval succeeds"),
     );
-    assert_eq!(
-        whole_only.candidates.len(),
-        1,
+    assert!(candidate_files(&whole_only.candidates).contains(&1));
+    assert!(
+        whole_only
+            .evidence_by_occurrence
+            .values()
+            .all(|evidence| evidence.matched_subtokens.is_empty()),
         "a whole-term query must not consume the distinct subtoken field"
     );
 
-    let subtoken_request = lexical_request("reserve", &[], &["reserve"], &[], 0, 8);
     let subtokens = complete(
-        LexicalLane::new(projection)
-            .retrieve_lexical(&subtoken_request)
+        lane.retrieve_lexical(&artifact.request("reserve", &[], &["reserve"], &[], 0, 8))
             .expect("subtoken retrieval succeeds"),
     );
-    assert_eq!(subtokens.candidates.len(), 2);
+    assert_eq!(candidate_files(&subtokens.candidates), BTreeSet::from([0, 1]));
     assert!(subtokens.evidence_by_occurrence.values().all(|evidence| {
         evidence.matched_whole_terms.is_empty()
             && evidence.matched_subtokens == vec!["reserve".to_owned()]
@@ -6557,71 +6052,47 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
 
 #[test]
 fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let chunks = vec![
-        admitted_rust_chunk(
-            &generation,
-            1,
-            "pub fn reserve() { // reserve stock inventory\n}\n",
-            CodeSearchChunkGrainV1::SymbolBody,
-            "reserve",
-        ),
-        admitted_rust_chunk(
-            &generation,
-            2,
-            "pub fn reserve_stock() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "reserve_stock",
-        ),
-    ];
-    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks,
-        BTreeMap::new(),
-    )
-    .expect("projection builds");
-    let phrase_request = lexical_request(r#""reserve stock""#, &[], &[], &["reserve stock"], 0, 8);
+    let artifact = rust_artifact(&[
+        "pub fn reserve() { // reserve stock inventory\n}\n",
+        "pub fn reserve_stock() {}\n",
+    ]);
+    let lane = artifact.lane();
     let phrase = complete(
-        LexicalLane::new(projection.clone())
-            .retrieve_lexical(&phrase_request)
-            .expect("phrase retrieval succeeds"),
+        lane.retrieve_lexical(&artifact.request(
+            r#""reserve stock""#,
+            &[],
+            &[],
+            &["reserve stock"],
+            0,
+            8,
+        ))
+        .expect("phrase retrieval succeeds"),
     );
-    assert_eq!(phrase.candidates.len(), 1);
-    assert_eq!(
-        phrase.evidence_by_occurrence[&phrase.candidates[0].source_occurrence_id].matched_phrases,
-        vec!["reserve stock".to_owned()]
-    );
+    assert!(!phrase.candidates.is_empty());
+    assert!(phrase.candidates.iter().all(|candidate| {
+        phrase.evidence_by_occurrence[&candidate.source_occurrence_id].matched_phrases
+            == vec!["reserve stock".to_owned()]
+    }));
 
-    let disabled = lexical_request("resreve_stock", &["resreve_stock"], &[], &[], 0, 8);
+    let disabled = artifact.request("resreve_stock", &["resreve_stock"], &[], &[], 0, 8);
     assert!(
         complete(
-            LexicalLane::new(projection.clone())
-                .retrieve_lexical(&disabled)
+            lane.retrieve_lexical(&disabled)
                 .expect("disabled fuzzy retrieval succeeds"),
         )
         .candidates
         .is_empty()
     );
 
-    let fuzzy = lexical_request("resreve_stock", &["resreve_stock"], &[], &[], 1, 8);
-    let first = complete(
-        LexicalLane::new(projection.clone())
-            .retrieve_lexical(&fuzzy)
-            .expect("fuzzy retrieval succeeds"),
-    );
-    let second = complete(
-        LexicalLane::new(projection)
-            .retrieve_lexical(&fuzzy)
-            .expect("fuzzy replay succeeds"),
-    );
+    let fuzzy = artifact.request("resreve_stock", &["resreve_stock"], &[], &[], 1, 8);
+    let first = complete(lane.retrieve_lexical(&fuzzy).expect("fuzzy retrieval succeeds"));
+    let second = complete(lane.retrieve_lexical(&fuzzy).expect("fuzzy replay succeeds"));
     assert_eq!(first, second);
-    assert_eq!(first.candidates.len(), 1);
-    assert!(
-        first.evidence_by_occurrence[&first.candidates[0].source_occurrence_id]
-            .typo_recovery_applied
-    );
+    assert_eq!(candidate_files(&first.candidates), BTreeSet::from([1]));
+    let evidence = &first.evidence_by_occurrence[&first.candidates[0].source_occurrence_id];
+    assert!(evidence.typo_recovery_applied);
     assert_eq!(
-        first.evidence_by_occurrence[&first.candidates[0].source_occurrence_id].spelling_variants,
+        evidence.spelling_variants,
         [LexicalSpellingVariantV1 {
             query: "resreve_stock".to_owned(),
             alternative: "reserve_stock".to_owned(),
@@ -6645,59 +6116,22 @@ fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
 
 #[test]
 fn lexical_phrase_candidate_set_and_frequency_are_reused_without_drift() {
-    // Equivalence guard for finding 14: the per-phrase n-gram candidate set is
-    // now intersected once and reused for both the document-frequency tally and
-    // the lexical document set. Two documents contain the phrase and one does
-    // not; the reused candidate set must still return exactly the two
-    // phrase-bearing documents, deterministically.
-    let generation = id::<CodeGenerationId>("generation.1");
-    let chunks = vec![
-        admitted_rust_chunk(
-            &generation,
-            1,
-            "pub fn reserve() {\n    // reserve stock inventory ledger\n}\n",
-            CodeSearchChunkGrainV1::SymbolBody,
-            "reserve",
-        ),
-        admitted_rust_chunk(
-            &generation,
-            2,
-            "pub fn hold() {\n    // reserve stock inventory ledger\n}\n",
-            CodeSearchChunkGrainV1::SymbolBody,
-            "hold",
-        ),
-        admitted_rust_chunk(
-            &generation,
-            3,
-            "pub fn unrelated() {\n    // nothing relevant lives here\n}\n",
-            CodeSearchChunkGrainV1::SymbolBody,
-            "unrelated",
-        ),
-    ];
-    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks,
-        BTreeMap::new(),
-    )
-    .expect("projection builds");
+    // The per-phrase n-gram candidate set is intersected once and reused for
+    // both the document-frequency tally and the lexical document set. Two
+    // files contain the phrase and one does not; the reused candidate set
+    // must return exactly the phrase-bearing files, deterministically.
+    let artifact = rust_artifact(&[
+        "pub fn reserve() {\n    // reserve stock inventory ledger\n}\n",
+        "pub fn hold() {\n    // reserve stock inventory ledger\n}\n",
+        "pub fn unrelated() {\n    // nothing relevant lives here\n}\n",
+    ]);
+    let lane = artifact.lane();
+    let request = artifact.request(r#""reserve stock""#, &[], &[], &["reserve stock"], 0, 8);
+    let first = complete(lane.retrieve_lexical(&request).expect("phrase retrieval succeeds"));
+    let second = complete(lane.retrieve_lexical(&request).expect("phrase retrieval replays"));
 
-    let phrase_request = lexical_request(r#""reserve stock""#, &[], &[], &["reserve stock"], 0, 8);
-    let first = complete(
-        LexicalLane::new(projection.clone())
-            .retrieve_lexical(&phrase_request)
-            .expect("phrase retrieval succeeds"),
-    );
-    let second = complete(
-        LexicalLane::new(projection)
-            .retrieve_lexical(&phrase_request)
-            .expect("phrase retrieval replays"),
-    );
-
-    // Reusing the shared candidate set is deterministic and drift-free.
     assert_eq!(first, second);
-    // Exactly the two phrase-bearing documents are returned; the unrelated
-    // document is excluded.
-    assert_eq!(first.candidates.len(), 2);
+    assert_eq!(candidate_files(&first.candidates), BTreeSet::from([0, 1]));
     for candidate in &first.candidates {
         assert_eq!(
             first.evidence_by_occurrence[&candidate.source_occurrence_id].matched_phrases,
@@ -6708,101 +6142,63 @@ fn lexical_phrase_candidate_set_and_frequency_are_reused_without_drift() {
 
 #[test]
 fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let chunks = vec![
-        admitted_rust_chunk(
-            &generation,
-            1,
-            "pub fn reserve() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "reserve",
-        ),
-        admitted_rust_chunk(
-            &generation,
-            2,
-            "pub fn reserved() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "reserved",
-        ),
-        admitted_rust_chunk(
-            &generation,
-            3,
-            "pub fn other() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "other",
-        ),
-    ];
-    let projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks,
-        BTreeMap::new(),
-    )
-    .expect("projection builds");
-    let request = lexical_request(
-        "reservd reservd otherr",
-        &["reservd", "reservd", "otherr"],
-        &[],
-        &[],
-        3,
-        8,
-    );
-
+    let artifact = rust_artifact(&[
+        "pub fn reserve() {}\n",
+        "pub fn reserved() {}\n",
+        "pub fn other() {}\n",
+    ]);
     let batch = complete(
-        LexicalLane::new(projection)
-            .retrieve_lexical(&request)
+        artifact
+            .lane()
+            .retrieve_lexical(&artifact.request(
+                "reservd reservd otherr",
+                &["reservd", "reservd", "otherr"],
+                &[],
+                &[],
+                3,
+                8,
+            ))
             .expect("fuzzy retrieval succeeds"),
     );
 
-    assert_eq!(batch.candidates.len(), 3);
+    assert_eq!(
+        candidate_files(&batch.candidates),
+        BTreeSet::from([0, 1, 2]),
+        "the duplicate term must leave budget for the distinct typo"
+    );
     assert!(
         batch
             .evidence_by_occurrence
             .values()
-            .any(|evidence| { evidence.matched_whole_terms.contains(&"otherr".to_owned()) })
+            .any(|evidence| evidence.matched_whole_terms.contains(&"otherr".to_owned()))
     );
 }
 
 #[test]
-fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
-    let generation = id::<CodeGenerationId>("generation.1");
-    let chunks: Vec<ExtractionAdmittedCodeSearchChunkV1> = (1..=3)
-        .map(|ordinal| {
-            admitted_rust_chunk(
-                &generation,
-                ordinal,
-                "pub fn target() {}\n",
-                CodeSearchChunkGrainV1::SymbolSignature,
-                "target",
-            )
-        })
-        .collect();
-    let current = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Current),
-        chunks.clone(),
-        BTreeMap::new(),
-    )
-    .expect("current projection builds");
-    let request = lexical_request("target", &["target"], &[], &[], 0, 2);
+fn lexical_artifact_reports_freshness_coverage_and_page_cutoff() {
+    let sources = ["pub fn target() {}\n"; 3];
+    let fixture = rust_source_fixture(&sources);
+    let current = sealed_artifact(&fixture, fixture.metadata.clone());
+    let request = current.request("target", &["target"], &[], &[], 0, 2);
 
     let page = complete(
-        LexicalLane::new(current)
+        current
+            .lane()
             .retrieve_lexical(&request)
             .expect("page retrieval succeeds"),
     );
 
     assert_eq!(page.candidates.len(), 2);
-    assert_eq!(page.coverage.examined, 3);
-    assert_eq!(page.coverage.eligible, 3);
-    assert_eq!(page.coverage.capped, 1);
+    assert!(page.coverage.eligible >= 3, "every file matches: {:?}", page.coverage);
+    assert_eq!(page.coverage.examined, page.coverage.eligible);
+    assert_eq!(page.coverage.capped, page.coverage.eligible - 2);
     assert!(!page.continuation.expect("continuation").exhausted);
 
-    let stale = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&generation, FreshnessCompatibilityV1::Stale),
-        chunks,
-        BTreeMap::new(),
-    )
-    .expect("stale projection remains inspectable");
-    let outcome = LexicalLane::new(stale)
+    let mut stale_metadata = fixture.metadata.clone();
+    stale_metadata.freshness = freshness(FreshnessCompatibilityV1::Stale);
+    let stale = sealed_artifact(&fixture, stale_metadata);
+    let outcome = stale
+        .lane()
         .retrieve_lexical(&request)
         .expect("staleness is a typed outcome");
     assert!(matches!(outcome, RetrieverOutcome::Stale(_)));
@@ -6810,43 +6206,25 @@ fn lexical_projection_reports_freshness_coverage_and_page_cutoff() {
 
 #[test]
 fn lexical_source_occurrence_identity_is_generation_exact() {
-    let first_generation = id::<CodeGenerationId>("generation.1");
-    let second_generation = id::<CodeGenerationId>("generation.2");
-    let first_projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&first_generation, FreshnessCompatibilityV1::Current),
-        vec![admitted_rust_chunk(
-            &first_generation,
-            1,
-            "pub fn target() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "target",
-        )],
-        BTreeMap::new(),
-    )
-    .expect("first projection builds");
-    let second_projection = CodeLexicalProjectionAdapterV1::new_admitted(
-        projection_metadata(&second_generation, FreshnessCompatibilityV1::Current),
-        vec![admitted_rust_chunk(
-            &second_generation,
-            1,
-            "pub fn target() {}\n",
-            CodeSearchChunkGrainV1::SymbolSignature,
-            "target",
-        )],
-        BTreeMap::new(),
-    )
-    .expect("second projection builds");
-    let first_request = lexical_request("target", &["target"], &[], &[], 0, 8);
-    let mut second_request = lexical_request("target", &["target"], &[], &[], 0, 8);
-    second_request.generation = second_generation;
+    let target = "pub fn target() {}\n";
+    let first = rust_artifact(&[target]);
+    let second = rust_artifact(&[target, "pub fn unrelated() {}\n"]);
+    assert_ne!(
+        first.metadata.generation, second.metadata.generation,
+        "a changed corpus seals a distinct generation"
+    );
+    let first_request = first.request("target", &["target"], &[], &[], 0, 8);
+    let second_request = second.request("target", &["target"], &[], &[], 0, 8);
 
-    let first = complete(
-        LexicalLane::new(first_projection)
+    let first_batch = complete(
+        first
+            .lane()
             .retrieve_lexical(&first_request)
             .expect("first retrieval succeeds"),
     );
-    let second = complete(
-        LexicalLane::new(second_projection)
+    let second_batch = complete(
+        second
+            .lane()
             .retrieve_lexical(&second_request)
             .expect("second retrieval succeeds"),
     );
@@ -6856,15 +6234,16 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
     // shareable anchor across generations. Generation exactness lives
     // in the source occurrence instead.
     assert_eq!(
-        first.candidates[0].anchor_id, second.candidates[0].anchor_id,
+        first_batch.candidates[0].anchor_id, second_batch.candidates[0].anchor_id,
         "an unchanged symbol occurrence keeps one anchor across generations"
     );
     assert_ne!(
-        first.candidates[0].source_occurrence_id, second.candidates[0].source_occurrence_id,
+        first_batch.candidates[0].source_occurrence_id,
+        second_batch.candidates[0].source_occurrence_id,
         "the logical chunk is stable but each generation has a distinct occurrence"
     );
     assert!(
-        first.candidates[0]
+        first_batch.candidates[0]
             .source_occurrence_id
             .as_str()
             .contains(first_request.generation.as_str()),

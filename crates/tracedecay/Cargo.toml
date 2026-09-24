@@ -232,12 +232,10 @@ test-transport = [
     "tracedecay-code-index-runtime/test-transport",
 ]
 
-# The evaluator library is the only selector of `tracedecay-query/search-eval`,
-# the eval-only in-memory lexical projection. Cargo rejects optional
-# dev-dependencies, and an unconditional one unifies this feature into every
-# test target, so the transport suites compile that projection. Journeys that
-# compare the CLI receipt to the library enable this feature. `test-transport`
-# and `production` must not.
+# Links the search-quality evaluator library. Cargo rejects optional
+# dev-dependencies, and an unconditional one links the evaluator into every
+# test target. Journeys that compare the CLI receipt to the library enable
+# this feature. `test-transport` and `production` must not.
 search-eval = ["dep:tracedecay-search-eval"]
 
 # The typed RMCP benchmark is the only consumer of the client-side RMCP
@@ -341,8 +339,8 @@ tempfile = "3"
 futures-util = "0.3.33"
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 # Opt-in. Cargo rejects optional dev-dependencies, and an unconditional one
-# unifies `tracedecay-query/search-eval` into every test target. Default and
-# `production` builds leave it off, so the shipped CLI does not link it.
+# links the evaluator into every test target. Default and `production` builds
+# leave it off, so the shipped CLI does not link it.
 tracedecay-search-eval = { path = "../tracedecay-search-eval", version = "0.1.0", optional = true }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
