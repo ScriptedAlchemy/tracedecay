@@ -26,10 +26,10 @@ import {
  */
 
 const INPUT_CLASS =
-  'min-h-[var(--touch-target-min)] rounded-sm border border-edge bg-surface-1 px-2 font-mono text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
+  'min-h-[var(--touch-target-min)] rounded-panel border border-edge-subtle bg-surface-1 px-2 font-mono text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
 
 const BUTTON_CLASS =
-  'min-h-[var(--touch-target-min)] rounded-sm border border-edge px-2.5 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted';
+  'min-h-[var(--touch-target-min)] rounded-panel border border-edge-subtle px-2.5 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:text-text-muted';
 
 const CELL = 'border border-edge-subtle p-1 align-top';
 const HEAD = `${CELL} td-legend whitespace-normal text-left text-text-muted`;

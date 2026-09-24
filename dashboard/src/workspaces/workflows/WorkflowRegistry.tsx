@@ -26,7 +26,7 @@ import {
  */
 
 const INPUT_CLASS =
-  'min-h-[var(--touch-target-min)] w-full rounded-sm border border-edge bg-surface-1 px-2 font-mono text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
+  'min-h-[var(--touch-target-min)] w-full rounded-panel border border-edge-subtle bg-surface-1 px-2 font-mono text-2xs text-text-primary placeholder:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent';
 
 export function WorkflowRegistryPanel({
   result,

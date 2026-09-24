@@ -23,7 +23,7 @@ export function EvidencePattern({
     <span className={cn('inline-flex items-center gap-1.5 text-2xs text-text-muted', className)}>
       <span
         aria-hidden
-        className="h-2.5 w-5 rounded-[2px] border border-edge-subtle opacity-80"
+        className="h-2.5 w-5 rounded-panel border border-edge-subtle opacity-80"
         style={{
           backgroundImage: PATTERN[quality],
           backgroundSize: quality === 'predicted' ? '4px 4px' : undefined,

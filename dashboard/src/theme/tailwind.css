@@ -91,6 +91,11 @@
   --text-3xl: 44px;
   --text-4xl: 60px;
 
+  /* `rounded-panel` (2px) and `rounded-chip` (1px) are the only corners in the
+   * design system. Tailwind's default `rounded-sm` is 0.25rem (3.5px at the
+   * 14px root), and there is no `--color-edge`, so `border-edge` falls back to
+   * currentColor: hairlines are `border-edge-subtle` or `border-edge-strong`. */
+  --radius-panel: var(--radius-panel);
   --radius-standard: var(--radius-standard);
   --radius-chip: var(--radius-chip);
 }
