@@ -314,7 +314,7 @@ mod tests {
         .unwrap();
         let binding = WorkExecutableBindingV1::new(
             executable,
-            std::path::PathBuf::from("/tmp/provider-configuration-restart-fixture"),
+            std::env::temp_dir().join("provider-configuration-restart-fixture"),
             vec![WorkExecutableCapabilityV1::CodexCliExecJson],
             Vec::new(),
         )
@@ -387,7 +387,7 @@ mod tests {
                 digest('f'),
             )
             .unwrap(),
-            std::path::PathBuf::from("/tmp/provider-configuration-mixed-fixture"),
+            std::env::temp_dir().join("provider-configuration-mixed-fixture"),
             vec![WorkExecutableCapabilityV1::CodexCliExecJson],
             Vec::new(),
         )

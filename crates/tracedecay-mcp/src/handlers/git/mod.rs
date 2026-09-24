@@ -175,7 +175,9 @@ mod tests {
     /// failure every other git error uses, so a caller never sees a bare hang.
     #[test]
     fn an_elapsed_dispatch_deadline_is_a_typed_semantic_failure() {
-        let project = fixture_project(std::path::Path::new("/unread"));
+        // Never read, but admission requires a host-absolute root, which a
+        // driveless `/unread` is not on Windows.
+        let project = fixture_project(&std::env::temp_dir().join("unread"));
         let result =
             git_dispatch_deadline_result(&fixture_context(&project), "tracedecay_pr_context");
 

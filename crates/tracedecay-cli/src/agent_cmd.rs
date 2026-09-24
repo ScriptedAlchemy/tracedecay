@@ -1177,6 +1177,9 @@ mod tests {
             .join("host-cli-test-homes");
         std::fs::create_dir_all(&root)
             .unwrap_or_else(|error| panic!("failed to create {}: {error}", root.display()));
+        // Spelled without the `..` hops: Windows private-file writes beneath a
+        // long home refuse any path that is not exactly absolute.
+        let root = tracedecay_runtime_core::path_safety::canonical_root_identity(&root);
         tempfile::Builder::new()
             .prefix(".tmp")
             .tempdir_in(&root)

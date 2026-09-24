@@ -21,7 +21,8 @@ use tracedecay_sessions::observation::{
 };
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitRelationFilter, GitRefFilter, SessionsForQuery, pending_git_evidence_publication_count,
+    CommitRelationFilter, GitRefFilter, SessionsForQuery, normalize_worktree,
+    pending_git_evidence_publication_count,
 };
 
 fn run_git(project: &Path, args: &[&str]) -> String {
@@ -209,7 +210,11 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
         .unwrap();
     assert_eq!(branch_hits.len(), 1);
     assert_eq!(branch_hits[0].session_id, session_id.as_str());
-    assert_eq!(branch_hits[0].worktree.as_deref(), project.to_str());
+    // Worktrees are keyed in their portable `/`-separated spelling.
+    assert_eq!(
+        branch_hits[0].worktree,
+        Some(normalize_worktree(&project.to_string_lossy()))
+    );
 
     let commit_hits = store
         .sessions_for_with_relation(

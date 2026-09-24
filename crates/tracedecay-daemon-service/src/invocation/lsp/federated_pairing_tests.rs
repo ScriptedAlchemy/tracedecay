@@ -16,7 +16,7 @@
 //! not name.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracedecay_contracts::{
     CapabilityGrantId, DisclosureClass, RegisteredRootLocatorV1, ResolvedScope,
@@ -82,13 +82,29 @@ fn grant(scope: &ResolvedScope, suffix: &str) -> CapabilityGrantSnapshot {
     .expect("scope grant")
 }
 
+/// A never-created root that is absolute on the host, as a registered root
+/// locator requires: `/name` has no drive, so Windows does not call it absolute.
+fn fixture_root(name: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!(r"C:\{name}"))
+    } else {
+        PathBuf::from(format!("/{name}"))
+    }
+}
+
+fn fixture_root_uri(root: &Path) -> String {
+    url::Url::from_file_path(root)
+        .expect("absolute fixture root")
+        .to_string()
+}
+
 async fn install_root(
     service: &DaemonInvocationService,
     scope: &ResolvedScope,
     suffix: &str,
 ) -> (PathBuf, String, ResolvedScope, RegisteredRootLocatorV1) {
-    let project_root = PathBuf::from(format!("/federated-pairing-{suffix}"));
-    let uri = format!("file:///federated-pairing-{suffix}");
+    let project_root = fixture_root(&format!("federated-pairing-{suffix}"));
+    let uri = fixture_root_uri(&project_root);
     service
         .install_lsp_owner(
             project_root.clone(),
@@ -197,7 +213,7 @@ async fn federated_workspace_authority_pairs_by_scope_digest_not_list_position()
     // to pair with, so the whole workspace is refused rather than partially
     // admitted.
     let unnamed = AdmittedRoot::authorized(
-        "file:///federated-pairing-unnamed".to_owned(),
+        fixture_root_uri(&fixture_root("federated-pairing-unnamed")),
         scope_for(999).scope_digest,
     );
     let mut widened = authorized.clone();

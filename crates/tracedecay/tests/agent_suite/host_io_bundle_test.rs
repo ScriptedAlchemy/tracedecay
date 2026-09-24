@@ -286,16 +286,20 @@ fn codex_agent_installer_and_remover_use_only_the_bundle_they_are_given() {
     let b_writes = drain(&B_LOG);
     assert_eq!(a_writes.len(), 2, "alpha agent + manifest: {a_writes:?}");
     assert_eq!(b_writes.len(), 3, "beta, gamma + manifest: {b_writes:?}");
+    // Compared as paths: Windows spells the joined `.codex/agents` with both
+    // separators, and a raw substring test reads that as a different directory.
+    let written_under = |entry: &String, home: &Path| {
+        entry
+            .strip_prefix("write_text ")
+            .and_then(|path| Path::new(path).parent())
+            == Some(home.join(".codex").join("agents").as_path())
+    };
     assert!(
-        a_writes
-            .iter()
-            .all(|entry| entry.contains("/a/.codex/agents/")),
+        a_writes.iter().all(|entry| written_under(entry, &a_home)),
         "{a_writes:?}"
     );
     assert!(
-        b_writes
-            .iter()
-            .all(|entry| entry.contains("/b/.codex/agents/")),
+        b_writes.iter().all(|entry| written_under(entry, &b_home)),
         "{b_writes:?}"
     );
 
