@@ -434,6 +434,13 @@ mod init_bootstrap_tests {
         let profile = temp.path().join("profile");
         std::fs::create_dir_all(&project).unwrap();
         let socket = temp.path().join("daemon.sock");
+        let authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+            temp.path(),
+            &tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.clone()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("publish the fixture daemon's authority record");
+        let auth_token = authority.auth_token().to_owned();
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let _socket_env = SocketEnvGuard::set(&socket);
 
@@ -446,6 +453,13 @@ mod init_bootstrap_tests {
                     let (stream, _addr) = listener.accept().await.unwrap();
                     let (reader, mut writer) = stream.into_split();
                     let mut lines = tokio::io::BufReader::new(reader).lines();
+                    let preface = lines.next_line().await.unwrap().unwrap();
+                    assert!(
+                        tracedecay_daemon_protocol::DaemonAuthPreface::from_line(preface.trim())
+                            .expect("auth preface")
+                            .authenticate(&auth_token),
+                        "init must present the daemon token"
+                    );
                     let _handshake_line = lines.next_line().await.unwrap().unwrap();
                     let request_line = lines.next_line().await.unwrap().unwrap();
                     let request: serde_json::Value = serde_json::from_str(&request_line).unwrap();

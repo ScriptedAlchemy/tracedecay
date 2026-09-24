@@ -14,12 +14,16 @@ use crate::common::{
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1;
 use tracedecay_contracts::{
-    ApplicationProblem, ApplicationProblemEnvelope, RUNTIME_MOUNTING_REASON_CODE, RequestId,
-    ResultContractRef, SafeDiagnostic,
+    ApplicationProblem, RUNTIME_MOUNTING_REASON_CODE, ResolvedScope, SafeDiagnostic,
 };
 use tracedecay_daemon_identity::authority::DaemonAuthority;
-use tracedecay_daemon_protocol::{DaemonAuthPreface, DaemonEndpoint};
+use tracedecay_daemon_protocol::{
+    DAEMON_INVOCATION_PROTOCOL, DaemonAuthPreface, DaemonEndpoint, DaemonInvocationPayload,
+    DaemonInvocationRequest, DaemonInvocationResponse,
+};
+use tracedecay_domain::{FactCategoryV1, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_domain::NativeHostIdentityV1;
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{HookEventV2, HookSpoolConfigV1, HookSpoolV1};
@@ -27,8 +31,6 @@ use tracedecay_runtime_core::storage::{
     EnrollmentMarker, StorageMode, default_profile_project_id, pin_fixture_repository_identity,
     profile_sharded_data_root, profile_sharded_layout,
 };
-use tracedecay_tool_catalog::SchemaId;
-
 /// Bound for waits that depend on spawning and running the real `tracedecay`
 /// CLI as a child process: connecting to the fake daemon socket and forwarding
 /// the observed request back to the test thread. Under nextest's
@@ -131,7 +133,9 @@ fn cli_build_version() -> &'static str {
 }
 
 /// Publishes the authority record beside `socket_path` that the CLI resolves
-/// a fake daemon through. Hold it for as long as the fake daemon serves.
+/// a fake daemon through: the record `TRACEDECAY_DAEMON_SOCKET` routes read
+/// or, for a fake bound on the profile's own socket, the profile record the
+/// typed retained route reads. Hold it for as long as the fake daemon serves.
 fn seed_fake_daemon_authority(socket_path: &Path) -> DaemonAuthority {
     DaemonAuthority::acquire(
         socket_path.parent().expect("socket parent"),
@@ -547,23 +551,6 @@ fn wait_for_daemon_socket(socket_path: &Path) {
             )
         },
     );
-}
-
-fn spawn_sentinel_daemon(
-    socket_path: PathBuf,
-    expected_tool_name: &'static str,
-    expect_project_path: bool,
-    expect_allow_init: bool,
-    sentinel: &'static str,
-) -> mpsc::Receiver<Value> {
-    spawn_sentinel_daemon_with_notification(
-        socket_path,
-        expected_tool_name,
-        expect_project_path,
-        expect_allow_init,
-        sentinel,
-        false,
-    )
 }
 
 fn spawn_sentinel_daemon_with_notification(
@@ -1222,27 +1209,29 @@ fn tool_cli_skips_daemon_notifications_until_matching_response() {
         .expect("fake daemon should receive tools/call request");
 }
 
+/// A retained store tool travels to the profile's daemon as one typed
+/// invocation: the explicit `--project` rides the handshake with first-touch
+/// init allowed, and the decoded request carries the caller's exact fields.
 #[test]
 fn fact_store_cli_routes_exact_tool_through_daemon() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
 
-    let sentinel = "first-touch daemon response";
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let observed_request = spawn_sentinel_daemon(
-        socket_path.clone(),
-        "tracedecay_fact_store_add",
-        true,
-        true,
-        sentinel,
+    let daemon = spawn_scripted_retained_daemon(
+        &home_path,
+        vec![ApplicationProblem::unavailable(
+            SafeDiagnostic::new(
+                "application.retained.authority-unavailable",
+                "first-touch daemon response",
+            )
+            .expect("diagnostic"),
+        )],
     );
     let project_arg = project_path.to_string_lossy().to_string();
     let output = tracedecay_command_with_home(&home_path)
         .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args([
             "tool",
             "--project",
@@ -1255,26 +1244,31 @@ fn fact_store_cli_routes_exact_tool_through_daemon() {
         .output()
         .expect("tracedecay tool should run");
 
-    assert!(
-        output.status.success(),
-        "first-touch store tool CLI should accept daemon response\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(sentinel),
-        "tool CLI should print daemon response, got:\n{stdout}"
+        stdout.contains("first-touch daemon response"),
+        "tool CLI should print the daemon's answer, got:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let request = observed_request
+    let (handshake, request) = daemon
+        .requests
         .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
-        .expect("fake daemon should receive first-touch tools/call request");
-    assert_eq!(request["params"]["name"], "tracedecay_fact_store_add");
+        .expect("fake daemon should receive the first-touch invocation");
     assert_eq!(
-        request["params"]["arguments"]["content"],
-        "first touch via daemon"
+        handshake["project_path"],
+        json!(project_path.to_string_lossy()),
+        "{handshake}"
     );
-    assert_eq!(request["params"]["arguments"]["category"], "decision");
+    assert_eq!(handshake["allow_init"], true, "{handshake}");
+    let DaemonInvocationPayload::RetainedApplication {
+        request: RetainedSurfaceRequestV1::FactStoreAdd(add),
+        ..
+    } = &request.payload
+    else {
+        panic!("fact_store_add must travel as a retained invocation: {request:?}");
+    };
+    assert_eq!(add.content, "first touch via daemon");
+    assert_eq!(add.category, Some(FactCategoryV1::Decision));
 }
 
 #[test]
@@ -1513,29 +1507,29 @@ fn daemon_project_handshake_uses_client_profile_identity() {
     );
 }
 
+/// Retained tools reach the daemon through the client profile's own authority
+/// record, so the daemon serving that profile sees the profile's stale
+/// `config.json` and must neither read it into the configuration authority
+/// nor rewrite it.
 #[test]
 fn daemon_first_touch_uses_registered_runtime_without_rewriting_legacy_config() {
-    let daemon_home = TempDir::new().unwrap();
-    let client_home = TempDir::new().unwrap();
+    let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let daemon_home_path = canonical_existing_path(daemon_home.path());
-    let client_home_path = canonical_existing_path(client_home.path());
+    let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&client_home_path, &project_path);
+    init_project_with_cli(&home_path, &project_path);
 
     let project_id = default_profile_project_id(&project_path);
-    let config_path = client_home_path
+    let config_path = home_path
         .join(".tracedecay/projects")
         .join(project_id)
         .join("config.json");
     std::fs::write(&config_path, b"{not json").unwrap();
 
-    let _daemon = spawn_tracedecay_daemon(&daemon_home_path);
-    let socket_path = common::daemon_socket_path(&daemon_home_path);
+    let _daemon = spawn_tracedecay_daemon(&home_path);
     let project_arg = project_path.to_string_lossy().to_string();
-    let output = tracedecay_command_with_home(&client_home_path)
+    let output = tracedecay_command_with_home(&home_path)
         .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args([
             "tool",
             "--project",
@@ -1854,28 +1848,34 @@ fn status_command_times_out_when_daemon_never_replies() {
     );
 }
 
-/// The `tools/call` requests a [`spawn_scripted_result_sequence_daemon`]
-/// observed. Dropping it stops the daemon thread.
-struct ScriptedResultSequenceDaemon {
-    requests: mpsc::Receiver<Value>,
+/// The handshake and typed invocation each request a
+/// [`spawn_scripted_retained_daemon`] observed. Dropping it stops the daemon
+/// thread.
+struct ScriptedRetainedDaemon {
+    requests: mpsc::Receiver<(Value, DaemonInvocationRequest)>,
     stop: Arc<AtomicBool>,
 }
 
-impl Drop for ScriptedResultSequenceDaemon {
+impl Drop for ScriptedRetainedDaemon {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
     }
 }
 
-/// A fake daemon that answers every `tools/call` for `expected_tool_name` with
-/// the next scripted `result`, repeating the last one once the script is
-/// exhausted, so a test can hand the CLI a typed retryable state for as many
-/// attempts as it makes and then either the answer or nothing else.
-fn spawn_scripted_result_sequence_daemon(
-    socket_path: PathBuf,
-    expected_tool_name: &'static str,
-    results: Vec<Value>,
-) -> ScriptedResultSequenceDaemon {
+/// A fake daemon serving `home`'s profile on that profile's own socket and
+/// authority record, speaking the typed invocation protocol the CLI's
+/// retained tools use. It answers every invocation with the next scripted
+/// problem as the retained owner's completed answer, repeating the last one
+/// once the script is exhausted, so a test can hand the CLI a typed
+/// retryable state for as many attempts as it makes and then the answer.
+///
+/// The CLI pools its invocation connection, so one accepted stream keeps
+/// serving requests until the client releases it.
+fn spawn_scripted_retained_daemon(
+    home: &Path,
+    problems: Vec<ApplicationProblem>,
+) -> ScriptedRetainedDaemon {
+    let socket_path = common::daemon_socket_path(home);
     let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -1884,13 +1884,20 @@ fn spawn_scripted_result_sequence_daemon(
     std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket_path);
         let authority = seed_fake_daemon_authority(&socket_path);
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.scripted-daemon").expect("project id"),
+            RepositoryId::new("repository.scripted-daemon").expect("repository id"),
+            WorktreeId::new("worktree.scripted-daemon").expect("worktree id"),
+            None,
+        )
+        .expect("scripted daemon scope");
         let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
         listener
             .set_nonblocking(true)
             .expect("set listener nonblocking");
         ready_tx.send(()).expect("notify fake daemon readiness");
-        let mut results = results.into_iter();
-        let mut current = results.next().expect("at least one scripted result");
+        let mut problems = problems.into_iter();
+        let mut current = problems.next().expect("at least one scripted problem");
 
         while !daemon_stop.load(Ordering::Acquire) {
             let stream = match listener.accept() {
@@ -1909,99 +1916,76 @@ fn spawn_scripted_result_sequence_daemon(
                 .expect("write timeout");
             let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
             let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
-            let request = loop {
+            let mut writer = stream;
+            let mut handshake: Option<Value> = None;
+            loop {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => break None,
+                    Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
-                if let Ok(preface) = DaemonAuthPreface::from_line(line.trim()) {
+                let line = line.trim();
+                if let Ok(preface) = DaemonAuthPreface::from_line(line) {
                     assert!(
                         preface.authenticate(authority.auth_token()),
                         "the CLI must present the daemon token"
                     );
                     continue;
                 }
-                let value: Value =
-                    serde_json::from_str(line.trim()).expect("fake daemon preamble JSON");
-                if value.get("method").is_some() {
-                    break Some(value);
+                let frame: Value = serde_json::from_str(line).expect("fake daemon frame JSON");
+                if frame["protocol"] != DAEMON_INVOCATION_PROTOCOL {
+                    handshake = Some(frame);
+                    continue;
                 }
-            };
-            let Some(request) = request else {
-                continue;
-            };
-            let result = if request["method"] == "initialize" {
-                json!({
-                    "serverInfo": {
-                        "name": "tracedecay",
-                        "version": cli_build_version(),
-                    }
-                })
-            } else {
-                assert_eq!(request["method"], "tools/call");
-                assert_eq!(request["params"]["name"], expected_tool_name);
-                if request_tx.send(request.clone()).is_err() {
-                    break;
+                let request: DaemonInvocationRequest =
+                    serde_json::from_value(frame).expect("typed daemon invocation request");
+                let request_id = request.request_id.clone();
+                let observed_handshake = handshake
+                    .clone()
+                    .expect("the handshake precedes every invocation");
+                if request_tx.send((observed_handshake, request)).is_err() {
+                    return;
                 }
-                let served = current.clone();
-                if let Some(next) = results.next() {
+                let response = DaemonInvocationResponse::retained_application_problem(
+                    request_id,
+                    scope.clone(),
+                    current.clone(),
+                );
+                if let Some(next) = problems.next() {
                     current = next;
                 }
-                served
-            };
-            let response = json!({
-                "jsonrpc": "2.0",
-                "id": request["id"].clone(),
-                "result": result,
-            });
-            let mut writer = stream;
-            writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&response).expect("response JSON")
+                )
                 .expect("write fake daemon response");
+            }
         }
     });
 
     ready_rx
         .recv_timeout(LOCAL_READY_TIMEOUT)
         .expect("fake daemon should become ready");
-    ScriptedResultSequenceDaemon {
+    ScriptedRetainedDaemon {
         requests: request_rx,
         stop,
     }
 }
 
-/// The MCP tool result the daemon renders for a completed pre-admission
-/// problem whose retry directive is `after_delay`.
-fn retry_directed_tool_result(code: &str, message: &str, retry_after_millis: u64) -> Value {
-    let envelope = ApplicationProblemEnvelope::new(
-        ResultContractRef::new(
-            SchemaId::new("schema.retained.fact_store_add.result").expect("schema id"),
-            1,
-        )
-        .expect("result contract"),
-        RequestId::new("request.cli.tool.mounting-owner").expect("request id"),
-        ApplicationProblem::unavailable(SafeDiagnostic::new(code, message).expect("diagnostic")),
-    )
-    .expect("retry-directed envelope")
-    .with_retry_after_millis(Some(retry_after_millis))
-    .expect("retry delay");
-    json!({
-        "content": [{
-            "type": "text",
-            "text": serde_json::to_string(&envelope).expect("envelope JSON"),
-        }],
-        "isError": true,
-        "problem": serde_json::to_value(envelope.problem.as_ref()).expect("problem record"),
-    })
+/// The retained owner's refusal while it is still mounting behind the core
+/// publication; the CLI re-sends the same request after the delay the daemon
+/// side's problem record names.
+fn mounting_owner_problem() -> ApplicationProblem {
+    ApplicationProblem::runtime_mounting()
 }
 
-/// The MCP tool result for a project route whose retained owner is still
-/// mounting behind the core publication.
-fn mounting_owner_tool_result(retry_after_millis: u64) -> Value {
-    retry_directed_tool_result(
-        RUNTIME_MOUNTING_REASON_CODE,
-        "The project runtime for this operation is still mounting",
-        retry_after_millis,
+/// A completed authority problem: the owner's answer, carrying its own
+/// `after_delay` directive for the caller.
+fn completed_authority_problem(message: &str) -> ApplicationProblem {
+    ApplicationProblem::unavailable(
+        SafeDiagnostic::new("application.retained.authority-unavailable", message)
+            .expect("diagnostic"),
     )
 }
 
@@ -2016,17 +2000,11 @@ fn fact_store_add_args() -> String {
     .to_string()
 }
 
-fn fact_store_add_command(
-    home: &Path,
-    project: &Path,
-    socket: &Path,
-    deadline_ms: &str,
-) -> Command {
+fn fact_store_add_command(home: &Path, project: &Path, deadline_ms: &str) -> Command {
     let project_arg = project.to_string_lossy().to_string();
     let mut command = tracedecay_command_with_home(home);
     command
         .current_dir(project)
-        .env("TRACEDECAY_DAEMON_SOCKET", socket)
         .env("TRACEDECAY_TOOL_DEADLINE_MS", deadline_ms)
         .args([
             "tool",
@@ -2042,48 +2020,50 @@ fn fact_store_add_command(
 
 /// A one-shot `tracedecay tool` call holds a deadline, so a typed
 /// `retry: after_delay` unavailable from an owner still mounting is progress
-/// to wait through on the delay the directive names, not the answer.
+/// to wait through on the delay the problem record names, not the answer. The
+/// owner's eventual answer here is a completed typed problem, which the CLI
+/// returns on first observation exactly like a success.
 #[test]
 fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
 
-    const RETRY_AFTER_MILLIS: u64 = 100;
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let daemon = spawn_scripted_result_sequence_daemon(
-        socket_path.clone(),
-        "tracedecay_fact_store_add",
+    let daemon = spawn_scripted_retained_daemon(
+        &home_path,
         vec![
-            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
-            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
-            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
-            mounting_owner_tool_result(RETRY_AFTER_MILLIS),
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": json!({"outcome": {"outcome": "effect", "marker": "mounted-answer"}}).to_string(),
-                }]
-            }),
+            mounting_owner_problem(),
+            mounting_owner_problem(),
+            mounting_owner_problem(),
+            mounting_owner_problem(),
+            completed_authority_problem("mounted-answer: history is not available"),
         ],
     );
     let started = Instant::now();
     let output = run_command_with_timeout(
-        fact_store_add_command(&home_path, &project_path, &socket_path, "10000"),
+        fact_store_add_command(&home_path, &project_path, "10000"),
         CLI_ROUNDTRIP_TIMEOUT,
     );
     let elapsed = started.elapsed();
 
     assert!(
-        output.status.success(),
-        "the tool must return the owner's answer once it mounts\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "the owner's completed problem must fail typed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let printed: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "the owner's typed answer must be printed as JSON ({error}):\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(
+        printed["problem"]["code"], "application.retained.authority-unavailable",
+        "stdout must carry the mounted owner's answer, got:\n{stdout}"
+    );
     assert!(
         stdout.contains("mounted-answer"),
         "stdout must carry the mounted owner's answer, got:\n{stdout}"
@@ -2097,8 +2077,14 @@ fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
         attempts, 5,
         "the CLI must re-send the same mounting request until the owner answers"
     );
+    // The mounting refusal and the final answer are both `after_delay`
+    // problems built by the one problem-record authority, so the printed
+    // delay is the delay each ridden-out refusal waited.
+    let retry_after_millis = printed["problem"]["retry_after_millis"]
+        .as_u64()
+        .expect("an after_delay problem names its delay");
     assert!(
-        elapsed >= Duration::from_millis(4 * RETRY_AFTER_MILLIS),
+        elapsed >= Duration::from_millis(4 * retry_after_millis),
         "each retry must wait the delay the directive names, took {elapsed:?}"
     );
 }
@@ -2109,24 +2095,18 @@ fn tool_waits_through_an_after_delay_unavailable_within_its_deadline() {
 fn tool_returns_a_completed_authority_result_without_resending() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
 
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let daemon = spawn_scripted_result_sequence_daemon(
-        socket_path.clone(),
-        "tracedecay_fact_store_add",
-        vec![retry_directed_tool_result(
-            "application.retained.authority-unavailable",
+    let daemon = spawn_scripted_retained_daemon(
+        &home_path,
+        vec![completed_authority_problem(
             "The retained operation authority is unavailable: history is not available",
-            250,
         )],
     );
     let started = Instant::now();
     let output = run_command_with_timeout(
-        fact_store_add_command(&home_path, &project_path, &socket_path, "10000"),
+        fact_store_add_command(&home_path, &project_path, "10000"),
         CLI_CHILD_KILL_TIMEOUT,
     );
     let elapsed = started.elapsed();
