@@ -115,13 +115,21 @@ fn profile_absence_is_explicit_in_snapshot_discovery() {
         .add_contribution(contribution)
         .add_handler(handler_for(&manifest))
         .add_profile(profile(
-            primary_profile_id,
-            vec![capability_id],
+            primary_profile_id.clone(),
+            vec![capability_id.clone()],
             ample_budget(),
         ))
         .add_profile(compact_profile);
     let snapshot = builder.build().unwrap();
 
+    assert_eq!(
+        snapshot
+            .visible_capabilities(&primary_profile_id, &BTreeSet::new())
+            .into_iter()
+            .map(|capability| capability.capability_id())
+            .collect::<Vec<_>>(),
+        vec![&capability_id]
+    );
     assert!(
         snapshot
             .visible_capabilities(&compact_profile_id, &BTreeSet::new())

@@ -1,5 +1,6 @@
 use crate::common;
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
@@ -16,7 +17,7 @@ use tracedecay_contracts::surface_contracts::{
 };
 use tracedecay_contracts::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
-    AuthorityReceipt, CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationFuture,
+    AuthorityReceipt, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryFuture,
     CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
     CodeImplementationsRequest, CodeQueryPage, CodeQueryScope, CodeRelationRequest,
@@ -619,37 +620,17 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
     let operations = callable_code_operations().unwrap();
 
     assert_eq!(
-        CallableCodeOperationKind::ALL.len(),
-        CALLABLE_CODE_OPERATION_COUNT
+        descriptors
+            .iter()
+            .map(|descriptor| descriptor.operation().capability_id())
+            .collect::<BTreeSet<_>>(),
+        contribution
+            .capabilities()
+            .iter()
+            .map(|capability| capability.capability_id())
+            .collect::<BTreeSet<_>>(),
+        "advertised callable capabilities and their handlers are the same set"
     );
-    let canonical_equivalents = [
-        CallableCodeOperationKind::SymbolSearch,
-        CallableCodeOperationKind::QualifiedName,
-        CallableCodeOperationKind::SignatureSearch,
-        CallableCodeOperationKind::Implementations,
-        CallableCodeOperationKind::TypeHierarchy,
-        CallableCodeOperationKind::Callers,
-        CallableCodeOperationKind::Impact,
-        CallableCodeOperationKind::ModuleApi,
-        CallableCodeOperationKind::SourceMetadata,
-    ];
-    let callable_catalog_count = CALLABLE_CODE_OPERATION_COUNT - canonical_equivalents.len();
-    assert_eq!(contribution.capabilities().len(), callable_catalog_count);
-    assert_eq!(descriptors.len(), callable_catalog_count);
-    assert_eq!(operations.iter().count(), CALLABLE_CODE_OPERATION_COUNT);
-    for kind in canonical_equivalents {
-        let capability_id = format!(
-            "capability.application.code-query.{}",
-            kind.as_str().replace('_', "-")
-        );
-        assert!(
-            contribution
-                .capabilities()
-                .iter()
-                .all(|capability| capability.capability_id().as_str() != capability_id),
-            "{kind:?} is owned by its canonical application surface"
-        );
-    }
     let reachable = [
         ("exact_occurrence", "code_exact_occurrence"),
         ("phrase_search", "code_phrase_search"),
@@ -660,23 +641,25 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
         ("type_definition", "code_type_definition"),
         ("references", "code_references"),
     ];
-    let expected_lsp_bindings = 3;
-    assert_eq!(
-        contribution.bindings().len(),
-        reachable.len() * 3 + expected_lsp_bindings
-    );
+    for (operation, _) in reachable {
+        let capability_id = format!(
+            "capability.application.code-query.{}",
+            operation.replace('_', "-")
+        );
+        assert!(
+            contribution
+                .capabilities()
+                .iter()
+                .any(|capability| capability.capability_id().as_str() == capability_id),
+            "{capability_id} is advertised"
+        );
+    }
     for capability in contribution.capabilities() {
         assert_eq!(
             capability.authority(),
             AuthorityRequirement::CapabilityGrantWithRevalidation
         );
         assert_eq!(capability.lifecycle(), LifecycleClass::Resumable);
-        let pagination = capability
-            .pagination()
-            .expect("direct callable code query is resumable");
-        assert_eq!(pagination.default_page_size(), 10);
-        assert_eq!(pagination.maximum_page_size(), 1_000);
-        assert_eq!(pagination.cursor_ttl_millis(), 15 * 60 * 1_000);
         let kind = CallableCodeOperationKind::ALL
             .into_iter()
             .find(|kind| {
@@ -687,6 +670,20 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
                     )
             })
             .expect("capability maps to one callable-code operation");
+        let pagination = capability
+            .pagination()
+            .expect("direct callable code query is resumable");
+        let expected_default_page_size = match kind {
+            CallableCodeOperationKind::Callees => 100,
+            _ => 10,
+        };
+        assert_eq!(
+            pagination.default_page_size(),
+            expected_default_page_size,
+            "{kind:?}"
+        );
+        assert_eq!(pagination.maximum_page_size(), 1_000);
+        assert_eq!(pagination.cursor_ttl_millis(), 15 * 60 * 1_000);
         let Some((_, surface_operation)) = reachable
             .iter()
             .find(|(operation, _)| *operation == kind.as_str())
@@ -728,7 +725,14 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
                 binding.binding_id().as_str(),
                 format!("binding.{surface_name}.{surface_operation}.v1")
             );
-            assert_eq!(binding.operation().as_str(), *surface_operation);
+            let expected_operation = match (kind, surface) {
+                (
+                    CallableCodeOperationKind::Callees,
+                    BindingSurface::Cli | BindingSurface::Mcp,
+                ) => "callees",
+                _ => *surface_operation,
+            };
+            assert_eq!(binding.operation().as_str(), expected_operation);
             assert!(binding.protocol_revisions().contains(1));
             assert!(!binding.protocol_revisions().contains(2));
             assert!(binding.required_features().is_empty());

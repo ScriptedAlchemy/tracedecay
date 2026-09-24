@@ -344,7 +344,22 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
     .unwrap()
     .enroll(&request, enrollment_credential)
     .expect("the SDK must join /remote/ and trust the configured private root");
-    assert!(enrolled.result.is_ok());
+    let envelope = enrolled.result.as_ref().expect("enrollment is admitted");
+    assert_eq!(envelope.request_id.as_str(), "request.remote-sdk-production");
+    let record = envelope
+        .outcome
+        .payload()
+        .expect("admitted enrollment carries its credential record");
+    assert_eq!(
+        record.enrollment_id.as_str(),
+        "enrollment.remote-sdk-production"
+    );
+    assert_eq!(record.brain_id, grant.brain_id);
+    assert_eq!(record.node_id, grant.node_id);
+    assert_eq!(record.expires_at, grant.expires_at);
+    assert_eq!(record.revoked_at, None);
+    assert_eq!(record.capabilities, grant.capabilities);
+    assert_eq!(record.scope, grant.scope);
 
     let local_route_response = tls_http11_request(
         first_remote,

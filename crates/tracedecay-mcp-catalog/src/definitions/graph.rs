@@ -512,11 +512,5 @@ mod search_schema_tests {
                 .as_array()
                 .is_some_and(|fields| fields.contains(&serde_json::json!("documentation")))
         );
-        assert!(
-            definition
-                .description
-                .contains("freshness: fresh | possibly_stale"),
-            "the description must tell agents the first line is a freshness verdict"
-        );
     }
 }

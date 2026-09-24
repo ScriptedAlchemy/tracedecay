@@ -1484,7 +1484,18 @@ mod tests {
             .iter()
             .filter(|operation| operation.operation_id.starts_with("operation.workflow."))
             .collect::<Vec<_>>();
-        assert!(!workflows.is_empty());
+        let register = workflows
+            .iter()
+            .find(|operation| operation.operation_id == "operation.workflow.register_definition")
+            .expect("workflow registration operation");
+        assert_eq!(
+            http_route(register),
+            Some("/application/workflow/register-definition")
+        );
+        assert_eq!(
+            register.binding,
+            "binding.http.workflow.register_definition"
+        );
         assert!(workflows.iter().all(|operation| {
             http_route(operation).is_some_and(|route| route.starts_with("/application/workflow/"))
                 && operation.binding.starts_with("binding.http.workflow.")
@@ -1522,7 +1533,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert!(!configuration.is_empty());
+        let get = configuration
+            .iter()
+            .find(|operation| operation.operation_id == "operation.application.configuration_get")
+            .expect("configuration get operation");
+        assert_eq!(
+            http_route(get),
+            Some("/application/configuration/configuration_get")
+        );
+        assert_eq!(get.binding, "binding.http.configuration_get.v1");
         assert!(unavailable.iter().all(|operation| {
             !operation
                 .operation_id

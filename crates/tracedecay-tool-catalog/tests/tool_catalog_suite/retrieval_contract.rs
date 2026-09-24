@@ -91,7 +91,11 @@ fn retrieval_primitives_canonicalize_temporal_and_cancellation_metadata() {
             ample_budget(),
         ));
     let snapshot = builder.build().unwrap();
-    assert!(snapshot.retrieval_primitive(&capability_id).is_some());
+    let registered = snapshot
+        .retrieval_primitive(&capability_id)
+        .expect("registered retrieval primitive");
+    assert_eq!(registered.family(), RetrievalFamily::Source);
+    assert_eq!(registered.retriever_id().as_str(), "retriever.source.lines");
 }
 
 #[test]

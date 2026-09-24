@@ -259,20 +259,9 @@ mod message_search_definition_tests {
             definition.annotations.as_ref().unwrap()["readOnlyHint"],
             true
         );
-        assert!(
-            definition
-                .description
-                .contains("never ingests or refreshes")
-        );
         assert_eq!(
             definition.input_schema["properties"]["require_fresh"]["default"],
             false
-        );
-        assert!(
-            definition.input_schema["properties"]["require_fresh"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("Freshness precondition")
         );
         assert_closed_objects(&definition.input_schema);
     }

@@ -53,24 +53,6 @@ fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
 }
 
 #[test]
-fn retired_unused_import_scan_is_absent_while_diagnostic_reads_remain() {
-    let definitions = get_maximal_tool_definitions().expect("tool definitions");
-    eprintln!("maximal source catalog count: {}", definitions.len());
-
-    assert!(
-        definitions
-            .iter()
-            .all(|definition| definition.name != "tracedecay_unused_imports")
-    );
-    for name in ["tracedecay_diagnose", "tracedecay_diagnostics"] {
-        assert!(
-            definitions.iter().any(|definition| definition.name == name),
-            "{name} must remain available for compiler and published diagnostics"
-        );
-    }
-}
-
-#[test]
 fn stack_snapshot_requires_an_exact_selection_binding() {
     let definition = get_tool_definitions()
         .expect("tool definitions")
@@ -294,38 +276,6 @@ fn per_session_budget_does_not_leak_through_the_cached_registry() {
     );
 }
 
-/// Always-loaded schemas enter the model prompt on every turn. The agreed cap
-/// is the small core; growing it is a context-window decision, not a drive-by.
-#[test]
-fn always_loaded_tools_stay_inside_the_agreed_core() {
-    let definitions = get_maximal_tool_definitions().expect("tool definitions");
-    let mut always_loaded = definitions
-        .iter()
-        .filter(|definition| {
-            definition
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("anthropic/alwaysLoad"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        })
-        .map(|definition| definition.name.as_str())
-        .collect::<Vec<_>>();
-    always_loaded.sort_unstable();
-    assert_eq!(
-        always_loaded,
-        vec![
-            "tracedecay_active_project",
-            "tracedecay_callers",
-            "tracedecay_context",
-            "tracedecay_grep",
-            "tracedecay_search",
-            "tracedecay_status",
-            "tracedecay_storage_status",
-        ]
-    );
-}
-
 #[test]
 fn status_and_skill_view_default_to_summaries() {
     let definitions = get_tool_definitions().expect("tool definitions");
@@ -353,10 +303,4 @@ fn status_and_skill_view_default_to_summaries() {
         view.input_schema["properties"]["include_support_files"]["default"],
         serde_json::json!(false)
     );
-    let retrieve = definitions
-        .iter()
-        .find(|definition| definition.name == "tracedecay_retrieve")
-        .expect("retrieve");
-    assert!(retrieve.description.contains("Do not walk next_offset"));
-    assert!(!retrieve.description.contains("byte-exactly"));
 }

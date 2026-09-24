@@ -489,38 +489,58 @@ fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
-    #[test]
-    fn catalog_advertises_every_transport_exposed_feedback_operation() {
-        let contribution = feedback_surface_catalog_contribution().expect("contribution");
-        let mut names: Vec<_> = contribution
-            .bindings()
-            .iter()
-            .map(|binding| binding.operation().as_str().to_owned())
-            .collect();
-        names.sort();
-        names.dedup();
-        let mut expected = FEEDBACK_SPECS
-            .iter()
-            .filter(|spec| !spec.surfaces.is_empty())
-            .map(|spec| spec.operation.to_owned())
-            .collect::<Vec<_>>();
-        expected.sort();
-        assert_eq!(names, expected);
+    fn property_keys(body: &Value) -> Vec<&str> {
+        let mut keys = body["properties"]
+            .as_object()
+            .map(|properties| properties.keys().map(String::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        keys.sort_unstable();
+        keys
     }
 
     #[test]
     fn mounted_test_results_and_advisory_cycle_have_exact_executable_schemas() {
         let contribution = feedback_surface_catalog_contribution().expect("contribution");
-        for capability in [
-            "capability.application.feedback.test-results",
-            ADVISORY_CYCLE_CAPABILITY_ID_V1,
+        for (capability, request_title, request_keys, result_title, result_keys) in [
+            (
+                "capability.application.feedback.test-results",
+                "TestResultsSurfaceRequestV1",
+                vec![],
+                "TestResultsResultV1",
+                vec![
+                    "available_results",
+                    "code_generation_id",
+                    "completed",
+                    "generation",
+                    "head_commit_id",
+                    "operation_id",
+                    "receipt",
+                    "result_offset",
+                    "results",
+                    "termination",
+                    "total",
+                ],
+            ),
+            (
+                ADVISORY_CYCLE_CAPABILITY_ID_V1,
+                "FeedbackAdvisoryCycleSurfaceRequestV1",
+                vec!["document_uri"],
+                "FeedbackAdvisoryCycleSurfaceResultV1",
+                vec!["cycle", "finding_handles", "read_handles"],
+            ),
         ] {
             let capability = CapabilityId::new(capability).expect("capability ID");
-            assert!(
-                contribution.executable_schema(&capability).is_some(),
-                "{capability} requires the exact mounted wire schema"
-            );
+            let schema = contribution
+                .executable_schema(&capability)
+                .unwrap_or_else(|| panic!("{capability} requires the exact mounted wire schema"));
+            let request = schema.request_schema().body();
+            let result = schema.result_schema().body();
+            assert_eq!(request["title"], request_title, "{capability}");
+            assert_eq!(property_keys(request), request_keys, "{capability}");
+            assert_eq!(result["title"], result_title, "{capability}");
+            assert_eq!(property_keys(result), result_keys, "{capability}");
         }
     }
 }

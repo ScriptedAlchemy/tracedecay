@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use schemars::schema_for;
 use tracedecay_contracts::git::{
     GitHubStackSignalExpandSurfaceRequest, GitHubStackSignalExpandSurfaceResultV1,
@@ -71,20 +73,24 @@ fn github_stack_signal_expand_is_schema_backed_and_publicly_mounted() {
 fn github_stack_signal_expand_result_schema_stays_bounded() {
     let schema = serde_json::to_value(schema_for!(GitHubStackSignalExpandSurfaceResultV1))
         .expect("result schema JSON");
-    let rendered = schema.to_string();
-    for field in [
-        "signal_id",
-        "watermark_id",
-        "stack_revision_digest",
-        "state_digest",
-        "observed_at",
-    ] {
-        assert!(
-            rendered.contains(&format!("\"{field}\"")),
-            "missing {field}"
-        );
-    }
-    assert!(!rendered.contains("repository_path"));
-    assert!(!rendered.contains("pull_request_body"));
-    assert!(!rendered.contains("commit_message"));
+    let evidence_fields = schema["$defs"]["GitHubStackSignalEvidenceRefV1"]["properties"]
+        .as_object()
+        .expect("evidence reference properties")
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        evidence_fields,
+        BTreeSet::from([
+            "github_stack_digest",
+            "kind",
+            "native_source",
+            "observed_at",
+            "signal_id",
+            "stack_revision_digest",
+            "stack_revision_id",
+            "state_digest",
+            "watermark_id",
+        ])
+    );
 }
