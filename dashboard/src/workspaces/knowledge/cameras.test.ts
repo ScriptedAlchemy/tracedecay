@@ -206,17 +206,17 @@ describe('layoutCameras', () => {
     expect(layout.mode).toBe('rows');
     expect(layout.height).toBe(90);
     expect(layout.frames.map((frame) => [frame.title, frame.count, frame.x, frame.y, frame.w, frame.h])).toEqual([
-      ['decision', 2, 12, 12, 300, 66],
-      ['tool', 1, 330, 12, 300, 66],
-      ['category absent', 1, 648, 12, 300, 66],
+      ['category absent', 1, 12, 12, 300, 66],
+      ['decision', 2, 330, 12, 300, 66],
+      ['tool', 1, 648, 12, 300, 66],
     ]);
     expect(layout.rail).toEqual({ x: 192, w: 60 });
     expect(layout.labelW).toBe(158);
-    expect(layout.frames[0]!.rows.map((entry) => [entry.fact.factId, entry.gx, entry.gy])).toEqual([
-      ['fact-one', 24, 44],
-      ['fact-two', 24, 64],
+    expect(layout.frames[1]!.rows.map((entry) => [entry.fact.factId, entry.gx, entry.gy])).toEqual([
+      ['fact-one', 342, 44],
+      ['fact-two', 342, 64],
     ]);
-    expect(layout.frames[0]!.cites).toEqual([
+    expect(layout.frames[1]!.cites).toEqual([
       { label: 'A', count: 2 },
       { label: 'B', count: 1 },
     ]);
@@ -225,9 +225,9 @@ describe('layoutCameras', () => {
   it('routes relations through the glyph gutter and the gaps between frames', () => {
     const layout = layoutCameras(scene, { width: 960, height: 400 }, null);
     expect(layout.relations.map((relation) => [relation.relation.kind, relation.d, relation.vertical])).toEqual([
-      ['supports', 'M 24 44 C 7 44, 7 64, 24 64', true],
-      ['contradicts', 'M 24 44 H 3 V 3 H 321 V 44 H 342', false],
-      ['supersedes', 'M 342 44 H 323.5 V 5.5 H 641.5 V 44 H 660', false],
+      ['supports', 'M 342 44 C 325 44, 325 64, 342 64', true],
+      ['contradicts', 'M 342 44 H 321 V 3 H 639 V 44 H 660', false],
+      ['supersedes', 'M 660 44 H 641.5 V 5.5 H 5.5 V 44 H 24', false],
     ]);
     expect(layout.relationsOffField).toBe(0);
   });
@@ -239,22 +239,22 @@ describe('layoutCameras', () => {
     expect(
       layout.frames.map((frame) => [frame.title, frame.count, frame.x, frame.w, frame.h, frame.rail, frame.disputes]),
     ).toEqual([
-      ['decision', 2, 12, 300, 54, { x: 30, w: 272, y: 33 }, 1],
-      ['tool', 1, 330, 300, 54, { x: 348, w: 272, y: 33 }, 2],
-      ['category absent', 1, 648, 300, 54, { x: 666, w: 272, y: 33 }, 1],
+      ['category absent', 1, 12, 300, 54, { x: 30, w: 272, y: 33 }, 1],
+      ['decision', 2, 330, 300, 54, { x: 348, w: 272, y: 33 }, 1],
+      ['tool', 1, 648, 300, 54, { x: 666, w: 272, y: 33 }, 2],
     ]);
     expect(layout.frames.map((frame) => frame.ticks.map((tick) => [tick.fact.factId, tick.x, tick.disputed]))).toEqual([
-      [
-        ['fact-one', 274.8, true],
-        ['fact-two', 138.8, false],
-      ],
-      [['fact-three', 538.4, true]],
       [[WITHHELD, null, true]],
+      [
+        ['fact-one', 592.8, true],
+        ['fact-two', 456.8, false],
+      ],
+      [['fact-three', 856.4, true]],
     ]);
     expect(layout.frames.map((frame) => [frame.trustRange, frame.trustAbsent, frame.withheld])).toEqual([
+      [null, 1, 1],
       [[0.4, 0.9], 0, 0],
       [[0.7, 0.7], 0, 0],
-      [null, 1, 1],
     ]);
     expect(layout.frames.every((frame) => frame.rows.length === 0)).toBe(true);
     expect(layout.relations).toEqual([]);

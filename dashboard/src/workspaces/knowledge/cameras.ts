@@ -133,10 +133,14 @@ export function layoutCameras(
     bucket.push(fact);
     groups.set(fact.category, bucket);
   }
-  // Largest frame first; the frame of facts with no category always last.
+  // A frame holding withheld facts first, so a typed absence is never below
+  // the fold; then largest first, with the frame of facts with no category
+  // last among the rest.
+  const withheld = (facts: readonly SceneFact[]) => facts.some((fact) => fact.restricted);
   const ordered = [...groups.entries()]
     .sort(
       (a, b) =>
+        Number(withheld(b[1])) - Number(withheld(a[1])) ||
         Number(a[0] === null) - Number(b[0] === null) ||
         b[1].length - a[1].length ||
         (a[0] ?? '').localeCompare(b[0] ?? ''),
