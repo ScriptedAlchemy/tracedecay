@@ -2,7 +2,6 @@ use crate::support::*;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracedecay::mcp::McpServer;
-use tracedecay::project::TraceDecay;
 use tracedecay_mcp::get_tool_definitions;
 #[test]
 fn outline_schema_requires_file_without_provider_property() {
@@ -20,13 +19,18 @@ fn outline_schema_requires_file_without_provider_property() {
 
 #[tokio::test]
 async fn schema_required_arguments_match_representative_handler_parsers() {
-    let (cg, _env, _dir) = setup_empty_project().await;
     let tools = get_tool_definitions().expect("tool definitions");
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
 
     // Direct `args.get(...).ok_or(...)` parser style.
     assert_schema_requires(&tools, "tracedecay_search", &["query"]);
-    expect_missing_argument_error(
-        &cg,
+    expect_real_server_missing_argument_error(
+        &server,
         "tracedecay_search",
         json!({}),
         "missing required parameter: query",
@@ -35,13 +39,6 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
 
     // Routed graph tools need the production query authority mounted before
     // dispatch reaches their operation parser.
-    let fixture = production_composition_fixture().await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
-    wait_for_current_graph(&server).await;
-
     // Shared helper parser style, including canonical node_id despite id alias support.
     assert_schema_requires(&tools, "tracedecay_callers", &["node_id"]);
     expect_real_server_missing_argument_error(
@@ -67,8 +64,8 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         "tracedecay_insert_at",
         &["path", "anchor", "content"],
     );
-    expect_missing_argument_error(
-        &cg,
+    expect_real_server_missing_argument_error(
+        &server,
         "tracedecay_insert_at",
         json!({ "path": "src/lib.rs" }),
         "missing required parameter: anchor",
@@ -163,11 +160,15 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
             )
             .await;
         } else {
-            expect_missing_argument_error(&cg, tool_name, json!({}), expected_message).await;
+            expect_real_server_missing_argument_error(
+                &server,
+                tool_name,
+                json!({}),
+                expected_message,
+            )
+            .await;
         }
     }
-    fixture.harness.shutdown().await;
-
     // Nested-object parser style.
     assert_schema_requires(
         &tools,
@@ -193,13 +194,14 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         target_branches[3]["required"],
         json!(["kind", "payload_ref"])
     );
-    expect_missing_argument_error(
-        &cg,
+    expect_real_server_missing_argument_error(
+        &server,
         "tracedecay_lcm_expand",
         json!({ "provider": "cursor", "session_id": "session-1", "target": {} }),
         "target: missing field `kind`",
     )
     .await;
+    fixture.shutdown().await;
 }
 
 #[test]
@@ -737,19 +739,6 @@ pub(crate) fn assert_schema_requires(
     assert_eq!(
         actual, expected,
         "{tool_name} schema required arguments drifted from handler parser expectations"
-    );
-}
-
-pub(crate) async fn expect_missing_argument_error(
-    cg: &TraceDecay,
-    tool_name: &str,
-    args: Value,
-    expected_message: &str,
-) {
-    let message = expect_tool_error(handle_tool_call(cg, tool_name, args, None, None).await);
-    assert!(
-        message.contains(expected_message),
-        "{tool_name} parser error should mention `{expected_message}`, got `{message}`"
     );
 }
 
