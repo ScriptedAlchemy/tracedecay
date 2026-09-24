@@ -1209,7 +1209,7 @@ async fn lcm_expand_query_large_response_preserves_synthesis_contract() {
     );
     assert!(payload["context_truncated"].as_bool().is_some());
     assert!(payload["context_budget"]["used_chars"].as_u64().is_some());
-    assert!(!payload["matches"].as_array().unwrap().is_empty());
+    assert_eq!(payload["matches"].as_array().unwrap().len(), 1, "{payload}");
     assert!(
         payload["context_blocks"].as_array().unwrap().len() <= 3,
         "MCP expand-query context should stay compact"

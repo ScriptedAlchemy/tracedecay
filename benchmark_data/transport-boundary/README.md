@@ -1,26 +1,9 @@
-# Transport-boundary direct test fixture
+# Transport-boundary compile baseline
 
-> **Historical evidence only.** Preserve the real fixture and provenance in
-> this directory. Current requirements come only from the
-> `docs/plans/tracedecay-v2/` hierarchy; exact commands, test names/counts,
-> snapshots, receipts, attestations, PR packets, and gate fields below are not
-> rebuild instructions. Validate current transport behavior directly.
-
-This directory supplies a checked-in real fixture to the direct product test
-for the callable application transport boundary. It is not an acceptance packet,
-snapshot, gate manifest, or separate evidence authority. Product acceptance
-comes from direct tests and normal CI, with pending work reported as pending.
-
-`goldens/application-surface-parity.json` is consumed by
-`tests/api_application_parity.rs`. Together they require:
-
-- identical request/result contracts and binding identities for Git preview,
-  Git apply, feedback diagnostics, feedback get, feedback expand, and feedback
-  list across CLI, MCP, and HTTP dispatch;
-- all four feedback reads to reach a callable owner and conceal an unknown
-  request handle as `not_found_or_not_authorized`, never `unavailable`;
-- HTTP and SSE to project the same canonical feedback payload; and
-- concealed HTTP problems to omit binding identity.
+> **Historical evidence only.** Current requirements come only from the
+> `docs/plans/tracedecay-v2/` hierarchy; exact commands and fields below are
+> not rebuild instructions. Transport parity is verified directly by
+> `crates/tracedecay/tests/product_surface_suite/api_application_parity.rs`.
 
 The compile workload remains executable, but its measurement is explicitly
 pending execution. Static validation does not run Cargo:

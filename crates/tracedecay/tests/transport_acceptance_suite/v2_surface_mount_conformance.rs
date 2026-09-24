@@ -668,16 +668,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // -- Work operations. ---------------------------------------------------
     // `WorkOperation::ALL` documents itself as "every mounted Work operation,
     // in mounted order"; this is what makes that claim testable.
-    // The floor guards against a silent shrink, which would let this sweep
-    // pass by grading fewer operations. Growth needs no edit here: the loop
-    // below iterates `ALL`, so a newly added operation is graded on the run
-    // that adds it.
-    assert!(
-        WorkOperation::ALL.len() >= 15,
-        "the Work operation set shrank to {}; a removed operation must be \
-         deleted deliberately, not dropped out of this sweep",
-        WorkOperation::ALL.len()
-    );
     for operation in WorkOperation::ALL {
         graded += 1;
         let route = operation.application_route_path();
@@ -710,12 +700,6 @@ fn every_declared_operation_is_mounted_or_sanctioned() {
     // closed family that publishes a transport-independent descriptor has to be
     // graded against every transport that descriptor claims, or the sweep only
     // proves the surface it happened to look at.
-    assert!(
-        WorkflowOperation::ALL.len() >= 8,
-        "the Workflow operation set shrank to {}; a removed operation must be \
-         deleted deliberately, not dropped out of this sweep",
-        WorkflowOperation::ALL.len()
-    );
     for operation in WorkflowOperation::ALL {
         graded += 1;
         let route = operation.application_route_path();

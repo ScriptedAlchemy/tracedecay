@@ -390,7 +390,7 @@ fn binary_content_is_classified_instead_of_text_diffed() {
         .expect("text record");
     assert!(!text.binary);
     assert_eq!(text.insertions, Some(1));
-    assert!(!text.hunks.is_empty());
+    assert_eq!(text.hunks.len(), 1);
 
     // Diff-level totals ignore the binary record rather than inventing zeros
     // for it: one text insertion, no deletions.

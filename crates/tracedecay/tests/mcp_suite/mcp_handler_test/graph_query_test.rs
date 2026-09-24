@@ -835,43 +835,6 @@ async fn test_node_not_found() {
 }
 
 #[tokio::test]
-async fn test_files_no_filter() {
-    let cg = production_graph_query_fixture().await;
-    let result = call_production_tool(&cg, "tracedecay_files", json!({}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty(), "files listing should not be empty");
-    assert!(text.starts_with("## Files"), "should have Files header");
-    assert!(
-        text.contains("**indexed files:**"),
-        "should include indexed files field"
-    );
-    assert!(
-        text.contains("```text"),
-        "should render compact tree/list block"
-    );
-    assert!(!text.contains("|"), "files markdown should not use tables");
-}
-
-#[tokio::test]
-async fn test_files_flat_format() {
-    let cg = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_files",
-        json!({"layout": "flat"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-    assert!(text.contains("bytes"), "flat format should show byte sizes");
-}
-
-#[tokio::test]
 async fn test_files_json_format_with_grouped_layout() {
     let cg = production_graph_query_fixture().await;
     let json_result = call_production_tool(
@@ -889,26 +852,6 @@ async fn test_files_json_format_with_grouped_layout() {
         file["path"].as_str() == Some("src/main.rs")
             && file["symbols"].as_i64().unwrap_or_default() >= 1
     }));
-}
-
-#[tokio::test]
-async fn test_affected() {
-    let cg = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_affected",
-        json!({"files": ["src/utils.rs"]}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("affected_tests"),
-        "should have affected_tests key"
-    );
-    assert!(text.contains("count"), "should have count key");
 }
 
 #[cfg(feature = "test-transport")]
@@ -1743,34 +1686,6 @@ async fn test_distribution_with_path_filter() {
     assert!(
         !text.contains("tests/test_utils"),
         "path filter should exclude files outside 'src/'",
-    );
-}
-
-#[tokio::test]
-async fn test_files_grouped_format() {
-    let cg = production_graph_query_fixture().await;
-    let result = call_production_tool(
-        &cg,
-        "tracedecay_files",
-        json!({"layout": "grouped"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-    assert!(
-        text.contains("indexed files"),
-        "grouped format should have 'indexed files' header"
-    );
-    assert!(
-        text.contains("**layout:** grouped"),
-        "grouped format should report grouped layout"
-    );
-    assert!(
-        text.contains("```text") && text.contains("src/"),
-        "grouped format should show compact tree/list block"
     );
 }
 

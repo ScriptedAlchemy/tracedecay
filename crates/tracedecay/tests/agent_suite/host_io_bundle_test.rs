@@ -90,14 +90,14 @@ fn bundle_a() -> HostIo {
         A_LOG.lock().unwrap().push("export_hosts".into());
         Vec::new()
     }
-    fn write_text(path: &Path, contents: &str, _: Option<&Path>) -> Result<()> {
+    fn write_text(path: &Path, contents: &str) -> Result<()> {
         A_LOG
             .lock()
             .unwrap()
             .push(format!("write_text {}", path.display()));
         Ok(std::fs::write(path, stamped(path, "A", contents))?)
     }
-    fn write_json(path: &Path, value: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+    fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
         A_LOG
             .lock()
             .unwrap()
@@ -141,14 +141,14 @@ fn bundle_b() -> HostIo {
             error: Some("b-host refused".into()),
         }]
     }
-    fn write_text(path: &Path, contents: &str, _: Option<&Path>) -> Result<()> {
+    fn write_text(path: &Path, contents: &str) -> Result<()> {
         B_LOG
             .lock()
             .unwrap()
             .push(format!("write_text {}", path.display()));
         Ok(std::fs::write(path, stamped(path, "B", contents))?)
     }
-    fn write_json(path: &Path, value: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+    fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
         B_LOG
             .lock()
             .unwrap()
@@ -177,12 +177,12 @@ fn bundle_b() -> HostIo {
 
 /// A bundle whose write surface is refused by the host.
 fn refusing_bundle() -> HostIo {
-    fn write_text(path: &Path, _: &str, _: Option<&Path>) -> Result<()> {
+    fn write_text(path: &Path, _: &str) -> Result<()> {
         Err(TraceDecayError::Config {
             message: format!("host refused write to {}", path.display()),
         })
     }
-    fn write_json(path: &Path, _: &serde_json::Value, _: Option<&Path>) -> Result<()> {
+    fn write_json(path: &Path, _: &serde_json::Value) -> Result<()> {
         Err(TraceDecayError::Config {
             message: format!("host refused write to {}", path.display()),
         })

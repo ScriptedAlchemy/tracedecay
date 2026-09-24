@@ -204,7 +204,10 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         repair.components[0].state,
         HostBundleComponentDoctorStateV1::Drifted
     );
-    assert!(!repair.components[0].repair_action.is_empty());
+    assert_eq!(
+        repair.components[0].repair_action,
+        "run `tracedecay install --agent kimi` to refresh the staged bundle, then open Kimi Code and run `/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay`; rerun Doctor to verify registration"
+    );
 }
 
 #[test]
