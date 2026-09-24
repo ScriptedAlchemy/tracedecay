@@ -117,7 +117,12 @@ export function CortexSceneCanvas<L>({
     }
     paletteRef.current ??= resolvePalette(host);
     const layout = current.layoutState.layout;
-    cameraRef.current ??= fitCamera(painter.bounds(layout), width, height, painter.fitPad);
+    // A frame can land before the fit effect; the fit it takes must be the
+    // one the effect measures zoom against, or a resize rescales from k = 1.
+    if (cameraRef.current === null) {
+      cameraRef.current = fitCamera(painter.bounds(layout), width, height, painter.fitPad);
+      fitKRef.current = cameraRef.current.k;
+    }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
     const emphasisId = current.hovered ?? current.inspectedId ?? current.cursor ?? current.selectedId;
