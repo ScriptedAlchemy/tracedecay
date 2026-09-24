@@ -38,19 +38,19 @@ const LABEL_CHARS = 30;
 
 /** Opacity a fact body is drawn at: trust as luminance, with a floor so a
  * low-trust fact remains a body rather than vanishing into the field. */
-function bodyOpacity(trust: number | null): number {
+export function bodyOpacity(trust: number | null): number {
   if (trust == null) return 0.55;
   return 0.42 + Math.max(0, Math.min(1, trust)) * 0.58;
 }
 
-const TONE_STROKE: Record<ReturnType<typeof relationStyle>['tone'], string> = {
+export const TONE_STROKE: Record<ReturnType<typeof relationStyle>['tone'], string> = {
   signal: 'var(--raw-graph-accent)',
   conflict: 'var(--raw-state-conflicting)',
   stale: 'var(--raw-state-stale)',
   quiet: 'var(--raw-graph-edge)',
 };
 
-const TONE_OPACITY: Record<ReturnType<typeof relationStyle>['tone'], number> = {
+export const TONE_OPACITY: Record<ReturnType<typeof relationStyle>['tone'], number> = {
   signal: 0.7,
   conflict: 0.85,
   stale: 0.8,
@@ -568,7 +568,7 @@ function RelationLegend({ model }: { model: ConstellationModel }) {
 }
 
 /** What this drawing covers, in the daemon's own accounting. */
-function CoverageFooter({
+export function CoverageFooter({
   model,
   graphRead,
 }: {

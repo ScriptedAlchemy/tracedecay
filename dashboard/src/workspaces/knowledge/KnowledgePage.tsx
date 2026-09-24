@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { EChartsOption } from 'echarts';
+import { useSearchParams } from 'react-router';
 
 import { ReadModelState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Corners, Meter, Readout } from '../../ui/instrument.tsx';
@@ -34,6 +35,8 @@ import { FactConstellation } from './FactConstellation.tsx';
 import { FactInspector } from './FactInspector.tsx';
 import { FactLedger, FactSortControl, MemoryCoverageNotices } from './FactLedger.tsx';
 import { composeConstellation } from './constellation.ts';
+import { ConstellationVariant } from './renderers/ConstellationVariant.tsx';
+import { CONSTELLATION_VARIANT_PARAM, parseConstellationVariant } from './renderers/variant.ts';
 import { useFactsAddress } from './factsAddress.ts';
 import { sortFacts } from './ledger.ts';
 import { cameraRegister, graphRegister, memoryRegister } from './knowledgeRegisters.ts';
@@ -361,6 +364,8 @@ function Aperture({
   onSelect: (factId: string) => void;
 }) {
   const graphRead = data.reads?.graph;
+  const [searchParams] = useSearchParams();
+  const variant = parseConstellationVariant(searchParams.get(CONSTELLATION_VARIANT_PARAM));
   const drawable =
     graphRead === undefined ||
     graphRead.state === 'ready' ||
@@ -368,7 +373,18 @@ function Aperture({
     graphRead.state === 'complete_zero_findings';
   return (
     <div className="relative shrink-0 border-b border-edge-subtle p-3" data-testid="knowledge-aperture">
-      {drawable && constellation ? (
+      {drawable && constellation && variant ? (
+        <ConstellationVariant
+          variant={variant}
+          graph={data.graph}
+          rows={data.facts}
+          inspectedFactId={inspectedFactId}
+          selectedFactId={selectedFactId}
+          onInspect={onInspect}
+          onSelect={onSelect}
+          graphRead={graphRead}
+        />
+      ) : drawable && constellation ? (
         <FactConstellation
           model={constellation}
           inspectedFactId={inspectedFactId}
