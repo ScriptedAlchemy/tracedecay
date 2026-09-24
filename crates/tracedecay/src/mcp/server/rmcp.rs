@@ -311,6 +311,91 @@ mod tests {
         drop(repo);
     }
 
+    /// MCP lets either party ping at any time; a stateless SEP-2575 connection
+    /// must still answer one after it has served another request.
+    #[tokio::test]
+    async fn stateless_connection_answers_ping_after_an_earlier_request() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let (cg, repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority);
+        let server = McpServer::new_with_registered_test_context(context, Vec::new())
+            .await
+            .expect("registered RMCP stateless server");
+        let adapter = production_adapter(&server, None);
+        let (server_io, client_io) = tokio::io::duplex(2 * 1024 * 1024);
+        let serving = tokio::spawn(async move {
+            let running = adapter
+                .serve(IntoTransport::<RoleServer, _, _>::into_transport(server_io))
+                .await
+                .expect("a stateless first request opens the RMCP session");
+            let _ = running.waiting().await;
+        });
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut client_read = tokio::io::BufReader::new(client_read);
+        let stateless_line = |request: Value| {
+            let mut request: JsonRpcRequest =
+                serde_json::from_value(request).expect("JSON-RPC request fixture");
+            assert!(tracedecay_mcp::server::attach_stateless_request_context(
+                &mut request
+            ));
+            format!(
+                "{}\n",
+                serde_json::to_string(&request).expect("stateless request")
+            )
+        };
+
+        client_write
+            .write_all(
+                stateless_line(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+                    .as_bytes(),
+            )
+            .await
+            .expect("send stateless tools/list");
+        let mut line = String::new();
+        client_read
+            .read_line(&mut line)
+            .await
+            .expect("read tools/list response");
+        let listed: Value = serde_json::from_str(&line).expect("tools/list frame");
+        assert_eq!(listed["id"], json!(1), "{line}");
+        assert!(listed["result"]["tools"].is_array(), "{line}");
+
+        for (request, id) in [
+            (
+                stateless_line(json!({"jsonrpc": "2.0", "id": 2, "method": "ping"})),
+                2,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#.to_owned() + "\n",
+                3,
+            ),
+        ] {
+            client_write
+                .write_all(request.as_bytes())
+                .await
+                .expect("send ping");
+            line.clear();
+            client_read
+                .read_line(&mut line)
+                .await
+                .expect("read ping response");
+            assert_eq!(
+                line.trim_end(),
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#),
+                "a later ping on a stateless connection must get an empty result: {request}",
+            );
+        }
+
+        drop(client_write);
+        drop(client_read);
+        serving.await.expect("join RMCP server");
+        server.shutdown().await;
+        drop(repo);
+    }
+
     #[tokio::test]
     async fn rmcp_wire_matrix_matches_raw_dispatch_initialize_tools_and_resources() {
         let fixture = RmcpWireFixture::start().await;

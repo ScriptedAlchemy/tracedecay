@@ -540,6 +540,7 @@ where
             GuardedHandshakeTransport {
                 inner: transport,
                 handshake_settled: false,
+                pending_ping_answer: None,
             },
         )
         .await
@@ -631,7 +632,14 @@ const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or mal
 /// returning a matching response", a transport mystery for what is a
 /// definitive protocol answer, exactly like the unparseable-handshake and
 /// rejected-auth refusals the daemon already writes before closing.
-struct GuardedHandshakeTransport<T> {
+///
+/// The guard also answers every `ping` itself. A connection whose first
+/// request carried SEP-2575 `_meta` instead of `initialize` is an inline
+/// lifecycle peer, and `rmcp`'s blanket `Service` impl refuses `ping` there
+/// with method-not-found (or invalid params without `_meta`) before
+/// `ServerHandler::ping` runs (rmcp 3.4, `handler/server.rs`). MCP requires
+/// an empty result to a ping at any time; hosts use it as a liveness probe.
+struct GuardedHandshakeTransport<T: rmcp::transport::Transport<RoleServer>> {
     inner: T,
     /// Set once a request that ends `rmcp`'s pre-initialize loop is forwarded.
     /// After that the guard is inert: a later stray `initialize` is an ordinary
@@ -641,6 +649,14 @@ struct GuardedHandshakeTransport<T> {
     /// initialize would end the connection the corrected handshake needs.
     /// JSON-RPC forbids answering them, and nothing is in flight yet.
     handshake_settled: bool,
+    /// `rmcp` polls `receive` inside `select!`, so a ping answer is written
+    /// from here rather than from a receive future that may be dropped
+    /// mid-write.
+    pending_ping_answer: Option<
+        std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<(), T::Error>> + Send>,
+        >,
+    >,
 }
 
 impl<T> rmcp::transport::Transport<RoleServer> for GuardedHandshakeTransport<T>
@@ -663,7 +679,23 @@ where
     {
         async move {
             loop {
+                if let Some(answer) = self.pending_ping_answer.as_mut() {
+                    let sent = answer.await;
+                    self.pending_ping_answer = None;
+                    sent.ok()?;
+                }
                 let message = self.inner.receive().await?;
+                if let rmcp::model::ClientJsonRpcMessage::Request(request) = &message
+                    && matches!(request.request, rmcp::model::ClientRequest::PingRequest(_))
+                {
+                    self.pending_ping_answer = Some(Box::pin(self.inner.send(
+                        rmcp::model::ServerJsonRpcMessage::response(
+                            rmcp::model::ServerResult::EmptyResult(rmcp::model::EmptyResult {}),
+                            request.id.clone(),
+                        ),
+                    )));
+                    continue;
+                }
                 if self.handshake_settled {
                     return Some(message);
                 }
@@ -676,10 +708,7 @@ where
                         rmcp::model::ClientRequest::InitializeRequest(_)
                     );
                 if !malformed_initialize {
-                    // `rmcp` answers a pre-initialize ping in place and keeps
-                    // waiting; any other request ends its handshake loop.
-                    self.handshake_settled =
-                        !matches!(request.request, rmcp::model::ClientRequest::PingRequest(_));
+                    self.handshake_settled = true;
                     return Some(message);
                 }
                 let refusal = rmcp::model::ServerJsonRpcMessage::error(
