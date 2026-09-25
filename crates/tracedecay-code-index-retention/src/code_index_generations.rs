@@ -2287,6 +2287,76 @@ fn sync_directory(path: &Path) -> Result<(), CodeGenerationRetentionErrorV1> {
         .map_err(storage)
 }
 
+/// Receipt of one scope-store reset: what was on disk before the derived
+/// publication was deleted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CodeIndexScopeStoreResetV1 {
+    pub removed_entries: u64,
+    pub removed_bytes: u64,
+}
+
+/// Delete every derived artifact in one worktree scope's generation store:
+/// the active pointer, sealed generations, retention receipts, journals,
+/// quarantines, staging files, and the scope-root record. Nothing here is
+/// authoritative project data; all of it is rebuilt from source by the next
+/// reconcile, so a pointer the reader classifies as corrupt is deleted
+/// outright rather than repaired, migrated, or kept aside.
+///
+/// The exclusive store lock is the witness that no publisher or retention
+/// pass is mid-write. The lock file itself stays: it is held open by `lock`,
+/// and unlinking a held lock would let a second owner lock a fresh inode.
+/// Content-addressed segments and text artifacts are project-level
+/// authorities shared by every scope (and colocated only in a single-scope
+/// store); they are left for the unreferenced sweep that already owns their
+/// reclamation once nothing names them.
+pub fn reset_code_index_scope_store(
+    lock: &CodeGenerationStoreLockV1,
+) -> Result<CodeIndexScopeStoreResetV1, CodeGenerationRetentionErrorV1> {
+    let store_root = lock.generation_store_root()?;
+    let mut receipt = CodeIndexScopeStoreResetV1::default();
+    for entry in std::fs::read_dir(store_root).map_err(storage)? {
+        let entry = entry.map_err(storage)?;
+        let name = entry.file_name();
+        if name == STORE_LOCK_FILE
+            || name == GENERATION_SEGMENTS_DIRECTORY
+            || name == CODE_TEXT_ARTIFACTS_DIRECTORY_V1
+        {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(storage)?;
+        if metadata.is_dir() {
+            receipt.removed_bytes = receipt
+                .removed_bytes
+                .saturating_add(directory_bytes(&path)?);
+            std::fs::remove_dir_all(&path).map_err(storage)?;
+        } else {
+            receipt.removed_bytes = receipt.removed_bytes.saturating_add(metadata.len());
+            std::fs::remove_file(&path).map_err(storage)?;
+        }
+        receipt.removed_entries += 1;
+    }
+    sync_directory(store_root)?;
+    Ok(receipt)
+}
+
+fn directory_bytes(root: &Path) -> Result<u64, CodeGenerationRetentionErrorV1> {
+    let mut total = 0_u64;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(storage)? {
+            let entry = entry.map_err(storage)?;
+            let metadata = entry.metadata().map_err(storage)?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
 fn total_bytes(generations: &[CodeGenerationRetentionGenerationV1]) -> u64 {
     generations.iter().fold(0_u64, |total, generation| {
         total.saturating_add(generation.size_bytes)

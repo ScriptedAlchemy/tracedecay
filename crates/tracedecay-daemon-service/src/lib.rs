@@ -54,6 +54,8 @@ pub mod adoption_observation;
 pub mod application_surface;
 pub mod automation_effect;
 pub mod automation_observation;
+#[cfg(unix)]
+pub mod bounded_stderr_log;
 pub mod callable_code_authorization;
 pub mod context_scout_lifecycle;
 pub mod doctor_kernel;

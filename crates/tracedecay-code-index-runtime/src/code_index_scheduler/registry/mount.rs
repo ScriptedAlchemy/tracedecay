@@ -30,6 +30,7 @@ use super::{
     ACTIVATION_RETRY_BACKOFF_CEILING, ACTIVATION_RETRY_BACKOFF_FLOOR,
     CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1,
     CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
+    CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
     CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1, CodeIndexSchedulerRegistryV1,
     ColdMountAdmissionV1, GraphActivationGateV1, GraphSeatGateV1, MountedCodeIndexWorktreeV1,
     PendingWakeV1, PublishedTextProjectionOutcomeV1, ServingSwapOutcomeV1,
@@ -39,7 +40,81 @@ use super::{
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
+/// What the worker does with a reconcile pass that found the durable
+/// publication corrupt.
+enum PublicationAuthorityResetV1 {
+    /// The derived store was deleted; the next pass rebuilds it from source.
+    Rebuilding,
+    /// Another owner holds the store lock; the reset is retried like any
+    /// held shared capacity and does not spend the one-shot budget.
+    StoreBusy,
+    /// The mount is parked until the operator acts.
+    Terminal {
+        reason: String,
+        remediation: &'static str,
+    },
+}
+
 impl CodeIndexSchedulerRegistryV1 {
+    /// Spend this mount's single automatic reset on a corrupt publication.
+    ///
+    /// The reset is attempted once per mount so a store that is corrupt again
+    /// after its own rebuild cannot cycle full re-indexes; a daemon restart
+    /// (or retire/remount) grants exactly one more attempt.
+    fn reset_corrupt_publication_authority(
+        scheduler: &Mutex<CodeIndexWorktreeSchedulerV1>,
+        reset_attempted: &mut bool,
+        corruption: &CodeIndexSchedulerErrorV1,
+    ) -> PublicationAuthorityResetV1 {
+        if *reset_attempted {
+            tracing::warn!(
+                event = "code_index_publication_authority_corrupt_after_reset",
+                path = "background_worker",
+                error = %corruption,
+                "code-index publication is corrupt again after its rebuild; parked until the daemon restarts"
+            );
+            return PublicationAuthorityResetV1::Terminal {
+                reason: corruption.to_string(),
+                remediation: CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
+            };
+        }
+        let reset = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reset_corrupt_publication_authority();
+        match reset {
+            Ok(receipt) => {
+                *reset_attempted = true;
+                tracing::warn!(
+                    event = "code_index_publication_authority_reset",
+                    path = "background_worker",
+                    removed_entries = receipt.removed_entries,
+                    removed_bytes = receipt.removed_bytes,
+                    error = %corruption,
+                    "corrupt derived code-index publication deleted; rebuilding from source"
+                );
+                PublicationAuthorityResetV1::Rebuilding
+            }
+            Err(busy) if busy.is_transient_capacity_failure() => {
+                PublicationAuthorityResetV1::StoreBusy
+            }
+            Err(failure) => {
+                *reset_attempted = true;
+                tracing::warn!(
+                    event = "code_index_publication_authority_reset_failed",
+                    path = "background_worker",
+                    error = %corruption,
+                    reset_error = %failure,
+                    "corrupt derived code-index publication could not be deleted; parked until the operator acts"
+                );
+                PublicationAuthorityResetV1::Terminal {
+                    reason: format!("{corruption}; reset failed: {failure}"),
+                    remediation: CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1,
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn open_worktree(
         &self,
@@ -386,6 +461,11 @@ impl CodeIndexSchedulerRegistryV1 {
             // artifact build. Releasing that capacity emits no wake, so this
             // worker must schedule its own.
             let mut capacity_retry = ReconcileCapacityRetryV1::new();
+            // Whether this worker already deleted and rebuilt a corrupt derived
+            // publication. One reset per mount bounds the work: a store that
+            // is corrupt again after its own rebuild parks instead of looping
+            // through full re-indexes.
+            let mut publication_authority_reset_attempted = false;
             // The last arrival this worker restored for a nothing-seated
             // warming outcome. A quiet remount's seat pass restores its
             // arrival exactly once so the next pass can restore and warm the
@@ -2216,22 +2296,52 @@ impl CodeIndexSchedulerRegistryV1 {
                             panic_guard.record_progress();
                             let publication_corruption =
                                 error.is_publication_authority_corruption();
-                            let transient_capacity = error.is_transient_capacity_failure();
-                            tracing::warn!(
-                                event = "code_index_reconcile_failed",
-                                path = "background_worker",
-                                terminal = publication_corruption,
-                                transient_capacity,
-                                trigger = trigger.label(),
-                                error = %error,
-                                "code-index background reconcile failed; the served generation stays stale"
-                            );
-                            if publication_corruption {
+                            let mut transient_capacity = error.is_transient_capacity_failure();
+                            // A corrupt derived publication is deleted and
+                            // rebuilt from source, once per mount. A store
+                            // that is corrupt again after its own rebuild, or
+                            // that cannot be deleted, is the terminal park;
+                            // a store another owner holds is retried like any
+                            // held capacity. `None` here means the failure was
+                            // not corruption or the reset is being retried.
+                            let publication_reset = if publication_corruption {
+                                match Self::reset_corrupt_publication_authority(
+                                    &worker_scheduler,
+                                    &mut publication_authority_reset_attempted,
+                                    error,
+                                ) {
+                                    PublicationAuthorityResetV1::Rebuilding => {
+                                        clear_convergence_park(&worker_convergence_park);
+                                        worker_serving_generation_changed.send_replace(());
+                                        worker_wake.notify_one();
+                                        None
+                                    }
+                                    PublicationAuthorityResetV1::StoreBusy => {
+                                        transient_capacity = true;
+                                        None
+                                    }
+                                    PublicationAuthorityResetV1::Terminal {
+                                        reason,
+                                        remediation,
+                                    } => Some((reason, remediation)),
+                                }
+                            } else {
+                                tracing::warn!(
+                                    event = "code_index_reconcile_failed",
+                                    path = "background_worker",
+                                    transient_capacity,
+                                    trigger = trigger.label(),
+                                    error = %error,
+                                    "code-index background reconcile failed; the served generation stays stale"
+                                );
+                                None
+                            };
+                            if let Some((reason, remediation)) = publication_reset {
                                 capacity_retry.record_progress();
                                 park_convergence(
                                     &worker_convergence_park,
-                                    error.to_string(),
-                                    CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1,
+                                    reason,
+                                    remediation,
                                     Some(
                                         CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt,
                                     ),

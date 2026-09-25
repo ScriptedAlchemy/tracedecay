@@ -15,6 +15,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 
 use super::*;
+#[cfg(unix)]
+use tracedecay_daemon_service::bounded_stderr_log::BoundedStderrLog;
 use tracedecay_daemon_service::shutdown::DAEMON_CLIENT_DRAIN_DEADLINE;
 #[cfg(not(unix))]
 use tracedecay_daemon_service::shutdown::{DaemonLifecycle, ShutdownStatus};
@@ -687,6 +689,21 @@ async fn run_foreground_unix(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
+    // launchd appends this daemon's stderr to a plain file with no rotation
+    // of its own; the journal (systemd) or a terminal is not a regular file
+    // and is left alone. Detection is truthful about what fd 2 is, so a
+    // failure to inspect it is reported, not treated as "not a file".
+    let stderr_log_rotation = match BoundedStderrLog::detect() {
+        Ok(Some(log)) => Some(log.spawn_rotation()),
+        Ok(None) => None,
+        Err(error) => {
+            log_daemon_event(
+                "daemon_stderr_log_unbounded",
+                &[("error", error.to_string())],
+            );
+            None
+        }
+    };
     log_daemon_event(
         "daemon_ready",
         &[(
@@ -738,6 +755,9 @@ async fn run_foreground_unix(
     }
     engine.lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
+    if let Some(rotation) = stderr_log_rotation {
+        rotation.abort();
+    }
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
     // via `connect_with_restart_grace`) instead of a queued connection that

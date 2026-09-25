@@ -549,6 +549,12 @@ impl DaemonServiceSpec {
         ))
     }
 
+    /// launchd appends the agent's stdout and stderr to `daemon.out.log` and
+    /// `daemon.err.log` under the data directory and never rotates them. The
+    /// daemon bounds `daemon.err.log` itself while it runs: it rotates the
+    /// file past `DAEMON_STDERR_LOG_ROTATE_BYTES` (32 MiB), keeping exactly
+    /// one previous generation as `daemon.err.log.1`, so the managed log holds
+    /// at most about twice that bound on disk.
     pub fn render_launchd_plist(&self) -> Result<String> {
         validate_managed_remote_tls(self.remote_tls.as_ref())?;
         if !self.tracedecay_bin.is_absolute() {

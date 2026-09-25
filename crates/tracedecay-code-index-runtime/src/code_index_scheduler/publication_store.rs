@@ -16,11 +16,11 @@ use same_file::Handle;
 use sha2::{Digest, Sha256};
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
 use tracedecay_code_index_retention::code_index_generations::{
-    CodeGenerationRetentionErrorV1, CodeGenerationStoreLockV1, DurableGenerationCardinalityV1,
-    DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
+    CodeGenerationRetentionErrorV1, CodeGenerationStoreLockV1, CodeIndexScopeStoreResetV1,
+    DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
     MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_generation_segments_publication_lock,
-    code_generation_segments_root, durable_generation_index_digest,
+    code_generation_segments_root, durable_generation_index_digest, reset_code_index_scope_store,
     retain_bounded_generation_index, try_acquire_code_generation_store_lock,
     try_acquire_code_generation_store_read_lock,
 };
@@ -2171,6 +2171,50 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .unwrap_or_else(PoisonError::into_inner);
             panic!("poison decoded-generation cache");
         }));
+    }
+
+    /// Delete this scope's derived publication and forget everything decoded
+    /// from it, so the next reconcile seals a fresh generation from source.
+    ///
+    /// The whole scope store is derived data. A pointer the reader classifies
+    /// as corrupt, whether damaged on disk or sealed by a release whose durable
+    /// entry shape digests differently, is deleted outright: no copy is kept
+    /// and nothing is migrated. A store another owner holds is a typed busy
+    /// refusal the caller retries; every other failure is reported as is.
+    pub(super) fn reset_corrupt_store(
+        &self,
+    ) -> Result<CodeIndexScopeStoreResetV1, CodeIndexPublicationStoreErrorV1> {
+        let store_root = self
+            .active_path
+            .parent()
+            .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
+        let store_lock = try_acquire_code_generation_store_lock(store_root)
+            .map_err(Self::unavailable)?
+            .ok_or_else(|| Self::unavailable(CODE_GENERATION_STORE_ACTIVE_OWNER_DETAIL_V1))?;
+        let receipt = reset_code_index_scope_store(&store_lock).map_err(Self::unavailable)?;
+        std::fs::create_dir_all(&self.generations_root).map_err(Self::unavailable)?;
+        tracedecay_code_index_retention::code_index_generations::record_scope_root(
+            store_root,
+            &self.project_root,
+        )
+        .map_err(Self::unavailable)?;
+        {
+            let mut state = self.cache.lock_state()?;
+            state.active = None;
+            state.decoded.clear();
+            state.active_epoch = state.active_epoch.wrapping_add(1);
+        }
+        self.cache.ready.notify_all();
+        *self
+            .pointer_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .unpublished_candidate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        self.active_encoded_bytes.store(0, Ordering::Release);
+        Ok(receipt)
     }
 
     pub(super) fn take_unpublished(&self) -> Option<Arc<CodeIndexPublishedGenerationV1>> {
