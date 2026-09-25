@@ -381,11 +381,14 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
     let settings = load_json_file(mcp_path);
     // Cursor Settings surfaces the MCP server key literally, so the Cursor
     // plugin registers `tracedecay` (not the Claude/Codex `graph` key).
+    // Plugin MCP servers run in Cursor's profile scope, which never expands
+    // `${workspaceFolder}`; `serve` resolves the workspace from its cwd and
+    // MCP initialize roots instead, so any `--path` argument is stale.
     let server = &settings["mcpServers"]["tracedecay"];
     if server["command"]
         .as_str()
         .is_some_and(|command| !command.is_empty())
-        && server["args"] == json!(["serve", "--path", "${workspaceFolder}"])
+        && server["args"] == json!(["serve"])
     {
         dc.pass(&format!(
             "Cursor plugin MCP registered in {}",
@@ -704,7 +707,9 @@ mod tests {
         assert_eq!(server["command"], "tracedecay");
         assert_eq!(
             server["args"],
-            serde_json::json!(["serve", "--path", "${workspaceFolder}"])
+            serde_json::json!(["serve"]),
+            "Cursor never expands `${{workspaceFolder}}` for profile-scoped plugin servers; \
+             serve must route from cwd and initialize roots"
         );
         assert!(
             mcp["mcpServers"].get("graph").is_none(),
