@@ -9,10 +9,6 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or
 /// reopen a session database while dispatching an action.
-///
-/// `profile_retained_authority` stays a daemon lease because
-/// `retained_catalog` still calls `execute_profile_retained_application`
-/// with `DaemonSessionRuntimeRegistryV1`.
 #[derive(Clone, Default)]
 pub struct SessionAuthorities<'a> {
     /// Registered project session store; ingestion, retrieval, and project
@@ -24,21 +20,10 @@ pub struct SessionAuthorities<'a> {
     /// The process background CPU authority host observation capture prepares
     /// under; absent on direct servers, where capture fails closed.
     pub background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
-    pub profile_retained_authority:
-        Option<&'a tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1>,
     pub project_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     pub profile_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
-    /// Daemon-wide profile session refresh service serving profile-scoped
-    /// `tracedecay_session_refresh_*` calls on this connection.
-    pub profile_session_refresh:
-        Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
-    /// Serving-status port of the mounted profile refresh worker; profile
-    /// message search / LCM retrieval with catch-up reads this.
-    pub profile_session_refresh_serving: Option<
-        &'a std::sync::Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
-    >,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -52,11 +37,8 @@ impl<'a> SessionAuthorities<'a> {
             user,
             profile_identity: None,
             background_cpu: None,
-            profile_retained_authority: None,
             project_lcm: None,
             profile_lcm: None,
-            profile_session_refresh: None,
-            profile_session_refresh_serving: None,
         }
     }
 
@@ -80,18 +62,6 @@ impl<'a> SessionAuthorities<'a> {
 
     #[must_use]
     #[hotpath::skip]
-    pub const fn with_profile_retained_authority(
-        mut self,
-        authority: Option<
-            &'a tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
-        >,
-    ) -> Self {
-        self.profile_retained_authority = authority;
-        self
-    }
-
-    #[must_use]
-    #[hotpath::skip]
     pub const fn with_lcm_authorities(
         mut self,
         project: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
@@ -99,30 +69,6 @@ impl<'a> SessionAuthorities<'a> {
     ) -> Self {
         self.project_lcm = project;
         self.profile_lcm = profile;
-        self
-    }
-
-    #[must_use]
-    #[hotpath::skip]
-    pub const fn with_profile_session_refresh(
-        mut self,
-        refresh: Option<&'a dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
-    ) -> Self {
-        self.profile_session_refresh = refresh;
-        self
-    }
-
-    #[must_use]
-    #[hotpath::skip]
-    pub const fn with_profile_session_refresh_serving(
-        mut self,
-        serving: Option<
-            &'a std::sync::Arc<
-                dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort,
-            >,
-        >,
-    ) -> Self {
-        self.profile_session_refresh_serving = serving;
         self
     }
 }

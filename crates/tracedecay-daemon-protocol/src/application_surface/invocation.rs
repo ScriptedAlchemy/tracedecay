@@ -10,14 +10,14 @@ use serde_json::Value;
 use tracedecay_contracts::feedback::observations::{
     FeedbackDeliveryRouteV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
-use tracedecay_contracts::retained_surfaces::RetainedSurfaceOperation;
+use tracedecay_contracts::retained_surfaces::{RetainedSurfaceOperation, RetainedSurfaceResultV1};
 use tracedecay_contracts::retrieval::PrimitiveRequest;
 use tracedecay_contracts::{
     ApplicationEnvelope, ApplicationInvocationBinding, ApplicationInvocationContext,
     ApplicationOutcome, ApplicationProblem, ApplicationResponse, CallableCodeSurfaceRequest,
-    InvocationError, NativeIntegrationSurfaceRequest, PageRequest, PrimitiveCodeSurfaceRequest,
-    RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, now_micros,
-    retained_surface_operation_is_effect, retained_surface_outcome_matches_terminal,
+    InvocationError, InvocationTarget, NativeIntegrationSurfaceRequest, PageRequest,
+    PrimitiveCodeSurfaceRequest, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    now_micros, retained_surface_operation_is_effect, retained_surface_outcome_matches_terminal,
     retained_surface_problem_matches_terminal, try_now_micros,
 };
 use tracedecay_domain::canonical_sha256;
@@ -384,16 +384,28 @@ pub async fn invoke_application_surface<E: DaemonInvocationExecutor + ?Sized>(
         return Err(InvocationError::InvalidRequest);
     }
     let route = application_delivery_route(surface);
-    let request = daemon_invocation_request(
-        &request_id,
-        operation,
-        request,
-        page,
-        deadline.clone(),
-        cancellation.context(),
-    )
-    .with_resolved_scope(target.resolved().cloned())
-    .map_err(|_| InvocationError::InvalidRequest)?
+    let request = match (target, request) {
+        (InvocationTarget::Profile, ApplicationSurfaceRequest::Retained(request)) => {
+            DaemonInvocationRequest::profile_retained_application(
+                request_id.as_str(),
+                request,
+                now_micros(),
+                deadline.clone(),
+                cancellation.context(),
+            )
+        }
+        (InvocationTarget::Profile, _) => return Err(InvocationError::InvalidRequest),
+        (target, request) => daemon_invocation_request(
+            &request_id,
+            operation,
+            request,
+            page,
+            deadline.clone(),
+            cancellation.context(),
+        )
+        .with_resolved_scope(target.resolved().cloned())
+        .map_err(|_| InvocationError::InvalidRequest)?,
+    }
     .with_delivery_route(route);
     let policy = application_surface_cancellation_policy(operation);
     match executor
@@ -567,6 +579,23 @@ pub fn application_response(
 
 /// Assemble a retained terminal only when it still belongs to the selected
 /// operation, request, and authenticated scope.
+/// A socket-decoded retained payload may carry a sibling operation's variant of
+/// the untagged result enum; re-select the variant the request named.
+fn retained_outcome_for_operation(
+    operation: RetainedSurfaceOperation,
+    mut outcome: ApplicationOutcome<RetainedSurfaceResultV1>,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, serde_json::Error> {
+    let payload = match &mut outcome {
+        ApplicationOutcome::Evidence(packet) => &mut packet.payload,
+        ApplicationOutcome::Effect(effect) => &mut effect.payload,
+        ApplicationOutcome::Preview(_) | ApplicationOutcome::Result(_) => return Ok(outcome),
+    };
+    if let Some(result) = payload.take() {
+        *payload = Some(result.for_operation(operation)?);
+    }
+    Ok(outcome)
+}
+
 fn retained_application_response(
     operation: RetainedSurfaceOperation,
     request_id: RequestId,
@@ -588,7 +617,17 @@ fn retained_application_response(
         ));
     }
     let invalid = || unavailable("The daemon returned an invalid retained application response");
-    match response.outcome {
+    let outcome = match response.outcome {
+        DaemonInvocationOutcome::RetainedApplication { scope, outcome } => {
+            DaemonInvocationOutcome::RetainedApplication {
+                scope,
+                outcome: retained_outcome_for_operation(operation, outcome)
+                    .map_err(|_| invalid())?,
+            }
+        }
+        outcome => outcome,
+    };
+    match outcome {
         DaemonInvocationOutcome::RetainedApplication { scope, outcome }
             if retained_surface_outcome_matches_terminal(
                 operation,

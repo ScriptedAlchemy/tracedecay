@@ -18,10 +18,7 @@ use tracedecay_mcp::{
     explore_call_budget, project_catalog_discovery_scope, tool_error_response,
     tool_result_has_semantic_error,
 };
-use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
-use tracedecay_sessions::runtime::user_sessions_db_path;
 use tracedecay_sessions::serving::SessionRefreshWorkerPort;
-use tracedecay_store::StoreShardIdV1;
 
 use super::*;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
@@ -40,10 +37,8 @@ where
 }
 
 /// Authenticated durable identity pinned once for a projectless connection.
-/// Request grants are issued only after the adapter supplies exact controls.
 struct ProjectlessConnectionStateV1 {
     client_identity: DaemonClientIdentity,
-    profile_authority: tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
     active_project_root: Option<PathBuf>,
 }
 
@@ -92,34 +87,11 @@ fn admit_projectless_connection(
         });
     }
     let pinned_profile_root = profile_identity.profile_root().to_path_buf();
-    let shard = StoreShardIdV1::profile_sessions(
-        profile_identity.brain_id().clone(),
-        profile_identity.profile_id().clone(),
-    );
-    let serving_db = user_sessions_db_path(&pinned_profile_root);
-    let serving = tracedecay_session_runtime::retained::profile_session_retrieval_serving_identity(
-        profile_identity,
-        &shard,
-        &serving_db,
-    )
-    .ok_or_else(|| TraceDecayError::Config {
-        message: "projectless profile session identity is unavailable".to_owned(),
-    })?;
-    let profile_session_root =
-        DaemonSessionRetrievalRoot::profile(serving).ok_or_else(|| TraceDecayError::Config {
-            message: "projectless profile session authority is unavailable".to_owned(),
-        })?;
-    let profile_authority =
-        tracedecay_session_runtime::retained::profile_retained_connection_authority(
-            profile_identity,
-            profile_session_root.identity(),
-        )?;
     Ok(ProjectlessConnectionStateV1 {
         client_identity: DaemonClientIdentity::new(
             pinned_profile_root.clone(),
             pinned_profile_root.join("global.db"),
         ),
-        profile_authority,
         active_project_root: None,
     })
 }
@@ -387,7 +359,6 @@ async fn projectless_tools_call_response_with_connection(
                     tool_name,
                     operation,
                     arguments,
-                    connection,
                     store_administration,
                 ))
             }
@@ -661,95 +632,43 @@ async fn projectless_profile_retained_response(
     tool_name: &str,
     operation: tracedecay_contracts::RetainedSurfaceOperation,
     arguments: serde_json::Value,
-    connection: &ProjectlessConnectionStateV1,
     store_administration: &StoreAdministration,
 ) -> tracedecay_mcp::JsonRpcResponse {
-    let is_lcm =
-        tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search";
-    let is_session_refresh = matches!(
-        operation,
-        tracedecay_contracts::RetainedSurfaceOperation::SessionRefreshBegin
-            | tracedecay_contracts::RetainedSurfaceOperation::SessionRefreshStatus
-            | tracedecay_contracts::RetainedSurfaceOperation::SessionRefreshCancel
-    );
-    let user_scope_requested = if is_session_refresh {
-        crate::mcp::tools::session_refresh_profile_scope_requested(tool_name, &arguments)
-    } else if is_lcm {
-        arguments
-            .get("storage_scope")
-            .and_then(serde_json::Value::as_str)
-            == Some("user")
-    } else {
-        arguments
-            .get("memory_scope")
-            .and_then(serde_json::Value::as_str)
-            == Some("user")
-    };
-    if !user_scope_requested {
-        return JsonRpcResponse::error(
-            id,
-            ErrorCode::InvalidParams,
-            "projectless retained dispatch requires an explicit user scope".to_string(),
-        );
+    match crate::mcp::tools::retained_tool_target(operation, &arguments) {
+        Ok(tracedecay_contracts::InvocationTarget::Profile) => {}
+        Ok(_) => {
+            return JsonRpcResponse::error(
+                id,
+                ErrorCode::InvalidParams,
+                "projectless retained dispatch requires an explicit user scope".to_string(),
+            );
+        }
+        Err(error) => return tool_error_response(id, tool_name, &error),
     }
-    if is_lcm
-        && let Err(error) =
-            boxed_projectless_phase(await_user_profile_host_admission_replay_for_identity(
-                store_administration,
-                &connection.client_identity,
-            ))
-            .await
-    {
-        return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-    }
-    let runtime_registry =
-        match boxed_projectless_phase(store_administration.registered_runtime_registry()).await {
-            Ok(registry) => registry,
-            Err(error) => {
-                return tool_error_response(id, tool_name, &error);
-            }
-        };
-    // The profile refresh service is daemon-wide so a handle begun here also
-    // resolves through a project-connected MCP server, and vice versa.
-    let session_refresh = if is_session_refresh {
-        let database = match boxed_projectless_phase(
-            store_administration.registered_profile_session_database(),
-        )
-        .await
-        {
-            Ok(database) => database,
-            Err(error) => {
-                return tool_error_response(id, tool_name, &error);
-            }
-        };
-        Some(
-            boxed_projectless_phase(
-                store_administration.profile_session_refresh_service(&database),
-            )
-            .await,
-        )
-    } else {
-        None
+    let Some(application) =
+        tracedecay_tool_catalog::ApplicationSurfaceOperation::from_tool_name(tool_name)
+    else {
+        return requires_project_error(id, tool_name);
     };
-    let result = boxed_projectless_phase(crate::mcp::tools::execute_profile_retained_mcp_tool(
-        operation,
-        tool_name,
+    let executor = super::profile_retained::ProfileRetainedExecutor {
+        store_administration: store_administration.clone(),
+    };
+    let result = boxed_projectless_phase(crate::mcp::tools::run_retained_surface_tool(
+        None,
+        tracedecay_tool_catalog::BindingSurface::Mcp,
+        application,
         arguments,
-        runtime_registry.as_ref(),
-        &connection.profile_authority,
-        None,
-        session_refresh.as_deref().map(|service| {
-            service as &dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1
-        }),
-        None,
-        None,
+        Some(&executor),
         None,
         None,
         None,
     ))
     .await;
     match result {
-        Ok(result) => JsonRpcResponse::success(id, result.value),
+        Ok(mut result) => {
+            tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
+            JsonRpcResponse::success(id, result.value)
+        }
         Err(error) => tool_error_response(id, tool_name, &error),
     }
 }
@@ -783,15 +702,29 @@ pub(super) fn projectless_first_request(request: Option<&JsonRpcRequest>) -> boo
     let Ok((tool_name, arguments)) = projectless_tool_call(request.params.as_ref()) else {
         return false;
     };
+    use tracedecay_contracts::RetainedSurfaceOperation as Op;
+    // Profile session and LCM reads never wait on the handshake's project;
+    // profile memory stays on the project connection.
     matches!(
         tool_name,
         "tracedecay_project_list" | "tracedecay_project_search" | "tracedecay_project_context"
-    ) || ((tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
-        && arguments
-            .get("storage_scope")
-            .and_then(serde_json::Value::as_str)
-            == Some("user"))
-        || crate::mcp::tools::session_refresh_profile_scope_requested(tool_name, &arguments)
+    ) || matches!(
+        Op::from_tool_name(tool_name),
+        Some(
+            operation @ (Op::LcmStatus
+                | Op::LcmDoctor
+                | Op::LcmLoadSession
+                | Op::LcmGrep
+                | Op::LcmDescribe
+                | Op::LcmExpand
+                | Op::LcmExpandQuery
+                | Op::MessageSearch
+                | Op::SessionRefreshBegin
+                | Op::SessionRefreshStatus
+                | Op::SessionRefreshCancel)
+        ) if crate::mcp::tools::retained_tool_target(operation, &arguments)
+            .is_ok_and(|target| target == tracedecay_contracts::InvocationTarget::Profile)
+    )
 }
 
 #[cfg(all(test, unix))]

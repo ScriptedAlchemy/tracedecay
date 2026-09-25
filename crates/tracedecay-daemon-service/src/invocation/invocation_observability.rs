@@ -74,6 +74,7 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::ContextScout
         | DaemonInvocationOperation::ObservatoryRead
         | DaemonInvocationOperation::RetainedApplication
+        | DaemonInvocationOperation::ProfileRetainedApplication
         | DaemonInvocationOperation::MultiRootScopeSetRead
         | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
         | DaemonInvocationOperation::MultiRootExecute

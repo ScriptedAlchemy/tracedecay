@@ -326,8 +326,6 @@ pub struct McpServer {
     global_db: Option<RegisteredGlobalDbLeaseV1>,
     profile_root: Option<PathBuf>,
     profile_identity: Option<Arc<dyn tracedecay_contracts::ProfileIdentityReadPort>>,
-    profile_retained_authority:
-        Option<tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1>,
     accounting_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
     /// Registered project session store. Startup recovery, ingestion,
     /// retrieval, and host admission all borrow this one lease and never
@@ -348,9 +346,6 @@ pub struct McpServer {
     user_session_refresh_wake:
         Option<Arc<dyn tracedecay_sessions::serving::SessionRefreshWorkerPort>>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
-    /// Daemon-wide profile session refresh service shared with the projectless
-    /// route, so a handle begun on either connection resolves on the other.
-    profile_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     /// Exact registered session-store coordinates retained with the project
     /// refresh authority. V2 refresh requests must match these values; caller
     /// selectors never rename the mounted store in receipts or digest inputs.
@@ -828,7 +823,6 @@ impl McpServer {
             background_cpu,
             project_session_refresh_wake,
             user_session_refresh_wake,
-            profile_session_refresh,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,
@@ -1042,28 +1036,6 @@ impl McpServer {
                     root.expected_runtime_shard()?,
                 )
             });
-        let profile_retained_authority = match profile_identity
-            .as_ref()
-            .zip(profile_session_retrieval_root.as_ref())
-        {
-            Some((identity, root)) => {
-                match tracedecay_session_runtime::retained::profile_retained_connection_authority(
-                    identity.as_ref(),
-                    root.identity(),
-                ) {
-                    Ok(authority) => Some(authority),
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "profile retained connection authority is unavailable"
-                        );
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
-
         let server = Arc::new_cyclic(|dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
@@ -1084,7 +1056,6 @@ impl McpServer {
             accounting_db,
             profile_root,
             profile_identity,
-            profile_retained_authority,
             project_session_db,
             registry_db,
             project_registry_reads,
@@ -1094,7 +1065,6 @@ impl McpServer {
             project_session_refresh_wake,
             user_session_refresh_wake,
             project_session_refresh_service,
-            profile_session_refresh_service: profile_session_refresh,
             project_session_store_id,
             project_session_root_id,
             session_sync_service,

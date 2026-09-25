@@ -59,11 +59,16 @@ type HostAdmissionBrokers =
 /// owns the opaque refresh handles it issued, so every route that reaches the
 /// same store (project MCP servers and the projectless client) must share the
 /// instance for `status`/`cancel` to resolve a `begin` handle.
-type ProfileSessionRefreshServices = Arc<
-    ProfiledTokioMutex<
-        HashMap<PathBuf, Arc<tracedecay_daemon_service::DaemonSessionRefreshService>>,
-    >,
->;
+type ProfileSessionRefreshServices =
+    Arc<ProfiledTokioMutex<HashMap<PathBuf, ProfileSessionRefreshAuthorityV1>>>;
+
+/// The daemon-wide refresh service of one profile session store and the
+/// serving status of the scheduler worker it wakes.
+#[derive(Clone)]
+pub(super) struct ProfileSessionRefreshAuthorityV1 {
+    pub(super) service: Arc<tracedecay_daemon_service::DaemonSessionRefreshService>,
+    pub(super) serving: Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
+}
 
 /// Resolves the writer scope for one store family.
 ///
@@ -1321,32 +1326,33 @@ impl StoreAdministration {
         &self.session_temporal_refresh_schedulers
     }
 
-    /// The daemon-wide refresh service for one registered profile session
+    /// The daemon-wide refresh authority for one registered profile session
     /// store, bound to that store's temporal refresh scheduler.
-    #[hotpath::measure(
-        label = "daemon.branch_admin.profile_session_refresh_service",
-        future = true
-    )]
-    pub(super) async fn profile_session_refresh_service(
+    #[hotpath::measure(label = "daemon.branch_admin.profile_session_refresh", future = true)]
+    pub(super) async fn profile_session_refresh(
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    ) -> Arc<tracedecay_daemon_service::DaemonSessionRefreshService> {
+    ) -> ProfileSessionRefreshAuthorityV1 {
         let path = database.db_path().to_path_buf();
         let mut services = self.profile_session_refresh_services.lock().await;
-        if let Some(service) = services.get(&path) {
-            return Arc::clone(service);
+        if let Some(authority) = services.get(&path) {
+            return authority.clone();
         }
-        let wake = self
-            .session_temporal_refresh_schedulers
-            .ensure_profile(path.clone(), database.clone())
-            .await;
-        let service = Arc::new(tracedecay_daemon_service::DaemonSessionRefreshService::new(
-            database.clone(),
-            Arc::new(wake),
-            None,
-        ));
-        services.insert(path, Arc::clone(&service));
-        service
+        let wake = Arc::new(
+            self.session_temporal_refresh_schedulers
+                .ensure_profile(path.clone(), database.clone())
+                .await,
+        );
+        let authority = ProfileSessionRefreshAuthorityV1 {
+            service: Arc::new(tracedecay_daemon_service::DaemonSessionRefreshService::new(
+                database.clone(),
+                Arc::clone(&wake) as _,
+                None,
+            )),
+            serving: wake,
+        };
+        services.insert(path, authority.clone());
+        authority
     }
 
     /// Drops the cached profile refresh services so their profile session

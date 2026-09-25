@@ -1,20 +1,20 @@
 use super::*;
 
 #[tokio::test]
-async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
+async fn projectless_user_session_setup_failure_is_a_typed_unavailable_terminal() {
     let temp = TempDir::new().unwrap();
     let profile_root = temp.path().join("profile");
     // A real profile identity whose registered profile-session store cannot be
     // opened: setup passes the identity gate and must then surface the
-    // registered-authority route failure as JSON-RPC instead of hanging or
-    // panicking.
+    // registered-authority route failure as the typed unavailable terminal of
+    // the profile retained owner, instead of hanging or panicking.
     //
     // The unopenable store is created by putting a directory where the
     // user-sessions database belongs. Merely withholding the daemon database
     // scope no longer produces a failure here: in a test build
     // `DatabaseAuthority::for_runtime` grants fixture `Test` authority to any
     // database under the system temp dir, so the whole retained path succeeds
-    // and the JSON-RPC error contract goes unexercised.
+    // and the refusal goes unexercised.
     let administration = test_store_administration_for_profile(&profile_root);
     std::fs::create_dir_all(tracedecay_sessions::runtime::user_sessions_db_path(
         &profile_root,
@@ -38,16 +38,14 @@ async fn projectless_user_session_setup_failure_returns_json_rpc_error() {
     )
     .await;
 
-    let error = response.error.clone().unwrap_or_else(|| {
-        panic!("profile setup failure must be returned as JSON-RPC: {response:?}")
+    let result = response.result.clone().unwrap_or_else(|| {
+        panic!("profile setup failure must be a typed tool result: {response:?}")
     });
-    assert_eq!(error.code, -32603);
-    assert!(
-        error
-            .message
-            .contains("project route error (registered_authority_unavailable)"),
-        "unexpected setup error: {}",
-        error.message
+    assert_eq!(result["isError"], true, "{result}");
+    assert_eq!(result["problem"]["kind"], "unavailable", "{result}");
+    assert_eq!(
+        result["problem"]["code"], "registered_authority_unavailable",
+        "{result}"
     );
 }
 

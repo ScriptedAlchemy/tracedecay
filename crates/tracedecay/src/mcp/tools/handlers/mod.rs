@@ -8,7 +8,7 @@ mod application_surface;
 pub(crate) use application_surface::graph_tool_error_problem;
 pub use application_surface::{
     RetainedSurfaceExecution, execute_graph_tool_surface, execute_retained_surface_tool,
-    render_retained_execution,
+    render_retained_execution, retained_tool_target, run_retained_surface_tool,
 };
 pub(crate) use dispatch_groups::compute_graph_tool_for_owner;
 #[cfg(test)]
@@ -160,8 +160,8 @@ pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 pub(super) use tool_call_support::text_tool_result;
 
 use serde_json::Value;
-use tracedecay_contracts::RetainedSurfaceOperation;
 use tracedecay_contracts::retrieval::ServedCodeGraphGenerationV1;
+use tracedecay_contracts::{InvocationTarget, RetainedSurfaceOperation};
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
 use super::LegacyToolCompatibilityOwner;
@@ -169,9 +169,6 @@ use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
     dispatch_git_tools, dispatch_graph_tools, dispatch_health_tools, dispatch_info_tools,
     dispatch_memory_tools, dispatch_session_workflow_tools,
-};
-use retained_catalog::{
-    dispatch_profile_retained_application_tool, session_refresh_profile_scope_requested,
 };
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use tracedecay_api::{WorkHttpRequest, WorkflowHttpRequest};
@@ -461,7 +458,7 @@ impl<'a> ToolCallRegistryOptions<'a> {
 pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,
-    mut args: Value,
+    args: Value,
     server_stats: Option<Value>,
     scope_prefix: Option<&'a str>,
     options: ToolCallRegistryOptions<'a>,
@@ -478,102 +475,26 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 });
             }
         }
-        if args.get("memory_scope").and_then(Value::as_str) == Some("user")
-            && matches!(
-                RetainedSurfaceOperation::from_tool_name(tool_name),
-                Some(
-                    RetainedSurfaceOperation::FactStoreAdd
-                        | RetainedSurfaceOperation::FactStoreSearch
-                        | RetainedSurfaceOperation::FactStoreProbe
-                        | RetainedSurfaceOperation::FactStoreRelated
-                        | RetainedSurfaceOperation::FactStoreReason
-                        | RetainedSurfaceOperation::FactStoreContradict
-                        | RetainedSurfaceOperation::FactStoreGet
-                        | RetainedSurfaceOperation::FactStoreUpdate
-                        | RetainedSurfaceOperation::FactStoreRemove
-                        | RetainedSurfaceOperation::FactStoreSupersede
-                        | RetainedSurfaceOperation::FactStoreList
-                        | RetainedSurfaceOperation::FactFeedback
-                        | RetainedSurfaceOperation::MemoryStatus
-                )
-            )
-        {
-            if args.get("storage_scope").is_some() {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
-                });
+        if let Some(retained) = RetainedSurfaceOperation::from_tool_name(tool_name) {
+            // A profile-targeted call names no project, so it skips project
+            // selector routing and goes straight to the profile owner.
+            if retained_tool_target(retained, &args)? == InvocationTarget::Profile {
+                ensure_mcp_dispatch_available(tool_name)?;
+                return boxed_send(dispatch_application_surface_tools(
+                    tool_name, cg, args, options,
+                ))
+                .await;
             }
-            ensure_mcp_dispatch_available(tool_name)?;
-            let operation =
-                RetainedSurfaceOperation::from_tool_name(tool_name).ok_or_else(|| {
-                    TraceDecayError::Config {
-                        message: format!("{tool_name} requires a supported retained action"),
-                    }
-                })?;
-            return dispatch_profile_retained_application_tool(
-                operation, tool_name, cg, args, options,
-            )
-            .await;
-        }
-        // A profile-scoped session refresh names its owner in the canonical
-        // request; like `memory_scope=user`, that selects the profile session
-        // authority and never the active project's session store.
-        if session_refresh_profile_scope_requested(tool_name, &args) {
-            if args.get("storage_scope").is_some() {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
-                });
-            }
-            ensure_mcp_dispatch_available(tool_name)?;
-            let operation = RetainedSurfaceOperation::from_tool_name(tool_name)
-                .ok_or_else(|| unknown_tool_error(tool_name))?;
-            return dispatch_profile_retained_application_tool(
-                operation, tool_name, cg, args, options,
-            )
-            .await;
-        }
-        if let Some(storage_scope) = args.get("storage_scope").and_then(Value::as_str) {
-            if !tool_name.starts_with("tracedecay_lcm_") && tool_name != "tracedecay_message_search"
-            {
-                return Err(TraceDecayError::Config {
-                    message: format!("unknown parameter `storage_scope` for `{tool_name}`"),
-                });
-            }
-            match storage_scope {
-                "user" => {
-                    // User-scoped retained/LCM calls return before the root
-                    // dispatch guard below. Keep the canonical availability
-                    // decision ahead of every profile handler and store effect.
-                    if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
-                        || tool_name == "tracedecay_message_search"
-                    {
-                        ensure_mcp_dispatch_available(tool_name)?;
-                    }
-                    if let Some(operation) = RetainedSurfaceOperation::from_tool_name(tool_name) {
-                        let dispatch: std::pin::Pin<
-                            Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-                        > = Box::pin(dispatch_profile_retained_application_tool(
-                            operation, tool_name, cg, args, options,
-                        ));
-                        return dispatch.await;
-                    }
-                    return Err(TraceDecayError::Config {
-                        message: format!(
-                            "storage_scope=user is unavailable for non-retained tool `{tool_name}`"
-                        ),
-                    });
-                }
-                "project" => {
-                    if let Some(object) = args.as_object_mut() {
-                        object.remove("storage_scope");
-                    }
-                }
-                _ => {
-                    return Err(TraceDecayError::Config {
-                        message: "storage_scope must be one of project, user".to_string(),
-                    });
-                }
-            }
+        } else if let Some(storage_scope) = args.get("storage_scope") {
+            return Err(TraceDecayError::Config {
+                message: if tool_name.starts_with("tracedecay_lcm_")
+                    && storage_scope.as_str() == Some("user")
+                {
+                    format!("storage_scope=user is unavailable for non-retained tool `{tool_name}`")
+                } else {
+                    format!("unknown parameter `storage_scope` for `{tool_name}`")
+                },
+            });
         }
         if tool_accepts_registered_project_selector(tool_name) {
             support::validate_registered_project_selector_aliases(&args)?;

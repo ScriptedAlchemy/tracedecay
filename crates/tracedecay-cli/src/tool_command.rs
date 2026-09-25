@@ -208,12 +208,6 @@ fn run_inner(
                 let mut tool_args = tool_args;
                 let dispatch =
                     DaemonToolDispatch::for_tool(explicit_project, tool_name, &mut tool_args);
-                if requests_profile_authority(tool_name, &tool_args) {
-                    return dispatch_compatibility_tool(
-                        dispatch, tool_name, tool_args, raw_json, deadline,
-                    )
-                    .await;
-                }
                 return dispatch_cli_retained(operation, tool_args, dispatch, raw_json, deadline)
                     .await;
             }
@@ -320,7 +314,6 @@ fn run_inner(
             .ok_or_else(tool_deadline_range_error)?;
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && RetainedSurfaceOperation::from_application(operation).is_some()
-            && !requests_profile_authority(&def.name, &tool_args)
         {
             let dispatch =
                 DaemonToolDispatch::for_tool(explicit_project, &def.name, &mut tool_args);
@@ -348,7 +341,6 @@ fn run_inner(
             )
             .await;
         }
-        // Profile-authority retained calls stay on the daemon's profile route below.
         if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name)
             && RetainedSurfaceOperation::from_application(operation).is_none()
         {
@@ -794,10 +786,10 @@ impl DaemonToolDispatch {
     /// `tool_args` may be seeded: a registry read that names an uninitialised
     /// `--project` but no `path` inherits that project as its `path`.
     fn for_tool(explicit_project: Option<String>, tool_name: &str, tool_args: &mut Value) -> Self {
-        // Profile-authority tools (Hermes user LCM/memory) must never invent a
+        // Profile-targeted calls (Hermes user LCM/memory) must never invent a
         // project from cwd. Hermes intentionally runs those calls with cwd=/ so
         // Hermes home is never mistaken for a TraceDecay project.
-        if requests_profile_authority(tool_name, tool_args) {
+        if targets_profile(tool_name, tool_args) {
             return Self {
                 project_path: None,
                 allow_init: false,
@@ -897,28 +889,12 @@ impl DaemonToolDispatch {
     }
 }
 
-/// Profile-authority calls: user-scope LCM/message search (`storage_scope`),
-/// user-scope memory (`memory_scope`), and a session refresh whose canonical
-/// `scope` names the profile-owned session store.
-fn requests_profile_authority(tool_name: &str, tool_args: &Value) -> bool {
-    matches!(
-        tool_args.get("storage_scope").and_then(Value::as_str),
-        Some("user")
-    ) || matches!(
-        tool_args.get("memory_scope").and_then(Value::as_str),
-        Some("user")
-    ) || (matches!(
-        RetainedSurfaceOperation::from_tool_name(tool_name),
-        Some(
-            RetainedSurfaceOperation::SessionRefreshBegin
-                | RetainedSurfaceOperation::SessionRefreshStatus
-                | RetainedSurfaceOperation::SessionRefreshCancel
-        )
-    ) && tool_args
-        .get("scope")
-        .and_then(|scope| scope.get("kind"))
-        .and_then(Value::as_str)
-        == Some("profile"))
+/// Whether a retained call addresses the authenticated profile's own stores.
+fn targets_profile(tool_name: &str, tool_args: &Value) -> bool {
+    RetainedSurfaceOperation::from_tool_name(tool_name).is_some_and(|operation| {
+        tracedecay::mcp::tools::retained_tool_target(operation, tool_args)
+            .is_ok_and(|target| target == tracedecay_contracts::InvocationTarget::Profile)
+    })
 }
 
 fn implicit_tool_project_path(cwd: &Path) -> Option<PathBuf> {
