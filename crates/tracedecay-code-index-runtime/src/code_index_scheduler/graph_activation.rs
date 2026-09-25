@@ -691,6 +691,7 @@ impl LatestCodeTextGenerationV1 {
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
         store.mark_interactive_catalog_warming()?;
+        store.warm_serving_engine()?;
         let reader = hotpath::measure_block!("code_graph.activation.head_evidence_reader", {
             store.evidence_reader_with_cancellation(
                 &generation_id,
@@ -757,6 +758,7 @@ impl LatestCompleteCodeIndexV1 {
         // immutable occurrence graph is already verified, so publish it first
         // and keep only catalog-dependent lookups in the typed warming state.
         store.mark_interactive_catalog_warming()?;
+        store.warm_serving_engine()?;
         let reader = hotpath::measure_block!("code_graph.activation.evidence_reader", {
             store.evidence_reader_with_cancellation(
                 &generation_id,

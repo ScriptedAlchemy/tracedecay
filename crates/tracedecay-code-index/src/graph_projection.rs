@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use std::sync::RwLock;
 
@@ -19,8 +19,8 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphConflictContextV1, GraphDbError, GraphEntity, GraphEntityId,
     GraphEntityRef, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphProperty, GraphPropertyName, GraphTraversalDirection, SourceGeneration, TraversalRequest,
-    VerifiedGraphSnapshot,
+    GraphProperty, GraphPropertyName, GraphServingEnginePin, GraphTraversalDirection,
+    SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
@@ -209,6 +209,9 @@ pub struct CodeGraphProjectionStore {
     /// The state lock is never held across the projection scan, so
     /// occurrence-seeded reads remain independent while catalog warming runs.
     interactive_catalog: Arc<InteractiveCatalogCache>,
+    /// Keeps this generation's graph engine resident for the store's
+    /// lifetime once [`Self::warm_serving_engine`] opened it.
+    serving_engine: Arc<OnceLock<GraphServingEnginePin>>,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -237,7 +240,35 @@ impl CodeGraphProjectionStore {
             projection,
             generation,
             interactive_catalog: Arc::new(InteractiveCatalogCache::new()),
+            serving_engine: Arc::new(OnceLock::new()),
         })
+    }
+
+    /// Opens this generation's graph engine once and keeps it resident for as
+    /// long as the store lives. Corpus-sized on a cold engine, so background
+    /// activation calls it before the store serves; readers never pay it.
+    #[hotpath::measure(label = "code_graph.store.warm_serving_engine")]
+    pub fn warm_serving_engine(&self) -> Result<(), CodeGraphProjectionError> {
+        if self.serving_engine.get().is_none() {
+            let pin = self.snapshot.pin_serving_engine()?;
+            // A concurrent warm that won the slot pinned the same engine; this
+            // pin's drop only releases its own count.
+            let _ = self.serving_engine.set(pin);
+        }
+        Ok(())
+    }
+
+    /// Readers are latency bounded: a cold engine is warmed in background
+    /// activation, so a read that arrives first gets the typed warming
+    /// answer instead of waiting on the open.
+    fn require_resident_engine(&self) -> Result<(), CodeGraphProjectionError> {
+        if self.snapshot.serving_engine_resident()? {
+            Ok(())
+        } else {
+            Err(CodeGraphProjectionError::Unavailable(
+                "code graph engine is warming in the background".to_owned(),
+            ))
+        }
     }
 
     pub fn evidence_reader(
@@ -269,6 +300,7 @@ impl CodeGraphProjectionStore {
             .validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
         validate_reader_metadata(repository_id.as_ref(), &freshness)?;
+        self.require_resident_engine()?;
         let snapshot = Arc::clone(&self.snapshot);
         let current =
             read_current_generation(&snapshot, &self.projection, Arc::clone(&cancellation))?;
@@ -313,6 +345,7 @@ impl CodeGraphProjectionStore {
         generation
             .validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+        self.require_resident_engine()?;
         let snapshot = Arc::clone(&self.snapshot);
         let current =
             read_current_generation(&snapshot, &self.projection, Arc::clone(&cancellation))?;

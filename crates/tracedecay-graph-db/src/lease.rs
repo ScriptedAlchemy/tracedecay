@@ -290,6 +290,19 @@ impl VerifiedGraphSnapshot {
         &self.head.locator.projection
     }
 
+    /// Opens the engine that serves this snapshot's head reads, a sealed
+    /// generation's own store when it has one, and keeps it resident while
+    /// the returned pin lives. Blocking and corpus-sized on a cold engine.
+    pub fn pin_serving_engine(&self) -> Result<crate::GraphServingEnginePin, GraphDbError> {
+        self.with_head_database(crate::GraphDb::pin_serving_engine)
+    }
+
+    /// Whether head reads would be served by an already resident engine, so a
+    /// latency-bounded caller can refuse instead of paying a cold open.
+    pub fn serving_engine_resident(&self) -> Result<bool, GraphDbError> {
+        self.with_head_database(crate::GraphDb::native_engine_open)
+    }
+
     #[must_use]
     pub fn generation(&self) -> &GraphGenerationId {
         &self.head.locator.generation

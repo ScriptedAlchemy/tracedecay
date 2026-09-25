@@ -601,6 +601,10 @@ pub struct CodeIndexMountedScopeV1 {
     pub shutting_down: Arc<AtomicBool>,
 }
 
+/// One worktree's graph-bearing serving seat. Every read path takes it, so it
+/// is Hotpath instrumented; each writer bumps the worktree's serving epoch.
+pub type ServingGenerationSlot = hotpath::rw_locks::RwLock<Option<LatestCompleteCodeIndexV1>>;
+
 /// Outcome of retiring the retained generation from a failed branch
 /// publication. A no-match preserves a newer generation that won the race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,7 +683,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// work so competing builds wait without occupying a blocking-pool thread.
     pub(super) build_publication_lock: Arc<tokio::sync::Mutex<()>>,
     pub historical_generation_owner: super::HistoricalCodeIndexGenerationOwnerV1,
-    pub serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    pub serving_generation: Arc<ServingGenerationSlot>,
     /// Complete-generation callers need the decoded serving owner; restored
     /// text and persistent graph reads do not. Only their explicit demand
     /// admits this optional decode after verified-head recovery.
@@ -1469,7 +1473,7 @@ impl Drop for PendingWakeClaimV1 {
 type ReadyProbeServingPartsV1 = (
     super::SourceFreshnessFenceV1,
     super::HistoricalCodeIndexGenerationOwnerV1,
-    Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    Arc<ServingGenerationSlot>,
     Arc<RwLock<Option<super::ServingSourceWitnessV1>>>,
     Arc<AtomicBool>,
     Arc<tokio::sync::Notify>,
@@ -2693,7 +2697,7 @@ impl CodeIndexSchedulerRegistryV1 {
     /// only when its sealed-digest proof describes this snapshot, so a seat
     /// the checkout has moved past is never armed here.
     pub(super) fn bind_unproven_seat_to_verified_source(
-        serving_generation: &RwLock<Option<LatestCompleteCodeIndexV1>>,
+        serving_generation: &ServingGenerationSlot,
         serving_source_witness: &RwLock<Option<super::ServingSourceWitnessV1>>,
         source_freshness: &super::SourceFreshnessFenceV1,
         verified_snapshot_content_identity: &tracedecay_domain::ContentDigest,

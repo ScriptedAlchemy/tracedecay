@@ -97,7 +97,7 @@ pub use registry::{
     GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,
     GraphPublicationPreparationV1, ProvenGraphPublicationV1,
 };
-pub use runtime::{GraphDb, GraphDbRuntimeState, GraphSnapshot};
+pub use runtime::{GraphDb, GraphDbRuntimeState, GraphServingEnginePin, GraphSnapshot};
 pub use schema::graph_stable_identity;
 pub use sealed_store::{SealedStoreCensusV1, census_sealed_store};
 
