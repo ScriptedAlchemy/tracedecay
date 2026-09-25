@@ -2194,10 +2194,12 @@ fn resolve_file_references(
             && typescript_imports
                 .get(reference.reference_name.as_str())
                 .is_some_and(|namespaces| {
-                    namespaces.iter().any(|namespace| match reference.reference_kind {
-                        EdgeKind::Calls => *namespace == ImportNamespaceV1::Value,
-                        _ => *namespace != ImportNamespaceV1::SideEffect,
-                    })
+                    namespaces
+                        .iter()
+                        .any(|namespace| match reference.reference_kind {
+                            EdgeKind::Calls => *namespace == ImportNamespaceV1::Value,
+                            _ => *namespace != ImportNamespaceV1::SideEffect,
+                        })
                 });
         let from_span = by_node_id
             .get(reference.from_node_id.as_str())

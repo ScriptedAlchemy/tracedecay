@@ -85,7 +85,14 @@ fn fallback_cursor_serves_disjoint_canonical_pages() {
     let cursor = first.fallback.cursor.clone().expect("continuation");
     assert_eq!(cursor.next_ordinal, 1);
     let second = authority
-        .compose(&request, &query, lanes(), &BTreeMap::new(), 1, Some(&cursor))
+        .compose(
+            &request,
+            &query,
+            lanes(),
+            &BTreeMap::new(),
+            1,
+            Some(&cursor),
+        )
         .expect("second page");
     assert_eq!(
         second
@@ -330,7 +337,14 @@ fn core_fallback_authority_ranks_task_session_without_changing_search_lanes() {
         id::<ScoreDomainId>(crate::retrieval::QUERY_TASK_SESSION_SCORE_DOMAIN_V1),
     );
     authority
-        .compose(&request, &query_view(), empty_foreground_lanes(), &BTreeMap::new(), 8, None)
+        .compose(
+            &request,
+            &query_view(),
+            empty_foreground_lanes(),
+            &BTreeMap::new(),
+            8,
+            None,
+        )
         .expect("search lanes stay the checked-in fallback set");
 }
 
@@ -572,7 +586,14 @@ fn query_cursor_ttl_uses_wall_clock_instead_of_snapshot_time() {
         .expect("system time")
         .as_micros() as i64;
     let current = authority()
-        .compose(&request, &query, paged_foreground_lanes(), &BTreeMap::new(), 1, None)
+        .compose(
+            &request,
+            &query,
+            paged_foreground_lanes(),
+            &BTreeMap::new(),
+            1,
+            None,
+        )
         .expect("compose current cursor")
         .fallback
         .cursor
@@ -638,7 +659,14 @@ fn exact_code_source_binding_is_authenticated_with_the_query_cursor() {
     let request = request();
     let query = query_view();
     let mut cursor = authority
-        .compose(&request, &query, paged_foreground_lanes(), &BTreeMap::new(), 1, None)
+        .compose(
+            &request,
+            &query,
+            paged_foreground_lanes(),
+            &BTreeMap::new(),
+            1,
+            None,
+        )
         .expect("compose first page")
         .fallback
         .cursor
@@ -687,10 +715,24 @@ fn authenticated_foreground_fallback_is_byte_stable_and_lane_bounded() {
     let request = request();
     let query = query_view();
     let first = authority
-        .compose(&request, &query, empty_foreground_lanes(), &BTreeMap::new(), 8, None)
+        .compose(
+            &request,
+            &query,
+            empty_foreground_lanes(),
+            &BTreeMap::new(),
+            8,
+            None,
+        )
         .expect("compose");
     let second = authority
-        .compose(&request, &query, empty_foreground_lanes(), &BTreeMap::new(), 8, None)
+        .compose(
+            &request,
+            &query,
+            empty_foreground_lanes(),
+            &BTreeMap::new(),
+            8,
+            None,
+        )
         .expect("repeat compose");
 
     assert_eq!(first, second);
