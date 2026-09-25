@@ -5,6 +5,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
@@ -678,9 +679,7 @@ pub(super) fn coordinated_background_refresh_writer(
     Arc::new(move |mut request| {
         let administration = administration.clone();
         Box::pin(async move {
-            let canonical_root = request
-                .project_root
-                .canonicalize()
+            let canonical_root = canonical_existing_identity(&request.project_root)
                 .unwrap_or_else(|_| request.project_root.clone());
             let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
             let graph = administration

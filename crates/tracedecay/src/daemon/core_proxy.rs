@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 #[cfg(unix)]
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -466,7 +467,7 @@ pub(crate) async fn resolve_daemon_initialize_route(
     let discovery_deadline = repository_discovery_parent_deadline();
     if let Some(registry) = registry {
         for root in &roots {
-            let mut candidate = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let mut candidate = canonical_existing_identity(root).unwrap_or_else(|_| root.clone());
             loop {
                 if registry
                     .project_registry_context_by_alias(&candidate)

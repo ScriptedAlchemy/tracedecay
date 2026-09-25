@@ -17,6 +17,7 @@ use tracedecay_runtime_core::branch::{
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 use super::{DaemonHandshake, StoreAdministration};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
@@ -449,12 +450,7 @@ fn graph_matches_project(
     graph: &tracedecay_project::project::TraceDecay,
     canonical_root: &std::path::Path,
 ) -> bool {
-    graph.project_root() == canonical_root
-        || graph
-            .project_root()
-            .canonicalize()
-            .ok()
-            .is_some_and(|root| root == canonical_root)
+    same_canonical_path(graph.project_root(), canonical_root)
 }
 
 pub(super) fn typed_project_route_error(

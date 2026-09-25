@@ -2,6 +2,7 @@
 
 use super::*;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 /// Upper bound for the size of the `DaemonInvocationService::invoke` future.
@@ -89,7 +90,7 @@ impl DaemonInvocationService {
         let canonical_root = match canonical_root {
             Some(canonical_root) => Some(canonical_root),
             None => {
-                resolved = project_root.canonicalize().ok();
+                resolved = canonical_existing_identity(project_root).ok();
                 resolved.as_deref()
             }
         };
@@ -223,7 +224,7 @@ impl DaemonInvocationService {
                 .project_runtimes
                 .request_runtimes_with_admission(project_root, project_admission),
             _ => {
-                let canonical_root = project_root.and_then(|root| root.canonicalize().ok());
+                let canonical_root = project_root.and_then(|root| canonical_existing_identity(root).ok());
                 hotpath::future!(
                     self.project_runtimes
                         .request_runtimes(project_root, canonical_root.as_deref()),

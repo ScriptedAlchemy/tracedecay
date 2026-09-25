@@ -8,6 +8,7 @@ use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonLspSessionAccess,
 };
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::*;
 
@@ -129,7 +130,7 @@ async fn authorize_lsp_workspace_for_uris(
     // registered roots, but the active project must be one of them so the
     // session stays anchored to the admitted route.
     let single_root = requested_uris.len() == 1;
-    let Ok(active_project_path) = project_path.canonicalize() else {
+    let Ok(active_project_path) = canonical_existing_identity(project_path) else {
         return lsp_workspace_refused("active_project_unresolvable", project_path);
     };
     let graphs = store_administration.mounted_project_graphs().await;
@@ -146,7 +147,7 @@ async fn authorize_lsp_workspace_for_uris(
         let Some(requested_path) = uri
             .to_file_path()
             .ok()
-            .and_then(|path| path.canonicalize().ok())
+            .and_then(|path| canonical_existing_identity(&path).ok())
         else {
             return lsp_workspace_refused("root_path_unresolvable", project_path);
         };

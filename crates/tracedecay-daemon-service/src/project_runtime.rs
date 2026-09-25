@@ -9,6 +9,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
@@ -1296,7 +1297,7 @@ impl ProjectRuntimeRegistryV1 {
         C: ProjectRuntimeComponent,
         F: FnOnce(&C) -> T,
     {
-        let canonical = project_root.canonicalize().ok();
+        let canonical = canonical_existing_identity(project_root).ok();
         let runtimes = self.lock_runtimes();
         runtime_for_lookup(&runtimes, project_root, canonical.as_deref())
             .and_then(C::peek)
@@ -1308,7 +1309,7 @@ impl ProjectRuntimeRegistryV1 {
         &self,
         project_root: &Path,
     ) -> Option<ProjectRuntimePublicationStateV1> {
-        let canonical = project_root.canonicalize().ok();
+        let canonical = canonical_existing_identity(project_root).ok();
         let runtimes = self.lock_runtimes();
         runtime_for_lookup(&runtimes, project_root, canonical.as_deref())
             .map(|runtime| runtime.publication)
