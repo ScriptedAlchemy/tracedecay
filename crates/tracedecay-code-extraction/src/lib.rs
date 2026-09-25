@@ -247,6 +247,13 @@ pub trait LanguageExtractor: Send + Sync {
     /// Human-readable language name.
     fn language_name(&self) -> &str;
 
+    /// Whether this extractor indexes configuration documents: manifest and
+    /// settings keys that resolvers read, not executable code that calls or
+    /// is called.
+    fn indexes_configuration(&self) -> bool {
+        matches!(self.language_name(), "JSON" | "TOML")
+    }
+
     /// Grammar key used by the shared retained parser for this path.
     fn retained_grammar_key(&self, file_path: &str) -> String {
         match self.language_name() {
@@ -499,6 +506,12 @@ impl LanguageRegistry {
             crate::hotpath_observe::record_dispatch_no_extractor();
         }
         extractor
+    }
+
+    /// Whether `path` is a configuration document rather than code.
+    pub fn is_configuration_file(&self, path: &str) -> bool {
+        self.extractor_for_file(path)
+            .is_some_and(|extractor| extractor.indexes_configuration())
     }
 
     /// Returns all supported file extensions across all extractors.
