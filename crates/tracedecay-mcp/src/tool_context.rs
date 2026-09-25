@@ -284,6 +284,30 @@ impl McpAdmittedProjectV1 {
         )
     }
 
+    /// `(open_active_branch, serving_branch)` as
+    /// [`Self::branch_diagnostics_for_serving_source`] reports them.
+    #[must_use]
+    pub fn serving_branch_identity_for_serving_source(
+        &self,
+        serving_source_reference: Option<&str>,
+        serving_source_revision: Option<&str>,
+        serving_source_is_current: bool,
+    ) -> (Option<String>, Option<String>) {
+        tracedecay_application::tracedecay::serving_branch_identity(
+            &self.identity.project_root,
+            &self.store_layout.data_root,
+            self.identity.active_branch.clone(),
+            self.identity.serving_branch.clone(),
+            serving_source_reference.map(|reference| {
+                tracedecay_application::tracedecay::ServingGraphSource {
+                    reference,
+                    revision: serving_source_revision,
+                    is_current: serving_source_is_current,
+                }
+            }),
+        )
+    }
+
     #[must_use]
     pub fn identity(&self) -> &McpProjectIdentityV1 {
         &self.identity
@@ -531,6 +555,20 @@ impl<'a> McpToolContext<'a> {
         serving_source_is_current: bool,
     ) -> tracedecay_application::tracedecay::BranchDiagnostics {
         self.project.branch_diagnostics_for_serving_source(
+            serving_source_reference,
+            serving_source_revision,
+            serving_source_is_current,
+        )
+    }
+
+    #[must_use]
+    pub fn serving_branch_identity_for_serving_source(
+        &self,
+        serving_source_reference: Option<&str>,
+        serving_source_revision: Option<&str>,
+        serving_source_is_current: bool,
+    ) -> (Option<String>, Option<String>) {
+        self.project.serving_branch_identity_for_serving_source(
             serving_source_reference,
             serving_source_revision,
             serving_source_is_current,

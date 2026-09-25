@@ -1116,6 +1116,23 @@ impl ChangedCodeChunkSetV1 {
     /// complement, call [`Self::validate_reused_complement`] at the
     /// publication or restore boundary that holds the current corpus.
     pub fn validate(&self) -> Result<(), DomainError> {
+        self.validate_partitions()?;
+        self.manifest_digest.validate()?;
+        if self.compute_digest()? != self.manifest_digest {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    /// Write `manifest_digest` over a set that passes [`Self::validate`],
+    /// without hashing the set a second time to compare against it.
+    pub fn seal(&mut self) -> Result<(), DomainError> {
+        self.validate_partitions()?;
+        self.manifest_digest = self.compute_digest()?;
+        Ok(())
+    }
+
+    fn validate_partitions(&self) -> Result<(), DomainError> {
         self.to_generation.validate()?;
         if let Some(from_generation) = &self.from_generation {
             from_generation.validate()?;
@@ -1146,10 +1163,6 @@ impl ChangedCodeChunkSetV1 {
                     field: "changed chunk partitions",
                 });
             }
-        }
-        self.manifest_digest.validate()?;
-        if self.compute_digest()? != self.manifest_digest {
-            return Err(DomainError::DigestMismatch);
         }
         Ok(())
     }

@@ -4,6 +4,8 @@
 //! and bounded history are read through `gix`.
 
 use std::collections::{BTreeSet, HashMap};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
@@ -99,6 +101,39 @@ static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySl
 /// A daemon serves few project roots; this bound exists so a long-lived
 /// process that probes many paths cannot grow the memo without limit.
 const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
+
+/// Last branch read from each Git directory's HEAD, keyed by that file's
+/// identity. Bounded and cleared like [`CHECKOUT_TOPOLOGY`].
+static HEAD_BRANCHES: LazyLock<Mutex<HeadBranchMemo>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+type HeadBranchMemo = HashMap<PathBuf, (HeadFileStamp, Option<String>)>;
+
+/// Identity of a HEAD file. Git replaces HEAD by renaming a lock file over
+/// it, so every checkout yields a new inode and change time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeadFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    inode: (u64, u64),
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl HeadFileStamp {
+    fn read(head: &Path) -> Option<Self> {
+        let metadata = std::fs::symlink_metadata(head).ok()?;
+        Some(Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            inode: (metadata.dev(), metadata.ino()),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
 
 /// Repository topology for `path`, resolved once per checkout root.
 ///
@@ -519,6 +554,44 @@ impl GitRepositoryAuthority {
                 detail: format!("unsupported object format {format}"),
             }),
         }
+    }
+
+    /// The branch HEAD names for the checkout `path` belongs to; `None` when
+    /// HEAD is detached or the repository is unreadable.
+    ///
+    /// Every tool call asks this, and opening the repository per call was the
+    /// dominant per-request Git cost. For a retained checkout the answer is
+    /// reused until the HEAD file's identity changes. Reftable repositories
+    /// keep HEAD in the table stack, so their answer is never reused.
+    pub fn current_branch(path: &Path) -> Option<String> {
+        let topology = repository_topology(path).ok()?;
+        let stamp = HeadFileStamp::read(&topology.git_dir.join("HEAD"));
+        if let Some(stamp) = &stamp
+            && let Some((cached, branch)) = HEAD_BRANCHES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&topology.git_dir)
+            && cached == stamp
+        {
+            return branch.clone();
+        }
+        let authority = match Self::open_retained(&topology) {
+            Some(authority) => authority,
+            None => Self::discover(path).ok()?,
+        };
+        let branch = authority.head().ok()?.branch().map(str::to_owned);
+        // The stamp was taken before the read, so a HEAD replaced in between
+        // is re-read on the next call instead of being pinned.
+        if let Some(stamp) = stamp
+            && !topology.common_dir.join("reftable").exists()
+        {
+            let mut branches = HEAD_BRANCHES.lock().unwrap_or_else(PoisonError::into_inner);
+            if branches.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES {
+                branches.clear();
+            }
+            branches.insert(topology.git_dir.clone(), (stamp, branch.clone()));
+        }
+        branch
     }
 
     /// Exact HEAD state for this repository or linked worktree.
