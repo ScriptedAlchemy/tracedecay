@@ -33,6 +33,7 @@ use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 
+mod file_quarantine;
 mod generation_scan;
 mod generation_transactions;
 mod graph_replay_release;
@@ -73,8 +74,8 @@ use generation_transactions::{
     acquire_graph_replay_pool_lock_checked, cleanup_committed_transaction,
     cleanup_committed_transaction_under_graph_replay_pool_lock,
     expose_staged_generations_under_graph_replay_pool_lock, open_file_sha256_hex_cancellable,
-    path_still_names_open_file, regular_file_exists, remove_empty_stage_root,
-    rollback_staged_transaction, stage_collectable_generations, transaction_path,
+    path_still_names_open_file, regular_file_exists, rollback_staged_transaction,
+    stage_collectable_generations, transaction_path,
 };
 #[cfg(test)]
 use generation_transactions::{
@@ -476,6 +477,10 @@ pub enum CodeGenerationRetentionErrorV1 {
     GraphReplayPoolBusy,
     #[error("code-generation retention deferred: generation store is busy")]
     GenerationStoreBusy,
+    /// Another owner's live handle refused a quarantine rename or unlink;
+    /// nothing was deleted and the durable journal retries it.
+    #[error("code-generation retention deferred: {0}")]
+    TargetHeld(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
