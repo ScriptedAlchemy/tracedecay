@@ -30,6 +30,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
 use super::context_support::{context_markdown_lane_preview, insert_context_memory_section};
+use super::lexical_routing::matched_anchor_line;
 use super::search::append_coverage_md;
 use super::search_evidence::append_verified_graph_evidence_md;
 
@@ -165,7 +166,8 @@ fn append_context_lexical_anchors(output: &mut String, anchors: &[ContextLexical
                 anchor,
                 matched,
                 admitted,
-            } => format!("- `{anchor}`: {matched} matches, {admitted} ranked"),
+                dropped,
+            } => matched_anchor_line(anchor, *matched, *admitted, dropped),
             ContextLexicalAnchorV1::Unmatched { anchor } => format!("- `{anchor}`: no matches"),
             ContextLexicalAnchorV1::NotServed { anchor } => {
                 format!("- `{anchor}`: route not served")

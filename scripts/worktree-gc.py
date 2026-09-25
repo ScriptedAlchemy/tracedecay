@@ -368,30 +368,57 @@ def patch_id_stream(repo: str, *git_args: str) -> Iterator[Iterator[str]]:
             raise GcError(f"git {' '.join(git_args[:1])} | git patch-id failed: {detail}")
 
 
-def integration_patch_ids(repo: str, integ: Integration, merge_bases: set[str]) -> set[str]:
-    """Patch ids of every integration commit newer than the oldest lane merge base."""
+@dataclass(frozen=True)
+class Landed:
+    """Integration commits newer than the oldest lane merge base."""
+
+    patch_ids: frozenset[str]
+    # Changed-path sets; a squash commit touches exactly the lane's paths.
+    path_sets: frozenset[frozenset[str]]
+
+
+def changed_path_sets(listing: str) -> set[frozenset[str]]:
+    sets, current = set(), None
+    for line in listing.splitlines():
+        if line.startswith("commit "):
+            if current:
+                sets.add(frozenset(current))
+            current = []
+        elif line and current is not None:
+            current.append(line)
+    if current:
+        sets.add(frozenset(current))
+    return sets
+
+
+def landed_on_integration(repo: str, integ: Integration, merge_bases: set[str]) -> Landed:
     if not merge_bases:
-        return set()
+        return Landed(frozenset(), frozenset())
     counts = {mb: int(git("rev-list", "--count", f"{mb}..{integ.tip}", cwd=repo)) for mb in merge_bases}
-    with patch_id_stream(repo, *LOG_PATCH, f"{max(counts, key=counts.__getitem__)}..{integ.tip}") as ids:
-        return set(ids)
+    revs = f"{max(counts, key=counts.__getitem__)}..{integ.tip}"
+    with patch_id_stream(repo, *LOG_PATCH, revs) as ids:
+        patch_ids = frozenset(ids)
+    listing = git("log", "--no-merges", "--name-only", "--no-renames", "--format=commit %H", revs, cwd=repo)
+    return Landed(patch_ids, frozenset(changed_path_sets(listing.decode(errors="surrogateescape"))))
 
 
 def merge_base(repo: str, tip: str, head: str) -> str | None:
     return git("merge-base", tip, head, cwd=repo, check=False).decode().strip() or None
 
 
-def patch_equivalence(repo: str, landed: set[str], head: str, mb: str) -> str | None:
+def patch_equivalence(repo: str, landed: Landed, head: str, mb: str) -> str | None:
     if git("rev-parse", f"{head}^{{tree}}", cwd=repo) == git("rev-parse", f"{mb}^{{tree}}", cwd=repo):
         return "patch (tree equals merge base)"
-    with patch_id_stream(repo, *DIFF_PATCH, mb, head) as ids:
-        if next(ids, None) in landed:
-            return "patch (squash-equivalent)"
+    lane_paths = git("diff", "--name-only", "--no-renames", mb, head, cwd=repo).decode(errors="surrogateescape")
+    if frozenset(lane_paths.splitlines()) in landed.path_sets:
+        with patch_id_stream(repo, *DIFF_PATCH, mb, head) as ids:
+            if next(ids, None) in landed.patch_ids:
+                return "patch (squash-equivalent)"
     # `git cherry` semantics, stopping at the first lane commit with no landed equivalent.
     with patch_id_stream(repo, *LOG_PATCH, f"{mb}..{head}") as ids:
         seen = False
         for pid in ids:
-            if pid not in landed:
+            if pid not in landed.patch_ids:
                 return None
             seen = True
         return "patch (every commit patch-equivalent)" if seen else None
@@ -444,7 +471,7 @@ def evaluate_merged(lanes: list[Lane], repo: str, integ: Integration, slug: str 
     ]
     with ThreadPoolExecutor(max_workers=8) as pool:
         bases = list(pool.map(lambda lane: merge_base(repo, integ.tip, lane.head), pending))
-    landed = integration_patch_ids(repo, integ, {mb for mb in bases if mb})
+    landed = landed_on_integration(repo, integ, {mb for mb in bases if mb})
 
     def check(pair: tuple[Lane, str | None]) -> None:
         lane, mb = pair

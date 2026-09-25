@@ -1,4 +1,5 @@
 use std::cmp::{Ordering, Reverse};
+use std::collections::BTreeMap;
 
 use tracedecay_domain::{
     ExactClass, FixedPointScore, FreshnessCompatibilityV1, FusedCandidate, RankingDecision,
@@ -7,7 +8,8 @@ use tracedecay_domain::{
 
 use super::stage_counters;
 
-/// Fused candidates in `compare_fused` order.
+/// Fused candidates in descending caller-anchor tier, then `compare_fused`
+/// order.
 ///
 /// The only constructor sorts, so a stage that takes this type never re-sorts
 /// and never trusts an unchecked caller's claim of order. Mutation through
@@ -16,9 +18,19 @@ use super::stage_counters;
 pub(super) struct OrderedFusedCandidates(Vec<FusedCandidate>);
 
 impl OrderedFusedCandidates {
-    pub(super) fn sort(mut candidates: Vec<FusedCandidate>) -> Self {
+    pub(super) fn sort(
+        mut candidates: Vec<FusedCandidate>,
+        anchor_tiers: &BTreeMap<RetrievalAnchorId, u32>,
+    ) -> Self {
         stage_counters::record_fused_sort();
-        candidates.sort_by(compare_fused);
+        let tier = |candidate: &FusedCandidate| {
+            Reverse(anchor_tiers.get(&candidate.anchor_id).copied().unwrap_or(0))
+        };
+        candidates.sort_by(|left, right| {
+            tier(left)
+                .cmp(&tier(right))
+                .then_with(|| compare_fused(left, right))
+        });
         Self(candidates)
     }
 

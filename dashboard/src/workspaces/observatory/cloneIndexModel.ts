@@ -10,7 +10,6 @@ const cloneIndexStates = {
   partial: 'partial',
   ready: 'ready',
   stale: 'stale',
-  verifying: 'loading',
 } as const satisfies Record<CodeCloneIndexStatusV1['state'], DomainStateKind>;
 
 export function cloneIndexState(status: CodeCloneIndexStatusV1): DomainStateKind {
@@ -33,8 +32,6 @@ export function cloneIndexDetail(status: CodeCloneIndexStatusV1): string {
       return 'exact and near-fingerprint postings are ready';
     case 'stale':
       return status.reason;
-    case 'verifying':
-      return 'clone census is being computed in the background';
     default:
       return assertNever(status);
   }
