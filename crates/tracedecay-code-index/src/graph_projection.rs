@@ -3,9 +3,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, OnceLock};
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use std::sync::RwLock;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
