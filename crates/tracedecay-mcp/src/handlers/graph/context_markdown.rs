@@ -21,8 +21,8 @@ use crate::tools::render::{self, Md};
 use serde_json::Value;
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::retrieval::{
-    ContextCodeBlockV1, ContextExtensionPointV1, ContextPlanV1, ContextResultV1,
-    ContextSearchMatchV1, PrimitiveSymbolLocationV1,
+    ContextCodeBlockV1, ContextExtensionPointV1, ContextLexicalAnchorV1, ContextPlanV1,
+    ContextResultV1, ContextSearchMatchV1, PrimitiveSymbolLocationV1,
 };
 use tracedecay_domain::RelationEdgeKindV1;
 use tracedecay_domain::code_intelligence::{NodeKind, Visibility};
@@ -52,6 +52,7 @@ pub(crate) fn render_context(
     if result.symbols.is_empty() {
         append_context_search_matches(&mut output, &result.search_matches);
     }
+    append_context_lexical_anchors(&mut output, &result.lexical_anchors);
     insert_context_memory_section(
         &mut output,
         &result.memory_matches,
@@ -148,6 +149,30 @@ fn append_context_search_matches(output: &mut String, matches: &[ContextSearchMa
             search_match.rank,
             search_match.utility_micros,
         );
+    }
+}
+
+/// Every caller anchor's outcome, so an anchor that matched nothing is never
+/// mistaken for one that was outranked.
+fn append_context_lexical_anchors(output: &mut String, anchors: &[ContextLexicalAnchorV1]) {
+    if anchors.is_empty() {
+        return;
+    }
+    output.push_str("\n### Lexical Anchors\n");
+    for anchor in anchors {
+        let line = match anchor {
+            ContextLexicalAnchorV1::Matched {
+                anchor,
+                matched,
+                admitted,
+            } => format!("- `{anchor}`: {matched} matches, {admitted} ranked"),
+            ContextLexicalAnchorV1::Unmatched { anchor } => format!("- `{anchor}`: no matches"),
+            ContextLexicalAnchorV1::NotServed { anchor } => {
+                format!("- `{anchor}`: route not served")
+            }
+        };
+        output.push_str(&line);
+        output.push('\n');
     }
 }
 

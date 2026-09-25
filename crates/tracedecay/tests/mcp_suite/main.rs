@@ -22,6 +22,7 @@ mod common;
 mod analytics_test;
 #[cfg(feature = "test-transport")]
 mod changelog_behavior_test;
+mod context_lexical_anchor_eval_test;
 mod context_relevance_eval_test;
 mod diagnostics_read_test;
 mod fixture;

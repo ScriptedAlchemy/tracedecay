@@ -54,7 +54,8 @@ pub use self::projection::{
     code_lexical_artifact_content_key,
 };
 pub use self::routes::{
-    LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorV1, LexicalRouteErrorV1,
+    LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1, LexicalAliasV1, LexicalAlternativeReasonV1,
+    LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalRouteErrorV1,
     LexicalRouteKindV1, LexicalRouteMatchV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1,
     LexicalRouteReceiptV1, LexicalRouteV1, LexicalRoutingV1, MAX_LEXICAL_ALIAS_BYTES_V1,
     MAX_LEXICAL_ALIASES_V1, MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1,

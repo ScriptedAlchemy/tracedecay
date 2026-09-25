@@ -12,7 +12,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    LexicalAliasV1, LexicalAlternativeReasonV1, LexicalAnchorV1, LexicalRouteErrorV1,
+    LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1, LexicalAliasV1, LexicalAlternativeReasonV1,
+    LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalAnchorV1, LexicalRouteErrorV1,
     LexicalRouteKindV1, LexicalRouteOutcomeV1, LexicalRoutePlanV1, LexicalRoutingV1,
     MAX_LEXICAL_ANCHOR_BYTES_V1, MAX_LEXICAL_ANCHORS_V1, MAX_PREFERRED_SYMBOL_TOKENS_V1,
     merge_lexical_routes, preferred_symbol_tokens,
@@ -506,8 +507,23 @@ fn anchor_route_reranks_and_names_itself_in_the_evidence() {
     assert_eq!(order(&batch), ["occ.reserve", "occ.allocate", "occ.other"]);
     assert_eq!(
         batch.candidates[1].raw_score,
-        FixedPointScore(450_000),
-        "a candidate ranked by two routes carries the checked sum of both"
+        FixedPointScore(450_000 + LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1),
+        "a candidate ranked by two routes carries the checked sum of both plus one anchor tier"
+    );
+    assert_eq!(
+        batch.candidates[2].raw_score,
+        FixedPointScore(100_000),
+        "a candidate no anchor ranked carries no tier"
+    );
+    assert_eq!(
+        receipt.anchors,
+        vec![LexicalAnchorReceiptV1 {
+            anchor: anchor("reserve_stock"),
+            outcome: LexicalAnchorOutcomeV1::Matched {
+                matched: 2,
+                admitted: 2,
+            },
+        }]
     );
     assert_eq!(
         batch
@@ -641,7 +657,11 @@ fn merged_prefix_is_independent_of_route_order_and_honors_the_lane_cap() {
     let RetrieverOutcome::Complete(capped) = capped else {
         panic!("complete");
     };
-    assert_eq!(order(&capped), ["occ.a", "occ.c", "occ.b"]);
+    assert_eq!(
+        order(&capped),
+        ["occ.c", "occ.d", "occ.a"],
+        "anchored candidates outrank every unanchored one regardless of BM25 sums"
+    );
     assert_eq!(capped.coverage.capped, 1);
     assert_eq!(capped.coverage.eligible, 4);
     assert!(
@@ -706,6 +726,206 @@ fn a_failed_additive_route_degrades_to_partial_without_hiding_the_query_route() 
         "recall through the failed route is unknown"
     );
     assert_eq!(receipt.routes.len(), 2);
+    assert_eq!(
+        receipt.anchors,
+        vec![LexicalAnchorReceiptV1 {
+            anchor: anchor("missing"),
+            outcome: LexicalAnchorOutcomeV1::NotServed,
+        }]
+    );
+}
+
+#[test]
+fn a_multi_chunk_site_of_a_common_anchor_cannot_starve_a_rare_anchor() {
+    // One oversized symbol matched by `version` is split into six chunks that
+    // all fuse under one site and outscore both `hono` rows.
+    let version_batch = lane_batch(
+        (0..6)
+            .map(|index| {
+                let (mut candidate, mut evidence) = pair(
+                    &format!("occ.version-chunk-{index}"),
+                    &[(LexicalFieldV1::BodyText, 800_000 - index as u64 * 10_000)],
+                    &["version"],
+                );
+                candidate.anchor_id = id("anchor.version-site");
+                candidate.logical_evidence_id = id("logical.version-site");
+                evidence.binding.candidate_anchor = candidate.anchor_id.clone();
+                (candidate, evidence)
+            })
+            .collect(),
+    );
+    let hono_batch = lane_batch(vec![
+        pair(
+            "occ.hono-a",
+            &[(LexicalFieldV1::BodyText, 50_000)],
+            &["hono"],
+        ),
+        pair(
+            "occ.hono-b",
+            &[(LexicalFieldV1::BodyText, 40_000)],
+            &["hono"],
+        ),
+    ]);
+    let (outcome, receipt) = merge_lexical_routes(
+        &generation(),
+        &budget(4),
+        &budget(8),
+        vec![
+            route(
+                LexicalRouteKindV1::Query,
+                lane_batch(vec![pair(
+                    "occ.query",
+                    &[(LexicalFieldV1::BodyText, 900_000)],
+                    &["dependency"],
+                )]),
+            ),
+            route(anchor_kind("version"), version_batch),
+            route(anchor_kind("hono"), hono_batch),
+        ],
+    )
+    .expect("merge");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("every route completed");
+    };
+    let admitted = order(&batch);
+    assert_eq!(admitted.len(), 4);
+    assert!(
+        admitted.contains(&"occ.hono-a") && admitted.contains(&"occ.hono-b"),
+        "both hono sites survive although every version chunk outscores them: {admitted:?}"
+    );
+    assert_eq!(
+        admitted
+            .iter()
+            .filter(|occurrence| occurrence.starts_with("occ.version-chunk-"))
+            .count(),
+        2,
+        "the multi-chunk site keeps only the seats left after reservations: {admitted:?}"
+    );
+    assert_eq!(
+        receipt.anchors[1],
+        LexicalAnchorReceiptV1 {
+            anchor: anchor("hono"),
+            outcome: LexicalAnchorOutcomeV1::Matched {
+                matched: 2,
+                admitted: 2,
+            },
+        }
+    );
+}
+
+#[test]
+fn every_anchor_keeps_its_best_sites_through_the_lane_cap_and_reports_its_outcome() {
+    // The query route fills the cap on its own; the common anchor `version`
+    // has more high-scoring rows than the cap; the rare anchor `hono` has two
+    // low-scoring rows; `nowhere` matches nothing.
+    let query_batch = lane_batch(
+        (0..6)
+            .map(|index| {
+                pair(
+                    &format!("occ.query-{index}"),
+                    &[(LexicalFieldV1::BodyText, 900_000 - index as u64 * 10_000)],
+                    &["dependency"],
+                )
+            })
+            .collect(),
+    );
+    let version_batch = lane_batch(
+        (0..6)
+            .map(|index| {
+                pair(
+                    &format!("occ.version-{index}"),
+                    &[(LexicalFieldV1::BodyText, 800_000 - index as u64 * 10_000)],
+                    &["version"],
+                )
+            })
+            .collect(),
+    );
+    let hono_batch = lane_batch(vec![
+        pair(
+            "occ.hono-a",
+            &[(LexicalFieldV1::BodyText, 50_000)],
+            &["hono"],
+        ),
+        pair(
+            "occ.hono-b",
+            &[(LexicalFieldV1::BodyText, 40_000)],
+            &["hono"],
+        ),
+    ]);
+    let (outcome, receipt) = merge_lexical_routes(
+        &generation(),
+        &budget(6),
+        &budget(8),
+        vec![
+            route(LexicalRouteKindV1::Query, query_batch),
+            route(anchor_kind("version"), version_batch),
+            route(anchor_kind("hono"), hono_batch),
+            route(anchor_kind("nowhere"), lane_batch(Vec::new())),
+        ],
+    )
+    .expect("merge");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("every route completed");
+    };
+    // Cap 6 with three served anchors reserves ceil(6 / 4) = 2 sites per
+    // anchor: both `hono` rows survive although every `version` row and every
+    // query row outscores them, and the query route keeps none because the
+    // anchored tier fills the cap first.
+    let admitted = order(&batch);
+    assert_eq!(admitted.len(), 6);
+    assert!(admitted.contains(&"occ.hono-a"), "{admitted:?}");
+    assert!(admitted.contains(&"occ.hono-b"), "{admitted:?}");
+    assert_eq!(
+        admitted
+            .iter()
+            .filter(|occurrence| occurrence.starts_with("occ.version-"))
+            .count(),
+        4,
+        "{admitted:?}"
+    );
+    assert_eq!(
+        admitted[..4],
+        [
+            "occ.version-0",
+            "occ.version-1",
+            "occ.version-2",
+            "occ.version-3"
+        ],
+        "within the anchored tier the route score still orders: {admitted:?}"
+    );
+    assert_eq!(batch.coverage.capped, 8);
+    assert_eq!(
+        receipt.anchors,
+        vec![
+            LexicalAnchorReceiptV1 {
+                anchor: anchor("version"),
+                outcome: LexicalAnchorOutcomeV1::Matched {
+                    matched: 6,
+                    admitted: 4,
+                },
+            },
+            LexicalAnchorReceiptV1 {
+                anchor: anchor("hono"),
+                outcome: LexicalAnchorOutcomeV1::Matched {
+                    matched: 2,
+                    admitted: 2,
+                },
+            },
+            LexicalAnchorReceiptV1 {
+                anchor: anchor("nowhere"),
+                outcome: LexicalAnchorOutcomeV1::Unmatched,
+            },
+        ]
+    );
+    let rendered = serde_json::to_value(&receipt.anchors).expect("receipt serializes");
+    assert_eq!(
+        rendered,
+        serde_json::json!([
+            {"anchor": "version", "outcome": "matched", "matched": 6, "admitted": 4},
+            {"anchor": "hono", "outcome": "matched", "matched": 2, "admitted": 2},
+            {"anchor": "nowhere", "outcome": "unmatched"},
+        ])
+    );
 }
 
 #[test]
@@ -798,7 +1018,10 @@ fn routes_merge_match_kinds_but_reject_source_binding_drift() {
         panic!("both routes completed");
     };
     assert_eq!(batch.candidates.len(), 1);
-    assert_eq!(batch.candidates[0].raw_score, FixedPointScore(300));
+    assert_eq!(
+        batch.candidates[0].raw_score,
+        FixedPointScore(300 + LEXICAL_ANCHOR_MATCH_SCORE_MICROS_V1)
+    );
     assert_eq!(
         batch.evidence_by_occurrence[&id::<tracedecay_domain::SourceOccurrenceId>("occ.invoice")]
             .binding

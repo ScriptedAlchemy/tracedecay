@@ -10,9 +10,9 @@ use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_contracts::InvocationAnalyticsV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    ContextCodeBlockV1, ContextModeV1, ContextResultV1, ContextSearchMatchV1,
-    ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestV1, RenamePreviewNodeV1,
-    RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
+    ContextCodeBlockV1, ContextLexicalAnchorV1, ContextModeV1, ContextResultV1,
+    ContextSearchMatchV1, ContextSurfaceRequestV1, RedundancyScopeV1, RedundancySurfaceRequestV1,
+    RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
     RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
     SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1, SimilarResultV1,
     SimilarSurfaceRequestV1, SimilarTargetV1,
@@ -21,6 +21,7 @@ use tracedecay_domain::ExactClass;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(test)]
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
+use tracedecay_query::retrieval::lexical::{LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1};
 
 #[cfg(test)]
 use crate::context_headings::CONTEXT_SEEN_NODE_IDS_LABEL;
@@ -574,6 +575,27 @@ fn context_search_matches(
         .collect()
 }
 
+/// The kernel's per-anchor receipts in the context wire shape.
+fn context_lexical_anchors(anchors: &[LexicalAnchorReceiptV1]) -> Vec<ContextLexicalAnchorV1> {
+    anchors
+        .iter()
+        .map(|receipt| {
+            let anchor = receipt.anchor.as_str().to_owned();
+            match receipt.outcome {
+                LexicalAnchorOutcomeV1::Matched { matched, admitted } => {
+                    ContextLexicalAnchorV1::Matched {
+                        anchor,
+                        matched,
+                        admitted,
+                    }
+                }
+                LexicalAnchorOutcomeV1::Unmatched => ContextLexicalAnchorV1::Unmatched { anchor },
+                LexicalAnchorOutcomeV1::NotServed => ContextLexicalAnchorV1::NotServed { anchor },
+            }
+        })
+        .collect()
+}
+
 fn context_graph_projection(
     ctx: &McpToolContext<'_>,
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
@@ -721,8 +743,9 @@ where
     let max_code_blocks = request
         .max_code_blocks
         .map_or(5, |value| value.clamp(1, 20) as usize);
+    let requested_anchors = request.lexical_anchors.clone().unwrap_or_default();
     let lexical_routing = lexical_routing::routing_from_parts(
-        request.lexical_anchors.clone().unwrap_or_default(),
+        requested_anchors.clone(),
         request.prefer_symbol.unwrap_or(false),
     )?;
     let memory_options = context_memory_options(&args);
@@ -754,38 +777,47 @@ where
     // state at serve time, not a snapshot taken before the lanes ran.
     let freshness_payload = ctx.freshness().await;
     let worktree_freshness = worktree_freshness_from_payload(freshness_payload.as_ref());
-    let (complete, code_generation, coverage, freshness, search_matches) = match outcome {
-        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let search_matches = context_search_matches(&complete, scope_prefix);
-            let code_generation = Some(complete.code_generation.clone());
-            let coverage = primitive_search_coverage(&complete.coverage);
-            let freshness = search_freshness(
-                ServedGenerationV1::Served(&complete.code_generation),
-                &complete.coverage,
-                &worktree_freshness,
-            );
-            (
-                Some(complete),
-                code_generation,
-                coverage,
-                freshness,
-                search_matches,
-            )
-        }
-        tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
-            None,
-            unavailable.code_generation,
-            primitive_search_coverage(&unavailable.coverage),
-            search_freshness(
-                ServedGenerationV1::Unavailable {
-                    reason: unavailable.reason.as_str(),
-                },
-                &unavailable.coverage,
-                &worktree_freshness,
+    let (complete, code_generation, coverage, freshness, search_matches, lexical_anchors) =
+        match outcome {
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Complete(complete) => {
+                let search_matches = context_search_matches(&complete, scope_prefix);
+                let lexical_anchors = context_lexical_anchors(&complete.lexical_routes.anchors);
+                let code_generation = Some(complete.code_generation.clone());
+                let coverage = primitive_search_coverage(&complete.coverage);
+                let freshness = search_freshness(
+                    ServedGenerationV1::Served(&complete.code_generation),
+                    &complete.coverage,
+                    &worktree_freshness,
+                );
+                (
+                    Some(complete),
+                    code_generation,
+                    coverage,
+                    freshness,
+                    search_matches,
+                    lexical_anchors,
+                )
+            }
+            tracedecay_query::code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => (
+                None,
+                unavailable.code_generation,
+                primitive_search_coverage(&unavailable.coverage),
+                search_freshness(
+                    ServedGenerationV1::Unavailable {
+                        reason: unavailable.reason.as_str(),
+                    },
+                    &unavailable.coverage,
+                    &worktree_freshness,
+                ),
+                Vec::new(),
+                requested_anchors
+                    .iter()
+                    .map(|anchor| ContextLexicalAnchorV1::NotServed {
+                        anchor: anchor.clone(),
+                    })
+                    .collect(),
             ),
-            Vec::new(),
-        ),
-    };
+        };
     let graph = match complete.as_ref() {
         Some(complete) => bind_verified_graph_to_search(graph, &complete.code_generation),
         None => graph,
@@ -858,6 +890,7 @@ where
         freshness,
         code_generation,
         search_matches,
+        lexical_anchors,
         symbols,
         related_symbols,
         code: projection.code_blocks,

@@ -3,8 +3,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_query::retrieval::lexical::{
-    LexicalAliasV1, LexicalFieldFilterV1, LexicalProximityV1, LexicalRouteKindV1,
-    LexicalRouteReceiptV1, LexicalRoutingV1,
+    LexicalAliasV1, LexicalAnchorOutcomeV1, LexicalAnchorReceiptV1, LexicalFieldFilterV1,
+    LexicalProximityV1, LexicalRouteKindV1, LexicalRouteReceiptV1, LexicalRoutingV1,
 };
 
 pub(super) fn routing_from_args(args: &Value) -> Result<LexicalRoutingV1> {
@@ -107,6 +107,9 @@ pub(super) fn attach_route_evidence(
         routes.push(value);
     }
     output["lexical_routes"] = Value::Array(routes);
+    if !receipt.anchors.is_empty() {
+        output["lexical_anchors"] = serde_json::to_value(&receipt.anchors)?;
+    }
     for result in results.iter_mut() {
         let Some(anchor) = result
             .get("candidate")
@@ -180,6 +183,19 @@ pub(super) fn result_route_suffix(result: &Value) -> String {
     }
 }
 
+/// One human line per caller anchor: how many rows carried it and how many
+/// the lane kept, or that it matched nothing / was not served.
+fn anchor_receipt_line(receipt: &LexicalAnchorReceiptV1) -> String {
+    let anchor = receipt.anchor.as_str();
+    match receipt.outcome {
+        LexicalAnchorOutcomeV1::Matched { matched, admitted } => {
+            format!("- `{anchor}`: {matched} matches, {admitted} ranked")
+        }
+        LexicalAnchorOutcomeV1::Unmatched => format!("- `{anchor}`: no matches"),
+        LexicalAnchorOutcomeV1::NotServed => format!("- `{anchor}`: route not served"),
+    }
+}
+
 pub(super) fn append_routes_md(md: &mut Md, value: &Value) {
     let Some(routes) = value.get("lexical_routes").and_then(Value::as_array) else {
         return;
@@ -195,6 +211,17 @@ pub(super) fn append_routes_md(md: &mut Md, value: &Value) {
         "Ranked routes fused into this page: {}",
         labels.join(", ")
     ));
+    for anchor in value
+        .get("lexical_anchors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Ok(receipt) = serde_json::from_value::<LexicalAnchorReceiptV1>(anchor.clone()) else {
+            continue;
+        };
+        md.line(&anchor_receipt_line(&receipt));
+    }
     for route in routes {
         if route.get("route").and_then(Value::as_str) != Some("alias") {
             continue;
@@ -308,6 +335,7 @@ mod tests {
         let query_only = LexicalRouteReceiptV1 {
             routes: vec![LexicalRouteKindV1::Query],
             matches_by_anchor: BTreeMap::new(),
+            anchors: Vec::new(),
         };
         attach_route_evidence(&mut output, &mut results, &query_only).expect("attach");
         assert!(output.get("lexical_routes").is_none());
@@ -356,8 +384,34 @@ mod tests {
                     },
                 ],
             )]),
+            anchors: vec![
+                LexicalAnchorReceiptV1 {
+                    anchor: LexicalRoutingV1::new(vec!["reserve_stock".to_owned()], false)
+                        .expect("routing")
+                        .anchors
+                        .remove(0),
+                    outcome: LexicalAnchorOutcomeV1::Matched {
+                        matched: 4,
+                        admitted: 1,
+                    },
+                },
+                LexicalAnchorReceiptV1 {
+                    anchor: LexicalRoutingV1::new(vec!["release_stock".to_owned()], false)
+                        .expect("routing")
+                        .anchors
+                        .remove(0),
+                    outcome: LexicalAnchorOutcomeV1::Unmatched,
+                },
+            ],
         };
         attach_route_evidence(&mut output, &mut results, &receipt).expect("attach");
+        assert_eq!(
+            output["lexical_anchors"],
+            json!([
+                {"anchor": "reserve_stock", "outcome": "matched", "matched": 4, "admitted": 1},
+                {"anchor": "release_stock", "outcome": "unmatched"},
+            ])
+        );
         assert_eq!(
             output["lexical_routes"],
             json!([
@@ -409,6 +463,14 @@ mod tests {
         );
         assert!(
             rendered.contains("Reason: configured vocabulary alias"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("- `reserve_stock`: 4 matches, 1 ranked"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("- `release_stock`: no matches"),
             "{rendered}"
         );
     }
