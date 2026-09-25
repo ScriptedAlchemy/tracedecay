@@ -16,7 +16,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_code_extraction::{
-    ExtractedCloneBodyV1, ExtractedImportEvidenceV1, ExtractionArtifactV1,
+    ExtractedCloneBodyV1, ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportNamespaceV1,
+    is_test_framework_call_signature,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkLogicalIdentityV1, ChunkerRevision,
@@ -1183,6 +1184,7 @@ impl DeterministicCodeChunker {
         )?;
         let (mut edges, edge_abstentions) = canonical_relation_edges(&result.edges, &symbol_rows);
         let (same_file_edges, unresolved_references) = resolve_file_references(
+            batch.language.as_str(),
             source,
             &offsets,
             &result.unresolved_refs,
@@ -2048,6 +2050,7 @@ fn reference_evidence_span(
 }
 
 fn resolve_file_references(
+    language: &str,
     source: &str,
     offsets: &[u64],
     unresolved: &[UnresolvedRef],
@@ -2065,6 +2068,18 @@ fn resolve_file_references(
         .filter(|binding| !binding.is_public)
         .filter_map(|binding| binding.local_name.as_deref())
         .collect::<HashSet<&str>>();
+    let typescript = is_typescript_family(language);
+    let mut typescript_imports: HashMap<&str, Vec<ImportNamespaceV1>> = HashMap::new();
+    if typescript {
+        for binding in imports.iter().filter(|binding| !binding.is_public) {
+            if let Some(local) = binding.local_name.as_deref() {
+                typescript_imports
+                    .entry(local)
+                    .or_default()
+                    .push(binding.namespace);
+            }
+        }
+    }
     let mut by_name: BTreeMap<&str, Vec<&SymbolRow>> = BTreeMap::new();
     let mut by_file_relative_name: BTreeMap<String, Vec<&SymbolRow>> = BTreeMap::new();
     let mut type_path_aliases: Vec<(String, &SymbolRow)> = Vec::new();
@@ -2162,6 +2177,25 @@ fn resolve_file_references(
         } else {
             by_name.get(reference.reference_name.as_str())
         };
+        // A TypeScript import is the module-scope binding of its name; a
+        // same-named module-scope declaration would be a redeclaration error,
+        // so only a declaration nested in a function scope that encloses the
+        // reference (a helper inside a `describe` callback) shadows it.
+        let shadows_import = typescript
+            && !reference.reference_name.contains("::")
+            && typescript_imports
+                .get(reference.reference_name.as_str())
+                .is_some_and(|namespaces| {
+                    namespaces.iter().any(|namespace| match reference.reference_kind {
+                        EdgeKind::Calls => *namespace == ImportNamespaceV1::Value,
+                        _ => *namespace != ImportNamespaceV1::SideEffect,
+                    })
+                });
+        let from_span = by_node_id
+            .get(reference.from_node_id.as_str())
+            .copied()
+            .flatten()
+            .map(|from| from.span);
         let compatible = candidates
             .map(|candidates| {
                 candidates
@@ -2169,6 +2203,16 @@ fn resolve_file_references(
                     .copied()
                     .filter(|target| {
                         reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
+                            && !(typescript
+                                && target.kind == NodeKind::Function.as_str()
+                                && target
+                                    .signature
+                                    .as_deref()
+                                    .is_some_and(is_test_framework_call_signature))
+                            && (!shadows_import
+                                || from_span.is_some_and(|from| {
+                                    encloses_in_function_scope(symbols, target, from)
+                                }))
                     })
                     .collect::<Vec<_>>()
             })
@@ -2298,6 +2342,34 @@ fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &s
         // abstention names a plausible endpoint rather than a name collision.
         None => relation_target_kind_is_compatible(RelationEdgeKindV1::Implements, target_kind),
     }
+}
+
+/// Languages whose files import through TypeScript/JavaScript module syntax.
+pub(crate) fn is_typescript_family(language: &str) -> bool {
+    matches!(
+        language,
+        "typescript" | "tsx" | "javascript" | "astro" | "svelte"
+    )
+}
+
+/// Whether `target` is declared directly in a function-like scope whose span
+/// contains the referencing symbol's span.
+fn encloses_in_function_scope(symbols: &[SymbolRow], target: &SymbolRow, from: SourceSpan) -> bool {
+    target
+        .parent
+        .and_then(|parent| symbols.get(parent))
+        .is_some_and(|scope| {
+            matches!(
+                NodeKind::from_str(&scope.kind),
+                Some(
+                    NodeKind::Function
+                        | NodeKind::Method
+                        | NodeKind::Constructor
+                        | NodeKind::ArrowFunction
+                )
+            ) && scope.span.start_byte <= from.start_byte
+                && from.end_byte <= scope.span.end_byte
+        })
 }
 
 /// [`reference_target_kind_is_compatible`] over the canonical relation kinds,
@@ -4726,6 +4798,7 @@ pub fn real_symbol() {}
         ];
 
         let (resolved, retained) = resolve_file_references(
+            "rust",
             source,
             &line_offsets(source.as_bytes()),
             &references,
@@ -4796,6 +4869,7 @@ pub fn real_symbol() {}
         let trait_occurrence = trait_target.occurrence.clone();
 
         let (resolved, retained) = resolve_file_references(
+            "rust",
             source,
             &line_offsets(source.as_bytes()),
             &[reference],
@@ -4857,6 +4931,7 @@ pub fn real_symbol() {}
             .expect("the fixture defines a local Result");
 
         let (resolved, retained) = resolve_file_references(
+            "rust",
             source,
             &offsets,
             &artifact.result.unresolved_refs,
@@ -4929,6 +5004,7 @@ pub fn real_symbol() {}
         let right_occurrence = right.occurrence.clone();
         let symbols = [child, left, right];
         let (resolved, retained) = resolve_file_references(
+            "rust",
             source,
             &line_offsets(source.as_bytes()),
             std::slice::from_ref(&reference),
@@ -4944,6 +5020,7 @@ pub fn real_symbol() {}
             ..reference.clone()
         };
         let (resolved, _) = resolve_file_references(
+            "rust",
             source,
             &line_offsets(source.as_bytes()),
             &[missing_namespace],
@@ -4960,6 +5037,7 @@ pub fn real_symbol() {}
             ..reference
         };
         let (resolved, retained) = resolve_file_references(
+            "rust",
             source,
             &line_offsets(source.as_bytes()),
             &[ambiguous],

@@ -233,7 +233,7 @@ function IdleBackfill({
             mode: event.target.value === 'off' ? 'off' : 'idle',
           })
         }
-        className="h-5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-1 text-2xs text-text-primary focus:border-accent/60 focus:outline-none disabled:opacity-50"
+        className="min-h-[var(--touch-target-min)] rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-1 text-2xs text-text-primary focus:border-accent/60 focus:outline-none disabled:opacity-50"
       >
         <option value="idle">idle</option>
         <option value="off">off</option>
@@ -347,7 +347,7 @@ function Figure({
 }) {
   return (
     <div className="flex flex-col">
-      <dt className="td-legend">{label}</dt>
+      <dt className="td-legend whitespace-normal">{label}</dt>
       <dd
         className={cn(
           'tabular text-sm',

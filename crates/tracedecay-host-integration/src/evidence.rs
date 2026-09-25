@@ -418,6 +418,14 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
             "file.edited,tool.execute.after,session.idle/session.status,lsp.updated",
             &["saved_edit", "post_tool_use"][..],
         ),
+        // The Pi extension forwards only its session boundaries; no edit
+        // callback exists, so the edit boundary stays fixture-limited.
+        HostKindV1::Pi => (
+            "pi",
+            "crates/tracedecay-hooks/fixtures/host_events/pi.json",
+            "session_start,agent_end",
+            &["saved_edit"][..],
+        ),
         HostKindV1::CursorCloud
         | HostKindV1::Devin
         | HostKindV1::Zed
@@ -428,8 +436,7 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::RooCode
         | HostKindV1::Kilo
         | HostKindV1::Gemini
-        | HostKindV1::Copilot
-        | HostKindV1::Pi => return None,
+        | HostKindV1::Copilot => return None,
     };
     let bytes = assets
         .native_fixtures
@@ -535,6 +542,7 @@ pub fn native_host_edit_stop_conformance_evidence_from_embedded_assets(
         HostKindV1::Kiro,
         HostKindV1::KimiCode,
         HostKindV1::OpenCode,
+        HostKindV1::Pi,
     ]
     .into_iter()
     .filter_map(|host| stock_host_native_fixture_evidence_from_embedded_assets(assets, host))

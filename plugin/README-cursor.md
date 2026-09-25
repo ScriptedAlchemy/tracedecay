@@ -76,11 +76,13 @@ For compiler output Cursor already captured, call `tracedecay_diagnose` first:
 it maps the supplied `cargo`/`clippy` stderr to symbols and callers without
 starting a toolchain, and publishes the findings for the current indexed
 generation. `tracedecay_diagnostics` reads those published diagnostics; it
-never runs a compiler itself. A TypeScript project with `tsconfig.json` and
-its own `node_modules/.bin/tsc` is checked automatically by the daemon after
-each complete index generation, so its read is populated without a paste; for
-any other toolchain, or before `npm install`, the read is a typed problem that
-names the exact next step.
+never runs a compiler itself. Each TypeScript project (every package
+`tsconfig.json` in a monorepo) whose package or workspace root has
+`node_modules/.bin/tsc` is checked automatically by the daemon after each
+complete index generation, so its read is populated without a paste; for any
+other toolchain, or before the workspace install (`pnpm install`, `yarn
+install`, or `npm install`, from the lockfile), the read is a typed problem
+that names the exact next step.
 
 `tracedecay lsp servers [--json]` is the separate CLI discovery command
 for supported local language servers and install hints. It is informational:

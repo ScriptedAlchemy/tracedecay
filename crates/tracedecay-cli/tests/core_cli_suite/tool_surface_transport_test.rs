@@ -15,8 +15,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::common::fixture::{
-    TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TypeScriptFixtureCompiler,
-    write_typescript_diagnostics_fixture,
+    TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_MONOREPO_APP_FILE, TypeScriptFixtureCompiler,
+    write_typescript_diagnostics_fixture, write_typescript_monorepo_diagnostics_fixture,
 };
 use crate::common::{
     canonical_existing_path, git_program, spawn_tracedecay_daemon, tracedecay_command_with_home,
@@ -362,8 +362,8 @@ fn application_surface_tools_resolve_the_project_from_a_subdirectory() {
 /// Commits a TypeScript checkout and initializes it, so the daemon admits the
 /// project and, when the project carries its own compiler, its diagnostics
 /// producer.
-fn init_typescript_project(home: &Path, project: &Path, compiler: TypeScriptFixtureCompiler) {
-    write_typescript_diagnostics_fixture(project, compiler);
+fn init_typescript_project(home: &Path, project: &Path, write_fixture: impl FnOnce(&Path)) {
+    write_fixture(project);
     git(project, &["init", "--initial-branch=master"]);
     git(project, &["config", "user.email", "surface@example.com"]);
     git(project, &["config", "user.name", "Surface Test"]);
@@ -374,30 +374,13 @@ fn init_typescript_project(home: &Path, project: &Path, compiler: TypeScriptFixt
 
 const DIAGNOSTICS_FILE_ARGS: &str = r#"{"scope":"file","path":"src/index.ts","format":"json"}"#;
 
-/// The CLI fallback the MCP error text names must answer exactly like the
-/// MCP tool: a fresh TypeScript project with its own `tsc` yields the
-/// compiler's `TS4023` on the file once the daemon's producer has published.
-#[test]
-fn tool_diagnostics_reads_the_typescript_producer_publication() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_typescript_project(
-        &home_path,
-        &project_path,
-        TypeScriptFixtureCompiler::Present,
-    );
-    let _daemon = spawn_tracedecay_daemon(&home_path);
-
+/// Polls `tracedecay tool diagnostics` until the daemon's producer has
+/// published for the current generation; pending is the only state worth
+/// waiting through.
+fn await_published_cli_diagnostics(home: &Path, project: &Path, args: &str) -> serde_json::Value {
     let started = Instant::now();
-    let payload = loop {
-        let outcome = run_surface_tool_from(
-            &home_path,
-            &project_path,
-            "diagnostics",
-            DIAGNOSTICS_FILE_ARGS,
-        );
+    loop {
+        let outcome = run_surface_tool_from(home, project, "diagnostics", args);
         match outcome.problem_code().as_deref() {
             None => break outcome.payload(),
             Some("application.diagnostics.pending" | "application.diagnostics.stale") => {
@@ -414,7 +397,24 @@ fn tool_diagnostics_reads_the_typescript_producer_publication() {
                 outcome.stdout, outcome.stderr
             ),
         }
-    };
+    }
+}
+
+/// The CLI fallback the MCP error text names must answer exactly like the
+/// MCP tool: a fresh TypeScript project with its own `tsc` yields the
+/// compiler's `TS4023` on the file once the daemon's producer has published.
+#[test]
+fn tool_diagnostics_reads_the_typescript_producer_publication() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Present);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let payload = await_published_cli_diagnostics(&home_path, &project_path, DIAGNOSTICS_FILE_ARGS);
     let records = payload["outcome"]["value"]["payload"]["diagnostics"]
         .as_array()
         .unwrap_or_else(|| panic!("diagnostics evidence lists its records: {payload}"));
@@ -426,10 +426,11 @@ fn tool_diagnostics_reads_the_typescript_producer_publication() {
     let invocations =
         std::fs::read_to_string(project_path.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS))
             .expect("the fixture compiler records every invocation");
+    let root = project_path.display();
     assert!(
         invocations
             .lines()
-            .all(|line| line == format!("{} --noEmit --pretty false", project_path.display())),
+            .all(|line| line == format!("{root} -p {root}/tsconfig.json --noEmit --pretty false")),
         "the producer runs the project's own tsc from the project root: {invocations}"
     );
 }
@@ -442,11 +443,9 @@ fn tool_diagnostics_names_the_install_command_without_a_compiler() {
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
-    init_typescript_project(
-        &home_path,
-        &project_path,
-        TypeScriptFixtureCompiler::Missing,
-    );
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Missing);
+    });
     let _daemon = spawn_tracedecay_daemon(&home_path);
 
     let outcome = run_surface_tool_from(
@@ -472,6 +471,75 @@ fn tool_diagnostics_names_the_install_command_without_a_compiler() {
         problem["message"]
             .as_str()
             .is_some_and(|message| message.contains("`npm install --save-dev typescript`")),
+        "{problem}"
+    );
+}
+
+const MONOREPO_APP_FILE_ARGS: &str =
+    r#"{"scope":"file","path":"packages/app/src/index.ts","format":"json"}"#;
+
+/// Issue #2025 through the CLI fallback: a pnpm monorepo with per-package
+/// tsconfigs and no root `tsconfig.json` publishes a package's `TS4023`.
+#[test]
+fn tool_diagnostics_reads_a_monorepo_package_finding() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_monorepo_diagnostics_fixture(project, TypeScriptFixtureCompiler::Present);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let payload =
+        await_published_cli_diagnostics(&home_path, &project_path, MONOREPO_APP_FILE_ARGS);
+    let records = payload["outcome"]["value"]["payload"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics evidence lists its records: {payload}"));
+    assert_eq!(records.len(), 1, "{payload}");
+    assert_eq!(
+        records[0]["logical_path"], TYPESCRIPT_MONOREPO_APP_FILE,
+        "{payload}"
+    );
+    assert_eq!(records[0]["diagnostic"]["code"], "TS4023", "{payload}");
+}
+
+/// The issue's reported command and state, dependencies not installed: the
+/// CLI names the owning tsconfig and `pnpm install`, never "no tsconfig.json".
+#[test]
+fn tool_diagnostics_names_pnpm_install_for_an_uninstalled_monorepo() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_typescript_project(&home_path, &project_path, |project| {
+        write_typescript_monorepo_diagnostics_fixture(project, TypeScriptFixtureCompiler::Missing);
+    });
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let outcome = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "diagnostics",
+        MONOREPO_APP_FILE_ARGS,
+    );
+    assert_eq!(
+        outcome.problem_code().as_deref(),
+        Some("application.diagnostics.producer-missing"),
+        "stdout:\n{}\nstderr:\n{}",
+        outcome.stdout,
+        outcome.stderr
+    );
+    let problem = &outcome.payload()["problem"];
+    assert_eq!(
+        problem["legal_actions"],
+        serde_json::json!(["refresh"]),
+        "{problem}"
+    );
+    assert!(
+        problem["message"].as_str().is_some_and(|message| {
+            message.contains("`packages/app/tsconfig.json`") && message.contains("`pnpm install`")
+        }),
         "{problem}"
     );
 }
@@ -502,5 +570,128 @@ fn application_surface_tools_do_not_invent_a_project_outside_a_checkout() {
         outcome.problem_code().is_some(),
         "an unresolved project must surface a typed problem, got:\n{}",
         outcome.stdout
+    );
+}
+
+/// The executable binding id and result schema a Work or Workflow tool's
+/// typed envelope must carry.
+fn family_binding(
+    registry: &tracedecay_tool_catalog::ExecutableBindingRegistryV1,
+    operation_id: &str,
+) -> (String, String) {
+    let operation_id = tracedecay_tool_catalog::OperationId::new(operation_id.to_owned()).unwrap();
+    let binding = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .unwrap_or_else(|| panic!("{} is not executable", operation_id.as_str()));
+    let (binding_id, _) = binding
+        .public_route()
+        .unwrap_or_else(|| panic!("{} has no public route", operation_id.as_str()));
+    (
+        binding_id.as_str().to_owned(),
+        binding
+            .result_schema()
+            .schema_ref()
+            .schema_id()
+            .as_str()
+            .to_owned(),
+    )
+}
+
+fn assert_cli_family_envelope(
+    outcome: &SurfaceOutcome,
+    tool: &str,
+    kind: &str,
+    schema_id: &str,
+    binding_id: Option<&str>,
+) -> Value {
+    let payload = outcome.payload();
+    assert_eq!(
+        payload["kind"], kind,
+        "`tracedecay tool {tool}` must answer with the family's typed envelope\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    let value = &payload["value"];
+    assert_eq!(value["contract"]["schema_id"], schema_id, "{tool}");
+    assert_eq!(value["binding_id"].as_str(), binding_id, "{tool}");
+    let request_id = value["request_id"].as_str().unwrap_or_default();
+    assert!(
+        request_id.starts_with("request.cli."),
+        "`tracedecay tool {tool}` must reach the owner as a CLI request, not a daemon MCP \
+         tool call; request_id was {request_id:?}"
+    );
+    payload
+}
+
+/// `tracedecay tool` runs Work and Workflow through their canonical owner over
+/// the daemon socket: the answer is the family's typed envelope, bound to its
+/// executable result contract, under the CLI's own request identity.
+#[test]
+fn work_and_workflow_tools_answer_through_their_typed_owner() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let work = tracedecay_contracts::work_executable_binding_registry().unwrap();
+    let workflow = tracedecay_contracts::workflow_executable_binding_registry().unwrap();
+
+    let listed = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "tracedecay_work_list_attempts",
+        r#"{"page_size":10}"#,
+    );
+    assert!(
+        listed.success,
+        "stdout:\n{}\nstderr:\n{}",
+        listed.stdout, listed.stderr
+    );
+    let (binding_id, schema_id) = family_binding(work, "operation.work.list_attempts");
+    assert_cli_family_envelope(
+        &listed,
+        "tracedecay_work_list_attempts",
+        "success",
+        &schema_id,
+        Some(&binding_id),
+    );
+
+    let definitions =
+        run_surface_tool_from(&home_path, &project_path, "workflow_list_definitions", "{}");
+    assert!(
+        definitions.success,
+        "stdout:\n{}\nstderr:\n{}",
+        definitions.stdout, definitions.stderr
+    );
+    let (binding_id, schema_id) = family_binding(workflow, "operation.workflow.list_definitions");
+    assert_cli_family_envelope(
+        &definitions,
+        "workflow_list_definitions",
+        "success",
+        &schema_id,
+        Some(&binding_id),
+    );
+
+    // An unknown definition is a concealed denial: it keeps the operation's
+    // result contract but withholds the binding, and fails the process.
+    let concealed = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "tracedecay_workflow_get_definition",
+        r#"{"definition_id":"workflow.absent","definition_version":1}"#,
+    );
+    assert!(
+        !concealed.success,
+        "a typed Workflow problem must fail the process\nstdout:\n{}",
+        concealed.stdout
+    );
+    let (_, schema_id) = family_binding(workflow, "operation.workflow.get_definition");
+    let concealed = assert_cli_family_envelope(
+        &concealed,
+        "tracedecay_workflow_get_definition",
+        "problem",
+        &schema_id,
+        None,
+    );
+    assert_eq!(
+        concealed["value"]["problem"]["kind"],
+        "not_found_or_not_authorized"
     );
 }

@@ -735,26 +735,24 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
-    const visibleKeys = () =>
-      [...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'));
-
     await findRow(MAX_FILE_SIZE);
-    // The unfiltered header states the whole effective configuration. Read it
-    // back rather than pinning the schema size: the behavior under test is that
-    // a filter narrows the rows and says how many of that whole it kept.
-    const unfilteredCount = screen.getByText(/^\d+ settings$/).textContent ?? '';
-    const total = unfilteredCount.replace(' settings', '');
-    expect(visibleKeys()).toEqual(expect.arrayContaining([MAX_FILE_SIZE, POLL_SECS]));
+    const rowKeys = () =>
+      [...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'));
+    const unfiltered = rowKeys();
+    expect(unfiltered).toContain(POLL_SECS);
+    expect(unfiltered).toContain('user.watcher_debounce');
+    expect(screen.getByText(`${unfiltered.length} settings`)).toBeTruthy();
 
     const filter = screen.getByLabelText('Filter configuration');
     await user.type(filter, 'poll');
-    expect(visibleKeys()).toEqual([POLL_SECS]);
-    expect(screen.getByText(`1 of ${total} settings`)).toBeTruthy();
+    expect(rowKeys()).toEqual([POLL_SECS]);
+    expect(screen.getByText(`1 of ${unfiltered.length} settings`)).toBeTruthy();
 
     await user.clear(filter);
-    expect(screen.getByText(unfilteredCount)).toBeTruthy();
-    expect(visibleKeys()).toEqual(expect.arrayContaining([MAX_FILE_SIZE, POLL_SECS]));
+    await user.type(filter, 'codex_app_server');
+    expect(rowKeys()).toEqual(['automation.backend']);
 
+    await user.clear(filter);
     await user.type(filter, 'zzzz-no-such-key');
     expect(screen.getByText('no key or value matches "zzzz-no-such-key"')).toBeTruthy();
     expect(document.querySelector('[role="grid"]')).toBeNull();

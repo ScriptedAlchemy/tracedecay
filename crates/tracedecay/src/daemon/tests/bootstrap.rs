@@ -3545,6 +3545,74 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         .expect("direct warmup shutdown timed out");
 }
 
+/// A profile registry read from a project connection answers from the
+/// registry while that project's open is held.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let project = project.canonicalize().expect("canonical project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "registry-read-blocked-open-test",
+    )
+    .expect("daemon database scope");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    prewarm_test_profile_runtime(&engine.store_administration).await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+
+    let capacity_gate =
+        super::super::project_open_capacity_gate(engine.project_open_gates.as_ref()).await;
+    let capacity_admission = capacity_gate.lock().await;
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_project_list",
+            "arguments": {"format": "json", "limit": 5}
+        }
+    });
+    let responses = tokio::time::timeout(
+        super::super::PROJECT_OPEN_REQUEST_DEADLINE,
+        super::handshake::daemon_round_trip(engine.clone(), &handshake, request),
+    )
+    .await
+    .expect("a registry read must not wait for the blocked project open");
+    drop(capacity_admission);
+
+    let response = responses
+        .iter()
+        .find(|response| response["id"] == json!(4))
+        .expect("project list response");
+    let payload = super::super::tool_json_payload(&response["result"], "tracedecay_project_list")
+        .unwrap_or_else(|error| panic!("typed project-list payload: {error}; {response}"));
+    assert_eq!(payload["status"], "ok", "payload: {payload}");
+    let projects = payload["projects"].as_array().expect("projects array");
+    assert_eq!(
+        projects
+            .iter()
+            .filter(|row| row["is_active"] == json!(true))
+            .count(),
+        1,
+        "the handshake project must be marked active without being opened: {payload}"
+    );
+    tokio::time::timeout(tokio::time::Duration::from_secs(20), engine.shutdown_all())
+        .await
+        .expect("registry read shutdown timed out");
+}
+
 #[tokio::test(start_paused = true)]
 async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
     let project_path = std::path::PathBuf::from("/projects/uncontended");

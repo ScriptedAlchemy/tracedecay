@@ -472,6 +472,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
         );
       case 'proximity': {
         const ref = interval.ref;
+        const hitWidth = Math.max(x1 - interval.x0 + 16, 44);
         const select = (): void => {
           if (ref !== null) onSelectEncounter?.(ref);
         };
@@ -491,7 +492,7 @@ export function TemporalScene(props: TemporalSceneProps): JSX.Element {
             }}
           >
             <title>{`${interval.label} · ${interval.grade}`}</title>
-            <rect x={interval.x0 - 8} y={interval.y - 22} width={x1 - interval.x0 + 16} height={44} fill="transparent" />
+            <rect x={(interval.x0 + x1 - hitWidth) / 2} y={interval.y - 22} width={hitWidth} height={44} fill="transparent" />
             <line
               data-interval={interval.id}
               data-interval-kind={interval.kind}

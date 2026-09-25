@@ -37,6 +37,8 @@ import {
   DeliveryOverviewV1Schema,
   DoctorFindingsPayloadV1Schema,
   DashboardEnvelopeV1Schema,
+  ExecutionTopologyMetricsV1Schema,
+  FeedbackProximityReadResultV1Schema,
   GraphNeighborsPayloadV1Schema,
   GraphOverviewPayloadV1Schema,
   GraphSearchPayloadV1Schema,
@@ -170,6 +172,8 @@ const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/application/workflow/definition-history': z.array(WorkflowDefinitionSchema),
   '/api/application/workflow/get-run': WorkflowRunProjectionSchema,
   '/api/application/handoff/list-task': ListTaskHandoffsResultV1Schema,
+  '/api/work/topology-metrics': ExecutionTopologyMetricsV1Schema,
+  '/api/feedback/proximity': FeedbackProximityReadResultV1Schema,
 };
 
 /**
