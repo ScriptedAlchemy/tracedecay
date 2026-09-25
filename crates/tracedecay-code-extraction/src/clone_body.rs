@@ -33,8 +33,13 @@ pub const MAX_AUTOMATIC_CLONE_BODY_TOKENS_V1: u32 = 4096;
 /// millions of tokens. Owning the name per token made the grammar table's
 /// static strings the largest single allocation source of the pre-progress
 /// extraction window; borrowing it keeps the wire shape and pays nothing.
-/// Deserialized pages still own their names.
+/// Decoded pages resolve names back to the grammar through
+/// [`crate::ts_provider::grammar_str`].
 pub type CloneSyntaxKindV1 = Cow<'static, str>;
+
+/// A clone-token text. Keywords and punctuation, whose text is their kind,
+/// borrow the grammar's name the same way; identifiers and literals own theirs.
+pub type CloneTokenTextV1 = Cow<'static, str>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -44,7 +49,7 @@ pub enum ConservativeCloneTokenV1 {
     },
     Syntax {
         syntax_kind: CloneSyntaxKindV1,
-        text: String,
+        text: CloneTokenTextV1,
     },
     StructureEnd {
         syntax_kind: CloneSyntaxKindV1,
@@ -439,17 +444,21 @@ impl<'a> TokenEmitter<'a> {
             return;
         }
         let syntax_kind = Cow::Borrowed(kind);
+        let text = if text == kind {
+            Cow::Borrowed(kind)
+        } else {
+            Cow::Owned(text.to_owned())
+        };
         if let Some(replacements) = self.replacements {
             let replacement = replacements.get(&(node.start_byte(), node.end_byte()));
             self.renamed.push(ConservativeCloneTokenV1::Syntax {
                 syntax_kind: syntax_kind.clone(),
-                text: replacement.map_or_else(|| text.to_owned(), Clone::clone),
+                text: replacement
+                    .map_or_else(|| text.clone(), |renamed| Cow::Owned(renamed.clone())),
             });
         }
-        self.tokens.push(ConservativeCloneTokenV1::Syntax {
-            syntax_kind,
-            text: text.to_owned(),
-        });
+        self.tokens
+            .push(ConservativeCloneTokenV1::Syntax { syntax_kind, text });
         self.token_count = self.token_count.saturating_add(1);
     }
 }

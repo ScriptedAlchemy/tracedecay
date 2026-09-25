@@ -104,7 +104,7 @@ function outer(source: number) {
     let syntax_text = normalized
         .iter()
         .filter_map(|token| match token {
-            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_str()),
+            ConservativeCloneTokenV1::Syntax { text, .. } => Some(text.as_ref()),
             ConservativeCloneTokenV1::StructureStart { .. }
             | ConservativeCloneTokenV1::StructureEnd { .. } => None,
         })
@@ -295,7 +295,7 @@ fn the_rename_stream_differs_from_the_conservative_one_only_at_renamed_identifie
             (
                 ConservativeCloneTokenV1::Syntax { text: before, .. },
                 ConservativeCloneTokenV1::Syntax { text: after, .. },
-            ) => (before.clone(), after.clone()),
+            ) => (before.to_string(), after.to_string()),
             _ => panic!("the two streams disagree on token shape: {conservative:?} {renamed:?}"),
         })
         .collect();
