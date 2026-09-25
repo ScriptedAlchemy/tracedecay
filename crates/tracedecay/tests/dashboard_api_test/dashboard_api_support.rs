@@ -650,20 +650,11 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
 
     for message in messages {
         // Production ingest persists every message as a canonical durable
-        // observation (which projects the message row itself) plus the raw
-        // LCM payload row; the session-temporal refresh discovers sessions
-        // ONLY from the observation effects, so the fixture walks the same
-        // two writes instead of raw message upserts the temporal projection
-        // would never see.
-        runtime
-            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Project, &message)
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "failed to ingest raw LCM fixture message {}: {error}",
-                    message.message_id
-                )
-            });
+        // observation whose projection is the sole writer of its
+        // `lcm_raw_messages` row. A second raw write of the same message would
+        // make that projection an output collision with no temporal output,
+        // and the session-temporal refresh discovers sessions only from
+        // output-producing observation effects.
         runtime
             .seed_session_message_observation_for_test(
                 tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {

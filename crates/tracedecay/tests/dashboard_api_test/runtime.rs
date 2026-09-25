@@ -518,22 +518,6 @@ impl DashboardTestRuntimeV1 {
         .await
     }
 
-    pub(crate) async fn lcm_ingest_raw_message_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        message: &SessionMessageRecord,
-    ) -> std::result::Result<(), tracedecay_lcm::LcmError> {
-        let database = self
-            .database(scope)
-            .map_err(|error| tracedecay_lcm::LcmError::Db(error.to_string()))?;
-        let storage_root = database.db_path().parent().ok_or_else(|| {
-            tracedecay_lcm::LcmError::Db(
-                "registered session database has no storage root".to_owned(),
-            )
-        })?;
-        database.lcm_ingest_raw_message(storage_root, message).await
-    }
-
     pub(crate) async fn lcm_raw_store_id_for_test(
         &self,
         scope: HostAdmissionScope,
