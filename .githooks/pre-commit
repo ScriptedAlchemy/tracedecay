@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Refuses a commit whose staged Rust files are not rustfmt-clean. Agents
-# merge without waiting for CI, so the Repository gates fmt check only holds
-# if every commit is formatted when it is made.
+# Formats staged Rust files before the commit is recorded. Agents merge
+# without waiting for CI, so the Repository gates fmt check only holds if
+# every commit is formatted when it is made.
+#
+# A file that also has unstaged changes is refused instead: formatting it
+# and re-staging would silently commit those unstaged changes.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -12,9 +15,31 @@ if [[ ${#staged[@]} -eq 0 ]]; then
     exit 0
 fi
 
-if ! rustfmt --edition 2024 --check -- "${staged[@]}" >/dev/null 2>&1; then
-    echo "pre-commit: staged Rust files are not rustfmt-clean:" >&2
-    rustfmt --edition 2024 --check -l -- "${staged[@]}" 2>/dev/null | sed 's/^/  /' >&2 || true
-    echo "run \`cargo fmt --all\` and stage the result" >&2
-    exit 1
+mapfile -d '' partial < <(git diff --name-only -z -- "${staged[@]}")
+if [[ ${#partial[@]} -gt 0 ]]; then
+    unformatted=()
+    for file in "${partial[@]}"; do
+        # rustfmt --check exits 0 on stdin even when it prints a diff, so
+        # compare the formatted staged blob with the staged blob itself.
+        if ! cmp -s <(git show ":$file") <(git show ":$file" | rustfmt --edition 2024 --emit stdout 2>/dev/null); then
+            unformatted+=("$file")
+        fi
+    done
+    if [[ ${#unformatted[@]} -gt 0 ]]; then
+        echo "pre-commit: these files are partially staged and their staged content is not rustfmt-clean:" >&2
+        printf '  %s\n' "${unformatted[@]}" >&2
+        echo "stage the whole file or run \`cargo fmt --all\` first" >&2
+        exit 1
+    fi
+fi
+
+fully_staged=()
+for file in "${staged[@]}"; do
+    if [[ ! " ${partial[*]} " == *" $file "* ]]; then
+        fully_staged+=("$file")
+    fi
+done
+if [[ ${#fully_staged[@]} -gt 0 ]]; then
+    rustfmt --edition 2024 -- "${fully_staged[@]}"
+    git add -- "${fully_staged[@]}"
 fi
