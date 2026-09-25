@@ -22,7 +22,7 @@ const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
 /// Canonical hosts whose first-party component lifecycle can publish durable
 /// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
 /// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
-pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 16] = [
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 17] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
@@ -39,6 +39,7 @@ pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 16] = [
     HostKindV1::Cline,
     HostKindV1::RooCode,
     HostKindV1::Kilo,
+    HostKindV1::Pi,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,7 +132,8 @@ pub fn unsupported_host_component_set_reason(
         // native hook/plugin surfaces remain evidence-gated.
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => None,
+        | HostKindV1::Kilo
+        | HostKindV1::Pi => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -185,6 +187,7 @@ pub fn default_components(host: HostKindV1) -> Vec<HostComponentV1> {
         | HostKindV1::Kilo => {
             vec![HostComponentV1::ContextMcp]
         }
+        HostKindV1::Pi => vec![HostComponentV1::Core, HostComponentV1::Agent],
         HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
     }
 }
@@ -577,6 +580,28 @@ fn component_assets(
             rendered.push((format!("{prefix}/{path}"), contents.into_bytes()));
         }
         return Ok(rendered);
+    }
+
+    // Pi loads its extension and skill from `~/.pi/agent`; the rendered bytes
+    // are the receipt-owned artifacts, the OpenCode plugin shape. A relocated
+    // agent directory is mirrored from these by the Pi activation.
+    if host == HostKindV1::Pi && matches!(component, HostComponentV1::Core | HostComponentV1::Agent)
+    {
+        let files = if component == HostComponentV1::Core {
+            super::pi::rendered_core_files(tracedecay_bin)
+                .map_err(|_| HostBundleRegistryError::Incompatible)?
+        } else {
+            super::pi::rendered_agent_files()
+        };
+        return Ok(files
+            .into_iter()
+            .map(|(relative, body)| {
+                (
+                    format!("{}/{relative}", super::pi::PI_AGENT_RELATIVE),
+                    body.into_bytes(),
+                )
+            })
+            .collect());
     }
 
     let (prefix, files) = match (host, component) {

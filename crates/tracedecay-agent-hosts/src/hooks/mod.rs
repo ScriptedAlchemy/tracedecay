@@ -142,7 +142,8 @@ const fn native_capture_agent(host: NativeHostIdentityV1) -> Option<HostIntegrat
         | NativeHostIdentityV1::RooCode
         | NativeHostIdentityV1::Kilo
         | NativeHostIdentityV1::KimiCode
-        | NativeHostIdentityV1::OpenCode => None,
+        | NativeHostIdentityV1::OpenCode
+        | NativeHostIdentityV1::Pi => None,
     }
 }
 
@@ -162,6 +163,27 @@ pub async fn dispatch_kimi_event(
     dispatch::dispatch(
         runtime,
         NativeHostIdentityV1::KimiCode,
+        event_json,
+        project_root,
+        Some(&telemetry),
+        started,
+    )
+    .await
+    .into_recorded_guidance(&telemetry)
+    .flatten()
+}
+
+#[hotpath::measure(future = true, label = "agent_hosts.hooks.dispatch_pi_event")]
+pub async fn dispatch_pi_event(
+    runtime: &HookRuntimeV1,
+    event_json: &str,
+    project_root: &Path,
+    started: Instant,
+) -> Option<String> {
+    let telemetry = record_other_hook_invoked(runtime, Some(project_root), "pi_event", event_json);
+    dispatch::dispatch(
+        runtime,
+        NativeHostIdentityV1::Pi,
         event_json,
         project_root,
         Some(&telemetry),
@@ -398,6 +420,11 @@ async fn hook_native_event(
 #[hotpath::measure(future = true, label = "hosts.hooks.kimi_event")]
 pub async fn hook_kimi_event(runtime: &HookRuntimeV1) -> i32 {
     hook_native_event(runtime, NativeHostIdentityV1::KimiCode, dispatch_kimi_event).await
+}
+
+#[hotpath::measure(future = true, label = "hosts.hooks.pi_event")]
+pub async fn hook_pi_event(runtime: &HookRuntimeV1) -> i32 {
+    hook_native_event(runtime, NativeHostIdentityV1::Pi, dispatch_pi_event).await
 }
 
 #[hotpath::measure(future = true, label = "hosts.hooks.opencode_event")]

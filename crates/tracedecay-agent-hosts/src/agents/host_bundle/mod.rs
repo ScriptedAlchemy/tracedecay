@@ -85,7 +85,7 @@ pub fn resolved_host_bundle_lifecycle_root() -> tracedecay_domain::errors::Resul
 
 /// Canonical stock-host enumeration shared by packaging, delivery, and
 /// conformance consumers.
-pub const fn stock_host_kinds() -> [HostKindV1; 18] {
+pub const fn stock_host_kinds() -> [HostKindV1; 19] {
     HostKindV1::ALL
 }
 

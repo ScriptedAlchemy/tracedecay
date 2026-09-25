@@ -2711,7 +2711,7 @@ mod tests {
 
         let mut self_invalidating = Vec::new();
         for agent in [
-            "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode",
+            "claude", "codex", "cursor", "hermes", "kimi", "kiro", "opencode", "pi",
         ] {
             let _profile = pinned_host_profile();
             let home = tempfile::tempdir().unwrap();

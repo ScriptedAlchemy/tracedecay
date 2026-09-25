@@ -141,6 +141,10 @@ pub const fn stock_event_support(
         (NativeHostIdentityV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
         (NativeHostIdentityV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
         (NativeHostIdentityV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (NativeHostIdentityV1::Pi, SessionBoundary) => Native,
+        (NativeHostIdentityV1::Pi, PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
+            Unavailable
+        }
         (
             NativeHostIdentityV1::Cline
             | NativeHostIdentityV1::RooCode

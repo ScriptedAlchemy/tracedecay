@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "session_start",
+  "id": "<EVENT_ID>",
+  "session_id": "<SESSION_ID>",
+  "cwd": "<PROJECT_ROOT>",
+  "reason": "startup"
+}

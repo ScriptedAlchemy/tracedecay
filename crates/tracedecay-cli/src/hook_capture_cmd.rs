@@ -121,6 +121,10 @@ const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1)] = &[
         "hook-opencode-tool-after",
         NativeHookCaptureSourceV1::OpenCodeToolExecuteAfter,
     ),
+    (
+        "hook-pi-event",
+        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Pi),
+    ),
 ];
 
 pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
@@ -198,6 +202,7 @@ fn native_response_command_from_name(command: &str) -> bool {
             | "hook-kimi-event"
             | "hook-opencode-event"
             | "hook-opencode-tool-after"
+            | "hook-pi-event"
     )
 }
 
@@ -230,6 +235,7 @@ fn capture_command_name(command: &Commands) -> Option<&'static str> {
         Commands::HookKimiEvent => Some("hook-kimi-event"),
         Commands::HookOpenCodeEvent => Some("hook-opencode-event"),
         Commands::HookOpenCodeToolAfter => Some("hook-opencode-tool-after"),
+        Commands::HookPiEvent => Some("hook-pi-event"),
         _ => None,
     }
 }

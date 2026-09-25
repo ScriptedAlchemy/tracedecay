@@ -64,6 +64,12 @@ pub fn require_component_capabilities(
         (HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe, Agent | OperatorMcp) => {
             return Err(HostBundleError::UnsupportedCapability);
         }
+        // Pi's Core deploys the extension that carries the agent surface;
+        // its hooks ride inside that extension rather than a native host hook
+        // protocol, so the component set is admitted against the scripted
+        // CLI capability only.
+        (HostKindV1::Pi, Core) => &[Cli],
+        (HostKindV1::Pi, Agent) => &[Cli],
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],

@@ -77,6 +77,7 @@ pub const NATIVE_HOOK_HOSTS: &[NativeHostIdentityV1] = &[
     NativeHostIdentityV1::Kiro,
     NativeHostIdentityV1::KimiCode,
     NativeHostIdentityV1::OpenCode,
+    NativeHostIdentityV1::Pi,
 ];
 
 pub fn project_id_for_layout(

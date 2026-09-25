@@ -175,6 +175,21 @@ impl CatalogHostComponentRegistrationAuthority {
             || component_set.host == crate::agents::host_bundle::HostKindV1::Cline
             || component_set.host == crate::agents::host_bundle::HostKindV1::RooCode
             || component_set.host == crate::agents::host_bundle::HostKindV1::Kilo
+            // Pi loads its deployed artifacts directly unless
+            // `PI_CODING_AGENT_DIR` relocates it; only then does it carry
+            // native registration state, the mirrors activation writes.
+            || (component_set.host == crate::agents::host_bundle::HostKindV1::Pi
+                && !self
+                    .integration
+                    .host_component_registration_paths(
+                        &component_set
+                            .components
+                            .iter()
+                            .map(|component| component.manifest.component)
+                            .collect::<Vec<_>>(),
+                        &self.context.home,
+                    )
+                    .is_empty())
             || (component_set.host == crate::agents::host_bundle::HostKindV1::OpenCode
                 && component_set.components.iter().any(|component| {
                     matches!(
@@ -688,14 +703,16 @@ impl crate::agents::host_bundle::HostComponentSetRegistrationV1
                 )),
             );
         }
-        // Claude's global install and Hermes' named-profile projection both
-        // derive host-owned registration from deployed component bytes. An
-        // install may replace those bytes while the preflight registration
-        // still reads Current, so both must re-activate after every install.
+        // Claude's global install, Hermes' named-profile projection, and Pi's
+        // relocated mirror all derive host-owned registration from deployed
+        // component bytes. An install may replace those bytes while the
+        // preflight registration still reads Current, so each must re-activate
+        // after every install.
         let always_refresh_registration_on_install = matches!(
             component_set.host,
             crate::agents::host_bundle::HostKindV1::ClaudeCode
                 | crate::agents::host_bundle::HostKindV1::Hermes
+                | crate::agents::host_bundle::HostKindV1::Pi
         ) && self.operation
             == crate::agents::host_bundle::HostBundleLifecycleOpV1::Install;
         self.should_apply = match self.operation {
