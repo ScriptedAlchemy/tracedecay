@@ -51,6 +51,7 @@ const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
 mod mcp_registry;
 mod plugin_registry;
+mod retired_bundle_files;
 
 pub struct CodexIntegration;
 
@@ -240,6 +241,17 @@ impl AgentIntegration for CodexIntegration {
         }
     }
 
+    fn foreign_bundle_entrypoints(
+        &self,
+        components: &[super::host_bundle::HostComponentV1],
+        home: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        if !components.contains(&super::host_bundle::HostComponentV1::Core) {
+            return Ok(Vec::new());
+        }
+        codex_foreign_bundle_entrypoints(home)
+    }
+
     fn is_detected(&self, home: &Path) -> bool {
         home.join(".codex").is_dir()
             || !codex_plugin_cached_install_dirs(home).is_empty()
@@ -315,6 +327,10 @@ impl AgentIntegration for CodexIntegration {
             &crate::host_io(),
             &ctx.home,
         )?;
+        // `codex plugin add` copies the whole source into Codex's cache, so a
+        // retired skill left there would keep the loaded plugin from ever
+        // matching the rendered bundle.
+        remove_codex_retired_bundle_files(&codex_plugin_install_dir(&ctx.home))?;
         if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             // `codex plugin add` resolves the catalog-deployed source through
@@ -367,6 +383,7 @@ impl AgentIntegration for CodexIntegration {
         // `plugin remove` never clears it. Leaving it would hold post-uninstall
         // registration at Repairable via [`codex_registration_residue`].
         remove_codex_marketplace_entry_at(&codex_personal_marketplace_path(&ctx.home), "personal")?;
+        remove_codex_retired_bundle_files(&codex_plugin_install_dir(&ctx.home))?;
         // `codex plugin remove` deliberately never touches `[hooks.state]`,
         // so the managed trust records written at install/update time would
         // otherwise survive as registration residue and hold uninstall
@@ -1478,6 +1495,25 @@ fn codex_loaded_cache_matches_rendered_bundle(
     if source != cache || expected.is_some_and(|expected| source != expected) {
         return Ok(false);
     }
+    super::observed_bundle_discovery_matches(
+        &source_root,
+        &cache_root,
+        &codex_expected_discovery_relatives(home, relatives)?,
+        CODEX_DISCOVERY_ROOTS,
+    )
+    .map_err(|_| ())
+}
+
+/// Directories Codex scans for plugin entrypoints.
+const CODEX_DISCOVERY_ROOTS: &[&str] = &[".codex-plugin", "agents", "commands", "hooks", "skills"];
+
+/// The bundle `relatives` plus the active managed-skill overlay: every
+/// entrypoint the personal source may carry.
+fn codex_expected_discovery_relatives(
+    home: &Path,
+    mut relatives: Vec<String>,
+) -> std::result::Result<Vec<String>, ()> {
+    let source_root = codex_plugin_install_dir(home);
     let profile_root =
         tracedecay_automation_runtime::automation::skill_targets::profile_root_for_agent_home(home);
     let overlay = tracedecay_automation_runtime::automation::skill_targets::rendered_native_skill_overlay_files(
@@ -1486,19 +1522,44 @@ fn codex_loaded_cache_matches_rendered_bundle(
         &source_root,
     )
     .map_err(|_| ())?;
-    let mut discovery_relatives = relatives;
     for (path, _) in overlay {
         let relative = path.strip_prefix(&source_root).map_err(|_| ())?;
         let relative = relative.to_str().ok_or(())?;
-        discovery_relatives.push(relative.replace(std::path::MAIN_SEPARATOR, "/"));
+        relatives.push(relative.replace(std::path::MAIN_SEPARATOR, "/"));
     }
-    super::observed_bundle_discovery_matches(
-        &source_root,
-        &cache_root,
-        &discovery_relatives,
-        &[".codex-plugin", "agents", "commands", "hooks", "skills"],
-    )
-    .map_err(|_| ())
+    Ok(relatives)
+}
+
+/// Entrypoints in the personal source that neither the current bundle nor a
+/// retired release file accounts for. Codex would copy them into its cache,
+/// so the loaded plugin could never match the rendered bundle.
+fn codex_foreign_bundle_entrypoints(home: &Path) -> Result<Vec<PathBuf>> {
+    let source_root = codex_plugin_install_dir(home);
+    let relatives = codex_embedded_plugin_files()
+        .into_iter()
+        .map(|(relative, _)| relative.to_string())
+        .collect();
+    let expected = codex_expected_discovery_relatives(home, relatives).map_err(|()| {
+        TraceDecayError::Config {
+            message: format!(
+                "could not read the managed Codex skill overlay for {}",
+                source_root.display()
+            ),
+        }
+    })?;
+    let mut foreign = Vec::new();
+    for relative in
+        super::unexpected_bundle_entrypoints(&source_root, &expected, CODEX_DISCOVERY_ROOTS)?
+    {
+        let path = source_root.join(&relative);
+        let contents = std::fs::read(&path).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to read {}: {e}", path.display()),
+        })?;
+        if !retired_bundle_files::is_retired_bundle_file(&relative, &contents) {
+            foreign.push(path);
+        }
+    }
+    Ok(foreign)
 }
 
 fn codex_source_manifest_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
@@ -1738,6 +1799,55 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Delete skill files a previous release deployed at paths the current bundle
+/// no longer ships, with their emptied directories. Only exact released bytes
+/// are TraceDecay's; anything else under `skills/` stays.
+fn remove_codex_retired_bundle_files(install_dir: &Path) -> Result<()> {
+    let skills_dir = install_dir.join("skills");
+    match std::fs::symlink_metadata(&skills_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return Ok(()),
+    }
+    let files = super::collect_regular_files(&skills_dir).map_err(|e| TraceDecayError::Config {
+        message: format!("failed to list {}: {e}", skills_dir.display()),
+    })?;
+    for file in files {
+        let Some(relative) = file
+            .strip_prefix(install_dir)
+            .ok()
+            .and_then(Path::to_str)
+            .map(|relative| relative.replace(std::path::MAIN_SEPARATOR, "/"))
+        else {
+            continue;
+        };
+        let contents = std::fs::read(&file).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to read {}: {e}", file.display()),
+        })?;
+        if !retired_bundle_files::is_retired_bundle_file(&relative, &contents) {
+            continue;
+        }
+        super::safe_remove_host_file(&file).map_err(|e| TraceDecayError::Config {
+            message: format!("failed to remove retired {}: {e}", file.display()),
+        })?;
+        for dir in file
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| *dir != skills_dir)
+        {
+            match std::fs::remove_dir(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+                Err(e) => {
+                    return Err(TraceDecayError::Config {
+                        message: format!("failed to prune {}: {e}", dir.display()),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn remove_codex_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
@@ -1804,6 +1914,7 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
         });
     }
     remove_codex_plugin_skills_dir(install_dir)?;
+    remove_codex_retired_bundle_files(install_dir)?;
     if codex_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),
@@ -1930,6 +2041,22 @@ fn group_has_subcommand(group: &serde_json::Value, subcommand: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
+    match codex_foreign_bundle_entrypoints(home) {
+        Ok(foreign) if foreign.is_empty() => {}
+        Ok(foreign) => dc.fail(&format!(
+            "{} not shipped by any TraceDecay release, but Codex loads it as part of the \
+             tracedecay plugin; move it out of {} and rerun `tracedecay install --agent codex`",
+            foreign
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            codex_plugin_install_dir(home).display()
+        )),
+        Err(error) => dc.fail(&format!(
+            "could not inventory the Codex plugin source: {error}"
+        )),
+    }
     let global_policy = CodexBundlePolicy::for_scope(InstallScope::Global);
     let cached_dirs = codex_plugin_cached_install_dirs(home);
     if !cached_dirs.is_empty() {
