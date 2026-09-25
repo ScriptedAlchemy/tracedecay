@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use std::io::BufRead;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tracing_subscriber::fmt::MakeWriter;
@@ -361,6 +361,37 @@ fn read_auth_preface(reader: &mut impl BufRead, expected_auth_token: &str) -> us
     read
 }
 
+/// Accepts the readiness probe the code under test is expected to open. A
+/// probe that never connects fails the fixture thread instead of parking it
+/// in `accept` while the test waits in `join`.
+#[cfg(unix)]
+fn accept_readiness_probe(listener: &UnixListener) -> std::os::unix::net::UnixStream {
+    const ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking readiness accept");
+    let deadline = std::time::Instant::now() + ACCEPT_TIMEOUT;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // BSD-derived kernels hand out accepted sockets that inherit
+                // the listener's O_NONBLOCK.
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking readiness stream");
+                return stream;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => panic!("no readiness probe connected within {ACCEPT_TIMEOUT:?}: {error}"),
+        }
+    }
+}
+
 #[cfg(unix)]
 pub(super) fn serve_probe_response(
     listener: UnixListener,
@@ -369,7 +400,7 @@ pub(super) fn serve_probe_response(
     expected_auth_token: String,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept readiness probe");
+        let mut stream = accept_readiness_probe(&listener);
         let mut reader =
             std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
         read_auth_preface(&mut reader, &expected_auth_token);
@@ -390,7 +421,7 @@ pub(super) fn serve_probe_response(
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn serve_counted_authenticated_probe(
     listener: UnixListener,
     expected_auth_token: String,
@@ -398,7 +429,7 @@ fn serve_counted_authenticated_probe(
     let accepts = Arc::new(AtomicUsize::new(0));
     let server_accepts = Arc::clone(&accepts);
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept readiness probe");
+        let mut stream = accept_readiness_probe(&listener);
         server_accepts.fetch_add(1, Ordering::SeqCst);
         let mut reader =
             std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
@@ -806,7 +837,7 @@ fn daemon_readiness_probe_classifies_authentication_denial() {
     .expect("publish daemon authority");
     let expected_auth_token = authority.auth_token().to_owned();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept readiness probe");
+        let mut stream = accept_readiness_probe(&listener);
         let mut reader =
             std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
         let mut line = String::new();
@@ -864,7 +895,10 @@ fn unreachable_systemd_user_manager_is_an_error_not_a_stopped_unit() {
     assert!(message.contains("Failed to connect to bus"), "{message}");
 }
 
-#[cfg(unix)]
+/// The fixture is a systemd user unit plus a fake `systemctl`; launchd reads
+/// its plist from `~/Library/LaunchAgents` and probes liveness with its own
+/// socket connect, so this contract is systemd's.
+#[cfg(target_os = "linux")]
 #[test]
 fn running_service_snapshot_uses_one_authenticated_connection() {
     let _env_lock = lock_user_data_dir_test_env();
