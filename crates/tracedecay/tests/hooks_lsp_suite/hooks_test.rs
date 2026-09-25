@@ -434,11 +434,13 @@ fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
         HookWorkspaceStatus::Generic
     );
 
-    let outside = std::env::current_dir()
-        .expect("cwd")
-        .join("target/test-hooks-workspace-status");
-    let _ = std::fs::remove_dir_all(&outside);
-    std::fs::create_dir_all(&outside).expect("fixture root outside temp");
+    // The target directory usually sits inside this checkout, whose
+    // repository may be an enrolled TraceDecay project; a fresh repository
+    // bounds project discovery so the outcome never depends on the checkout.
+    let outside_dir =
+        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("fixture root outside temp");
+    let outside = outside_dir.path();
+    gix::init(outside).expect("fixture repository boundary");
 
     let project_like = outside.join("cargo-marker");
     std::fs::create_dir_all(&project_like).unwrap();
@@ -459,8 +461,6 @@ fn test_codex_workspace_status_distinguishes_generic_and_project_like_dirs() {
         codex_workspace_status_from_event(&git_event),
         HookWorkspaceStatus::UnindexedProject
     );
-
-    let _ = std::fs::remove_dir_all(&outside);
 }
 
 #[test]
