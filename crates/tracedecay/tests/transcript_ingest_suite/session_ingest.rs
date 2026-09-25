@@ -507,8 +507,8 @@ async fn registered_project_roots_include_modern_registry_aliases() {
     let worktree = temp.path().join("repo-worktree");
     std::fs::create_dir_all(&canonical).unwrap();
     std::fs::create_dir_all(&worktree).unwrap();
-    let canonical = std::fs::canonicalize(canonical).unwrap();
-    let worktree = std::fs::canonicalize(worktree).unwrap();
+    let canonical = tracedecay_runtime_core::path_safety::canonical_root_identity(&canonical);
+    let worktree = tracedecay_runtime_core::path_safety::canonical_root_identity(&worktree);
     let runtime = profile_test_runtime().await;
     runtime
         .database

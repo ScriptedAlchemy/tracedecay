@@ -19,8 +19,8 @@ use std::process::Command;
 use tempfile::TempDir;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_root_identity as canonical_temp_path;
 
-use crate::common::canonical_existing_path as canonical_temp_path;
 use crate::home_env_lock::HOME_ENV_LOCK;
 
 fn git_cli_path(path: &Path) -> PathBuf {

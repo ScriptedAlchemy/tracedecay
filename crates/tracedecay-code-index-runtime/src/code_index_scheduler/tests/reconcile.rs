@@ -2204,10 +2204,12 @@ async fn unchanged_git_watcher_probe_does_not_enqueue_authoritative_capture() {
         "settled fixture starts without source-change evidence"
     );
 
-    let identity = tracedecay_runtime_core::git_discovery::GitRepositoryIdentity {
-        worktree_root: canonical_root.clone(),
-        git_dir: canonical_root.join(".git"),
-        common_dir: canonical_root.join(".git"),
+    let tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(identity) =
+        tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(
+            fixture.path(),
+        )
+    else {
+        panic!("the fixture checkout resolves a repository identity");
     };
     assert_eq!(
         registry.request_for_root(&identity).await,
