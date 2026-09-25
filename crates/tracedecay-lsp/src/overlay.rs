@@ -446,10 +446,6 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
                     coverage: "refresh-required".to_owned(),
                 }
             }
-            OperationPoll::Busy => DiagnosticSnapshotOutcome::Partial {
-                source_generation: None,
-                coverage: "runtime-busy".to_owned(),
-            },
         }
     }
 
@@ -510,9 +506,6 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
             Ok(OperationAdmission::Existing(identity)) => {
                 DiagnosticRefreshAdmission::AlreadyRunning(identity)
             }
-            Ok(OperationAdmission::Busy) => DiagnosticRefreshAdmission::Rejected {
-                failure_class: "runtime-busy".to_owned(),
-            },
             Ok(OperationAdmission::Saturated) => DiagnosticRefreshAdmission::Rejected {
                 failure_class: "diagnostic-capacity".to_owned(),
             },
