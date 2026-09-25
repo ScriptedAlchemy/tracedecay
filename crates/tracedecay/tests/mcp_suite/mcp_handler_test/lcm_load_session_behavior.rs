@@ -275,39 +275,6 @@ async fn tracedecay_lcm_load_session_returns_the_messages_the_caller_asked_for()
     )
     .await;
 
-    let proof = json!({
-        "cursor_newest_first": cursor_newest_first,
-        "explicit_forensic": explicit_forensic,
-        "window": window,
-        "past_end": past_end,
-        "tool_only": tool_only,
-        "user_and_assistant": user_and_assistant,
-        "during_assistant": during_assistant,
-        "as_of_assistant": as_of_assistant,
-        "codex_only": codex_only,
-        "every_provider": every_provider,
-        "explicit_all": explicit_all,
-        "clamped": clamped,
-        "first_page": first_page,
-        "second_page": second_page,
-        "third_page": third_page,
-        "ghost": ghost,
-        "empty_session": empty_session,
-        "empty_role": empty_role,
-        "zero_content_limit": zero_content_limit,
-        "zero_limit": zero_limit,
-        "over_limit": over_limit,
-        "as_of_without_cutoff": as_of_without_cutoff,
-        "missing_session": missing_session,
-        "unknown_field": unknown_field,
-        "negative_limit": negative_limit,
-    });
-    std::fs::write(
-        "/tmp/lcm-load-session-proof.json",
-        serde_json::to_string_pretty(&proof).expect("proof json"),
-    )
-    .expect("proof file");
-
     let cursor_messages = json!([
         message(
             TOOL_ID,

@@ -209,6 +209,7 @@ struct IsolatedCli {
     project: TempDir,
     profile: PathBuf,
     bin_dir: PathBuf,
+    shim: PathBuf,
 }
 
 impl IsolatedCli {
@@ -239,7 +240,14 @@ impl IsolatedCli {
             project,
             profile,
             bin_dir,
+            shim,
         }
+    }
+
+    /// The command text hosts are configured with: the resolved shim,
+    /// executable suffix included, spelled with forward slashes.
+    fn installed_bin(&self) -> String {
+        tracedecay_domain::forward_slash_text(self.shim.to_str().expect("UTF-8 test path"))
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -322,7 +330,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             .unwrap();
         assert_eq!(
             entry["command"].as_str(),
-            cli.bin_dir.join("tracedecay").to_str()
+            Some(cli.installed_bin().as_str())
         );
         assert_eq!(entry["transport"].as_str(), Some("stdio"));
         assert_eq!(entry["args"].as_array().unwrap()[0].as_str(), Some("serve"));
@@ -350,10 +358,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             .unwrap();
             assert!(extension.contains("TraceDecayPiExtension"));
             assert!(
-                extension.contains(
-                    &serde_json::to_string(cli.bin_dir.join("tracedecay").to_str().unwrap())
-                        .unwrap()
-                ),
+                extension.contains(&serde_json::to_string(&cli.installed_bin()).unwrap()),
                 "{} extension did not render the resolved binary",
                 case.id
             );
@@ -421,19 +426,13 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
     let entry = &config[root]["tracedecay"];
     match case.host {
         HostKindV1::Cline => {
-            assert_eq!(
-                entry["command"],
-                serde_json::json!(cli.bin_dir.join("tracedecay"))
-            );
+            assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
             assert_eq!(entry["disabled"], false);
             assert_eq!(entry["autoApprove"], serde_json::json!([]));
         }
         HostKindV1::Devin | HostKindV1::Antigravity => {
-            assert_eq!(
-                entry["command"],
-                serde_json::json!(cli.bin_dir.join("tracedecay"))
-            );
+            assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
             assert_eq!(entry["env"], serde_json::json!({}));
             assert_eq!(entry["transport"], "stdio");
@@ -454,7 +453,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
                 assert_eq!(cli_plugin["ui"]["theme"], "dark");
                 assert_eq!(
                     cli_plugin["mcpServers"]["tracedecay"]["command"],
-                    serde_json::json!(cli.bin_dir.join("tracedecay"))
+                    serde_json::json!(cli.installed_bin())
                 );
                 assert_eq!(
                     cli_plugin["mcpServers"]["tracedecay"]["args"],
@@ -463,17 +462,11 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             }
         }
         HostKindV1::Zed => {
-            assert_eq!(
-                entry["command"],
-                serde_json::json!(cli.bin_dir.join("tracedecay"))
-            );
+            assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
         }
         HostKindV1::RooCode => {
-            assert_eq!(
-                entry["command"],
-                serde_json::json!(cli.bin_dir.join("tracedecay"))
-            );
+            assert_eq!(entry["command"], serde_json::json!(cli.installed_bin()));
             assert_eq!(entry["args"], serde_json::json!(["serve"]));
             assert_eq!(entry["disabled"], false);
             assert_eq!(entry["alwaysAllow"], serde_json::json!([]));
@@ -482,7 +475,7 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
             assert_eq!(entry["type"], "local");
             assert_eq!(
                 entry["command"],
-                serde_json::json!([cli.bin_dir.join("tracedecay"), "serve"])
+                serde_json::json!([cli.installed_bin(), "serve"])
             );
             assert_eq!(entry["enabled"], true);
         }
@@ -941,7 +934,7 @@ fn production_cli_installs_devin_project_mcp_without_touching_siblings() {
     assert_eq!(config["mcpServers"]["foreign"]["command"], "foreign-bin");
     assert_eq!(
         config["mcpServers"]["tracedecay"]["command"],
-        serde_json::json!(cli.bin_dir.join("tracedecay"))
+        serde_json::json!(cli.installed_bin())
     );
     assert_eq!(
         config["mcpServers"]["tracedecay"]["args"],
@@ -978,7 +971,7 @@ fn production_cli_installs_zed_project_mcp_without_touching_siblings() {
     );
     assert_eq!(
         config["context_servers"]["tracedecay"]["command"],
-        serde_json::json!(cli.bin_dir.join("tracedecay"))
+        serde_json::json!(cli.installed_bin())
     );
     assert_eq!(
         config["context_servers"]["tracedecay"]["args"],
@@ -1009,14 +1002,7 @@ fn production_cli_installs_vibe_project_components_without_touching_siblings() {
     let config = fs::read_to_string(&config).unwrap();
     assert!(config.contains("name = \"foreign\"\ncommand = \"foreign-bin\""));
     assert!(config.contains("name = \"tracedecay\""));
-    assert!(
-        config.contains(
-            cli.bin_dir
-                .join("tracedecay")
-                .to_str()
-                .expect("UTF-8 test path")
-        )
-    );
+    assert!(config.contains(&cli.installed_bin()));
     let prompt = fs::read_to_string(&prompt).unwrap();
     assert!(prompt.contains("Keep this text."));
     assert!(prompt.contains("## Prefer tracedecay MCP tools"));
@@ -1028,7 +1014,7 @@ fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
     let case = host_case(HostKindV1::Hermes);
     seed_host(case, &cli);
 
-    let bin_literal = serde_json::to_string(&cli.bin_dir.join("tracedecay")).unwrap();
+    let bin_literal = serde_json::to_string(&cli.installed_bin()).unwrap();
     let assert_dashboard_absent = || {
         for plugin in [
             cli.home.path().join(".hermes/plugins/tracedecay"),
@@ -1754,7 +1740,7 @@ fn pi_lifecycle_installs_diagnoses_sweeps_and_uninstalls_exact_bytes() {
     owned.sort_unstable();
     assert_eq!(owned, PI_ARTIFACTS);
     let extension = fs::read_to_string(cli.home.path().join(PI_ARTIFACTS[0])).unwrap();
-    assert!(extension.contains(&serde_json::to_string(&cli.bin_dir.join("tracedecay")).unwrap()));
+    assert!(extension.contains(&serde_json::to_string(&cli.installed_bin()).unwrap()));
     let schemas: Vec<serde_json::Value> =
         serde_json::from_slice(&fs::read(cli.home.path().join(PI_ARTIFACTS[2])).unwrap()).unwrap();
     assert!(

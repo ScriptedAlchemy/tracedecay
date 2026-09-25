@@ -8,9 +8,7 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
@@ -98,9 +96,7 @@ fn automation_jobs_crud_and_manual_run_are_dashboard_controllable() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");
@@ -209,9 +205,7 @@ fn dashboard_user_job_history_appears_only_after_retained_settlement() {
     let runtime = create_runtime();
     runtime.block_on(async {
         let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
+        let tmp_root = canonical_existing_identity(tmp.path())
             .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
         let project_root = tmp_root.join("project");
         let global_db_path = tmp_root.join("global").join("global.db");

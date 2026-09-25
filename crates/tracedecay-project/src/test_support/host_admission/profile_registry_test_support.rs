@@ -1,5 +1,6 @@
 use super::*;
 use sha2::{Digest as _, Sha256};
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +56,8 @@ impl HostAdmissionTestRuntimeV1 {
                     operation: "resolve test profile-relative path".to_owned(),
                     message: "profile database has no parent directory".to_owned(),
                 })?;
-        path.strip_prefix(profile_root)
+        canonical_root_identity(path)
+            .strip_prefix(canonical_root_identity(profile_root))
             .map(Path::to_path_buf)
             .map_err(|error| TraceDecayError::Database {
                 operation: "resolve test profile-relative path".to_owned(),
