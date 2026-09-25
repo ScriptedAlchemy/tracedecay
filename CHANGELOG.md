@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.52](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.51...v1.0.0-beta.52) (2026-09-25)
+
+
+### Bug Fixes
+
+* **code-index:** key watcher ingress by the product root identity ([#1994](https://github.com/ScriptedAlchemy/tracedecay/issues/1994)) ([76bddad](https://github.com/ScriptedAlchemy/tracedecay/commit/76bddad5103d95b5d663a46f3ecd9284e10444f7))
+* **code-index:** resolve TypeScript cross-file imports ([#1998](https://github.com/ScriptedAlchemy/tracedecay/issues/1998)) ([293e283](https://github.com/ScriptedAlchemy/tracedecay/commit/293e2838027a60b5a293f3d3947712f1c00ad2bb)), closes [#1975](https://github.com/ScriptedAlchemy/tracedecay/issues/1975)
+* **context:** make lexical anchors must-have evidence ([#1999](https://github.com/ScriptedAlchemy/tracedecay/issues/1999)) ([b874719](https://github.com/ScriptedAlchemy/tracedecay/commit/b874719fd0be90c10ae7153aaf85844867de0c91))
+* held-capability quarantine and canonical root identity routing ([#2002](https://github.com/ScriptedAlchemy/tracedecay/issues/2002)) ([0933cce](https://github.com/ScriptedAlchemy/tracedecay/commit/0933ccea88c5d1ae0ed39c35d49d25e011b30973))
+* **lint:** unpin workspace-versioned path deps and clear clippy errors ([#1995](https://github.com/ScriptedAlchemy/tracedecay/issues/1995)) ([8b1213e](https://github.com/ScriptedAlchemy/tracedecay/commit/8b1213e4c75495267451f193bb3e9e0a0acf2cee))
+* **release:** accept master-dispatched attestation digests ([#2003](https://github.com/ScriptedAlchemy/tracedecay/issues/2003)) ([a887e08](https://github.com/ScriptedAlchemy/tracedecay/commit/a887e08a96f6a36deb7b9244a422cb877390fd3a))
+
+
+### Performance Improvements
+
+* **ci:** balance macOS groups by measured partition cost ([#2004](https://github.com/ScriptedAlchemy/tracedecay/issues/2004)) ([9f341bf](https://github.com/ScriptedAlchemy/tracedecay/commit/9f341bf29a6f1fd45e898fa823da92f7f17ebbc1))
+* **ci:** partition Windows tests and regroup macOS by resolution ([#1989](https://github.com/ScriptedAlchemy/tracedecay/issues/1989)) ([b050ee8](https://github.com/ScriptedAlchemy/tracedecay/commit/b050ee8abd71d4a3a4163f956b5fadb546d1b7b9))
+* unblock 772-file restart receipt (THP, n-gram, plan merge) ([#2006](https://github.com/ScriptedAlchemy/tracedecay/issues/2006)) ([fdec3c9](https://github.com/ScriptedAlchemy/tracedecay/commit/fdec3c9fb5cf295a6ecaecf1d888a449a7863286))
+
 ## [1.0.0-beta.51](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.50...v1.0.0-beta.51) (2026-09-25)
 
 
