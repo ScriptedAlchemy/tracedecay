@@ -83,6 +83,7 @@ impl HostKindV1 {
             Self::Codex => Some(HostIntegrationIdV1::Codex),
             Self::Hermes => Some(HostIntegrationIdV1::Hermes),
             Self::Kiro => Some(HostIntegrationIdV1::Kiro),
+            Self::Pi => Some(HostIntegrationIdV1::Pi),
             Self::Devin
             | Self::Zed
             | Self::Antigravity
@@ -95,8 +96,7 @@ impl HostKindV1 {
             | Self::KimiCode
             | Self::OpenCode
             | Self::Gemini
-            | Self::Copilot
-            | Self::Pi => None,
+            | Self::Copilot => None,
         }
     }
 }
@@ -307,12 +307,13 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
         // model-callable tools and lifecycle hooks directly, and the shipped
         // extension bridges the code graph through `tracedecay tool` over the
         // daemon socket. The CLI remains the scripted fallback surface. Its
-        // lifecycle events reach `hook-pi-event` under the Pi native identity,
-        // but no host-integration native fixture evidences that route yet.
+        // lifecycle events reach `hook-pi-event` under the Pi native identity;
+        // the checked-in `pi.json` fixture proves the session-start and stop
+        // boundaries, exactly the evidence Codex's hook row rests on.
         HostKindV1::Pi => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
-            Unavailable(CheckedInEvidenceMissing),
+            Supported,
             Unavailable(HostRegistrationUnsupported),
             Supported,
         ),
@@ -351,15 +352,17 @@ pub enum HostIntegrationIdV1 {
     Cursor,
     Hermes,
     Kiro,
+    Pi,
 }
 
 impl HostIntegrationIdV1 {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::Hermes,
         Self::Kiro,
+        Self::Pi,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -369,6 +372,7 @@ impl HostIntegrationIdV1 {
             Self::Cursor => "cursor",
             Self::Hermes => "hermes",
             Self::Kiro => "kiro",
+            Self::Pi => "pi",
         }
     }
 
@@ -389,6 +393,7 @@ impl HostIntegrationIdV1 {
             "cursor" => Some(Self::Cursor),
             "hermes" => Some(Self::Hermes),
             "kiro" => Some(Self::Kiro),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -401,6 +406,7 @@ impl HostIntegrationIdV1 {
             Self::Cursor => ".cursor_shell_sync_at",
             Self::Hermes => ".hermes_terminal_receipt_at",
             Self::Kiro => ".kiro_post_tool_sync_at",
+            Self::Pi => ".pi_session_sync_at",
         }
     }
 }

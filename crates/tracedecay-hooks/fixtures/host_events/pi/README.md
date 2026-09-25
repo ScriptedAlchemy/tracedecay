@@ -7,4 +7,8 @@ JSON object on stdin, then closes stdin. These fixtures are that payload shape:
 `id` is a fresh UUID per event, `session_id` is Pi's session id, and `cwd` is
 the session working directory. `reason` is Pi's `session_start` reason.
 
+`../pi.json` is the host-integration evidence catalog over these captures:
+`session_start` is the session boundary and `agent_end` is the stop boundary.
+The extension forwards no edit callback, so no saved-edit identity is claimed.
+
 Reference: https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md

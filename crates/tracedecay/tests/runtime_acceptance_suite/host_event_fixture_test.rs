@@ -36,7 +36,7 @@ use crate::common::{
     tracedecay_command_with_home,
 };
 
-const FIXTURES: [(&str, &str); 5] = [
+const FIXTURES: [(&str, &str); 6] = [
     (
         "codex",
         include_str!("../../../../tests/fixtures/host_events/codex/baseline.json"),
@@ -57,10 +57,14 @@ const FIXTURES: [(&str, &str); 5] = [
         "kiro",
         include_str!("../../../../tests/fixtures/host_events/kiro/baseline.json"),
     ),
+    (
+        "pi",
+        include_str!("../../../../tests/fixtures/host_events/pi/baseline.json"),
+    ),
 ];
 
 const HOST_ADMISSION_PROVIDERS: &[&str] = &[
-    "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo",
+    "claude", "codex", "cursor", "hermes", "kiro", "pi", "cline", "roo-code", "kilo",
 ];
 
 #[tokio::test]
@@ -395,6 +399,7 @@ fn execute_host_boundary(provider: &str, home: &Path, project: &Path, request: &
         "cursor" => "hook-cursor-session-start",
         "hermes" => "hook-hermes-terminal-receipt",
         "kiro" => "hook-kiro-prompt-submit",
+        "pi" => "hook-pi-event",
         other => panic!("unexpected provider {other}"),
     };
     let mut command = tracedecay_command_with_home(home);
@@ -683,6 +688,25 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
                 !capture.deferred_by_byte_cap,
                 "Kiro native fixture must not defer on the byte cap"
             );
+            HostAdmissionScope::Project
+        }
+        "pi" => {
+            let agent_dir = tmp.path().join("pi-agent");
+            write_pi_native_fixture(&agent_dir, &project);
+            let capture = tracedecay_sessions::runtime::hosts::pi::capture_pi_observations(
+                &facade,
+                &tracedecay_sessions::runtime::hosts::pi::PiSource::with_agent_dir(&agent_dir),
+                &project,
+                ObservationScopeV1::Project {
+                    project_id: project_id.clone(),
+                },
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap();
+            assert!(capture.bytes_consumed > 0, "Pi native fixture");
+            assert!(!capture.deferred, "Pi native fixture must land completely");
             HostAdmissionScope::Project
         }
         other => panic!("unexpected provider {other}"),
@@ -2043,6 +2067,27 @@ fn encode_workspace_path(path: &Path) -> String {
         output.push(TABLE[((buffer << (6 - bits)) & 0x3f) as usize] as char);
     }
     output.replace('/', "_")
+}
+
+fn write_pi_native_fixture(agent_dir: &Path, project: &Path) {
+    let cwd = project.to_string_lossy();
+    let encoded = cwd
+        .strip_prefix('/')
+        .unwrap_or(&cwd)
+        .replace(['/', '\\', ':'], "-");
+    let directory = agent_dir.join("sessions").join(format!("--{encoded}--"));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl"),
+        include_str!(
+            "../../../../tests/fixtures/transcript_golden/pi/2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl"
+        )
+        .replace(
+            "\"<PROJECT_ROOT>\"",
+            &serde_json::to_string(project).unwrap(),
+        ),
+    )
+    .unwrap();
 }
 
 fn write_kiro_native_fixture(home: &Path, project: &Path) {
