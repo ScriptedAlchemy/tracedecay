@@ -255,6 +255,30 @@ fn open_builder_connection(
     Ok(connection)
 }
 
+/// Run one batch append with memory-backed statement journals.
+///
+/// Every staged insert fires a builder-gate trigger that may abort it, so
+/// SQLite journals each statement's touched pages. Under file-backed temporary
+/// storage the first journal to outgrow SQLite's spill threshold becomes a
+/// temp file for the rest of the transaction, and every later insert writes
+/// its pages through it (gigabytes per corpus for a journal that never exceeds
+/// a few hundred KiB). A batch runs no corpus-wide sort, so its journals stay
+/// in memory; the connection returns to file-backed storage afterwards so
+/// finalization keeps its threaded sorter.
+fn with_memory_statement_journals<T>(
+    connection: &mut rusqlite::Connection,
+    append: impl FnOnce(&mut rusqlite::Connection) -> Result<T, CodeLexicalArtifactErrorV1>,
+) -> Result<T, CodeLexicalArtifactErrorV1> {
+    connection
+        .pragma_update(None, "temp_store", "MEMORY")
+        .map_err(sqlite_error)?;
+    let appended = append(connection);
+    connection
+        .pragma_update(None, "temp_store", "FILE")
+        .map_err(sqlite_error)?;
+    appended
+}
+
 /// CPU units one builder statement occupies: the builder thread plus every
 /// SQLite sorter helper the connection was granted.
 fn builder_sorter_cpu_units(
@@ -294,9 +318,46 @@ mod tests {
 
     use super::{
         ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
-        builder_sorter_cpu_units, code_lexical_artifact_build_memory_budget_for,
-        open_builder_connection,
+        CodeLexicalArtifactErrorV1, builder_sorter_cpu_units,
+        code_lexical_artifact_build_memory_budget_for, open_builder_connection,
+        with_memory_statement_journals,
     };
+
+    fn temp_store(connection: &rusqlite::Connection) -> i64 {
+        connection
+            .pragma_query_value(None, "temp_store", |row| row.get(0))
+            .expect("temp-store pragma")
+    }
+
+    /// A batch append keeps its statement journals in memory, and the
+    /// connection returns to file-backed temporary storage afterwards, even
+    /// when the append fails, so finalization never sorts in memory.
+    #[test]
+    fn batch_appends_journal_in_memory_and_restore_file_backed_sorting() {
+        let directory = tempfile::tempdir().expect("artifact tempdir");
+        let mut connection = open_builder_connection(
+            &directory.path().join("journals.sqlite"),
+            CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
+        )
+        .expect("builder connection");
+
+        let during = with_memory_statement_journals(&mut connection, |connection| {
+            Ok(temp_store(connection))
+        })
+        .expect("append succeeds");
+        assert_eq!(during, 2, "a batch append must journal in memory");
+        assert_eq!(
+            temp_store(&connection),
+            1,
+            "a committed append restores FILE"
+        );
+
+        let failed = with_memory_statement_journals(&mut connection, |_| {
+            Err::<(), _>(CodeLexicalArtifactErrorV1::Contract("refused".to_owned()))
+        });
+        assert!(failed.is_err(), "the append's refusal is returned");
+        assert_eq!(temp_store(&connection), 1, "a refused append restores FILE");
+    }
 
     /// Staging builder connections stay inside the kernel SQLite window:
     /// no mmap grant, page cache at most 64 MiB, and `synchronous = NORMAL`,
