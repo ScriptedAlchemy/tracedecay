@@ -92,10 +92,11 @@ if sdk_paths:
 PY
 
 # Exercise the canonical verifier rather than requiring every workflow to copy
-# its `gh attestation verify` implementation. This keeps the workflow guard
-# focused on delegation while proving the shared authority derives the exact
-# tag source ref, preserves the source digest and signer, rejects self-hosted
-# attestations, and propagates verification failures.
+# its `gh attestation verify` implementation. A fake `gh` serves one
+# attestation digest per signer ref and a compare status per commit range, so
+# each case asserts the verifier's accept/reject decision for one provenance
+# shape, including the master-dispatched run whose attestation names master's
+# head rather than the tag commit.
 python3 - <<'PY'
 import json
 import os
@@ -109,7 +110,10 @@ verifier = root / "scripts/verify-retained-release-assets.sh"
 tag = "v9.8.7"
 repo = "ScriptedAlchemy/tracedecay"
 signer = "ScriptedAlchemy/tracedecay/.github/workflows/release.yml"
-source_digest = "0123456789abcdef"
+tag_sha = "0123456789abcdef"
+master_head = "fedcba9876543210"
+tag_ref = f"refs/tags/{tag}"
+master_ref = "refs/heads/master"
 
 with tempfile.TemporaryDirectory() as temp:
     temp_path = Path(temp)
@@ -128,135 +132,83 @@ arguments = sys.argv[1:]
 with Path(os.environ["GH_INVOCATION_LOG"]).open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(arguments) + "\\n")
 
-if arguments[:2] == ["release", "download"]:
-    pattern = arguments[arguments.index("--pattern") + 1]
-    destination = Path(arguments[arguments.index("--dir") + 1])
-    destination.mkdir(parents=True, exist_ok=True)
-    (destination / pattern).write_bytes(b"retained release asset")
-
-if (
-    arguments[:2] == ["attestation", "verify"]
-    and os.environ.get("GH_FAIL_ATTESTATION") == "1"
-):
-    raise SystemExit(17)
-if (
-    arguments[:2] == ["attestation", "verify"]
-    and os.environ.get("GH_FAIL_TAG_REF") == "1"
-    and arguments[arguments.index("--source-ref") + 1].startswith("refs/tags/")
-):
-    raise SystemExit(18)
+if arguments[:2] == ["attestation", "verify"]:
+    if "--deny-self-hosted-runners" not in arguments:
+        raise SystemExit(20)
+    if arguments[arguments.index("--signer-workflow") + 1] != os.environ["GH_SIGNER"]:
+        raise SystemExit(21)
+    source_ref = arguments[arguments.index("--source-ref") + 1]
+    digest = json.loads(os.environ["GH_ATTESTATIONS"]).get(source_ref)
+    if digest is None:
+        raise SystemExit(17)
+    if (
+        "--source-digest" in arguments
+        and arguments[arguments.index("--source-digest") + 1] != digest
+    ):
+        raise SystemExit(19)
+    print(json.dumps([
+        {"verificationResult": {"signature": {"certificate": {
+            "sourceRepositoryRef": source_ref,
+            "sourceRepositoryDigest": digest,
+        }}}}
+    ]))
+elif arguments[:1] == ["api"]:
+    commit_range = arguments[1].rsplit("/compare/", 1)[1]
+    print(json.loads(os.environ["GH_COMPARE"]).get(commit_range, "diverged"))
 """,
         encoding="utf-8",
     )
     fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
 
-    environment = os.environ.copy()
-    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
-    environment["GH_INVOCATION_LOG"] = str(invocation_log)
-
     files = [temp_path / "first.tar.gz", temp_path / "second.mcpb"]
     for file in files:
         file.write_bytes(b"release asset")
 
-    command = [
-        str(verifier),
-        "--tag",
-        tag,
-        "--repo",
-        repo,
-        "--signer-workflow",
-        signer,
-        "--source-digest",
-        source_digest,
-        "--files",
-        *(str(file) for file in files),
-    ]
-    subprocess.run(command, cwd=root, env=environment, check=True)
+    def verify(attestations, signer_refs=(), compare=None):
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+        environment["GH_INVOCATION_LOG"] = str(invocation_log)
+        environment["GH_SIGNER"] = signer
+        environment["GH_ATTESTATIONS"] = json.dumps(attestations)
+        environment["GH_COMPARE"] = json.dumps(compare or {})
+        command = [
+            str(verifier),
+            "--tag", tag,
+            "--repo", repo,
+            "--signer-workflow", signer,
+            "--source-digest", tag_sha,
+        ]
+        for signer_ref in signer_refs:
+            command += ["--signer-ref", signer_ref]
+        command += ["--files", *(str(file) for file in files)]
+        return subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
 
-    invocations = [
-        json.loads(line)
-        for line in invocation_log.read_text(encoding="utf-8").splitlines()
+    both_refs = (tag_ref, master_ref)
+    descends = {f"{tag_sha}...{master_head}": "ahead"}
+    cases = [
+        ("tag-dispatched run attesting the tag commit", True,
+         verify({tag_ref: tag_sha})),
+        ("master-dispatched run attesting a master head that descends from the tag", True,
+         verify({master_ref: master_head}, both_refs, descends)),
+        ("master-dispatched run attesting the tag commit itself", True,
+         verify({master_ref: tag_sha}, both_refs)),
+        ("master-dispatched run attesting a head the tag is not an ancestor of", False,
+         verify({master_ref: master_head}, both_refs, {f"{tag_sha}...{master_head}": "diverged"})),
+        ("tag-ref attestation naming any commit but the tag", False,
+         verify({tag_ref: master_head}, both_refs, descends)),
+        ("master-ref attestation when only the tag ref is allowed", False,
+         verify({master_ref: master_head}, (), descends)),
+        ("no attestation for any allowed ref", False,
+         verify({}, both_refs, descends)),
     ]
-    expected_suffix = [
-        "--repo",
-        repo,
-        "--signer-workflow",
-        signer,
-        "--source-ref",
-        f"refs/tags/{tag}",
-        "--source-digest",
-        source_digest,
-        "--deny-self-hosted-runners",
-    ]
-    expected = [
-        ["attestation", "verify", str(file), *expected_suffix]
-        for file in files
-    ]
-    if invocations != expected:
-        raise SystemExit(
-            "canonical release verifier did not preserve exact provenance: "
-            f"{invocations!r}"
-        )
-
-    invocation_log.write_text("", encoding="utf-8")
-    files_index = command.index("--files")
-    fallback_command = [
-        *command[:files_index],
-        "--signer-ref",
-        f"refs/tags/{tag}",
-        "--signer-ref",
-        "refs/heads/master",
-        *command[files_index:],
-    ]
-    fallback_environment = environment.copy()
-    fallback_environment["GH_FAIL_TAG_REF"] = "1"
-    subprocess.run(fallback_command, cwd=root, env=fallback_environment, check=True)
-    invocations = [
-        json.loads(line)
-        for line in invocation_log.read_text(encoding="utf-8").splitlines()
-    ]
-    expected = []
-    for file in files:
-        expected.append(
-            [
-                "attestation",
-                "verify",
-                str(file),
-                *expected_suffix,
-            ]
-        )
-        expected.append(
-            [
-                "attestation",
-                "verify",
-                str(file),
-                "--repo",
-                repo,
-                "--signer-workflow",
-                signer,
-                "--source-ref",
-                "refs/heads/master",
-                "--source-digest",
-                source_digest,
-                "--deny-self-hosted-runners",
-            ]
-        )
-    if invocations != expected:
-        raise SystemExit(
-            "canonical release verifier did not fall back to the allowed master ref: "
-            f"{invocations!r}"
-        )
-
-    failure_environment = environment.copy()
-    failure_environment["GH_FAIL_ATTESTATION"] = "1"
-    failed = subprocess.run(
-        command[:-1],
-        cwd=root,
-        env=failure_environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if failed.returncode == 0:
-        raise SystemExit("canonical release verifier swallowed attestation failure")
+    wrong = [name for name, expected, accepted in cases if accepted != expected]
+    if wrong:
+        raise SystemExit("canonical release verifier decided wrongly for: " + "; ".join(wrong))
 PY

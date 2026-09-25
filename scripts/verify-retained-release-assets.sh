@@ -16,11 +16,17 @@
 #   --tag TAG                  release tag; the source ref is refs/tags/TAG
 #   --repo OWNER/REPO
 #   --signer-workflow PATH     e.g. OWNER/REPO/.github/workflows/release.yml
-#   --source-digest SHA        commit the tag must attest to
+#   --source-digest SHA        commit the tag points at
 # Optional, repeatable:
 #   --signer-ref REF           accepted workflow run ref; defaults to refs/tags/TAG
 #
-# Requires an authenticated `gh` (GH_TOKEN or ambient credentials).
+# Build provenance attests the commit the workflow ran at, not the checkout it
+# built. A tag-ref attestation must name SHA exactly. A branch-ref attestation
+# (a master-dispatched release or recovery run) names that branch's head at
+# dispatch, which must descend from SHA, the same rule the workflows enforce
+# with `merge-base --is-ancestor` before building.
+#
+# Requires an authenticated `gh` (GH_TOKEN or ambient credentials) and `jq`.
 set -euo pipefail
 
 usage() {
@@ -56,18 +62,30 @@ if [[ ${#signer_refs[@]} -eq 0 ]]; then
   signer_refs=("refs/tags/${tag}")
 fi
 
+attested_source_matches() {
+  local source_ref="$1" digest="$2"
+  [[ "$digest" == "$source_digest" ]] && return 0
+  [[ "$source_ref" == refs/heads/* ]] || return 1
+  [[ "$(gh api "repos/${repo}/compare/${source_digest}...${digest}" --jq .status)" == "ahead" ]]
+}
+
 verify_asset() {
   local asset="$1"
-  local source_ref
+  local source_ref digests digest
   for source_ref in "${signer_refs[@]}"; do
-    if gh attestation verify "$asset" \
+    digests="$(gh attestation verify "$asset" \
       --repo "$repo" \
       --signer-workflow "$signer_workflow" \
       --source-ref "$source_ref" \
-      --source-digest "$source_digest" \
-      --deny-self-hosted-runners >/dev/null 2>&1; then
-      return 0
-    fi
+      --deny-self-hosted-runners \
+      --format json 2>/dev/null \
+      | jq -r '.[].verificationResult.signature.certificate.sourceRepositoryDigest')" || continue
+    while IFS= read -r digest; do
+      [[ -n "$digest" ]] || continue
+      if attested_source_matches "$source_ref" "$digest"; then
+        return 0
+      fi
+    done <<< "$digests"
   done
   echo "release asset attestation did not match an allowed signer ref: $asset" >&2
   return 1
