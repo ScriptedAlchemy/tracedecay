@@ -102,6 +102,7 @@ pub(super) async fn serve_authenticated_socket_client_with_class(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 #[hotpath::measure(label = "daemon.engine.transport.rmcp", future = true)]
 pub(crate) async fn serve_routed_rmcp_connection(
     server: Arc<crate::mcp::McpServer>,
@@ -126,6 +127,7 @@ pub(crate) async fn serve_routed_rmcp_connection(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_routed_rmcp_connection_inner(
     server: Arc<crate::mcp::McpServer>,
     transport: BrokerStreamTransport,
