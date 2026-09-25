@@ -367,8 +367,8 @@ function FindingRows({
               onClick={() => onSelect(entry.index)}
             >
               <span aria-hidden className={cn('size-1.5 shrink-0', presentation.dotClass)} />
-              <span className="min-w-0 flex-1 truncate text-text-primary">{entry.title}</span>
-              <span className={cn('td-legend shrink-0', presentation.tokenClass)}>
+              <span className="min-w-0 flex-auto truncate text-text-primary">{entry.title}</span>
+              <span className={cn('td-legend min-w-0 truncate', presentation.tokenClass)}>
                 {presentation.label}
               </span>
               <span className="td-legend shrink-0 tabular">{entry.citations} cit.</span>
