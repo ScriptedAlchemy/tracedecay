@@ -735,13 +735,26 @@ describe('SettingsPage effective configuration review', () => {
     const user = userEvent.setup();
     renderSettings();
 
+    const visibleKeys = () =>
+      [...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'));
+
     await findRow(MAX_FILE_SIZE);
+    // The unfiltered header states the whole effective configuration. Read it
+    // back rather than pinning the schema size: the behavior under test is that
+    // a filter narrows the rows and says how many of that whole it kept.
+    const unfilteredCount = screen.getByText(/^\d+ settings$/).textContent ?? '';
+    const total = unfilteredCount.replace(' settings', '');
+    expect(visibleKeys()).toEqual(expect.arrayContaining([MAX_FILE_SIZE, POLL_SECS]));
+
     const filter = screen.getByLabelText('Filter configuration');
     await user.type(filter, 'poll');
-    expect([...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'))).toEqual([POLL_SECS]);
-    expect(screen.getByText('1 of 53 settings')).toBeTruthy();
+    expect(visibleKeys()).toEqual([POLL_SECS]);
+    expect(screen.getByText(`1 of ${total} settings`)).toBeTruthy();
 
     await user.clear(filter);
+    expect(screen.getByText(unfilteredCount)).toBeTruthy();
+    expect(visibleKeys()).toEqual(expect.arrayContaining([MAX_FILE_SIZE, POLL_SECS]));
+
     await user.type(filter, 'zzzz-no-such-key');
     expect(screen.getByText('no key or value matches "zzzz-no-such-key"')).toBeTruthy();
     expect(document.querySelector('[role="grid"]')).toBeNull();
