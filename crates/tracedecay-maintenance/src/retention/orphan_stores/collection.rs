@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use cap_std::fs::Dir;
+use tracedecay_contracts::storage::is_retired_branch_store_path;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_private_fs::capability_dir::{remove_open_dir_all_nofollow, sync_directory};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
@@ -1071,6 +1072,9 @@ async fn check_manifestless_store_durable_memory(
 /// The manifestless path deliberately does not guess a single filename, so a
 /// custom legacy graph cannot be mistaken for payload-only debris. Any other
 /// file shape is an unverifiable durable-data candidate, not disposable dust.
+/// Files of the retired `branches/` store layout are old data with no current
+/// owner: they are neither candidates nor unrecognized payload, and they are
+/// deleted with the directory.
 fn collect_sqlite_candidates(
     root: &Path,
     current: &Path,
@@ -1093,11 +1097,12 @@ fn collect_sqlite_candidates(
             ));
         }
         let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
         if file_type.is_dir() {
             collect_sqlite_candidates(root, &path, output, control)?;
+        } else if file_type.is_file() && is_retired_branch_store_path(relative) {
         } else if file_type.is_file()
             && path.extension().and_then(|extension| extension.to_str()) == Some("db")
-            && let Ok(relative) = path.strip_prefix(root)
         {
             output.push(relative.to_path_buf());
         } else {
