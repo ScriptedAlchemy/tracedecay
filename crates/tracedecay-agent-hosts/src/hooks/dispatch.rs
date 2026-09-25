@@ -78,6 +78,7 @@ pub const NATIVE_HOOK_HOSTS: &[NativeHostIdentityV1] = &[
     NativeHostIdentityV1::KimiCode,
     NativeHostIdentityV1::OpenCode,
     NativeHostIdentityV1::Pi,
+    NativeHostIdentityV1::FactoryDroid,
 ];
 
 pub fn project_id_for_layout(

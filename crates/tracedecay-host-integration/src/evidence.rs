@@ -428,6 +428,15 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
             "file.edited,tool.execute.after,session.idle/session.status,lsp.updated",
             &["saved_edit", "post_tool_use"][..],
         ),
+        // The captured Droid fixtures prove the session boundaries the
+        // integration deploys (`SessionStart`, `Stop`); no tool-lifecycle
+        // event was captured, so the edit boundary stays unclaimed.
+        HostKindV1::FactoryDroid => (
+            "droid",
+            "crates/tracedecay-hooks/fixtures/host_events/droid.json",
+            "SessionStart,Stop",
+            &[][..],
+        ),
         HostKindV1::CursorCloud
         | HostKindV1::Devin
         | HostKindV1::Zed
@@ -439,8 +448,7 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::Kilo
         | HostKindV1::Gemini
         | HostKindV1::Copilot
-        | HostKindV1::Pi
-        | HostKindV1::FactoryDroid => return None,
+        | HostKindV1::Pi => return None,
     };
     let bytes = assets
         .native_fixtures

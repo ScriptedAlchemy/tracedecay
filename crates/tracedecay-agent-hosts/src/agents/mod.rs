@@ -631,7 +631,7 @@ pub fn get_integration(id: &str) -> Result<Box<dyn AgentIntegration>> {
         "kimi" => Ok(Box::new(KimiIntegration)),
         "vibe" => Ok(Box::new(VibeIntegration)),
         "pi" => Ok(Box::new(PiIntegration)),
-        "droid" => Ok(Box::new(DroidIntegration))
+        "droid" => Ok(Box::new(DroidIntegration)),
         _ => Err(TraceDecayError::Config {
             message: format!(
                 "unknown agent: \"{id}\". Available agents: {}",

@@ -319,15 +319,15 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostRegistrationUnsupported),
             Supported,
         ),
-        // Factory Droid's adopted lifecycle drives exactly one route:
-        // `droid mcp add|remove`, which owns `~/.factory/mcp.json`. Droid
-        // documents a hooks surface (`~/.factory/hooks.json`), but no
-        // checked-in native Droid event fixture proves that route yet, so
-        // `Hooks` stays evidence-gated rather than claimed.
+        // Factory Droid's adopted lifecycle drives two routes:
+        // `droid mcp add|remove` owns `~/.factory/mcp.json`, and the managed
+        // hook merge deploys `SessionStart` / `Stop` entries into
+        // `~/.factory/hooks.json` calling `hook-droid-event` under the Droid
+        // native identity. Both are backed by checked-in captured fixtures.
         HostKindV1::FactoryDroid => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
-            Unavailable(CheckedInEvidenceMissing),
+            Supported,
             Supported,
             Supported,
         ),

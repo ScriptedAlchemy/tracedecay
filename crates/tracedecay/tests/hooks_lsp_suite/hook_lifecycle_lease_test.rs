@@ -420,6 +420,18 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/pi/agent-end.json")
                 .to_vec(),
         ),
+        (
+            "hook-droid-event",
+            NativeHostIdentityV1::FactoryDroid,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/droid/session-start.json")
+                .to_vec(),
+        ),
+        (
+            "hook-droid-event",
+            NativeHostIdentityV1::FactoryDroid,
+            include_bytes!("../../../../crates/tracedecay-hooks/fixtures/host_events/droid/stop.json")
+                .to_vec(),
+        ),
     ];
 
     for (index, (hook, host, payload)) in cases.into_iter().enumerate() {
@@ -466,7 +478,8 @@ fn native_hook_captures_only_bound_transport_spool_records() {
             | "hook-kimi-event"
             | "hook-opencode-event"
             | "hook-opencode-tool-after"
-            | "hook-pi-event" => b"",
+            | "hook-pi-event"
+            | "hook-droid-event" => b"",
             _ => b"{}\n",
         };
         assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");

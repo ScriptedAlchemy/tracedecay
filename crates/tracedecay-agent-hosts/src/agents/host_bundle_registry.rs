@@ -22,7 +22,7 @@ const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
 /// Canonical hosts whose first-party component lifecycle can publish durable
 /// ownership receipts. Discovery-only and evidence-unadmitted hosts stay in
 /// `HostKindV1::ALL`, but never enter install/update/uninstall sweeps.
-pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 17] = [
+pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 18] = [
     HostKindV1::ClaudeCode,
     HostKindV1::CursorDesktop,
     HostKindV1::Codex,
@@ -188,9 +188,11 @@ pub fn default_components(host: HostKindV1) -> Vec<HostComponentV1> {
         | HostKindV1::Copilot
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo
-        | HostKindV1::FactoryDroid => {
+        | HostKindV1::Kilo => {
             vec![HostComponentV1::ContextMcp]
+        }
+        HostKindV1::FactoryDroid => {
+            vec![HostComponentV1::Core, HostComponentV1::ContextMcp]
         }
         HostKindV1::Pi => vec![HostComponentV1::Core, HostComponentV1::Agent],
         HostKindV1::CursorCloud | HostKindV1::ClineFamily => Vec::new(),
@@ -719,6 +721,17 @@ fn component_assets(
             vec![(
                 "context-mcp.json",
                 r#"{"host":"droid","registration":"mcp.json","registrar":"droid mcp add|remove","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"type":"stdio"}}"#,
+            )],
+        ),
+        // The Core descriptor names the host-owned hooks document; the
+        // activation adapter merges the SessionStart / Stop entries into
+        // `~/.factory/hooks.json` and retains the byte snapshot, exactly the
+        // Cline MCP merge shape for a host-owned configuration file.
+        (HostKindV1::FactoryDroid, HostComponentV1::Core) => (
+            ".factory/tracedecay",
+            vec![(
+                "core.json",
+                r#"{"host":"droid","registration":"../hooks.json","registrar":"tracedecay managed merge","route":"hooks","server":{"command":"__TRACEDECAY_BIN__","args":["hook-droid-event"]}}"#,
             )],
         ),
         (HostKindV1::OpenCode, HostComponentV1::Agent) => (

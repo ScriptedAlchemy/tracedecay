@@ -145,6 +145,11 @@ pub const fn stock_event_support(
         (NativeHostIdentityV1::Pi, PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
             Unavailable
         }
+        (NativeHostIdentityV1::FactoryDroid, SessionBoundary) => Native,
+        (
+            NativeHostIdentityV1::FactoryDroid,
+            PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
+        ) => Unavailable,
         (
             NativeHostIdentityV1::Cline
             | NativeHostIdentityV1::RooCode

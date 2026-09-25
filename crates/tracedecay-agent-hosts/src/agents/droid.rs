@@ -15,17 +15,24 @@
 //! at `/mcpServers/tracedecay` and checks the launch surface against the same
 //! constants the CLI invocation spells.
 //!
-//! Droid also documents a hooks surface (`~/.factory/hooks.json`), but no
-//! checked-in native Droid event fixture proves that route yet, so the Hooks
-//! capability stays evidence-gated and the component set is Context MCP only.
+//! Droid's hooks surface (`~/.factory/hooks.json`) is a host-owned
+//! configuration file, not a registry with its own CLI, so the `Core`
+//! component manages a merge into it: `SessionStart` and `Stop` entries
+//! calling `tracedecay hook-droid-event` under the Droid native identity,
+//! whose payload shape is proven by the checked-in captured fixture
+//! (`crates/tracedecay-hooks/fixtures/host_events/droid.json`). Operator hook
+//! entries are preserved byte-for-byte on install, refresh, and uninstall.
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
-use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file};
+use super::{
+    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
+    JsonConfigMutation, load_json_file, update_json_config_transactionally,
+};
 
 /// Name of Factory Droid's own CLI, which owns `~/.factory/mcp.json`.
 const DROID_CLI: &str = "droid";
@@ -47,6 +54,18 @@ const MCP_SERVER_ARGS: &[&str] = &["serve"];
 /// registration pins the transport instead of relying on the CLI default.
 const DROID_TRANSPORT: &str = "stdio";
 
+/// The lifecycle events TraceDecay deploys into `~/.factory/hooks.json`,
+/// matching the events proven by the checked-in captured fixture.
+const DROID_HOOK_EVENTS: [&str; 2] = ["SessionStart", "Stop"];
+
+/// The subcommand every managed Droid hook entry calls; also the ownership
+/// marker used to distinguish TraceDecay entries from operator entries.
+const DROID_HOOK_MARKER: &str = "hook-droid-event";
+
+/// Timeout (seconds) for the managed hook commands, bounded like the other
+/// host hook tables.
+const DROID_HOOK_TIMEOUT_SECS: u64 = 30;
+
 pub struct DroidIntegration;
 
 fn droid_config_dir(home: &Path) -> PathBuf {
@@ -55,6 +74,126 @@ fn droid_config_dir(home: &Path) -> PathBuf {
 
 fn droid_mcp_config_path(home: &Path) -> PathBuf {
     droid_config_dir(home).join("mcp.json")
+}
+
+fn droid_hooks_path(home: &Path) -> PathBuf {
+    droid_config_dir(home).join("hooks.json")
+}
+
+/// The managed hook entry TraceDecay appends under each lifecycle event.
+fn tracedecay_hook_entry(tracedecay_bin: &str) -> Value {
+    json!({
+        "type": "command",
+        "command": super::hook_command(tracedecay_bin, DROID_HOOK_MARKER),
+        "timeout": DROID_HOOK_TIMEOUT_SECS,
+    })
+}
+
+/// True when a hook group carries the TraceDecay marker command.
+fn hook_group_is_tracedecay(group: &Value) -> bool {
+    group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| {
+            hooks.iter().any(|hook| {
+                hook.get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| command.contains(DROID_HOOK_MARKER))
+            })
+        })
+}
+
+/// Merge the managed SessionStart / Stop entries into the host-owned hooks
+/// document, replacing any earlier TraceDecay entries and preserving every
+/// operator entry byte-for-byte. Returns true when the document changed.
+fn install_droid_hooks(hooks_path: &Path, tracedecay_bin: &str) -> Result<bool> {
+    update_json_config_transactionally(hooks_path, JsonConfigDialect::Json, |mut config| {
+        let object = config
+            .as_object_mut()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!("{} must contain a JSON object", hooks_path.display()),
+            })?;
+        let mut changed = false;
+        for event in DROID_HOOK_EVENTS {
+            let groups = object
+                .entry(event)
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!(
+                        "{} key in {} must contain a JSON array",
+                        event,
+                        hooks_path.display()
+                    ),
+                })?;
+            groups.retain(|group| !hook_group_is_tracedecay(group));
+            groups.push(json!({
+                "matcher": "*",
+                "hooks": [tracedecay_hook_entry(tracedecay_bin)],
+            }));
+            changed = true;
+        }
+        if changed {
+            Ok((true, JsonConfigMutation::Write(config)))
+        } else {
+            Ok((false, JsonConfigMutation::Unchanged))
+        }
+    })
+}
+
+/// Remove every TraceDecay hook group from the host-owned hooks document and
+/// drop event keys that become empty. Returns true when the document changed.
+fn remove_droid_hooks(hooks_path: &Path) -> Result<bool> {
+    update_json_config_transactionally(hooks_path, JsonConfigDialect::Json, |mut config| {
+        let Some(object) = config.as_object_mut() else {
+            return Ok((false, JsonConfigMutation::Unchanged));
+        };
+        let mut changed = false;
+        for event in DROID_HOOK_EVENTS {
+            let Some(groups) = object.get_mut(event).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = groups.len();
+            groups.retain(|group| !hook_group_is_tracedecay(group));
+            changed |= groups.len() != before;
+            if groups.is_empty() {
+                object.remove(event);
+            }
+        }
+        if changed {
+            Ok((true, JsonConfigMutation::Write(config)))
+        } else {
+            Ok((false, JsonConfigMutation::Unchanged))
+        }
+    })
+}
+
+/// Readback state for the managed hook merge: every deployed event must carry
+/// a TraceDecay hook group; a partial set is repairable, none is missing.
+fn droid_hooks_registration_state(home: &Path) -> HostBundleRegistrationStateV1 {
+    let hooks_path = droid_hooks_path(home);
+    let Ok(bytes) = std::fs::read(&hooks_path) else {
+        return HostBundleRegistrationStateV1::Missing;
+    };
+    let Ok(config) = serde_json::from_slice::<Value>(&bytes) else {
+        return HostBundleRegistrationStateV1::Corrupt;
+    };
+    let events = DROID_HOOK_EVENTS
+        .iter()
+        .map(|event| {
+            config
+                .get(event)
+                .and_then(Value::as_array)
+                .is_some_and(|groups| groups.iter().any(hook_group_is_tracedecay))
+        })
+        .collect::<Vec<_>>();
+    if events.iter().all(|present| *present) {
+        HostBundleRegistrationStateV1::Current
+    } else if events.iter().any(|present| *present) {
+        HostBundleRegistrationStateV1::Repairable
+    } else {
+        HostBundleRegistrationStateV1::Missing
+    }
 }
 
 /// Readback state for the one host-owned registration this integration
@@ -144,6 +283,25 @@ impl AgentIntegration for DroidIntegration {
                 config_path.display()
             ));
         }
+        let hooks_path = droid_hooks_path(&ctx.home);
+        match droid_hooks_registration_state(&ctx.home) {
+            HostBundleRegistrationStateV1::Current => dc.pass(&format!(
+                "TraceDecay hooks merged into {}",
+                hooks_path.display()
+            )),
+            HostBundleRegistrationStateV1::Repairable => dc.fail(&format!(
+                "TraceDecay hooks in {} are incomplete, run `tracedecay install --agent droid`",
+                hooks_path.display()
+            )),
+            HostBundleRegistrationStateV1::Missing => dc.warn(&format!(
+                "{} has no TraceDecay hooks, run `tracedecay install --agent droid`",
+                hooks_path.display()
+            )),
+            HostBundleRegistrationStateV1::Corrupt => dc.fail(&format!(
+                "{} could not be parsed as JSON",
+                hooks_path.display()
+            )),
+        }
     }
 
     fn host_component_registration(
@@ -151,10 +309,13 @@ impl AgentIntegration for DroidIntegration {
         component: HostComponentV1,
         ctx: &HealthcheckContext,
     ) -> HostBundleRegistrationStateV1 {
-        if component != HostComponentV1::ContextMcp {
-            return HostBundleRegistrationStateV1::Missing;
+        match component {
+            HostComponentV1::ContextMcp => droid_context_mcp_registration_state(&ctx.home),
+            HostComponentV1::Core => droid_hooks_registration_state(&ctx.home),
+            HostComponentV1::Agent | HostComponentV1::OperatorMcp => {
+                HostBundleRegistrationStateV1::Missing
+            }
         }
-        droid_context_mcp_registration_state(&ctx.home)
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -166,7 +327,7 @@ impl AgentIntegration for DroidIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
-        vec![droid_mcp_config_path(home)]
+        vec![droid_mcp_config_path(home), droid_hooks_path(home)]
     }
 
     /// Register the tracedecay MCP server through Droid's own registry.
@@ -183,6 +344,9 @@ impl AgentIntegration for DroidIntegration {
             let droid_cli = require_droid_cli()?;
             droid_mcp_add_with(&droid_cli, &ctx.home, &ctx.tracedecay_bin)?;
         }
+        if components.contains(&HostComponentV1::Core) {
+            install_droid_hooks(&droid_hooks_path(&ctx.home), &ctx.tracedecay_bin)?;
+        }
         Ok(())
     }
 
@@ -197,11 +361,15 @@ impl AgentIntegration for DroidIntegration {
             let droid_cli = require_droid_cli()?;
             droid_mcp_remove_with(&droid_cli, &ctx.home)?;
         }
+        if components.contains(&HostComponentV1::Core) {
+            remove_droid_hooks(&droid_hooks_path(&ctx.home))?;
+        }
         Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
         super::mcp_config_has_tracedecay(&droid_mcp_config_path(home), "mcpServers", load_json_file)
+            || droid_hooks_registration_state(home) != HostBundleRegistrationStateV1::Missing
     }
 
     fn detected_host_surface(&self, home: &Path) -> Option<PathBuf> {
@@ -343,6 +511,137 @@ mod tests {
         .unwrap();
     }
 
+    fn write_hooks(home: &Path, hooks: Value) {
+        std::fs::create_dir_all(droid_config_dir(home)).unwrap();
+        std::fs::write(
+            droid_hooks_path(home),
+            format!("{}\n", serde_json::to_string(&hooks).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hook_merge_preserves_operator_entries_and_installs_both_events() {
+        let home = tempfile::tempdir().unwrap();
+        write_hooks(
+            home.path(),
+            serde_json::json!({
+                "SessionStart": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            { "type": "command", "command": "/usr/local/bin/operator-hook.sh", "timeout": 10 }
+                        ]
+                    }
+                ]
+            }),
+        );
+
+        let changed =
+            install_droid_hooks(&droid_hooks_path(home.path()), "/usr/local/bin/tracedecay")
+                .unwrap();
+        assert!(changed);
+
+        let merged: Value =
+            serde_json::from_slice(&std::fs::read(droid_hooks_path(home.path())).unwrap()).unwrap();
+        for event in DROID_HOOK_EVENTS {
+            let groups = merged[event].as_array().unwrap();
+            assert!(
+                groups.iter().any(hook_group_is_tracedecay),
+                "{event} must carry a TraceDecay group"
+            );
+        }
+        let session_start = merged["SessionStart"].as_array().unwrap();
+        assert_eq!(session_start.len(), 2);
+        assert_eq!(
+            session_start[0]["hooks"][0]["command"],
+            "/usr/local/bin/operator-hook.sh"
+        );
+        assert_eq!(
+            session_start[1]["hooks"][0]["command"],
+            crate::agents::hook_command("/usr/local/bin/tracedecay", DROID_HOOK_MARKER)
+        );
+        assert_eq!(session_start[1]["hooks"][0]["timeout"], 30);
+        assert_eq!(
+            droid_hooks_registration_state(home.path()),
+            HostBundleRegistrationStateV1::Current
+        );
+        assert_eq!(
+            DroidIntegration.host_component_registration(
+                HostComponentV1::Core,
+                &HealthcheckContext {
+                    home: home.path().to_path_buf(),
+                    project_path: home.path().to_path_buf(),
+                }
+            ),
+            HostBundleRegistrationStateV1::Current
+        );
+
+        // A refresh replaces the managed group instead of appending a twin.
+        let changed =
+            install_droid_hooks(&droid_hooks_path(home.path()), "/usr/local/bin/tracedecay")
+                .unwrap();
+        assert!(changed);
+        let refreshed: Value =
+            serde_json::from_slice(&std::fs::read(droid_hooks_path(home.path())).unwrap()).unwrap();
+        assert_eq!(refreshed["SessionStart"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn hook_removal_leaves_operator_entries_and_drops_empty_events() {
+        let home = tempfile::tempdir().unwrap();
+        write_hooks(
+            home.path(),
+            serde_json::json!({
+                "SessionStart": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            { "type": "command", "command": "/usr/local/bin/operator-hook.sh", "timeout": 10 }
+                        ]
+                    },
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            { "type": "command", "command": "/usr/local/bin/tracedecay hook-droid-event", "timeout": 30 }
+                        ]
+                    }
+                ],
+                "Stop": [
+                    {
+                        "matcher": "*",
+                        "hooks": [
+                            { "type": "command", "command": "/usr/local/bin/tracedecay hook-droid-event", "timeout": 30 }
+                        ]
+                    }
+                ]
+            }),
+        );
+
+        let changed = remove_droid_hooks(&droid_hooks_path(home.path())).unwrap();
+        assert!(changed);
+        let remaining: Value =
+            serde_json::from_slice(&std::fs::read(droid_hooks_path(home.path())).unwrap()).unwrap();
+        assert_eq!(remaining["SessionStart"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            remaining["SessionStart"][0]["hooks"][0]["command"],
+            "/usr/local/bin/operator-hook.sh"
+        );
+        assert!(
+            remaining.get("Stop").is_none(),
+            "emptied events are dropped"
+        );
+        assert_eq!(
+            droid_hooks_registration_state(home.path()),
+            HostBundleRegistrationStateV1::Missing
+        );
+
+        // A missing document is a no-op removal, never a failure.
+        std::fs::remove_file(droid_hooks_path(home.path())).unwrap();
+        let changed = remove_droid_hooks(&droid_hooks_path(home.path())).unwrap();
+        assert!(!changed);
+    }
+
     #[test]
     fn registration_state_reads_the_host_owned_document() {
         let home = tempfile::tempdir().unwrap();
@@ -418,7 +717,10 @@ mod tests {
         );
         assert_eq!(
             integration.host_registration_paths(home.path()),
-            vec![droid_mcp_config_path(home.path())]
+            vec![
+                droid_mcp_config_path(home.path()),
+                droid_hooks_path(home.path())
+            ]
         );
         assert!(droid_mcp_config_path(home.path()).starts_with(home.path()));
     }
