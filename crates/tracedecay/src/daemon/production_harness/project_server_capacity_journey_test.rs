@@ -1,4 +1,5 @@
 use tempfile::TempDir;
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::journey_test_support::git;
 use super::*;
@@ -277,7 +278,7 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     )
     .await
     .expect("production harness authority");
-    let first_root = projects[0].canonicalize().expect("canonical first project");
+    let first_root = canonical_existing_identity(&projects[0]).expect("canonical first project");
     // Keep the oldest owner leased while sequential clients exceed capacity.
     // Retirement must choose another idle owner, preserving this live client.
     let initial_client = harness
@@ -408,7 +409,8 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
             .lock()
             .await;
         for project in [&projects[0], &projects[1]] {
-            let canonical = project.canonicalize().expect("canonical uncached project");
+            let canonical =
+                canonical_existing_identity(project).expect("canonical uncached project");
             assert!(
                 servers
                     .servers
@@ -471,7 +473,9 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
     };
     let uncached_project = projects
         .iter()
-        .find(|project| !leased_servers.contains_key(&project.canonicalize().unwrap()))
+        .find(|project| {
+            !leased_servers.contains_key(&canonical_existing_identity(project).unwrap())
+        })
         .expect("the journey exceeds the route cache");
     let refused = open_project_composition(&harness, uncached_project, "all-owners-leased").await;
     assert!(
