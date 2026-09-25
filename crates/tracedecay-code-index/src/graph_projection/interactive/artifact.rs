@@ -6,14 +6,15 @@
 //! checks here are structural defense in depth, a corrupt row is a typed
 //! `Corrupt`, never a partially installed catalog.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
 use tracedecay_domain::{FileOccurrenceId, SanitizedCodeFileV1, SymbolOccurrenceId};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphGenerationManifest, MAX_VERIFIED_GENERATION_RELATIONS,
+    GraphCancellation, GraphEntityId, GraphEntityRef, GraphGenerationManifest,
+    MAX_VERIFIED_GENERATION_RELATIONS,
 };
 
 use super::super::schema::{
@@ -21,8 +22,11 @@ use super::super::schema::{
     SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, file_entity_id,
     file_import_relation_id, has_label, import_entity_id,
 };
-use super::super::{CodeGraphProjectionError, CodeGraphSymbolBindingV1, validate_symbol_record};
-use super::catalog::{canonical_import_order, check_cancelled};
+use super::super::{
+    CodeGraphProjectionError, CodeGraphSymbolBindingV1, SOURCE_EDGE_KIND, TARGET_EDGE_KIND,
+    validate_symbol_record,
+};
+use super::catalog::{SymbolDegreeCounts, canonical_import_order, check_cancelled};
 use super::models::{CatalogSymbol, InteractiveCatalog};
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
@@ -30,10 +34,12 @@ use crate::lineage::LineageSymbolRecordV1;
 /// Bundle artifact name of the interactive catalog.
 pub const INTERACTIVE_CATALOG_ARTIFACT_NAME: &str = "interactive-catalog";
 
-/// v3 names no generation: the catalog is a pure function of the graph's
-/// rows, so linked worktrees sealing the same graph share one artifact, and
-/// the per-generation bundle manifest carries the identity binding.
-const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str = "tracedecay.code-graph-interactive-catalog.v3";
+/// The format names no generation: the catalog is a pure function of the
+/// graph's rows, so linked worktrees sealing the same graph share one
+/// artifact, and the per-generation bundle manifest carries the identity
+/// binding. v4 adds each symbol's semantic degree; a v3 artifact is refused
+/// at install and the catalog is re-derived from the projection.
+const INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1: &str = "tracedecay.code-graph-interactive-catalog.v4";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +48,8 @@ struct CatalogSymbolRowV1 {
     binding: Option<CodeGraphSymbolBindingV1>,
     metadata: Option<LineageSymbolRecordV1>,
     unresolved_calls: Vec<CodeIndexUnresolvedReferenceV1>,
+    outgoing: u64,
+    incoming: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -53,14 +61,16 @@ struct InteractiveCatalogArtifactV1 {
     imports: Vec<CodeIndexImportEvidenceV1>,
 }
 
-struct ValidatedCatalogArtifactRowsV1 {
+struct ValidatedCatalogArtifactRowsV1<'a> {
     symbol_count: usize,
+    degrees: SymbolDegreeCounts<&'a GraphEntityId>,
     files: Vec<SanitizedCodeFileV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
 }
 
 struct CatalogSymbolRowsV1<'a> {
     manifest: &'a GraphGenerationManifest,
+    degrees: &'a SymbolDegreeCounts<&'a GraphEntityId>,
     cancellation: &'a dyn GraphCancellation,
     count: usize,
 }
@@ -80,11 +90,14 @@ impl Serialize for CatalogSymbolRowsV1<'_> {
             }
             let record: super::super::SymbolRecordV1 =
                 deserialize_property(entity, SYMBOL_RECORD_PROPERTY).map_err(S::Error::custom)?;
+            let (outgoing, incoming) = self.degrees.get(&entity.identity);
             sequence.serialize_element(&CatalogSymbolRowV1 {
                 occurrence: record.occurrence,
                 binding: record.binding,
                 metadata: record.metadata,
                 unresolved_calls: record.unresolved_calls,
+                outgoing,
+                incoming,
             })?;
         }
         sequence.end()
@@ -123,11 +136,13 @@ struct InteractiveCatalogArtifactViewV1<'a> {
     imports: CancellableRowsV1<'a, CodeIndexImportEvidenceV1>,
 }
 
-fn validate_catalog_artifact_rows(
-    manifest: &GraphGenerationManifest,
+fn validate_catalog_artifact_rows<'a>(
+    manifest: &'a GraphGenerationManifest,
     cancellation: &dyn GraphCancellation,
-) -> Result<ValidatedCatalogArtifactRowsV1, CodeGraphProjectionError> {
+) -> Result<ValidatedCatalogArtifactRowsV1<'a>, CodeGraphProjectionError> {
     let mut symbol_count = 0_usize;
+    let mut symbol_identities = BTreeSet::<&GraphEntityId>::new();
+    let mut degrees = SymbolDegreeCounts::default();
     let mut files = BTreeMap::<FileOccurrenceId, SanitizedCodeFileV1>::new();
     let mut files_by_logical_path = BTreeMap::<String, FileOccurrenceId>::new();
     let mut imports = Vec::new();
@@ -178,6 +193,7 @@ fn validate_catalog_artifact_rows(
                     "code graph interactive symbol count overflowed".to_owned(),
                 )
             })?;
+            symbol_identities.insert(&entity.identity);
         }
         if has_label(entity, IMPORT_LABEL) {
             let record: CodeIndexImportEvidenceV1 =
@@ -233,8 +249,17 @@ fn validate_catalog_artifact_rows(
                 "code graph interactive scan exceeded the verified relation ceiling".to_owned(),
             ));
         }
-        if relation.kind.as_str() != FILE_IMPORT_EDGE_KIND {
-            continue;
+        match relation.kind.as_str() {
+            SOURCE_EDGE_KIND => {
+                degrees.record_outgoing(symbol_endpoint(&symbol_identities, &relation.from)?);
+                continue;
+            }
+            TARGET_EDGE_KIND => {
+                degrees.record_incoming(symbol_endpoint(&symbol_identities, &relation.to)?);
+                continue;
+            }
+            FILE_IMPORT_EDGE_KIND => {}
+            _ => continue,
         }
         let Some((expected_identity, expected_file)) =
             expected_import_links.remove(&relation.to.identity)
@@ -260,8 +285,20 @@ fn validate_catalog_artifact_rows(
     imports.sort_by(canonical_import_order);
     Ok(ValidatedCatalogArtifactRowsV1 {
         symbol_count,
+        degrees,
         files: files.into_values().collect(),
         imports,
+    })
+}
+
+fn symbol_endpoint<'a>(
+    symbols: &BTreeSet<&'a GraphEntityId>,
+    endpoint: &GraphEntityRef,
+) -> Result<&'a GraphEntityId, CodeGraphProjectionError> {
+    symbols.get(&endpoint.identity).copied().ok_or_else(|| {
+        CodeGraphProjectionError::Corrupt(
+            "code graph relation endpoint is not a symbol entity".to_owned(),
+        )
     })
 }
 
@@ -285,6 +322,7 @@ pub fn write_interactive_catalog_artifact(
         format: INTERACTIVE_CATALOG_ARTIFACT_FORMAT_V1,
         symbols: CatalogSymbolRowsV1 {
             manifest,
+            degrees: &rows.degrees,
             cancellation,
             count: rows.symbol_count,
         },
@@ -370,6 +408,8 @@ pub(super) fn decode_interactive_catalog_artifact(
                 binding: record.binding,
                 metadata: record.metadata,
                 unresolved_calls: record.unresolved_calls,
+                outgoing: row.outgoing,
+                incoming: row.incoming,
             },
         );
     }
