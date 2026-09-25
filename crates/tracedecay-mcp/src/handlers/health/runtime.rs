@@ -130,16 +130,19 @@ fn attach_doctor_report(value: &mut Value, report: McpDoctorReportV1<'_>) {
             "report": admitted.report,
             "table_growth_evidence": admitted.table_growth_evidence,
             "schema_convergences": admitted.schema_convergences,
+            "language_servers": admitted.language_servers,
         }),
         McpDoctorReportV1::ReadFailed => json!({
             "kind": "unknown",
             "table_growth_evidence": [],
             "schema_convergences": [],
+            "language_servers": tracedecay_contracts::doctor::LanguageServerReadV1::Unknown,
         }),
         McpDoctorReportV1::NotAttached => json!({
             "kind": "unsupported",
             "table_growth_evidence": [],
             "schema_convergences": [],
+            "language_servers": tracedecay_contracts::doctor::LanguageServerReadV1::Unsupported,
         }),
     };
 }

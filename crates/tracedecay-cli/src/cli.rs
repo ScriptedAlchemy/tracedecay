@@ -860,7 +860,7 @@ impl From<RemoteAction> for crate::remote_command::RemoteCommand {
 
 #[derive(Subcommand)]
 pub enum LspAction {
-    /// List supported language servers, availability, and install hints
+    /// List the project's analyzers as the daemon resolved them, with install hints
     Servers {
         /// Output as JSON
         #[arg(long)]

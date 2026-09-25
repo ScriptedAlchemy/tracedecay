@@ -150,15 +150,19 @@ Related: tracedecay serve (same tools over MCP stdio), tracedecay status.";
 
 pub(crate) const LSP_LONG_ABOUT: &str = "\
 Shows which language servers the dashboard's code-diagnostics panel can use \
-on this machine: detected binaries, versions, and install hints for missing \
-ones. Purely informational. Nothing is installed or started.";
+for the current project, exactly as the daemon resolved them: which languages \
+are active in the project, each analyzer's live state on the daemon's PATH, and \
+the install step for a missing executable. This is the same read `tracedecay \
+doctor` grades, so the two never disagree. Purely informational. Nothing is \
+installed or started.";
 
 pub(crate) const LSP_AFTER_HELP: &str = "\
 Examples:
-  tracedecay lsp servers                         Table of supported servers
+  tracedecay lsp servers                         Analyzer table for the current project
   tracedecay lsp servers --json                  Machine-readable output
 
-Related: tracedecay dashboard (uses these servers for diagnostics).";
+Related: tracedecay doctor (LanguageServer finding), tracedecay dashboard
+(uses these servers for diagnostics).";
 
 pub(crate) const INSTALL_LONG_ABOUT: &str = "\
 Installs an agent host's canonical first-party component set (MCP registration, \

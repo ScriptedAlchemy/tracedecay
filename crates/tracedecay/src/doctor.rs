@@ -446,6 +446,28 @@ async fn daemon_project_status(
     }
 }
 
+/// The daemon owner's per-analyzer language-server read for the project at
+/// `project_path`: the same read Doctor grades, resolved on the daemon's PATH.
+/// `Ok(None)` is the warming state where the daemon answered but has not
+/// published this project's telemetry yet.
+pub async fn daemon_language_server_read(
+    project_path: &Path,
+) -> tracedecay_domain::errors::Result<Option<tracedecay_contracts::doctor::LanguageServerReadV1>> {
+    let Some(status) = daemon_project_status(project_path).await? else {
+        return Ok(None);
+    };
+    let read = status
+        .pointer("/doctor_report/language_servers")
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: "daemon runtime response omitted the language-server read".to_string(),
+        })?;
+    serde_json::from_value(read.clone())
+        .map(Some)
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("daemon language-server read violated its wire contract: {error}"),
+        })
+}
+
 fn daemon_doctor_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
