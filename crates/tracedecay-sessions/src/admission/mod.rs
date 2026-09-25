@@ -69,13 +69,16 @@ pub struct HostAdmissionOutcome {
     /// from strings at another layer.
     #[serde(skip)]
     pub recovery: Option<HostAdmissionRecovery>,
-    /// Operator-only storage cause for `ObservationStoreError::Storage`.
+    /// Operator-only cause behind the reason code: the storage error for
+    /// `ObservationStoreError::Storage`, or the sanitizer's typed error for a
+    /// `privacy_boundary_failed` refusal. Without it a deterministic refusal is
+    /// one indistinguishable code across every failure the sanitizer can name.
     ///
     /// Host wire output stays reason-code-only. Admission callers that already
-    /// carry a detail/message slot (MCP hook JSON-RPC `detail`) may copy this
-    /// text; it is never reconstructed into a reason code.
+    /// carry a detail/message slot (MCP hook JSON-RPC `detail`, ingest logs)
+    /// may copy this text; it is never reconstructed into a reason code.
     #[serde(skip)]
-    pub storage_cause: Option<String>,
+    pub cause: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +114,7 @@ impl HostAdmissionOutcome {
             retryable,
             reason_code,
             recovery: None,
-            storage_cause: None,
+            cause: None,
         }
     }
 
@@ -122,7 +125,20 @@ impl HostAdmissionOutcome {
             retryable: false,
             reason_code: Some(reason_code),
             recovery: Some(HostAdmissionRecovery::DeterministicContentRefusal),
-            storage_cause: None,
+            cause: None,
+        }
+    }
+
+    /// A deterministic refusal that keeps the refusing authority's own
+    /// operator-facing cause beside the bounded reason code.
+    #[hotpath::skip]
+    pub fn deterministic_content_refusal_with_cause(
+        reason_code: &'static str,
+        cause: impl std::fmt::Display,
+    ) -> Self {
+        Self {
+            cause: Some(cause.to_string()),
+            ..Self::deterministic_content_refusal(reason_code)
         }
     }
 

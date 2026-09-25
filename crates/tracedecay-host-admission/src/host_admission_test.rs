@@ -116,7 +116,7 @@ fn application_errors_map_to_bounded_static_outcomes() {
     assert!(storage.retryable);
     assert_eq!(storage.reason_code, Some("authority_write_failed"));
     assert_eq!(
-        storage.storage_cause.as_deref(),
+        storage.cause.as_deref(),
         Some("write: provider content must not escape")
     );
     let serialized = serde_json::to_string(&storage).unwrap();
