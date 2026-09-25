@@ -764,7 +764,9 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
 mod cursor_tests {
     use std::collections::BTreeSet;
 
-    use crate::runtime::hosts::cursor::{CursorSweepIngestOutcome, CursorTranscriptIngestStats};
+    use crate::runtime::hosts::cursor::{
+        CursorSweepCoverage, CursorSweepIngestOutcome, CursorTranscriptIngestStats,
+    };
     use crate::runtime::hosts::cursor_composer::CursorComposerSweepOutcome;
 
     use super::merge_user_cursor_sweep;
@@ -785,6 +787,7 @@ mod cursor_tests {
                 exact_duplicate: false,
             },
             session_ids: BTreeSet::from(["shared-session".to_string()]),
+            coverage: CursorSweepCoverage::Complete,
         };
 
         let outcome = merge_user_cursor_sweep(
