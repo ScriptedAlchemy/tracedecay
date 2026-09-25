@@ -34,6 +34,7 @@ source-analysis = ["tracedecay-code-extraction/lite"]
 
 [dependencies]
 futures-util = "0.3.33"
+shell-words = "1.1"
 gix.workspace = true
 glob = "0.3"
 hex = "0.4"
