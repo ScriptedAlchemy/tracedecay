@@ -11,6 +11,7 @@ use tracedecay::mcp::McpServer;
 use tracedecay_mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 use tracedecay_runtime_core::storage::resolve_response_handle_root;
 
 /// Creates a temporary Rust project and returns a direct protocol server.
@@ -21,7 +22,9 @@ use tracedecay_runtime_core::storage::resolve_response_handle_root;
 /// non-graph tool behavior.
 pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
     let dir = TempDir::new().unwrap();
-    let project = dir.path();
+    // The daemon routes a project by its canonical root identity, so a macOS
+    // `/var` temp dir is served as `/private/var`.
+    let project = &canonical_root_identity(dir.path());
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/main.rs"),
