@@ -372,10 +372,24 @@ fn require_claude_cli() -> Result<PathBuf> {
 /// Drive Claude Code's own commands to register the staged marketplace and
 /// enable the plugin.
 ///
+/// Claude keys its plugin cache by manifest version, and `plugin install` and
+/// `plugin update` both leave an installed version's cache untouched. A
+/// rebuilt bundle that keeps the version (every build between releases) is
+/// therefore only loaded after Claude's own uninstall drops the stale cache.
+///
 /// Split from the trait method so tests can supply a launcher and an isolated
 /// `HOME` without mutating the process environment.
 #[hotpath::measure(label = "hosts.agent.claude.plugin_activate")]
 fn claude_plugin_activate_with(claude: &Path, home: &Path) -> Result<()> {
+    if claude_plugin_registration_is_active(home)?
+        && !claude_loaded_cache_matches_rendered_bundle(home, None)?
+    {
+        run_claude_plugin_step(
+            claude,
+            &["plugin", "uninstall", PLUGIN_SELECTION_NAME],
+            home,
+        )?;
+    }
     let deploy_dir = plugin_deploy_dir(home);
     let deploy_arg = deploy_dir.to_string_lossy().into_owned();
     run_claude_plugin_step(
