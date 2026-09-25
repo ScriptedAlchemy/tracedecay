@@ -932,9 +932,11 @@ impl MergedRoutes {
     }
 
     /// Occurrences every anchor keeps through the cap: walking each served
-    /// anchor route in its own score order, the rows that cover its first
-    /// `cap / (anchors + 1)` distinct sites (fused anchors). The query route
-    /// keeps the same share, so no anchor, common or rare, starves another.
+    /// anchor route in its own score order, the best row of each of its first
+    /// `cap / (anchors + 1)` distinct sites (fused anchors). One row per site
+    /// keeps the reservation within the cap even when a site is an oversized
+    /// symbol split into many chunks; the query route keeps the same share, so
+    /// no anchor, common or rare, starves another.
     fn reserved_occurrences(&self, cap: usize) -> BTreeSet<SourceOccurrenceId> {
         let served = self.anchors.iter().filter(|route| route.served).count();
         let sites_per_anchor = cap.div_ceil(served.saturating_add(1)).max(1);
@@ -942,11 +944,12 @@ impl MergedRoutes {
         for route in &self.anchors {
             let mut sites = BTreeSet::new();
             for (site, occurrence) in &route.ranking {
-                if !sites.contains(site) && sites.len() >= sites_per_anchor {
+                if sites.len() >= sites_per_anchor {
                     break;
                 }
-                sites.insert(site.clone());
-                reserved.insert(occurrence.clone());
+                if sites.insert(site.clone()) {
+                    reserved.insert(occurrence.clone());
+                }
             }
         }
         reserved

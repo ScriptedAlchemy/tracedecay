@@ -736,6 +736,84 @@ fn a_failed_additive_route_degrades_to_partial_without_hiding_the_query_route() 
 }
 
 #[test]
+fn a_multi_chunk_site_of_a_common_anchor_cannot_starve_a_rare_anchor() {
+    // One oversized symbol matched by `version` is split into six chunks that
+    // all fuse under one site and outscore both `hono` rows.
+    let version_batch = lane_batch(
+        (0..6)
+            .map(|index| {
+                let (mut candidate, mut evidence) = pair(
+                    &format!("occ.version-chunk-{index}"),
+                    &[(LexicalFieldV1::BodyText, 800_000 - index as u64 * 10_000)],
+                    &["version"],
+                );
+                candidate.anchor_id = id("anchor.version-site");
+                candidate.logical_evidence_id = id("logical.version-site");
+                evidence.binding.candidate_anchor = candidate.anchor_id.clone();
+                (candidate, evidence)
+            })
+            .collect(),
+    );
+    let hono_batch = lane_batch(vec![
+        pair(
+            "occ.hono-a",
+            &[(LexicalFieldV1::BodyText, 50_000)],
+            &["hono"],
+        ),
+        pair(
+            "occ.hono-b",
+            &[(LexicalFieldV1::BodyText, 40_000)],
+            &["hono"],
+        ),
+    ]);
+    let (outcome, receipt) = merge_lexical_routes(
+        &generation(),
+        &budget(4),
+        &budget(8),
+        vec![
+            route(
+                LexicalRouteKindV1::Query,
+                lane_batch(vec![pair(
+                    "occ.query",
+                    &[(LexicalFieldV1::BodyText, 900_000)],
+                    &["dependency"],
+                )]),
+            ),
+            route(anchor_kind("version"), version_batch),
+            route(anchor_kind("hono"), hono_batch),
+        ],
+    )
+    .expect("merge");
+    let RetrieverOutcome::Complete(batch) = outcome else {
+        panic!("every route completed");
+    };
+    let admitted = order(&batch);
+    assert_eq!(admitted.len(), 4);
+    assert!(
+        admitted.contains(&"occ.hono-a") && admitted.contains(&"occ.hono-b"),
+        "both hono sites survive although every version chunk outscores them: {admitted:?}"
+    );
+    assert_eq!(
+        admitted
+            .iter()
+            .filter(|occurrence| occurrence.starts_with("occ.version-chunk-"))
+            .count(),
+        2,
+        "the multi-chunk site keeps only the seats left after reservations: {admitted:?}"
+    );
+    assert_eq!(
+        receipt.anchors[1],
+        LexicalAnchorReceiptV1 {
+            anchor: anchor("hono"),
+            outcome: LexicalAnchorOutcomeV1::Matched {
+                matched: 2,
+                admitted: 2,
+            },
+        }
+    );
+}
+
+#[test]
 fn every_anchor_keeps_its_best_sites_through_the_lane_cap_and_reports_its_outcome() {
     // The query route fills the cap on its own; the common anchor `version`
     // has more high-scoring rows than the cap; the rare anchor `hono` has two
