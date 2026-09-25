@@ -77,6 +77,22 @@ const DAEMON_STOP_TIMEOUT_MARGIN_SECS: u64 = 15;
 /// let an OOM-killed cgroup release memory before the next `ExecStart`.
 const DAEMON_RESTART_SEC: u64 = 2;
 
+/// How long a maintenance window waits, after stopping the managed daemon,
+/// for that daemon to release the shared lifecycle lease it holds for its
+/// whole lifetime.
+///
+/// `launchctl bootout` returns once the job is signalled, not once the
+/// process has exited, so the daemon is still draining clients, aborting
+/// tasks, and persisting shutdown work while the window tries to take the
+/// exclusive lease. Read as instant contention, that turned `tracedecay
+/// update` against a healthy daemon into "another lifecycle operation is
+/// already active" with the daemon left stopped. The bound covers the
+/// supervisor's stop timeout (which SIGKILLs a hung daemon) plus process-exit
+/// and lease-release latency; only a foreign holder that outlives it is
+/// reported as contention.
+const QUIESCED_LEASE_RELEASE_TIMEOUT: Duration =
+    Duration::from_secs(DAEMON_STOP_TIMEOUT_SECS + DAEMON_STOP_TIMEOUT_MARGIN_SECS * 2);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonServiceSpec {
     pub tracedecay_bin: PathBuf,
@@ -123,31 +139,26 @@ pub struct QuiescedDaemonLifecycle {
 }
 
 impl QuiescedDaemonLifecycle {
+    /// Stops the managed daemon, waits for it to release its shared lifecycle
+    /// lease within [`QUIESCED_LEASE_RELEASE_TIMEOUT`], then takes exclusive
+    /// ownership. A failed acquisition restores the captured daemon state
+    /// before the error is returned.
     pub fn acquire(operation: &str, expected_version: &str) -> Result<Self> {
-        Self::acquire_with(
-            operation,
-            expected_version,
-            ServiceRunner::current()?,
-            || tracedecay_runtime_core::lifecycle_lease::acquire_exclusive(operation),
-        )
+        Self::acquire_with_timeout(operation, QUIESCED_LEASE_RELEASE_TIMEOUT, expected_version)
     }
 
-    /// Stops the managed daemon, then waits up to `timeout` for its shared
-    /// lifecycle lease to release before taking exclusive ownership.
+    /// [`Self::acquire`] with an explicit bound on the wait for the shared
+    /// lifecycle lease to release.
     pub fn acquire_with_timeout(
         operation: &str,
         timeout: Duration,
         expected_version: &str,
     ) -> Result<Self> {
-        Self::acquire_with(
+        Self::acquire_with_runner_and_timeout(
             operation,
             expected_version,
             ServiceRunner::current()?,
-            || {
-                tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_with_timeout(
-                    operation, timeout,
-                )
-            },
+            timeout,
         )
     }
 
@@ -156,8 +167,24 @@ impl QuiescedDaemonLifecycle {
         expected_version: &str,
         runner: ServiceRunner,
     ) -> Result<Self> {
+        Self::acquire_with_runner_and_timeout(
+            operation,
+            expected_version,
+            runner,
+            QUIESCED_LEASE_RELEASE_TIMEOUT,
+        )
+    }
+
+    fn acquire_with_runner_and_timeout(
+        operation: &str,
+        expected_version: &str,
+        runner: ServiceRunner,
+        timeout: Duration,
+    ) -> Result<Self> {
         Self::acquire_with(operation, expected_version, runner, || {
-            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive(operation)
+            tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_with_timeout(
+                operation, timeout,
+            )
         })
     }
 

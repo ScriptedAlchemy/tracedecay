@@ -8,15 +8,10 @@
 //! upgrade. Pass `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use crate::upgrade::UpgradeOutcome;
 use tracedecay_daemon_control as daemon_control;
 use tracedecay_session_memory::user_config::UserConfig;
-
-// Exceeds the daemon's sequential 15s client drain, 2s task abort, and 45s
-// server-shutdown bounds with margin for service-manager/process-exit latency.
-const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Rewrites the installed daemon service while preserving its captured
 /// lifecycle state, returning the service path and socket or `None` when no
@@ -126,9 +121,8 @@ where
 }
 
 pub(crate) fn restart_daemon_service() -> tracedecay_domain::errors::Result<()> {
-    let guard = daemon_control::QuiescedDaemonLifecycle::acquire_with_timeout(
+    let guard = daemon_control::QuiescedDaemonLifecycle::acquire(
         "daemon restart",
-        DAEMON_RESTART_LEASE_TIMEOUT,
         crate::product_runtime::PRODUCT_BUILD_VERSION,
     )?;
     let (stopped_state, desired_state) = match guard.previous_state() {

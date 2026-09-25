@@ -20,12 +20,12 @@ use tracedecay_runtime_core::config::{
     USER_DATA_DIR_ENV, lock_user_data_dir_test_env, user_data_dir,
 };
 
-const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
+pub(super) const TEST_BUILD_VERSION: &str = "0.1.0-test+service-probe";
 
 use super::isolated_profile::EnvVarGuard;
 
 #[cfg(target_os = "linux")]
-fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {
+pub(super) fn systemctl_log_contains_sequence(log: &str, expected: &[&str]) -> bool {
     let mut lines = log.lines();
     for command in expected {
         loop {
@@ -448,7 +448,7 @@ fn serve_counted_authenticated_probe(
 /// write-and-increment so tests can wait on that acknowledgement instead of
 /// racing the increment that follows the identity response (f92ced4acc).
 #[cfg(target_os = "linux")]
-fn serve_identity_probes(
+pub(super) fn serve_identity_probes(
     listener: UnixListener,
     versions: Vec<&'static str>,
     expected_auth_token: String,
