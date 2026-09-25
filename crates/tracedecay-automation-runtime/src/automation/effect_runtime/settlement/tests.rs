@@ -3261,3 +3261,176 @@ async fn timed_out_after_admission_does_not_reserve_journal() {
         "timed-out run must not enter the pending journal index"
     );
 }
+
+fn reserve_indexed(
+    dashboard_root: &std::path::Path,
+    admission: &DurableAutomationAdmission,
+) -> std::path::PathBuf {
+    let path = canonical_journal_path(dashboard_root, &admission.request.run_id);
+    let ReservationResult::Execute { claim } = reserve_or_replay_with_index(
+        &path,
+        admission.clone(),
+        || recovery_index::add_pending_blocking(dashboard_root, &path, admission),
+        || Ok(()),
+    )
+    .expect("indexed reservation") else {
+        panic!("fresh admission must execute")
+    };
+    drop(claim);
+    path
+}
+
+/// Rewrites a reserved memory journal into the shape written before retirement
+/// bindings were removed from the memory recovery binding.
+fn rewrite_as_retired_memory_binding_shape(path: &std::path::Path) {
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("journal")).expect("journal json");
+    let binding = journal["admission"]["recovery"]["binding"]
+        .as_object_mut()
+        .expect("memory recovery binding");
+    binding.insert("retirement".to_owned(), serde_json::Value::Null);
+    binding.insert("reset_source_digest".to_owned(), serde_json::Value::Null);
+    write_private_test_file(path, &serde_json::to_vec_pretty(&journal).expect("bytes"));
+}
+
+async fn recover_without_memory_reads(
+    dashboard_root: &std::path::Path,
+) -> recovery_index::AutomationEffectRecoveryReport {
+    let owner = FactOwnerV1::Project {
+        project_id: scope().project_id,
+    };
+    let cancellation =
+        CancellationSignal::active("cancellation.old-shape-recovery").expect("cancellation");
+    match recovery_index::prepare_reserved_automation_effect_recovery(dashboard_root)
+        .await
+        .expect("prepare recovery")
+    {
+        recovery_index::AutomationEffectRecoveryPreparation::Complete(report) => report,
+        recovery_index::AutomationEffectRecoveryPreparation::Pending(preparation) => {
+            recovery_index::reconcile_prepared_automation_effects_for_project(
+                preparation,
+                |_, _| async { panic!("refused journal shapes must not read memory receipts") },
+                &owner,
+                &cancellation,
+                &scope(),
+            )
+            .await
+            .expect("reconcile recovery")
+        }
+    }
+}
+
+#[tokio::test]
+async fn refused_memory_journal_shape_resets_per_entry_and_recovery_converges() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let old_memory = reserve_indexed(
+        dashboard_root,
+        &admission("run.old-memory-shape", "request.old-memory-shape"),
+    );
+    rewrite_as_retired_memory_binding_shape(&old_memory);
+    let external = reserve_indexed(
+        dashboard_root,
+        &external_admission("run.current-external", "request.current-external"),
+    );
+    let Err(refusal) = read_indexed_record_blocking(&old_memory) else {
+        panic!("old memory binding shape must be refused")
+    };
+    assert!(
+        refusal.reset_required_context().is_some(),
+        "refusal must be a typed reset: {refusal}"
+    );
+
+    let report = recover_without_memory_reads(dashboard_root).await;
+    assert_eq!(report.inspected, 2);
+    assert_eq!(report.reset_required, 1);
+    assert_eq!(report.indeterminate, 1);
+    assert_eq!(report.deferred, 0);
+    assert!(!old_memory.exists(), "refused journal is discarded");
+    assert!(
+        !terminal_sidecar_path(&old_memory)
+            .expect("sidecar")
+            .exists()
+    );
+    assert!(
+        read_indexed_record_blocking(&external)
+            .expect("external journal")
+            .expect("external terminal")
+            .is_terminal()
+    );
+    assert!(
+        recovery_index::indexed_journals_blocking(dashboard_root, &scope())
+            .expect("pending index")
+            .is_empty()
+    );
+    assert_eq!(
+        recover_without_memory_reads(dashboard_root).await,
+        recovery_index::AutomationEffectRecoveryReport::default(),
+        "a converged recovery has nothing left to inspect"
+    );
+}
+
+#[tokio::test]
+async fn refused_pending_index_shape_rebuilds_from_journals_and_converges() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let old_memory = reserve_indexed(
+        dashboard_root,
+        &admission("run.old-index-memory", "request.old-index-memory"),
+    );
+    rewrite_as_retired_memory_binding_shape(&old_memory);
+    let external = reserve_indexed(
+        dashboard_root,
+        &external_admission("run.old-index-external", "request.old-index-external"),
+    );
+    let index_path = dashboard_root
+        .join("automation_effects")
+        .join("pending-index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index_path).expect("index")).expect("index json");
+    let old_memory_file = old_memory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("journal filename");
+    index["retirement_transitions"] = json!([{
+        "journal_file": old_memory_file,
+        "project_id": scope().project_id,
+        "scope_digest": scope().scope_digest,
+        "source_digest": format!("sha256:{}", "c".repeat(64)),
+        "capture_expected": false,
+    }]);
+    write_private_test_file(
+        &index_path,
+        &serde_json::to_vec_pretty(&index).expect("bytes"),
+    );
+
+    let fresh = admission("run.after-old-index", "request.after-old-index");
+    let fresh_path = canonical_journal_path(dashboard_root, &fresh.request.run_id);
+    let refusal = recovery_index::add_pending_blocking(dashboard_root, &fresh_path, &fresh)
+        .expect_err("old index shape refuses new reservations until recovery");
+    assert!(
+        refusal.reset_required_context().is_some(),
+        "refusal must be a typed reset: {refusal}"
+    );
+
+    let report = recover_without_memory_reads(dashboard_root).await;
+    assert_eq!(report.inspected, 2);
+    assert_eq!(report.reset_required, 1);
+    assert_eq!(report.indeterminate, 1);
+    assert_eq!(report.deferred, 0);
+    assert!(!old_memory.exists(), "refused journal is discarded");
+    assert!(
+        read_indexed_record_blocking(&external)
+            .expect("external journal")
+            .expect("external terminal")
+            .is_terminal()
+    );
+    recovery_index::add_pending_blocking(dashboard_root, &fresh_path, &fresh)
+        .expect("rebuilt index admits new reservations");
+    recovery_index::remove_pending_blocking(dashboard_root, &fresh_path).expect("cleanup");
+    assert_eq!(
+        recover_without_memory_reads(dashboard_root).await,
+        recovery_index::AutomationEffectRecoveryReport::default(),
+        "a converged recovery has nothing left to inspect"
+    );
+}
