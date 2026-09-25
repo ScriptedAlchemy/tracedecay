@@ -14,6 +14,7 @@ mod cache;
 mod fingerprint;
 pub mod python;
 pub mod rust;
+pub mod tsconfig;
 pub mod typescript;
 
 use std::path::{Path, PathBuf};
