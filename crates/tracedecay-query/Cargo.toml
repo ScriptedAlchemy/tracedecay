@@ -29,15 +29,15 @@ serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
 tracing = "0.1"
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 # For `git_open`, the one authority that opens a `gix` repository. Already in
 # this crate's tree through `tracedecay-code-index`, so the edge costs no build.
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 zeroize = "1.9.0"
 
 [features]
@@ -61,9 +61,9 @@ tempfile = "3"
 # Test-only: the relocated search-quality suites build lexical/exact fixtures
 # through the code-index intake and the extracted language registry, which
 # needs the bundled lite grammar tier (Rust).
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false, features = ["lang-markdown", "lite"] }
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["lite", "test-helpers"] }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lang-markdown", "lite"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["lite", "test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 
 # Profiling bench: built only under the opt-in `hotpath` feature so a
 # default `cargo bench` / `cargo test --all-targets` never compiles hotpath

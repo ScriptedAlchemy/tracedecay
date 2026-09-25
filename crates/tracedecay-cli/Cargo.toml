@@ -161,37 +161,37 @@ tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec"] }
-tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false }
-tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
-tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
-tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", version = "0.1.0" }
-tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
+tracedecay = { path = "../tracedecay", default-features = false }
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
+tracedecay-application = { path = "../tracedecay-application" }
+tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime" }
+tracedecay-api = { path = "../tracedecay-api" }
 # Language tiers stay selected through `tracedecay/{lite,medium,full}` above;
 # the direct edge only names the parallelism status the runtime installs.
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
-tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-daemon-control = { path = "../tracedecay-daemon-control", version = "0.1.0" }
-tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
-tracedecay-daemon-service = { path = "../tracedecay-daemon-service", version = "0.1.0" }
-tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
-tracedecay-hotpath-guard = { path = "../tracedecay-hotpath-guard", version = "0.1.0" }
-tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
-tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
-tracedecay-maintenance = { path = "../tracedecay-maintenance", version = "0.1.0" }
-tracedecay-mcp = { path = "../tracedecay-mcp", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-sdk = { path = "../tracedecay-sdk", version = "0.1.0" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-store-runtime = { path = "../tracedecay-store-runtime", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-daemon-control = { path = "../tracedecay-daemon-control" }
+tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
+tracedecay-daemon-service = { path = "../tracedecay-daemon-service" }
+tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-hooks = { path = "../tracedecay-hooks" }
+tracedecay-hotpath-guard = { path = "../tracedecay-hotpath-guard" }
+tracedecay-host-integration = { path = "../tracedecay-host-integration" }
+tracedecay-lsp = { path = "../tracedecay-lsp" }
+tracedecay-maintenance = { path = "../tracedecay-maintenance" }
+tracedecay-mcp = { path = "../tracedecay-mcp" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-project = { path = "../tracedecay-project" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-sdk = { path = "../tracedecay-sdk" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
 ureq = { version = "3", features = ["json"] }
 url = "2"
@@ -213,15 +213,15 @@ regex = "1.12.3"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
 tower = "0.5"
-tracedecay = { path = "../tracedecay", version = "0.1.0-beta.37", default-features = false, features = ["test-helpers"] }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay = { path = "../tracedecay", default-features = false, features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 # The shared root fixture (`crates/tracedecay/tests/common`) names the LCM
 # contracts directly since the lcm extraction; CLI test targets compile that
 # fixture via `#[path]` and need the extern.
-tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-project = { path = "../tracedecay-project", version = "0.1.0-beta.37", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 xattr = "1"

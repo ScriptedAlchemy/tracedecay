@@ -25,14 +25,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tracing = "0.1"
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 
 [dev-dependencies]
 # The maintenance backup test verifies snapshots through a raw SQLite handle.
@@ -42,4 +42,4 @@ tokio = { version = "1", features = ["full"] }
 # This crate's own test target needs the kernel's `db::engine::TestConnection`.
 # Declaring the same path dependency with the feature keeps it out of the lib
 # build while feature unification supplies it to every test target here.
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }

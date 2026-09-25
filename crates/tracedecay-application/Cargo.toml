@@ -48,43 +48,43 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 url = "2"
 zeroize = "1.9.0"
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
-tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", version = "0.1.0" }
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-automation = { path = "../tracedecay-automation" }
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
 # Grammar-free schema-evidence types only: native-integration analysis compares
 # retained schema facts and never links a tree-sitter bundle into this crate.
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
-tracedecay-configuration = { path = "../tracedecay-configuration", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-graph-query = { path = "../tracedecay-graph-query", version = "0.1.0" }
-tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
-tracedecay-host-integration = { path = "../tracedecay-host-integration", version = "0.1.0" }
-tracedecay-lsp = { path = "../tracedecay-lsp", version = "0.1.0" }
-tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
-tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
-tracedecay-query = { path = "../tracedecay-query", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
-tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
+tracedecay-configuration = { path = "../tracedecay-configuration" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-graph-query = { path = "../tracedecay-graph-query" }
+tracedecay-hooks = { path = "../tracedecay-hooks" }
+tracedecay-host-integration = { path = "../tracedecay-host-integration" }
+tracedecay-lsp = { path = "../tracedecay-lsp" }
+tracedecay-policy = { path = "../tracedecay-policy" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-query = { path = "../tracedecay-query" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
 static_assertions = "1.1.0"
 # Test-only helper surfaces reached across crate boundaries by this crate's
 # test targets. Feature unification supplies them to the test build only.
-tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
 
 # Dual-mode self-check via benches/hotpath_coverage.rs: feature off must
 # not write a report; feature on must record exact journey labels.

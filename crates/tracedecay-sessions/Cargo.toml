@@ -33,17 +33,17 @@ sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-framing = { path = "../tracedecay-framing", version = "0.1.0" }
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-capture = { path = "../tracedecay-capture" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-framing = { path = "../tracedecay-framing" }
+tracedecay-graph-db = { path = "../tracedecay-graph-db" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
+tracedecay-store = { path = "../tracedecay-store" }
 url = "2"
 getrandom = "0.2"
 
@@ -55,10 +55,10 @@ tempfile = "3"
 # This crate's own test target needs the kernel's `db::engine::TestConnection`.
 # Declaring the same path dependency with the feature keeps it out of the lib
 # build while feature unification supplies it to every test target here.
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 # The live git-attribution test publishes evidence through the hermetic
 # in-memory verified snapshot (`VerifiedGraphSnapshot::memory`).
-tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 
 [[bench]]
 name = "host_transcript_io"

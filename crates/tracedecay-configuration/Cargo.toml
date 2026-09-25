@@ -19,15 +19,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-automation = { path = "../tracedecay-automation" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-policy = { path = "../tracedecay-policy" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 
 [dev-dependencies]
 tempfile = "3"
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
