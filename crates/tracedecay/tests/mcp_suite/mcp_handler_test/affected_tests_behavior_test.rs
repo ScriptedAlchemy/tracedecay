@@ -17,7 +17,7 @@ use tracedecay_mcp::ToolResult;
 use url::Url;
 
 use crate::support::{
-    ProductionCompositionFixture, extract_text, production_composition_fixture,
+    ProductionCompositionFixture, extract_text, peer_production_composition,
     production_composition_fixture_with_sources, wait_for_current_graph,
 };
 
@@ -396,9 +396,8 @@ async fn run_affected_tests_reports_the_cargo_result_for_the_changed_manifest() 
 /// of failing with an expired history frontier.
 #[tokio::test]
 async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_shutdown() {
-    let (_isolated_env, _) = crate::common::IsolatedEnv::acquire().await;
     let owner = production_composition_fixture_with_sources(write_affected_fixture).await;
-    let peer = production_composition_fixture().await;
+    let (peer, _peer_isolation) = peer_production_composition(&owner).await;
 
     let root_uri = Url::from_directory_path(
         fs::canonicalize(&owner.project_root).expect("canonical affected fixture root"),
@@ -418,7 +417,7 @@ async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_
         .await
         .expect("managed test run admitted before the peer shuts down");
 
-    peer.harness.shutdown().await;
+    peer.shutdown().await;
 
     let first_result = emitter
         .test_result(GREETING_TEST.to_owned(), true)

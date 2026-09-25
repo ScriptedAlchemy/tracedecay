@@ -475,10 +475,7 @@ pub(crate) async fn production_composition_fixture_with_sources(
 ) -> ProductionCompositionFixture {
     let (environment, _) = common::IsolatedEnv::acquire().await;
     let isolation = test_temp_dir();
-    let project_root = isolation.path().join("project");
-    std::fs::create_dir_all(&project_root).expect("production composition project");
-    write_sources(&project_root);
-    commit_worktree(&project_root, "production composition fixture");
+    let project_root = seed_production_composition_project(isolation.path(), write_sources);
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         vec![project_root.clone()],
@@ -495,6 +492,39 @@ pub(crate) async fn production_composition_fixture_with_sources(
         _environment: environment,
         _isolation: isolation,
     }
+}
+
+/// Opens a second composition, with its own project and profile, inside the
+/// environment `owner` holds. A second fixture would wait forever on the
+/// process env lock `owner` keeps for its whole lifetime.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn peer_production_composition(
+    _owner: &ProductionCompositionFixture,
+) -> (ProductionProjectCompositionHarnessV1, TestTempDir) {
+    let isolation = test_temp_dir();
+    let project_root = seed_production_composition_project(
+        isolation.path(),
+        fixture::write_indexed_fixture_sources,
+    );
+    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        vec![project_root],
+    ))
+    .await
+    .expect("peer production composition harness");
+    (harness, isolation)
+}
+
+#[cfg(feature = "test-transport")]
+fn seed_production_composition_project(
+    isolation_root: &Path,
+    write_sources: impl FnOnce(&Path),
+) -> PathBuf {
+    let project_root = isolation_root.join("project");
+    std::fs::create_dir_all(&project_root).expect("production composition project");
+    write_sources(&project_root);
+    commit_worktree(&project_root, "production composition fixture");
+    project_root
 }
 
 #[cfg(feature = "test-transport")]

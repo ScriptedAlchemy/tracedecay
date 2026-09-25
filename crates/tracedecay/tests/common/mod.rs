@@ -173,20 +173,63 @@ pub fn lock_global_db_env() -> std::sync::MutexGuard<'static, ()> {
 /// `HOME` writer holds the same lock" a compile error to break rather than a
 /// convention: a suite that reached for a lock of its own interleaved with
 /// [`IsolatedEnv`] and read another fixture's home out of `$HOME`.
-pub struct ProcessEnvGuard(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
+pub struct ProcessEnvGuard {
+    root_holder: bool,
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+}
+
+/// Thread whose test body, rather than a task it spawned, holds
+/// [`PROCESS_ENV_LOCK`]. A test body runs as its thread's only root future
+/// (no tokio task id), so that root asking again can never be woken: its
+/// own guard would have to drop first.
+static PROCESS_ENV_ROOT_HOLDER: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+
+impl ProcessEnvGuard {
+    fn refuse_root_reentry() -> bool {
+        if tokio::task::try_id().is_some() {
+            return false;
+        }
+        let current = std::thread::current().id();
+        assert_ne!(
+            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER),
+            Some(current),
+            "this test already holds PROCESS_ENV_LOCK (an IsolatedEnv or fixture that owns \
+             one is still alive); acquiring it again would deadlock"
+        );
+        true
+    }
+
+    fn held(guard: tokio::sync::MutexGuard<'static, ()>, root_holder: bool) -> Self {
+        if root_holder {
+            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER) = Some(std::thread::current().id());
+        }
+        pin_toolchain_environment();
+        Self {
+            root_holder,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for ProcessEnvGuard {
+    fn drop(&mut self) {
+        if self.root_holder {
+            *lock_recovering_poison(&PROCESS_ENV_ROOT_HOLDER) = None;
+        }
+    }
+}
 
 /// Acquires [`PROCESS_ENV_LOCK`] for an async test.
 pub async fn lock_process_env() -> ProcessEnvGuard {
-    let guard = PROCESS_ENV_LOCK.lock().await;
-    pin_toolchain_environment();
-    ProcessEnvGuard(guard)
+    let root_holder = ProcessEnvGuard::refuse_root_reentry();
+    ProcessEnvGuard::held(PROCESS_ENV_LOCK.lock().await, root_holder)
 }
 
 /// Sync counterpart of [`lock_process_env`]; panics inside an async context.
 pub fn lock_process_env_blocking() -> ProcessEnvGuard {
-    let guard = PROCESS_ENV_LOCK.blocking_lock();
-    pin_toolchain_environment();
-    ProcessEnvGuard(guard)
+    let root_holder = ProcessEnvGuard::refuse_root_reentry();
+    ProcessEnvGuard::held(PROCESS_ENV_LOCK.blocking_lock(), root_holder)
 }
 
 /// Resolves `RUSTUP_HOME` and `CARGO_HOME` to absolute paths before the first
@@ -484,14 +527,14 @@ impl TraceDecayStorageEnvGuard {
 /// the env pin alive until just before the lock is released.
 pub struct AgentEnvLock {
     _pin: EnvVarGuard,
-    _lock: tokio::sync::MutexGuard<'static, ()>,
+    _lock: ProcessEnvGuard,
 }
 
 impl AgentEnvLock {
     /// Pins [`USER_DATA_DIR_ENV`] to `<home>/.tracedecay` while holding
     /// [`PROCESS_ENV_LOCK`].
     pub fn pin(home: impl AsRef<Path>) -> Self {
-        let lock = PROCESS_ENV_LOCK.blocking_lock();
+        let lock = lock_process_env_blocking();
         let pin = EnvVarGuard::set(USER_DATA_DIR_ENV, home.as_ref().join(".tracedecay"));
         Self {
             _pin: pin,
