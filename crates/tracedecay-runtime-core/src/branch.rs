@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use tracedecay_domain::GitHeadStateV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_private_fs::FileLease;
 
@@ -114,6 +115,41 @@ pub fn current_branch(project_root: &Path) -> Option<String> {
         .ok()?
         .branch()
         .map(str::to_owned)
+}
+
+/// Live HEAD of one checkout.
+///
+/// [`current_branch`] collapses a detached HEAD and an unreadable repository
+/// into the same `None`. Readers that display the checkout's branch need those
+/// apart: detached HEAD is an observation, and keeping the branch recorded at
+/// enrollment would stay stale after `git switch` or `git checkout --detach`.
+/// A linked worktree resolves its own Git directory, so its HEAD is not the
+/// primary checkout's branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckoutHead {
+    /// HEAD names a branch, including an unborn branch with no commits yet.
+    Branch(String),
+    /// HEAD is detached from every branch.
+    Detached,
+}
+
+/// Resolves [`CheckoutHead`] for `project_root`.
+///
+/// Returns `None` when the path is not a repository or HEAD cannot be read.
+/// That is uncertainty, not detachment.
+#[hotpath::measure(label = "runtime_core.git.branch.checkout_head")]
+#[must_use]
+pub fn checkout_head(project_root: &Path) -> Option<CheckoutHead> {
+    let head = crate::git_repository::GitRepositoryAuthority::discover(project_root)
+        .ok()?
+        .head()
+        .ok()?;
+    match head {
+        GitHeadStateV1::Attached { branch, .. } | GitHeadStateV1::Unborn { branch } => {
+            Some(CheckoutHead::Branch(branch))
+        }
+        GitHeadStateV1::Detached { .. } => Some(CheckoutHead::Detached),
+    }
 }
 
 /// One live-branch resolution, scoped to a single request or write gate.

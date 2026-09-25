@@ -17,7 +17,8 @@ use tracedecay_contracts::{
     ProjectRegistryReadPort, ProjectRegistrySelector,
 };
 use tracedecay_dashboard_api::project_registry::{
-    build_project_registry_view, public_code_project_from_record,
+    align_public_checkout_branches, build_project_registry_view, public_code_project_for_checkout,
+    public_code_project_from_record,
 };
 use tracedecay_domain::errors::Result;
 use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDbLeaseV1};
@@ -66,11 +67,17 @@ impl DaemonProjectRegistryReadService {
             .registry
             .project_registry_contexts_for_projects(&projects)
             .await?;
-        let view = build_project_registry_view(&contexts, active_id.as_deref(), truncated);
-        let projects = projects
+        let view = build_project_registry_view(
+            &contexts,
+            active_id.as_deref(),
+            active_project_root,
+            truncated,
+        );
+        let mut projects = projects
             .iter()
             .map(|project| public_code_project_from_record(project, active_id.as_deref()))
             .collect::<Vec<_>>();
+        align_public_checkout_branches(&mut projects, &view);
         Ok(ProjectRegistryListingView {
             registry_path: self.registry.db_path().to_path_buf(),
             truncated,
@@ -153,11 +160,21 @@ impl DaemonProjectRegistryReadService {
             .active_project_id(active_project_root.as_deref())
             .await?;
         let is_active = active_id.as_deref() == Some(context.project.project_id.as_str());
+        let preferred = match &selector {
+            ProjectRegistrySelector::Path { path, .. } => Some(path.as_path()),
+            ProjectRegistrySelector::ProjectId(_) if is_active => active_project_root.as_deref(),
+            ProjectRegistrySelector::ProjectId(_) => None,
+        };
         Ok(ProjectRegistryContextOutcome::Context(Box::new(
             ProjectRegistryContextView {
                 registry_path,
                 is_active,
-                project: public_code_project_from_record(&context.project, active_id.as_deref()),
+                project: public_code_project_for_checkout(
+                    &context.project,
+                    &context.aliases,
+                    active_id.as_deref(),
+                    preferred,
+                ),
                 aliases: serialize_records(&context.aliases)?,
                 stores: serialize_records(&context.stores)?,
             },
