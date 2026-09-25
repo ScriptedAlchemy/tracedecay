@@ -326,24 +326,25 @@ jobs:
       # lockfile; the workspace crates compile fresh every run. No per-run
       # compiler store: the perf-profile test graph wrote 15.7 GB of outputs
       # per build on macOS, which no store inside the repository's 10 GB
-      # cache budget can hold. Two lineages, one writer each. `root-suites`
-      # resolves the widest root graph (the root crate with its
-      # dev-dependencies, the CLI and the evaluator), and its save covers
+      # cache budget can hold. One writer keeps the lane at one entry:
+      # `root-suites` resolves the widest root graph (the root crate with
+      # its dev-dependencies, the CLI and the evaluator), so its save covers
       # `root-lib` and the `root-transport` group exactly (test-transport
-      # re-resolves 31 workspace crates but no dependency unit). The `lower`
-      # group's three partitions each unify the dependencies differently
-      # from the root graph and from each other (run 36051245663: 213
-      # dependency units recompiled against the root cache, 38.8 of
-      # `runtime`'s 44 minutes on three cores), so that group keeps its own
-      # entry, saved after all three have compiled into one target
-      # directory, which is what makes the next run's three restores hits.
-      # Restored before the first `cargo metadata` below so the registry
-      # index comes from the cache too.
+      # re-resolves 31 workspace crates but no dependency unit). The lower
+      # partitions unify the dependencies differently and recompile ~100-200
+      # units against it, which costs nothing measurable here: `runtime`
+      # compiled in 28.5-29.6 min with every one of its 604 dependency units
+      # built from source and in 29.5 with a full-match cache of its own
+      # (runs 36087768140 and 36095356282), because on three cores the
+      # serial workspace chain plus the test targets are the whole path and
+      # the dependency units fill the slots beside it. A lineage for them
+      # was tried and removed on that evidence. Restored before the first
+      # `cargo metadata` below so the registry index comes from the cache too.
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.group == 'lower' && 'ci-test-lower-' || 'ci-test-full-' }}${{ runner.os }}
-          save-if: ${{ matrix.group == 'root-suites' || matrix.group == 'lower' }}
+          shared-key: ci-test-full-${{ runner.os }}
+          save-if: ${{ matrix.group == 'root-suites' }}
           cache-on-failure: true
 
       # Every group job re-proves the cover and the grouping before it
@@ -359,14 +360,15 @@ jobs:
       # (`build-args`; nothing for a partition whose tests spawn nothing),
       # then nextest under the `ci` policy and the perf cargo profile with
       # `--no-tests=fail`. One target directory for the group, so a later
-      # partition's shared units are fingerprint hits; the manifest groups
-      # partitions of one resolution so that is most of them (run
-      # 36051245663 had `root-transport` re-resolve 31 workspace crates
-      # behind `root-journeys`, 18 min on three cores, and
-      # `root-dashboard-api` as a lone `-p tracedecay` selection recompile
-      # 48 workspace crates and 108 dependency units, 24 min, because the
-      # CLI's clap graph changes `mio`'s features and so tokio's and every
-      # crate above it). Every partition runs
+      # partition's shared units are fingerprint hits; the manifest pairs
+      # partitions of one resolution where they exist (run 36051245663 had
+      # `root-transport` re-resolve 31 workspace crates behind
+      # `root-journeys`, 18 min on three cores, and `root-dashboard-api` as
+      # a lone `-p tracedecay` selection recompile 48 workspace crates and
+      # 108 dependency units, 24 min, because the CLI's clap graph changes
+      # `mio`'s features and so tokio's and every crate above it) and
+      # otherwise balances the sums of the measured partition costs, since
+      # a group's wall time is that sum. Every partition runs
       # even after an earlier one fails, as nextest's `ci` policy runs every
       # test, and the step fails if any did. Every nextest run rewrites the
       # `ci` profile's junit.xml, so each partition's report is moved under
