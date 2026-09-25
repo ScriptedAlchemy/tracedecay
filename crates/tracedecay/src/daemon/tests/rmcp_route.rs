@@ -6,6 +6,12 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(unix)]
+use tracedecay_domain::{CodeGenerationId, HostIntegrationIdV1};
+#[cfg(unix)]
+use tracedecay_hooks::core_events::DaemonHookEvent;
+#[cfg(unix)]
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::*;
 
@@ -29,7 +35,7 @@ struct RmcpRouteFixture {
 }
 
 async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
-    rmcp_route_fixture_with_projects(label, &[]).await
+    rmcp_route_fixture_with_projects(label, &[], false).await
 }
 
 /// Every project a test will mount is initialized here, before the engine
@@ -40,12 +46,29 @@ async fn rmcp_route_fixture(label: &str) -> RmcpRouteFixture {
 async fn rmcp_route_fixture_with_projects(
     label: &str,
     extra_projects: &[(&str, &str, &str)],
+    git_repository: bool,
 ) -> RmcpRouteFixture {
     let temp = TempDir::new().expect("route fixture");
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("fixture source");
+    if git_repository {
+        git(&project, &["init", "-q", "-b", "main"]);
+        git(&project, &["add", "."]);
+        git(
+            &project,
+            &[
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-qm",
+                "seed",
+            ],
+        );
+    }
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
     for (directory, source_path, source) in extra_projects {
@@ -587,6 +610,110 @@ async fn unix_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Vec<Va
     responses
 }
 
+/// Delivers one hook the way `core_hooks::notify_hook_event` does: write the
+/// stateless request, then close the socket without reading any reply.
+#[cfg(unix)]
+async fn unix_fire_and_forget_hook(fixture: &RmcpRouteFixture, event: DaemonHookEvent) {
+    let request = stateless_request(json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": tracedecay_hooks::core_events::HOOK_EVENT_METHOD,
+        "params": event,
+    }));
+    let (server_stream, client_stream) =
+        tokio::net::UnixStream::pair().expect("fire-and-forget socket pair");
+    let engine = fixture.engine.clone();
+    let served = tokio::spawn(async move {
+        Box::pin(super::serve_authenticated_test_client(
+            server_stream,
+            engine,
+        ))
+        .await
+    });
+    let (reader, mut writer) = client_stream.into_split();
+    super::write_test_auth_preface(&mut writer).await;
+    writer
+        .write_all(fixture.handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, &request).await;
+    writer.shutdown().await.expect("shutdown hook client");
+    drop((reader, writer));
+    // The reply cannot be written to a departed peer; only completion matters.
+    let _ = tokio::time::timeout(PHASE_TIMEOUT, served)
+        .await
+        .expect("fire-and-forget connection settled");
+}
+
+#[cfg(unix)]
+async fn wait_for_new_generation(
+    fixture: &RmcpRouteFixture,
+    project: &std::path::Path,
+    prior: Option<&CodeGenerationId>,
+    step: &str,
+) -> CodeGenerationId {
+    // Well inside the 30 s query-admission backstop, so only this step's
+    // own hook wake can publish in time.
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        loop {
+            if let Some(current) = fixture
+                .engine
+                .invocation
+                .code_index_schedulers
+                .latest_generation_id(project)
+                .await
+                && Some(&current) != prior
+            {
+                return current;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{step} hook did not wake a reconcile pass"))
+}
+
+/// Save, rename, and delete each arrive as a fire-and-forget after-edit
+/// hook; the rename and delete name paths that no longer exist. Every one
+/// must reach the mounted scheduler through the daemon socket route.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fire_and_forget_edit_hooks_each_wake_a_reconcile() {
+    let fixture = rmcp_route_fixture_with_projects("unix-fire-and-forget-hooks", &[], true).await;
+    let project = canonical_existing_identity(
+        fixture
+            .handshake
+            .project_path
+            .as_deref()
+            .expect("fixture project"),
+    )
+    .expect("canonical fixture project");
+    wait_for_host_ingest_publication(&fixture).await;
+    let edit = |paths: &[&str]| {
+        DaemonHookEvent::post_tool_use_edit(
+            HostIntegrationIdV1::Codex,
+            paths.iter().map(|path| (*path).to_owned()).collect(),
+            project.clone(),
+        )
+    };
+
+    let initial = wait_for_new_generation(&fixture, &project, None, "initial mount").await;
+
+    std::fs::write(project.join("src/saved.rs"), "pub fn saved() {}\n").expect("save source");
+    unix_fire_and_forget_hook(&fixture, edit(&["src/saved.rs"])).await;
+    let saved = wait_for_new_generation(&fixture, &project, Some(&initial), "save").await;
+
+    std::fs::rename(project.join("src/saved.rs"), project.join("src/renamed.rs"))
+        .expect("rename source");
+    unix_fire_and_forget_hook(&fixture, edit(&["src/saved.rs", "src/renamed.rs"])).await;
+    let renamed = wait_for_new_generation(&fixture, &project, Some(&saved), "rename").await;
+
+    std::fs::remove_file(project.join("src/renamed.rs")).expect("delete source");
+    unix_fire_and_forget_hook(&fixture, edit(&["src/renamed.rs"])).await;
+    wait_for_new_generation(&fixture, &project, Some(&renamed), "delete").await;
+}
+
 async fn portable_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Vec<Value> {
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
         &tracedecay_daemon_protocol::default_loopback_endpoint(),
@@ -857,9 +984,12 @@ fn response_text(response: &Value) -> &str {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_owner() {
-    let fixture =
-        rmcp_route_fixture_with_projects("rmcp-selected-target-disconnect", &[RMCP_TARGET_PROJECT])
-            .await;
+    let fixture = rmcp_route_fixture_with_projects(
+        "rmcp-selected-target-disconnect",
+        &[RMCP_TARGET_PROJECT],
+        false,
+    )
+    .await;
     let (_target_handshake, target_project_id, target_key, _target_route) =
         mount_rmcp_target(&fixture).await;
     let target_server = {

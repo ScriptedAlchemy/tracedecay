@@ -4596,6 +4596,17 @@ fn disk_artifact_finalization_resumes_after_restart_without_source_replay() {
         &control,
     )
     .expect("resume interrupted finalization");
+    // A crash inside the compacted rewrite leaves its sibling behind; the
+    // resumed rewrite must replace it rather than refuse the occupied target.
+    #[cfg(unix)]
+    let compacting = {
+        let mut name = artifact_path.as_os_str().to_os_string();
+        name.push("-compacting");
+        std::path::PathBuf::from(name)
+    };
+    #[cfg(unix)]
+    std::fs::write(&compacting, b"partial rewrite from a crashed attempt")
+        .expect("plant stale compacted rewrite");
     let verified = loop {
         match resumed
             .advance_finalization(&source_receipt, 2, &control)
@@ -4605,6 +4616,11 @@ fn disk_artifact_finalization_resumes_after_restart_without_source_replay() {
             CodeLexicalArtifactFinalizationStepV1::Ready(receipt) => break receipt,
         }
     };
+    #[cfg(unix)]
+    assert!(
+        !compacting.exists(),
+        "the compacted rewrite became the staging file"
+    );
     assert_eq!(verified.total_chunks(), source_receipt.total_chunks());
     assert_eq!(
         staged_row_cardinality(&artifact_path).0,

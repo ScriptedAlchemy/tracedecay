@@ -798,6 +798,45 @@ where
     })
 }
 
+/// A host hook event is fire-and-forget: its client writes the request and
+/// closes the socket without reading a reply, so its close says nothing about
+/// whether the event is still wanted. Routing it is bounded by the profile
+/// binding and project-open deadlines instead of by the peer.
+fn is_fire_and_forget(first_request: Option<&JsonRpcRequest>) -> bool {
+    first_request
+        .is_some_and(|request| classify_mcp_method(&request.method) == McpMethod::HookEvent)
+}
+
+/// Resolves once the peer has fully closed, which abandons any first request
+/// except a fire-and-forget one.
+fn peer_abandoned_first_request(
+    transport: &impl McpTransport,
+    first_request: Option<&JsonRpcRequest>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let fire_and_forget = is_fire_and_forget(first_request);
+    let peer_full_close = transport.peer_fully_closed_after_eof();
+    async move {
+        if fire_and_forget {
+            std::future::pending::<()>().await;
+        } else {
+            peer_full_close.await;
+        }
+    }
+}
+
+/// Await the project owner for a routed first request, without racing a
+/// fire-and-forget request against its client's close.
+async fn await_project_owner_for_first_request<T: Send>(
+    transport: &mut (impl McpTransport + Send),
+    first_request: Option<&JsonRpcRequest>,
+    open: impl std::future::Future<Output = Result<T>> + Send,
+) -> Result<Option<(T, VecDeque<String>)>> {
+    if is_fire_and_forget(first_request) {
+        return open.await.map(|owner| Some((owner, VecDeque::new())));
+    }
+    await_project_owner_or_disconnect(transport, open).await
+}
+
 #[cfg(unix)]
 #[hotpath::measure(label = "daemon.engine.transport.broker", future = true)]
 async fn serve_broker_socket_client(
@@ -1109,7 +1148,7 @@ fn serve_broker_socket_client_inner(
         // Ordered after the first request, exactly as the portable broker does,
         // so a binding that misses its deadline is answered as a typed retry on
         // that request's id instead of closing the socket with no evidence.
-        let peer_full_close = transport.peer_fully_closed_after_eof();
+        let peer_full_close = peer_abandoned_first_request(&transport, first_request.parsed());
         tokio::pin!(peer_full_close);
         let store_administration = tokio::select! {
             result = bind_authenticated_profile_identity_within_deadline(
@@ -1453,8 +1492,9 @@ fn serve_broker_socket_client_inner(
                 let user_session_request = projectless_user_session_request(first_request.parsed());
                 let project_owner = boxed_broker_connection_phase(async {
                     if handshake.project_path.is_some() && !user_session_request {
-                        match await_project_owner_or_disconnect(
+                        match await_project_owner_for_first_request(
                             &mut transport,
+                            first_request.parsed(),
                             engine.project_server_for_request(
                                 &handshake,
                                 project_server_requirement(first_request.parsed()),
@@ -1650,7 +1690,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         drop(setup_activity);
         return Ok(());
     }
-    let peer_full_close = transport.peer_fully_closed_after_eof();
+    let peer_full_close = peer_abandoned_first_request(&transport, first_request.parsed());
     tokio::pin!(peer_full_close);
     let store_administration = tokio::select! {
         result = Box::pin(bind_authenticated_profile_identity_within_deadline(
@@ -1940,8 +1980,9 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
         // Heap-allocate the owner-await composition: embedded by value it
         // dominates this serve future's resident frame and overflows the
         // worker stack in perf-profile layouts.
-        let server = match Box::pin(await_project_owner_or_disconnect(
+        let server = match Box::pin(await_project_owner_for_first_request(
             &mut transport,
+            first_request.parsed(),
             Box::pin(portable_project_server_for_request(
                 lifecycle.clone(),
                 store_administration.clone(),

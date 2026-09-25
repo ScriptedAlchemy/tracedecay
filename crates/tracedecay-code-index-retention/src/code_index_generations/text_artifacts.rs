@@ -520,15 +520,18 @@ pub(super) fn staging_text_artifact_source_digest(file_name: &str) -> Option<&st
         .filter(|digest| is_lowercase_hex(digest, 64))
 }
 
-/// The SQLite sidecar files a staging database leaves beside itself
-/// (`.staging-journal`, `.staging-wal`, `.staging-shm`). They carry the same
-/// source-generation digest as their staging file and share its liveness.
+/// The sidecar files a staging database leaves beside itself: SQLite's
+/// (`.staging-journal`, `.staging-wal`, `.staging-shm`) and the builder's
+/// compacted rewrite before it replaces the staging file
+/// (`.staging-compacting`). They carry the same source-generation digest as
+/// their staging file and share its liveness.
 pub(super) fn staging_sidecar_text_artifact_source_digest(file_name: &str) -> Option<&str> {
     let value = file_name.strip_prefix(".text-artifact-")?;
     let digest = value
         .strip_suffix(".staging-journal")
         .or_else(|| value.strip_suffix(".staging-wal"))
-        .or_else(|| value.strip_suffix(".staging-shm"))?;
+        .or_else(|| value.strip_suffix(".staging-shm"))
+        .or_else(|| value.strip_suffix(".staging-compacting"))?;
     is_lowercase_hex(digest, 64).then_some(digest)
 }
 

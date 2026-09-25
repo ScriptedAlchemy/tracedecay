@@ -2922,11 +2922,21 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     let active_sidecar =
         artifacts_root.join(format!(".text-artifact-{active_digest}.staging-journal"));
     std::fs::write(&active_sidecar, b"active staging journal").expect("write active sidecar");
+    let active_compacting =
+        artifacts_root.join(format!(".text-artifact-{active_digest}.staging-compacting"));
+    std::fs::write(&active_compacting, b"active compacted rewrite")
+        .expect("write active compacting sidecar");
     let orphan_staging = artifacts_root.join(format!(".text-artifact-{}.staging", "c".repeat(64)));
     std::fs::write(&orphan_staging, b"abandoned staging").expect("write orphan staging");
     let orphan_sidecar =
         artifacts_root.join(format!(".text-artifact-{}.staging-journal", "c".repeat(64)));
     std::fs::write(&orphan_sidecar, b"abandoned staging journal").expect("write orphan sidecar");
+    let orphan_compacting = artifacts_root.join(format!(
+        ".text-artifact-{}.staging-compacting",
+        "c".repeat(64)
+    ));
+    std::fs::write(&orphan_compacting, b"abandoned compacted rewrite")
+        .expect("write orphan compacting sidecar");
 
     let report = run_code_generation_retention(
         store.path(),
@@ -2937,13 +2947,14 @@ fn staging_sidecars_share_their_staging_artifact_liveness() {
     )
     .expect("apply sidecar-aware retention");
 
-    assert_eq!(report.deleted_text_artifacts.len(), 2);
+    assert_eq!(report.deleted_text_artifacts.len(), 3);
     assert!(
-        active_staging.is_file() && active_sidecar.is_file(),
-        "the active build's staging file and its sidecar must survive"
+        active_staging.is_file() && active_sidecar.is_file() && active_compacting.is_file(),
+        "the active build's staging file and its sidecars must survive"
     );
     assert!(!orphan_staging.exists());
     assert!(!orphan_sidecar.exists());
+    assert!(!orphan_compacting.exists());
 }
 
 /// A seated successor releases the serving pin on its predecessor, and a
