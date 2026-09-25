@@ -20,7 +20,7 @@ use tracedecay_application::code_index::{
     DaemonCodeIndexControlV1, ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
 };
 use tracedecay_code_index_retention::code_index_generations::{
-    DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
+    CodeIndexScopeStoreResetV1, DurablePublicationPointerV1, DurableSealedCodeGenerationIdentityV1,
 };
 use tracedecay_contracts::{
     code_index_freshness::{
@@ -2445,6 +2445,43 @@ impl CodeIndexWorktreeSchedulerV1 {
             fault.arrive()?;
         }
         Ok(())
+    }
+
+    /// Delete this worktree's corrupt derived publication and forget every
+    /// in-memory derivation of it, so the next pass seals from source.
+    ///
+    /// Only the publication authority (`CorruptionResetRequired`) reaches
+    /// this. The scope store is derived data with no authoritative content,
+    /// so the legal action is deletion and rebuild, never repair. Serving
+    /// seats already handed to the registry are left in place; the rebuilt
+    /// generation replaces them through the ordinary swap.
+    pub fn reset_corrupt_publication_authority(
+        &mut self,
+    ) -> Result<CodeIndexScopeStoreResetV1, CodeIndexSchedulerErrorV1> {
+        let receipt = self
+            .publication
+            .reset_corrupt_store()
+            .map_err(CodeIndexProductionErrorV1::Publication)?;
+        self.latest_content_identity = None;
+        self.retained_snapshot_bytes.clear();
+        self._retained_snapshot_memory.clear();
+        *self
+            .active_snapshot_changed_paths
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .query_owners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .generation_recovery
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .build_progress
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = CodeIndexBuildProgressSlotStateV1::default();
+        Ok(receipt)
     }
 
     /// Retained-owner activation entry point. Foreground reads never call this.

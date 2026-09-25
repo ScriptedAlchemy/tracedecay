@@ -309,6 +309,47 @@ fn progress_snapshot_for_generation(
     }
 }
 
+/// Rewrite the active pointer to the durable index entry shape every release
+/// before 0.1.0-beta.38 sealed: no `segment_bytes`, no `cardinality`. The
+/// stored `generation_index_digest` is left exactly as that release computed
+/// it over that shape.
+pub(super) fn downgrade_pointer_to_pre_segment_bytes_shape(pointer_path: &Path) {
+    let mut pointer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pointer_path).expect("read active pointer"))
+            .expect("decode active pointer");
+    let entries = pointer["generation_index"]
+        .as_array_mut()
+        .expect("durable generation index");
+    assert!(
+        !entries.is_empty(),
+        "the sealed pointer names its generation"
+    );
+    for entry in entries {
+        let entry = entry.as_object_mut().expect("index entry object");
+        assert!(
+            entry.remove("segment_bytes").is_some(),
+            "the current shape records segment bytes"
+        );
+        entry.remove("cardinality");
+    }
+    // The old release digested exactly the trimmed entries; the current
+    // struct re-adds `segment_bytes: 0` on re-serialization, so its digest
+    // over the same file can no longer reproduce this value.
+    let trimmed = tracedecay_domain::canonical_sha256(&(
+        pointer["generation_index"].clone(),
+        pointer["generation_index_truncated"]
+            .as_bool()
+            .unwrap_or(false),
+    ))
+    .expect("trimmed digest");
+    pointer["generation_index_digest"] = serde_json::Value::String(trimmed.as_str().to_owned());
+    std::fs::write(
+        pointer_path,
+        serde_json::to_vec(&pointer).expect("encode downgraded pointer"),
+    )
+    .expect("write downgraded pointer");
+}
+
 fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvidenceV1 {
     match outcome {
         CodeIndexReconcileOutcomeV1::Published(evidence) => evidence,

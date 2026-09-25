@@ -818,9 +818,22 @@ const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon l
      abnormal text-projection failure; indexing retries when a new generation seals over \
      changed input";
 
-const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the durable code-index \
-     publication store is corrupt; retire this project route, replace or rebuild that store, \
-     then remount, `tracedecay sync` and ordinary wakes cannot clear it";
+/// Remediation when the derived publication was already deleted and rebuilt
+/// once in this mount and is corrupt again. The daemon deletes and rebuilds a
+/// corrupt derived store automatically; a repeat is bounded to one attempt per
+/// mount so a defect that corrupts every fresh seal cannot cycle re-indexes.
+const CONVERGENCE_PARK_PUBLICATION_CORRUPTION_REMEDIATION_V1: &str = "the derived code-index \
+     publication was deleted and rebuilt once in this daemon and is corrupt again; run \
+     `tracedecay daemon restart` for one more automatic rebuild, and report the daemon log's \
+     code_index_publication_authority_* events if it recurs";
+
+/// Remediation when the derived publication could not be deleted (the store
+/// directory refused the unlink). Nothing in that directory is authoritative,
+/// so the operator fixes the named filesystem fault and restarts.
+const CONVERGENCE_PARK_PUBLICATION_RESET_FAILED_REMEDIATION_V1: &str = "the derived code-index \
+     publication is corrupt and could not be deleted; fix the named filesystem fault on the \
+     project's code-index-v1 scope store, then run `tracedecay daemon restart` to rebuild it \
+     from source";
 
 fn is_terminal_publication_authority_park(parked: &CodeIndexConvergenceParkedV1) -> bool {
     parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::PublicationAuthorityCorrupt)

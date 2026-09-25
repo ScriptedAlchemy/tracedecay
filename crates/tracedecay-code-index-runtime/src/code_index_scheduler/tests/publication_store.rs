@@ -30,7 +30,7 @@ use tracedecay_query::retrieval::lexical::LexicalLaneRequest;
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 
 use super::{
-    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0,
+    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, downgrade_pointer_to_pre_segment_bytes_shape,
     execute_scope_retention_with_test_binding_cleanup, published,
     remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
     test_project_id, unix_now_secs,
@@ -3371,4 +3371,93 @@ fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
     )
     .expect("sweep after publication");
     assert_eq!(segment_files(&segments_root), present);
+}
+
+/// The upgrade journey behind issue #1979. A pointer sealed before
+/// `segment_bytes` joined the digested entry decodes under this release
+/// (`#[serde(default)]`), but re-serializes with the new field, so the digest
+/// the old release stored no longer matches and the reader refuses the whole
+/// publication as corrupt. That refusal was terminal: nothing deleted the
+/// derived store, so the project stayed parked across restarts.
+#[test]
+fn a_pointer_sealed_before_segment_bytes_is_corrupt_until_the_store_is_reset() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn one() -> usize { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let pool = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut sealed_by_old_release = scheduler(&fixture, store.path().to_path_buf(), pool.clone());
+    published(
+        sealed_by_old_release
+            .reconcile_now()
+            .expect("seal the generation the old release leaves behind"),
+    );
+    drop(sealed_by_old_release);
+    let pointer_path = store.path().join("active-code-generation-v1.json");
+    downgrade_pointer_to_pre_segment_bytes_shape(&pointer_path);
+
+    // The upgraded daemon mounts cold over the old store.
+    let mut upgraded = scheduler(&fixture, store.path().to_path_buf(), pool.clone());
+    let error = upgraded
+        .publication
+        .read_publication_pointer()
+        .expect_err("the re-serialized entries no longer match the stored digest");
+    match &error {
+        CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail) => assert!(
+            detail.contains("digest does not match its entries"),
+            "the reader must name the digest mismatch: {detail}"
+        ),
+        other => panic!("expected the corrupt publication authority, got {other:?}"),
+    }
+    let reconcile = upgraded
+        .reconcile_now()
+        .expect_err("a cold reconcile over the old pointer fails as corruption");
+    assert!(
+        reconcile.is_publication_authority_corruption(),
+        "reconcile must surface the typed corruption, got {reconcile}"
+    );
+
+    let receipt = upgraded
+        .reset_corrupt_publication_authority()
+        .expect("the derived store is deleted, not repaired");
+    assert!(
+        receipt.removed_entries >= 2,
+        "the pointer and the generations directory are gone: {receipt:?}"
+    );
+    assert!(receipt.removed_bytes > 0);
+    assert!(
+        !pointer_path.exists(),
+        "no copy of the corrupt pointer survives"
+    );
+    assert_eq!(
+        std::fs::read_dir(store.path().join("code-generations-v1"))
+            .expect("generations root is recreated empty")
+            .count(),
+        0
+    );
+    assert!(
+        store
+            .path()
+            .join(".code-generation-retention.lock")
+            .exists(),
+        "the held lock file is the one entry a reset keeps"
+    );
+    assert!(
+        upgraded
+            .publication
+            .read_publication_pointer()
+            .expect("a reset store reads as unpublished")
+            .is_none()
+    );
+
+    published(
+        upgraded
+            .reconcile_now()
+            .expect("the next pass rebuilds the publication from source"),
+    );
+    let rebuilt = upgraded
+        .publication
+        .read_publication_pointer()
+        .expect("the rebuilt pointer validates")
+        .expect("the rebuilt pointer exists");
+    assert_eq!(rebuilt.generation_index.len(), 1);
+    assert!(rebuilt.generation_index[0].segment_bytes > 0);
 }
