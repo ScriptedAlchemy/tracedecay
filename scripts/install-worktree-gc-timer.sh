@@ -70,6 +70,9 @@ fi
 case "$(uname -s)" in
     Linux)
         unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+        # Non-login shells (agents, ssh, cron) often lack it; systemctl --user
+        # finds the user manager through it.
+        export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         if ((uninstall == 1)); then
             systemctl --user disable --now "$name.timer" 2>/dev/null || true
             rm -f -- "$unit_dir/$name.service" "$unit_dir/$name.timer" "$installed"
