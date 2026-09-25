@@ -6,8 +6,53 @@
 //! used to copy the same environment set, success check, and env restore.
 
 use std::ffi::{OsStr, OsString};
+#[cfg(target_os = "linux")]
+use std::ffi::{c_int, c_ulong};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn prctl(option: c_int, ...) -> c_int;
+}
+
+/// Makes the kernel SIGKILL the spawned child when the test process dies.
+///
+/// Fixture guards reap children on return and unwind, but a harness timeout
+/// or flake runner that SIGKILLs the test binary runs no `Drop`, and a child
+/// in its own process group also escapes the harness's group signal. Such
+/// daemons used to survive for days.
+///
+/// `PR_SET_PDEATHSIG` fires when the spawning *thread* exits (prctl(2)), so a
+/// bound child must be spawned from a thread that outlives it, never from a
+/// Tokio blocking-pool worker that is reaped after going idle.
+pub fn die_with_test_process(command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        const PR_SET_PDEATHSIG: c_int = 1;
+        const SIGKILL: c_ulong = 9;
+        let spawner = std::process::id();
+        // SAFETY: the hook runs between fork and exec and issues only the
+        // async-signal-safe `prctl` and `getppid` syscalls, without allocating.
+        unsafe {
+            command.pre_exec(move || {
+                if prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // A spawner that died before the signal was armed never
+                // delivers it; refuse to start an already-orphaned child.
+                if std::os::unix::process::parent_id() != spawner {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = command;
+}
 
 /// Restores one process environment variable when the guard drops.
 pub struct EnvVarGuard {
@@ -57,6 +102,7 @@ impl Drop for EnvVarGuard {
 /// Host CLIs launch only through the `lcm.summarizer_executables.v1` setting,
 /// which defaults to unconfigured, so no executable pin is needed here.
 pub fn apply_isolated_profile_env(command: &mut Command, home: &Path, profile: &Path) {
+    die_with_test_process(command);
     command
         .env("HOME", home)
         .env("USERPROFILE", home)

@@ -99,6 +99,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from lib.portable_process import dies_with_this_process
+
 SCHEMA = "tracedecay.efficiency-scorecard/v1"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FIXTURE = REPO_ROOT / "benchmark_data" / "index-bench" / "corpus"
@@ -527,6 +529,7 @@ class Sandbox:
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                preexec_fn=dies_with_this_process(),
             )
         if callable(self.on_spawn):
             self.on_spawn(self.daemon.pid)

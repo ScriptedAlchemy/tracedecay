@@ -122,7 +122,9 @@ pub async fn open_test_database(
 #[path = "../../../../tests/support/isolated_profile.rs"]
 mod isolated_profile;
 #[allow(unused_imports)] // each suite binary uses a subset
-pub use isolated_profile::{EnvVarGuard, apply_isolated_profile_env, run_ok};
+pub use isolated_profile::{
+    EnvVarGuard, apply_isolated_profile_env, die_with_test_process, run_ok,
+};
 
 /// Query lanes a terminal code-index answer must report as `"complete"`.
 /// Daemon journeys and the MCP readiness wait share this set.
@@ -992,23 +994,21 @@ fn signal_child_process_group(pid: u32) {
     let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
 }
 
-/// Detach a test child from the test process group.
+/// Detach a test child from the test process group, bound to the test's life.
 ///
 /// Nextest (and other harness timeouts) signal the test's process group.
 /// Spawned `tracedecay daemon run` children inherit that group unless they
 /// call `setpgid`, so a group SIGTERM becomes a clean daemon exit (status 0
 /// via `run_foreground_unix`) mid-test. `TestChildProcess::kill_and_wait` and
 /// `Drop` still target the PID, so the harness reaps the daemon when the
-/// test ends.
-fn detach_from_test_process_group(command: &mut Command) {
+/// test ends; [`die_with_test_process`] covers a test process that is killed
+/// before any `Drop` runs.
+fn bind_to_test_process(command: &mut Command) {
     #[cfg(unix)]
     {
         command.process_group(0);
     }
-    #[cfg(not(unix))]
-    {
-        let _ = command;
-    }
+    die_with_test_process(command);
 }
 
 pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
@@ -1031,7 +1031,7 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
             tracedecay_daemon_protocol::SOCKET_ENV,
             home.join(".tracedecay/daemon.sock"),
         );
-    detach_from_test_process_group(command);
+    bind_to_test_process(command);
 }
 
 /// Resolve a `tracedecay-search-eval` package binary that used to live under
@@ -1364,7 +1364,7 @@ fn spawn_tracedecay_daemon_process(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     configure(&mut command);
-    detach_from_test_process_group(&mut command);
+    bind_to_test_process(&mut command);
     let child = command.spawn().expect("tracedecay daemon should start");
     let mut daemon = DaemonProcess::new(child);
     #[cfg(unix)]
