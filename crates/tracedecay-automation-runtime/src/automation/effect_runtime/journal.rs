@@ -22,7 +22,7 @@ use tracedecay_private_fs::framed_log::{
 
 use super::contract::contract_error;
 use super::terminal::{AutomationSettledProblem, AutomationSettledTerminal};
-use tracedecay_domain::errors::Result;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Production builds keep the item crate-private. Test / `test-helpers` builds
 /// expose it so composition-root journal tests can drive internals without
@@ -407,6 +407,40 @@ pub fn read_indexed_terminal_blocking(path: &Path) -> Result<Option<AutomationSe
             DurableAutomationState::Reserved => return Ok(None),
         };
         read_terminal_sidecar(path, &terminal).map(Some)
+    })
+}
+
+pub enum JournalShapeProbe {
+    Missing,
+    Current(Box<DurableAutomationRecord>),
+    /// The persisted shape was refused and the journal with its sidecar was
+    /// durably removed. No current writer produces a refused shape, so its
+    /// admission can never be reconciled or replayed.
+    Discarded(TraceDecayError),
+}
+
+pub fn read_or_discard_unsupported_record_blocking(path: &Path) -> Result<JournalShapeProbe> {
+    with_journal_lock(path, || {
+        let refusal = match read_record(path) {
+            Ok(None) => return Ok(JournalShapeProbe::Missing),
+            Ok(Some(record)) => return Ok(JournalShapeProbe::Current(Box::new(record))),
+            Err(error) if error.reset_required_context().is_some() => error,
+            Err(error) => return Err(error),
+        };
+        remove_terminal_sidecar_if_present(path)?;
+        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map_err(
+            |error| {
+                contract_error(format!(
+                    "unsupported automation journal reset failed: {error}"
+                ))
+            },
+        )?;
+        sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
+            contract_error(format!(
+                "unsupported automation journal reset directory sync failed: {error}"
+            ))
+        })?;
+        Ok(JournalShapeProbe::Discarded(refusal))
     })
 }
 
@@ -1036,8 +1070,9 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
         ));
     }
     {
-        let record =
-            serde_json::from_slice::<DurableAutomationRecord>(&bytes).map_err(contract_error)?;
+        let record = serde_json::from_slice::<DurableAutomationRecord>(&bytes).map_err(|error| {
+            TraceDecayError::reset_required("automation effect journal", error.to_string())
+        })?;
         validate_admission_shape(&record.admission)?;
         match &record.state {
             DurableAutomationState::Reserved => {
