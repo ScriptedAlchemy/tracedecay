@@ -739,7 +739,7 @@ describe('SettingsPage effective configuration review', () => {
     const filter = screen.getByLabelText('Filter configuration');
     await user.type(filter, 'poll');
     expect([...document.querySelectorAll('[role="row"][data-key]')].map((element) => element.getAttribute('data-key'))).toEqual([POLL_SECS]);
-    expect(screen.getByText('1 of 54 settings')).toBeTruthy();
+    expect(screen.getByText('1 of 53 settings')).toBeTruthy();
 
     await user.clear(filter);
     await user.type(filter, 'zzzz-no-such-key');
