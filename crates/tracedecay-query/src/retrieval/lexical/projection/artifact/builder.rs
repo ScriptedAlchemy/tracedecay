@@ -1877,13 +1877,10 @@ impl CodeLexicalArtifactBuilderV1 {
         // A crash before the seal commits repeats this rewrite on resume.
         store_finalization_state(&transaction, &state)?;
         commit_finalization_transaction(transaction, &mut transaction_metrics)?;
-        hotpath::measure_block!("query.artifact.finalization.canonical_layout", {
-            with_cancellable_sqlite_statement(&self.connection, control, || {
-                self.connection
-                    .execute_batch("VACUUM;")
-                    .map_err(sqlite_error)
-            })
-        })?;
+        hotpath::measure_block!(
+            "query.artifact.finalization.canonical_layout",
+            self.rewrite_canonical_layout(control)
+        )?;
         checkpoint(control)?;
         let transaction = self.connection.transaction().map_err(sqlite_error)?;
         let mut transaction_metrics = FinalizationTransactionMetricsV1::new();
@@ -1914,6 +1911,73 @@ impl CodeLexicalArtifactBuilderV1 {
         let step = CodeLexicalArtifactFinalizationStepV1::Ready(Box::new(receipt));
         record_finalization_step(&step);
         Ok(step)
+    }
+
+    /// Rewrite the staging file from its content alone.
+    ///
+    /// Under the builder's rollback journal an in-place `VACUUM` writes the
+    /// file three times (a temporary copy, a journal of every original page,
+    /// and the copy back) with syncs between them, so it stretches whenever
+    /// another writer shares the disk. `VACUUM INTO` writes a private sibling
+    /// once, which then replaces the staging path. The sibling carries the
+    /// finalization state, so a crash on either side of the rename resumes
+    /// into this same rewrite.
+    #[cfg(unix)]
+    fn rewrite_canonical_layout(
+        &mut self,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        self.verify_path_binding()?;
+        let compacting = compacting_staging_sibling(&self.path)?;
+        match std::fs::remove_file(&compacting) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(private_staging_error(error)),
+        }
+        let compacted = create_private_file_retained(&compacting)
+            .map_err(|failure| private_staging_error(failure.into_error()))?;
+        let target = compacting.to_str().ok_or_else(|| {
+            CodeLexicalArtifactErrorV1::Contract(
+                "lexical artifact staging path is not UTF-8".to_owned(),
+            )
+        })?;
+        with_cancellable_sqlite_statement(&self.connection, control, || {
+            self.connection
+                .execute("VACUUM INTO ?1", [target])
+                .map(drop)
+                .map_err(sqlite_error)
+        })?;
+        compacted.sync_all().map_err(private_staging_error)?;
+        std::fs::rename(&compacting, &self.path).map_err(private_staging_error)?;
+        sync_parent_directory(&self.path, DirectorySyncPolicy::Strict)
+            .map_err(private_staging_error)?;
+        let (connection, private_file, file_identity) =
+            open_private_builder_connection(&self.path, self.memory_budget_bytes)?;
+        if file_identity != stable_file_identity(&compacted)? {
+            return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                "lexical artifact staging path changed while its compacted file was installed"
+                    .to_owned(),
+            ));
+        }
+        self.mutation_gate = register_builder_mutation_gate(&connection)?;
+        self.connection = connection;
+        self.private_file = private_file;
+        self.file_identity = file_identity;
+        Ok(())
+    }
+
+    /// Windows refuses to rename onto a path this builder holds open, so the
+    /// file is rewritten in place.
+    #[cfg(windows)]
+    fn rewrite_canonical_layout(
+        &mut self,
+        control: &dyn CodeIndexExecutionControlV1,
+    ) -> Result<(), CodeLexicalArtifactErrorV1> {
+        with_cancellable_sqlite_statement(&self.connection, control, || {
+            self.connection
+                .execute_batch("VACUUM;")
+                .map_err(sqlite_error)
+        })
     }
 
     /// SQLite's file change counter (header offset 24) and version-valid-for
@@ -2033,6 +2097,17 @@ fn staging_initialization_error(
 }
 
 fn initializing_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
+    staging_sibling(path, ".initializing")
+}
+
+/// Named like the staging database's SQLite sidecars, so staging retirement
+/// and retention treat it as part of the same staging family.
+#[cfg(unix)]
+fn compacting_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
+    staging_sibling(path, "-compacting")
+}
+
+fn staging_sibling(path: &Path, suffix: &str) -> Result<PathBuf, CodeLexicalArtifactErrorV1> {
     let mut name = path
         .file_name()
         .ok_or_else(|| {
@@ -2041,7 +2116,7 @@ fn initializing_staging_sibling(path: &Path) -> Result<PathBuf, CodeLexicalArtif
             )
         })?
         .to_os_string();
-    name.push(".initializing");
+    name.push(suffix);
     Ok(path.with_file_name(name))
 }
 

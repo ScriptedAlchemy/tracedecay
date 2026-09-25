@@ -3320,7 +3320,7 @@ fn clear_text_artifact_staging_sidecars(staging_path: &Path) -> std::io::Result<
             "text-artifact staging path has no file name",
         ));
     };
-    for suffix in ["-journal", "-wal", "-shm"] {
+    for suffix in ["-journal", "-wal", "-shm", "-compacting"] {
         let mut sidecar_name = name.to_os_string();
         sidecar_name.push(suffix);
         let sidecar = staging_path.with_file_name(sidecar_name);
@@ -3377,9 +3377,12 @@ mod staging_sidecar_tests {
 
         std::fs::write(&staging, b"staged").expect("fresh staging database");
         std::fs::write(&journal, b"rollback").expect("replant journal");
+        let compacting = root.path().join(".text-artifact-ab.staging-compacting");
+        std::fs::write(&compacting, b"compacted").expect("plant compacted rewrite");
         retire_text_artifact_staging_family(&staging).expect("retire family");
         assert!(!staging.exists());
         assert!(!journal.exists());
+        assert!(!compacting.exists());
 
         std::fs::write(root.path().join(".text-artifact-ab.staging-wal"), b"wal")
             .expect("plant wal");
