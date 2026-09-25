@@ -166,14 +166,15 @@ async fn request_path_with_headers_at(
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
+    // Send head and body in one write. A handler that answers before reading
+    // the body closes with the body segment still unread, and macOS then
+    // resets the connection and discards the response the test reads.
+    let mut bytes = request.into_bytes();
+    bytes.extend_from_slice(body);
     stream
-        .write_all(request.as_bytes())
+        .write_all(&bytes)
         .await
         .expect("write HTTP request");
-    stream
-        .write_all(body)
-        .await
-        .expect("write HTTP request body");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
