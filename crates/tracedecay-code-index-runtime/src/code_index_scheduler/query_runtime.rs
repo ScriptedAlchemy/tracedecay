@@ -36,8 +36,9 @@ use tracedecay_query::retrieval::lexical::{
 use tracedecay_query::retrieval::ports::RetrievalExecutionControl;
 use tracedecay_query::retrieval::{
     AuthorizedQueryFallbackV1, QUERY_EXACT_SCORE_DOMAIN_V1, QUERY_GRAPH_SCORE_DOMAIN_V1,
-    QUERY_LEXICAL_SCORE_DOMAIN_V1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
-    RetrievalPortError, SanitizedRetrievalRequestV1,
+    QUERY_LEXICAL_CALIBRATION_CEILING_MICROS_V1, QUERY_LEXICAL_SCORE_DOMAIN_V1,
+    QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1, RetrievalPortError,
+    SanitizedRetrievalRequestV1,
 };
 
 const QUERY_FALLBACK_PROFILE_ID: &str = "query-fallback";
@@ -249,18 +250,25 @@ fn core_query_policy() -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeM
             RetrieverKind::ExactLiteral,
             QUERY_EXACT_SCORE_DOMAIN_V1,
             1_000_000,
+            1_000_000,
         ),
         (
             RetrieverKind::Lexical,
             QUERY_LEXICAL_SCORE_DOMAIN_V1,
             1_000_000,
+            QUERY_LEXICAL_CALIBRATION_CEILING_MICROS_V1,
         ),
-        (RetrieverKind::Graph, QUERY_GRAPH_SCORE_DOMAIN_V1, 250_000),
+        (
+            RetrieverKind::Graph,
+            QUERY_GRAPH_SCORE_DOMAIN_V1,
+            250_000,
+            1_000_000,
+        ),
     ];
     let mut calibrations = BTreeMap::new();
     let mut score_domain_calibrations = BTreeMap::new();
     let mut weights_micros = BTreeMap::new();
-    for (lane, score_domain, weight_micros) in lanes {
+    for (lane, score_domain, weight_micros, raw_max_micros) in lanes {
         let calibration_profile_id: CalibrationProfileId = fallback_policy_id(&format!(
             "calibration.{}.{QUERY_FALLBACK_PROFILE_ID}",
             lane.as_str()
@@ -273,7 +281,7 @@ fn core_query_policy() -> Result<(FusionProfile, DiversityPolicy), QueryRuntimeM
                 calibration_profile_id,
                 score_domain,
                 raw_min_micros: 0,
-                raw_max_micros: 1_000_000,
+                raw_max_micros,
             },
         );
         weights_micros.insert(lane, weight_micros);

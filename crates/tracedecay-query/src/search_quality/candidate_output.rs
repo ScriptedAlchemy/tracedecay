@@ -888,18 +888,21 @@ pub fn fusion_profile(profile: &ProfileSpecV1) -> Result<FusionProfile, Candidat
         (
             RetrieverKind::ExactLiteral,
             crate::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
+            1_000_000,
         ),
         (
             RetrieverKind::Lexical,
             crate::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            crate::retrieval::QUERY_LEXICAL_CALIBRATION_CEILING_MICROS_V1,
         ),
         (
             RetrieverKind::Graph,
             crate::retrieval::QUERY_GRAPH_SCORE_DOMAIN_V1,
+            1_000_000,
         ),
     ]
     .into_iter()
-    .map(|(lane, domain)| {
+    .map(|(lane, domain, raw_max_micros)| {
         let score_domain = typed_id::<ScoreDomainId>(domain)?;
         Ok((
             score_domain.clone(),
@@ -911,7 +914,7 @@ pub fn fusion_profile(profile: &ProfileSpecV1) -> Result<FusionProfile, Candidat
                 ))?,
                 score_domain,
                 raw_min_micros: 0,
-                raw_max_micros: 1_000_000,
+                raw_max_micros,
             },
         ))
     })
