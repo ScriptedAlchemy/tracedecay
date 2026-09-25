@@ -1759,7 +1759,7 @@ fn pi_lifecycle_installs_diagnoses_sweeps_and_uninstalls_exact_bytes() {
     assert!(
         doctor.contains(&format!(
             "TraceDecay extension deployed at {}",
-            cli.home.path().join(PI_ARTIFACTS[0]).display()
+            agent_dir.join("extensions/tracedecay/index.ts").display()
         )) && doctor.contains("TraceDecay routing skill deployed at"),
         "{doctor}"
     );

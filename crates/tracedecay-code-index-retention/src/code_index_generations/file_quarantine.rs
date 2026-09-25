@@ -416,15 +416,16 @@ mod tests {
         // `FILE_SHARE_DELETE`, so the platform refuses the rebind itself.
         #[cfg(windows)]
         assert_eq!(
-            rebind.expect_err("a held source cannot be moved").raw_os_error(),
+            rebind
+                .expect_err("a held source cannot be moved")
+                .raw_os_error(),
             Some(32)
         );
         #[cfg(not(windows))]
         {
             rebind.expect("move the held source");
             std::fs::create_dir(&fixture.source_path).expect("rebind the source path");
-            std::fs::write(fixture.source_path.join("payload"), b"foreign")
-                .expect("foreign file");
+            std::fs::write(fixture.source_path.join("payload"), b"foreign").expect("foreign file");
         }
 
         fixture

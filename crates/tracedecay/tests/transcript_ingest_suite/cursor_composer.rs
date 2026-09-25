@@ -317,9 +317,12 @@ async fn composer_completed_edit_records_edit_time_and_tool_call_id() {
             "toolCallId": "call_2jug3QnkUS9kwSbiI4oSDy5a",
             "status": "completed",
             "name": "edit_file_v2",
-            "params": format!(
-                "{{\"relativeWorkspacePath\":\"{edited}\",\"noCodeblock\":true,\"cloudAgentEdit\":false}}"
-            ),
+            "params": serde_json::json!({
+                "relativeWorkspacePath": edited,
+                "noCodeblock": true,
+                "cloudAgentEdit": false
+            })
+            .to_string(),
             "result": "{\"diff\":\"...\"}"
         }
     });

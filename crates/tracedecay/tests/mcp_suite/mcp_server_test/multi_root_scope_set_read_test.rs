@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use super::support::{jsonrpc_request, response_with_id, run_client_connection_with_messages};
 
@@ -130,10 +131,8 @@ async fn tracedecay_multi_root_scope_set_read_reports_the_saved_set_and_conceals
         .project_id(&fixture.project_root)
         .await
         .expect("registered project id");
-    let root = fixture
-        .project_root
-        .canonicalize()
-        .expect("canonical registered root");
+    let root =
+        canonical_existing_identity(&fixture.project_root).expect("canonical registered root");
     let root_text = root.to_string_lossy().into_owned();
 
     let responses = run_client_connection_with_messages(
