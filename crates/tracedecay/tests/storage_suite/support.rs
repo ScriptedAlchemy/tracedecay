@@ -9,25 +9,29 @@
 use std::fs::{self, OpenOptions};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-/// FNV-1a hash of everything that can change a template's contents: the
-/// schema-defining sources, the template name, and any builder-specific
-/// fingerprint supplied by the caller (for templates whose contents also
-/// depend on sources outside `tracedecay-runtime-core`'s `db` module, such as
-/// fixture SQL defined in a test file).
-fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
+/// FNV-1a hash of the template name and the running test executable's
+/// identity. Every schema definition the template captures is compiled into
+/// that executable, wherever in the workspace it lives, so a rebuild can never
+/// reuse a template cut from an older schema by this or another checkout.
+fn template_hash(name: &str) -> u64 {
+    let exe = std::env::current_exe().expect("failed to resolve test executable");
+    let metadata = fs::metadata(&exe).expect("failed to stat test executable");
+    let modified = metadata
+        .modified()
+        .expect("test executable has no modification time")
+        .duration_since(UNIX_EPOCH)
+        .expect("test executable modified before the Unix epoch")
+        .as_nanos();
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in include_bytes!("../../../../crates/tracedecay-runtime-core/src/db/migrations.rs")
+    for byte in exe
+        .as_os_str()
+        .as_encoded_bytes()
         .iter()
-        .chain(include_bytes!(
-            "../../../../crates/tracedecay-runtime-core/src/db/connection.rs"
-        ))
-        .chain(include_bytes!(
-            "../../../../crates/tracedecay-runtime-core/src/db/engine/test_support.rs"
-        ))
-        .chain(include_bytes!("../common/mod.rs"))
+        .chain(&metadata.len().to_le_bytes())
+        .chain(&modified.to_le_bytes())
         .chain(name.as_bytes())
-        .chain(builder_fingerprint)
     {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -35,13 +39,10 @@ fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
     hash
 }
 
-pub fn template_db_path(name: &str, builder_fingerprint: &[u8]) -> PathBuf {
+pub fn template_db_path(name: &str) -> PathBuf {
     std::env::temp_dir()
         .join("tracedecay-test-fixtures")
-        .join(format!(
-            "{name}-{:016x}.db",
-            template_hash(name, builder_fingerprint)
-        ))
+        .join(format!("{name}-{:016x}.db", template_hash(name)))
 }
 
 fn template_cache_exists(path: &Path) -> bool {
@@ -49,25 +50,18 @@ fn template_cache_exists(path: &Path) -> bool {
 }
 
 /// Returns the path of the cached template database named `name`, building
-/// it first if this machine has no template for the current schema revision.
-///
-/// `builder_fingerprint` must cover every input to `build` that lives
-/// outside the `tracedecay-runtime-core` `db` module, typically
-/// `include_bytes!` of the defining test file,
-/// so that editing the fixture-building code invalidates the cached
-/// template. Pass `&[]` when `build` depends only on the production schema
-/// code that `template_hash` already covers.
+/// it first if this test executable has no template yet.
 ///
 /// `build` must write a fully checkpointed database (no live WAL) at the
 /// path it is given. Concurrent test processes coordinate through an
 /// exclusive file lock and an atomic rename, so at most one process pays the
 /// build cost.
-pub async fn ensure_template_db<F, Fut>(name: &str, builder_fingerprint: &[u8], build: F) -> PathBuf
+pub async fn ensure_template_db<F, Fut>(name: &str, build: F) -> PathBuf
 where
     F: FnOnce(PathBuf) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let template_path = template_db_path(name, builder_fingerprint);
+    let template_path = template_db_path(name);
     if template_cache_exists(&template_path) {
         return template_path;
     }
@@ -107,7 +101,7 @@ where
 /// Seeds `dest` with an empty latest-schema graph database, the exact file
 /// `Database::initialize` would produce, without paying schema creation.
 pub async fn seed_latest_graph_db(dest: &Path) {
-    let template = ensure_template_db("graph-empty", &[], |path| async move {
+    let template = ensure_template_db("graph-empty", |path| async move {
         // Initialise on a throwaway path, then snapshot the committed schema to
         // `path`. The registered runtime's `checkpoint` follows a bounded WAL
         // policy that no-ops below its soft threshold, so a freshly-created
