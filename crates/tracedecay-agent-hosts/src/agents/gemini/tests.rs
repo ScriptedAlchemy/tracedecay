@@ -248,6 +248,25 @@ fn activation_without_a_staged_source_refuses_before_invoking_the_host() {
     );
 }
 
+/// The lifecycle activates Gemini's canonical set, the lone context-MCP
+/// component, through the component boundary. It must reach the extension
+/// lifecycle, whose refusal here (no staged source, or no `gemini` on PATH)
+/// proves it ran; a silent `Ok` left install to fail verify opaquely.
+#[test]
+fn context_mcp_component_activation_reaches_the_extension_lifecycle() {
+    use crate::agents::host_bundle::HostComponentV1;
+
+    let home = tempfile::tempdir().unwrap();
+
+    GeminiIntegration
+        .activate_deployed_host_component_registration(
+            &[HostComponentV1::ContextMcp],
+            &install_context(home.path(), "/bin/tracedecay"),
+        )
+        .expect_err("an uninstalled extension cannot be reported as activated");
+    assert!(!installed_extension_dir(home.path()).exists());
+}
+
 /// Deactivation is Gemini's own `extensions uninstall`, addressed by the
 /// extension name.
 #[cfg(unix)]
