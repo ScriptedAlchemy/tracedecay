@@ -123,7 +123,6 @@ export function FactCameras({
           viewBox={`0 0 ${layout.width} ${layout.height}`}
           className="block select-none"
           data-testid="fact-constellation-svg"
-          onPointerLeave={() => setHovered(null)}
         >
           <defs>
             <HatchDef id={hatchId} />
@@ -206,6 +205,7 @@ export function FactCameras({
                   setHovered(row.fact.nodeId);
                   onInspect(row.fact.factId);
                 }}
+                onLeave={() => setHovered(null)}
                 onClick={() => onSelect(row.fact.factId)}
               />
             )),
@@ -384,6 +384,7 @@ function Row({
   inspected,
   selected,
   onEnter,
+  onLeave,
   onClick,
 }: {
   fact: SceneFact;
@@ -398,6 +399,7 @@ function Row({
   inspected: boolean;
   selected: boolean;
   onEnter: () => void;
+  onLeave: () => void;
   onClick: () => void;
 }) {
   const { rail } = layout;
@@ -412,6 +414,7 @@ function Row({
       opacity={dimmed ? 0.3 : 1}
       className="cursor-pointer transition-opacity duration-[var(--dur-state)]"
       onPointerMove={onEnter}
+      onPointerLeave={onLeave}
       onClick={onClick}
     >
       <rect x={x + 1} y={top + 1} width={w - 2} height={CAMERA_ROW_H - 2} fill={inspected ? 'var(--raw-surface-3)' : 'transparent'} fillOpacity={0.6} />

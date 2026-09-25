@@ -23,6 +23,7 @@ export interface CardWiring {
   readonly onFocus: () => void;
   readonly onBlur: () => void;
   readonly onPointerEnter: () => void;
+  readonly onPointerLeave: () => void;
   readonly onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
 }
 
