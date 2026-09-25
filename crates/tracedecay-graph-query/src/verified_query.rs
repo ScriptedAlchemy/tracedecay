@@ -23,7 +23,7 @@ use tracedecay_domain::{
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::path_safety::plain_host_path;
 
-use super::queries::GraphQueryManager;
+use super::queries::{FileDependentsV1, GraphQueryManager};
 use super::source_authority::{
     AdmittedSourceAuthority, graph_source_scope_mismatch, graph_source_unbound,
 };
@@ -264,7 +264,7 @@ impl VerifiedGraphQuery {
     }
 
     #[hotpath::measure(label = "usecases.graph.verified.file_dependents", future = true)]
-    pub async fn get_file_dependents(&self, file_path: &str) -> Result<Vec<String>> {
+    pub async fn get_file_dependents(&self, file_path: &str) -> Result<FileDependentsV1> {
         self.await_bound(self.manager().get_file_dependents(file_path))
             .await
     }

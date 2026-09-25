@@ -1,6 +1,7 @@
 #![cfg(feature = "test-transport")]
 
 mod callers_coverage;
+mod typescript_module_resolution;
 
 use crate::support::*;
 use serde_json::{Value, json};

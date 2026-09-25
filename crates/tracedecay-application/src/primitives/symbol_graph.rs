@@ -602,10 +602,13 @@ where
                     Err(()) => return failed(context, "caller traversal failed"),
                 };
                 let gaps = if unsupported {
+                    // Unresolved Rust receiver calls and TypeScript imports the
+                    // seal could not bind share one disclosure; the gap is the
+                    // call site, not a language.
                     vec![PrimitiveSupportGap {
                         provider: Some("code_index".to_owned()),
-                        language: Some("rust".to_owned()),
-                        reason: "Exact target evidence is unavailable for matching method calls"
+                        language: None,
+                        reason: "Exact target evidence is unavailable for matching call sites"
                             .to_owned(),
                     }]
                 } else {

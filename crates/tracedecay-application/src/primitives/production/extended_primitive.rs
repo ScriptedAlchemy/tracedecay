@@ -31,8 +31,9 @@ use super::super::runtime::{
 use super::super::symbol_graph::{read_symbol_source_body, symbol_record};
 use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
-    all_code_graph_symbols, completed, diagnostics_result, diagnostics_unavailable,
-    evidence_unavailable, failed, graph_read_outcome, now_observed, open_code_graph,
+    all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
+    diagnostics_unavailable, evidence_unavailable, failed, graph_read_outcome, now_observed,
+    open_code_graph,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
@@ -512,7 +513,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     }
                 };
                 let query = GraphQueryManager::new(&reader, cancellation);
-                let Ok(dependent_files) = query.get_file_dependents(&request.file).await else {
+                let Ok(dependents) = query.get_file_dependents(&request.file).await else {
                     return evidence_unavailable(
                         EvidenceDomain::Graph,
                         now_observed(),
@@ -520,14 +521,15 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         0,
                     );
                 };
-                completed(
-                    FileDependentsPrimitiveResult {
-                        file: request.file.clone(),
-                        dependent_files,
-                    },
-                    EvidenceDomain::Graph,
-                    now_observed(),
-                )
+                let payload = FileDependentsPrimitiveResult {
+                    file: request.file.clone(),
+                    dependent_files: dependents.files,
+                };
+                if dependents.unresolved_callers {
+                    completed_unsupported(payload, EvidenceDomain::Graph, now_observed())
+                } else {
+                    completed(payload, EvidenceDomain::Graph, now_observed())
+                }
             },
             label = "usecases.primitives.file_dependents"
         ))
