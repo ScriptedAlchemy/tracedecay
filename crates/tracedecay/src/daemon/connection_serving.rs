@@ -7,7 +7,7 @@
 use super::*;
 use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
-use tracedecay_daemon_service::shutdown::DaemonLifecycle;
+use tracedecay_daemon_service::shutdown::{DaemonActivity, DaemonLifecycle};
 use tracedecay_daemon_service::{DaemonInvocationService, DaemonLspSessionAccess, Lease};
 use tracedecay_mcp::BrokerSelectedResponseLease;
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -111,6 +111,7 @@ pub(crate) async fn serve_routed_rmcp_connection(
     initialize_route: Option<InitializeRouteMetadata>,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
+    activity: Option<DaemonActivity>,
 ) -> Result<()> {
     serve_routed_rmcp_connection_inner(
         server,
@@ -120,6 +121,7 @@ pub(crate) async fn serve_routed_rmcp_connection(
         initialize_route,
         timings_enabled,
         lifecycle,
+        activity,
     )
     .await
 }
@@ -132,6 +134,7 @@ fn serve_routed_rmcp_connection_inner(
     initialize_route: Option<InitializeRouteMetadata>,
     timings_enabled: bool,
     lifecycle: &DaemonLifecycle,
+    activity: Option<DaemonActivity>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
     // Erase the deeply nested rmcp service future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
@@ -149,7 +152,7 @@ fn serve_routed_rmcp_connection_inner(
         }
         let delivery_settlement_recorder = server.delivery_settlement_recorder.clone();
         let adapter = RmcpConnectionAdapter::new(
-            ProductionMcpConnectionContext::new(server),
+            ProductionMcpConnectionContext::with_activity(server, activity),
             timings_enabled,
             initialize_response_decorator,
             delivery_settlement_recorder,
@@ -1522,7 +1525,6 @@ fn serve_broker_socket_client_inner(
                     }
                 })
                 .await?;
-                drop(setup_activity);
                 let Some((server, pending_project_open_lines)) = project_owner else {
                     return Ok(());
                 };
@@ -1560,12 +1562,15 @@ fn serve_broker_socket_client_inner(
                             initialize_route,
                             handshake.timings,
                             &engine.lifecycle,
+                            Some(setup_activity),
                         ))
                         .await?;
                     } else {
+                        drop(setup_activity);
                         refuse_sessionless_request(&mut transport, &first_request).await?;
                     }
                 } else {
+                    drop(setup_activity);
                     let mut transport = ReplayTransport::new(transport);
                     transport.push_replay(first_request.into_raw())?;
                     for line in pending_project_open_lines {
@@ -2014,7 +2019,6 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 return Ok(());
             }
         };
-        drop(setup_activity);
         let (server, pending_lines) = server;
         if opens_rmcp_session(first_request.parsed()) {
             #[cfg(test)]
@@ -2029,9 +2033,11 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
                 initialize_route,
                 handshake.timings,
                 lifecycle,
+                Some(setup_activity),
             ))
             .await?;
         } else {
+            drop(setup_activity);
             refuse_sessionless_request(&mut transport, &first_request).await?;
         }
     } else {
