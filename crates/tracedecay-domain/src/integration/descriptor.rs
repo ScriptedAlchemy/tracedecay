@@ -203,7 +203,8 @@ impl HostKindV1 {
             | Self::Vibe
             | Self::ClineFamily
             | Self::Gemini
-            | Self::Copilot => None,
+            | Self::Copilot
+            | Self::FactoryDroid => None,
             Self::Cline => Some(NativeHostIdentityV1::Cline),
             Self::RooCode => Some(NativeHostIdentityV1::RooCode),
             Self::Kilo => Some(NativeHostIdentityV1::Kilo),
@@ -421,6 +422,18 @@ pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
             "pi",
             Native(NativeHostIdentityV1::Pi),
             vec![Core, Agent],
+            ManagedEmbedded,
+            Managed,
+            HostProjectRegistrationPathV1::Unavailable,
+        ),
+        // Factory Droid's `droid mcp add|remove` registry owns the MCP
+        // document; TraceDecay drives the commands and owns only the
+        // receipt-backed component descriptor, Copilot's shape exactly.
+        HostKindV1::FactoryDroid => (
+            "droid",
+            "factory-droid",
+            NotApplicable,
+            vec![ContextMcp],
             ManagedEmbedded,
             Managed,
             HostProjectRegistrationPathV1::Unavailable,

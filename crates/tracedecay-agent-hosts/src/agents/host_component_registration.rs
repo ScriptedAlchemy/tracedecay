@@ -172,6 +172,10 @@ impl CatalogHostComponentRegistrationAuthority {
             // writes its own registry, so the deployed bytes alone are not the
             // lifecycle.
             || component_set.host == crate::agents::host_bundle::HostKindV1::Copilot
+            // Factory Droid is Copilot's shape exactly: `droid mcp add`
+            // writes the host-owned `~/.factory/mcp.json`; the deployed
+            // descriptor alone is not the lifecycle.
+            || component_set.host == crate::agents::host_bundle::HostKindV1::FactoryDroid
             || component_set.host == crate::agents::host_bundle::HostKindV1::Cline
             || component_set.host == crate::agents::host_bundle::HostKindV1::RooCode
             || component_set.host == crate::agents::host_bundle::HostKindV1::Kilo

@@ -49,10 +49,11 @@ pub enum HostKindV1 {
     Antigravity,
     Vibe,
     Pi,
+    FactoryDroid,
 }
 
 impl HostKindV1 {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::ClaudeCode,
         Self::CursorDesktop,
         Self::CursorCloud,
@@ -72,6 +73,7 @@ impl HostKindV1 {
         Self::Antigravity,
         Self::Vibe,
         Self::Pi,
+        Self::FactoryDroid,
     ];
 
     /// Project a stock host surface into the bounded host observation catalog
@@ -96,7 +98,8 @@ impl HostKindV1 {
             | Self::OpenCode
             | Self::Gemini
             | Self::Copilot
-            | Self::Pi => None,
+            | Self::Pi
+            | Self::FactoryDroid => None,
         }
     }
 }
@@ -314,6 +317,18 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostApiAbsent),
             Unavailable(CheckedInEvidenceMissing),
             Unavailable(HostRegistrationUnsupported),
+            Supported,
+        ),
+        // Factory Droid's adopted lifecycle drives exactly one route:
+        // `droid mcp add|remove`, which owns `~/.factory/mcp.json`. Droid
+        // documents a hooks surface (`~/.factory/hooks.json`), but no
+        // checked-in native Droid event fixture proves that route yet, so
+        // `Hooks` stays evidence-gated rather than claimed.
+        HostKindV1::FactoryDroid => (
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostApiAbsent),
+            Unavailable(CheckedInEvidenceMissing),
+            Supported,
             Supported,
         ),
     };
@@ -559,6 +574,7 @@ impl HostIntegrationCatalogV1 {
             HostKindV1::Antigravity => &STOCK_HOST_CAPABILITIES[16],
             HostKindV1::Vibe => &STOCK_HOST_CAPABILITIES[17],
             HostKindV1::Pi => &STOCK_HOST_CAPABILITIES[18],
+            HostKindV1::FactoryDroid => &STOCK_HOST_CAPABILITIES[19],
         }
     }
 
@@ -649,7 +665,7 @@ impl HostIntegrationCatalogV1 {
     }
 }
 
-const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 19] = [
+const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 20] = [
     canonical_stock_host_capabilities(HostKindV1::ClaudeCode),
     canonical_stock_host_capabilities(HostKindV1::CursorDesktop),
     canonical_stock_host_capabilities(HostKindV1::CursorCloud),
@@ -669,6 +685,7 @@ const STOCK_HOST_CAPABILITIES: [[HostCapabilityRecordV1; 5]; 19] = [
     canonical_stock_host_capabilities(HostKindV1::Antigravity),
     canonical_stock_host_capabilities(HostKindV1::Vibe),
     canonical_stock_host_capabilities(HostKindV1::Pi),
+    canonical_stock_host_capabilities(HostKindV1::FactoryDroid),
 ];
 
 #[derive(Serialize)]

@@ -40,6 +40,7 @@ pub const RECEIPT_BACKED_HOST_KINDS: [HostKindV1; 17] = [
     HostKindV1::RooCode,
     HostKindV1::Kilo,
     HostKindV1::Pi,
+    HostKindV1::FactoryDroid,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +135,9 @@ pub fn unsupported_host_component_set_reason(
         | HostKindV1::RooCode
         | HostKindV1::Kilo
         | HostKindV1::Pi => None,
+        // Factory Droid's `droid mcp add|remove` registry is its whole
+        // integration surface.
+        | HostKindV1::FactoryDroid => None,
         // Cursor cloud exposes no host registration API to install into. Its
         // presence in the host enum and capability catalog is not support
         // evidence, so it stays typed unavailable until a real component set
@@ -184,7 +188,8 @@ pub fn default_components(host: HostKindV1) -> Vec<HostComponentV1> {
         | HostKindV1::Copilot
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo => {
+        | HostKindV1::Kilo
+        | HostKindV1::FactoryDroid => {
             vec![HostComponentV1::ContextMcp]
         }
         HostKindV1::Pi => vec![HostComponentV1::Core, HostComponentV1::Agent],
@@ -699,6 +704,21 @@ fn component_assets(
             vec![(
                 "context-mcp.json",
                 r#"{"host":"kilo","registration":"../kilo.jsonc","registrar":"tracedecay managed merge","route":"mcp","server":{"command":["__TRACEDECAY_BIN__","serve"]}}"#,
+            )],
+        ),
+        // Factory Droid's `~/.factory/mcp.json` is written by
+        // `droid mcp add`, never by TraceDecay, so it must never be a managed
+        // artifact: owning it here would put the transaction's own write in
+        // the middle of the host command's registry merge, the exact failure
+        // Kiro's and Copilot's comments record. Own a receipt descriptor
+        // under `.factory/tracedecay` instead. It names the registry document
+        // the host CLI owns so a receipt reader can find it without the
+        // catalog ever claiming to write it.
+        (HostKindV1::FactoryDroid, HostComponentV1::ContextMcp) => (
+            ".factory/tracedecay",
+            vec![(
+                "context-mcp.json",
+                r#"{"host":"droid","registration":"mcp.json","registrar":"droid mcp add|remove","route":"mcp","server":{"command":"__TRACEDECAY_BIN__","args":["serve"],"type":"stdio"}}"#,
             )],
         ),
         (HostKindV1::OpenCode, HostComponentV1::Agent) => (

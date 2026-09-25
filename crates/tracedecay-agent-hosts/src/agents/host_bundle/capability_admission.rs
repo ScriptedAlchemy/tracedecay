@@ -70,6 +70,11 @@ pub fn require_component_capabilities(
         // CLI capability only.
         (HostKindV1::Pi, Core) => &[Cli],
         (HostKindV1::Pi, Agent) => &[Cli],
+        // Factory Droid's adopted lifecycle is its MCP registration and
+        // nothing else. A Core component would install the hook surface,
+        // which stays evidence-gated, so requiring `Hooks` refuses it against
+        // the same capability matrix every other host is judged by.
+        (HostKindV1::FactoryDroid, Core) => &[Hooks, Mcp],
         (_, ContextMcp | OperatorMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],

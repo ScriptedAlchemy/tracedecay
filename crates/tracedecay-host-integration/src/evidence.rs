@@ -189,6 +189,16 @@ pub(crate) const HOST_REGISTRATIONS: &[HostRegistrationDescriptor] = host_regist
         Cli => "plugin/pi/index.ts",
         Hook => "plugin/pi/index.ts",
     }
+    // Factory Droid's adopted lifecycle carries exactly one registration
+    // route: the `mcpServers.tracedecay` entry that `droid mcp add` writes
+    // into the host-owned `~/.factory/mcp.json`. Droid documents a hooks
+    // surface, but no checked-in native Droid fixture proves that route yet,
+    // so the hook row cites the host contract instead.
+    FactoryDroid {
+        Cli => "src/tool_command.rs",
+        Hook => "https://docs.factory.ai/harness/hooks",
+        Mcp => "src/agents/droid.rs",
+    }
 };
 
 /// Registration routes and their evidence for one stock host, used by
@@ -429,7 +439,8 @@ pub fn stock_host_native_fixture_evidence_from_embedded_assets(
         | HostKindV1::Kilo
         | HostKindV1::Gemini
         | HostKindV1::Copilot
-        | HostKindV1::Pi => return None,
+        | HostKindV1::Pi
+        | HostKindV1::FactoryDroid => return None,
     };
     let bytes = assets
         .native_fixtures
