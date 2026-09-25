@@ -577,7 +577,7 @@ fn tool_json(response: Value) -> Value {
 
 fn directory(path: &Path) -> PathBuf {
     fs::create_dir_all(path).expect("create project directory");
-    fs::canonicalize(path).expect("canonicalize project directory")
+    canonical_existing_identity(path).expect("canonicalize project directory")
 }
 
 fn git_repository(path: &Path) -> PathBuf {
