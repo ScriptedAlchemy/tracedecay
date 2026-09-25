@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::process::Command;
 use std::sync::Arc;
 #[cfg(unix)]
@@ -53,7 +52,6 @@ mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;
 
-#[cfg(unix)]
 fn git(root: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
