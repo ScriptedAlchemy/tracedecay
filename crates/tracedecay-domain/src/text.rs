@@ -25,6 +25,61 @@ pub fn fold_control_characters(value: &str) -> String {
         .collect()
 }
 
+/// Replace `//` and `/* … */` comments in JSON-with-comments (`tsconfig.json`,
+/// editor settings) with spaces, leaving string contents and every newline in
+/// place.
+///
+/// The output has the same byte length and line structure as the input, so a
+/// strict JSON parser accepts it and any value it locates is at the same
+/// offset in the original text.
+#[must_use]
+pub fn blank_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(current) = chars.next() {
+        match current {
+            '"' => {
+                out.push(current);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    match inner {
+                        '\\' => {
+                            if let Some(escaped) = chars.next() {
+                                out.push(escaped);
+                            }
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                out.push(' ');
+                for inner in chars.by_ref() {
+                    if inner == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                    out.push(' ');
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                out.push(' ');
+                let mut previous = '\0';
+                for inner in chars.by_ref() {
+                    out.push(if inner == '\n' { '\n' } else { ' ' });
+                    if previous == '*' && inner == '/' {
+                        break;
+                    }
+                    previous = inner;
+                }
+            }
+            _ => out.push(current),
+        }
+    }
+    out
+}
+
 /// Replace `\` with `/`.
 ///
 /// Trailing separators stay. `\` becomes `/`, `foo\` becomes `foo/`, and
@@ -69,8 +124,29 @@ pub fn utf8_prefix_at_or_before(text: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        collapse_whitespace, fold_control_characters, forward_slash_text, utf8_prefix_at_or_before,
+        blank_json_comments, collapse_whitespace, fold_control_characters, forward_slash_text,
+        utf8_prefix_at_or_before,
     };
+
+    #[test]
+    fn json_comments_become_spaces_and_keep_offsets_and_strings() {
+        let text = "{\n // a\n \"url\": \"http://x/y\", /* b\n c */ \"n\": 1\n}";
+        let blanked = blank_json_comments(text);
+        assert_eq!(blanked.len(), text.len());
+        assert_eq!(blanked.matches('\n').count(), text.matches('\n').count());
+        assert_eq!(
+            blanked,
+            "{\n     \n \"url\": \"http://x/y\",     \n      \"n\": 1\n}"
+        );
+        assert_eq!(
+            blank_json_comments("\"//not a comment\""),
+            "\"//not a comment\""
+        );
+        assert_eq!(
+            blank_json_comments("\"esc\\\" // still\""),
+            "\"esc\\\" // still\""
+        );
+    }
 
     #[test]
     fn control_characters_become_spaces_without_trimming() {

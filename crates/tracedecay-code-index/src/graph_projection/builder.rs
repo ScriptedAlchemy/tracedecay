@@ -111,6 +111,10 @@ pub fn build_published_code_graph_manifest_checked(
             unresolved_calls.push(reference.clone());
         }
     }
+    // A TypeScript call whose import names project code the seal could not
+    // bind is the same kind of disclosed gap as an unresolved Rust receiver.
+    check()?;
+    unresolved_calls.extend(generation.unresolved_typescript_import_calls());
     unresolved_calls.sort();
     unresolved_calls.dedup();
     let manifest = Arc::new(build_code_graph_manifest_inputs_checked(

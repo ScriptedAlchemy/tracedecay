@@ -382,8 +382,8 @@ pub use session_derived::{
 };
 pub use source_path_policy::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
 pub use text::{
-    collapse_whitespace, fold_control_characters, forward_slash_path, forward_slash_text,
-    utf8_prefix_at_or_before,
+    blank_json_comments, collapse_whitespace, fold_control_characters, forward_slash_path,
+    forward_slash_text, utf8_prefix_at_or_before,
 };
 pub use work::{RuntimeEvidenceRef, WorkAuthority, WorkContractError, WorkVersion};
 pub use work_duplicate_adjudication::{

@@ -1,0 +1,9 @@
+{
+  // JSON with comments is what tsconfig files are in practice.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "paths": {
+      "~/*": ["./src/*"]
+    }
+  }
+}
