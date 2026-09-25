@@ -41,10 +41,14 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ProjectId, ProviderId, RefId, RepositoryId, SessionId, SourceSpan,
     SymbolOccurrenceId, UtcMicros, WorktreeId,
 };
+use tracedecay_global_db::ParseOffset;
 use tracedecay_mcp::handlers::dashboard_delivery::DashboardDeliveryReadAdapter;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::dashboard_api_support::*;
+use tracedecay_sessions::runtime::git_correlation::{
+    DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
+};
 
 const DELIVERY_HTTP_ADMISSION_MATCHED_PR: &str = "42";
 const DELIVERY_HTTP_ADMISSION_UNMATCHED_PR: &str = "99";
@@ -588,6 +592,183 @@ fn delivery_overview_serves_real_git_reads_and_typed_unmounted_authority() {
         }
 
         fixture.server.stop();
+    });
+}
+
+fn agent_usage_session(
+    project_key: &str,
+    project_path: &Path,
+    session_id: &str,
+    agent_id: Option<&str>,
+) -> SessionRecord {
+    SessionRecord {
+        provider: "codex".to_string(),
+        session_id: session_id.to_string(),
+        project_key: project_key.to_string(),
+        project_path: project_path.display().to_string(),
+        title: Some(format!("Agent usage fixture {session_id}")),
+        started_at: Some(1_760_000_000),
+        ended_at: None,
+        transcript_path: None,
+        metadata_json: None,
+        parent_session_id: None,
+        is_subagent: agent_id.is_some(),
+        agent_id: agent_id.map(str::to_string),
+        parent_tool_use_id: None,
+    }
+}
+
+#[test]
+fn delivery_overview_counts_agent_tool_calls_for_sessions_on_the_live_branch() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let project_root = fixture.project_root.clone();
+        write_file(&project_root.join("src/lib.rs"), "pub fn agents() {}\n");
+        commit_all(&project_root, "agent usage fixture");
+        git(&project_root, &["branch", "-M", "feature/agents"]);
+        let agent = http_agent();
+        let overview_url = format!("{}/api/delivery/overview", fixture.base_url);
+
+        // No span has been recorded, so the correlation index cannot place any
+        // session on the branch: that is an unpublished authority, not zero.
+        let (status, body) = get_json(&agent, &overview_url);
+        assert_eq!(status, 200, "{body}");
+        let usage = &body["payload"]["agent_usage"];
+        assert_eq!(usage["state"], "not_published", "{body}");
+        assert_eq!(usage["required_authority"], "session-Git correlation index");
+
+        let project_key = fixture.host_runtime.project_id().as_str().to_string();
+        let sessions = [
+            agent_usage_session(&project_key, &project_root, "planner-1", Some("planner")),
+            agent_usage_session(&project_key, &project_root, "planner-2", Some("planner")),
+            agent_usage_session(&project_key, &project_root, "unlabeled-1", None),
+            // On another branch of this project.
+            agent_usage_session(&project_key, &project_root, "main-1", Some("planner")),
+            // On the same branch name in another project.
+            agent_usage_session(
+                "other-project",
+                Path::new("/elsewhere"),
+                "other-1",
+                Some("planner"),
+            ),
+        ];
+        for session in &sessions {
+            assert!(
+                fixture
+                    .host_runtime
+                    .upsert_session_for_test(HostAdmissionScope::Project, session)
+                    .await
+                    .expect("seed agent usage session")
+            );
+        }
+        let tool_rows = [
+            ("planner-1", "tool_call", 3),
+            ("planner-1", "file_edit", 1),
+            ("planner-1", "chat", 2),
+            ("planner-2", "tool_call", 1),
+            ("unlabeled-1", "tool_call", 2),
+            ("main-1", "tool_call", 7),
+            ("other-1", "tool_call", 11),
+        ];
+        for session in &sessions {
+            let messages: Vec<SessionMessageRecord> = tool_rows
+                .iter()
+                .filter(|(id, _, _)| *id == session.session_id)
+                .flat_map(|(id, kind, count)| (0..*count).map(move |n| (*id, *kind, n)))
+                .enumerate()
+                .map(|(ordinal, (id, kind, n))| {
+                    let message_id = format!("{id}-{kind}-{n}");
+                    MessageRecordBuilder::new(
+                        "codex",
+                        &message_id,
+                        id,
+                        "assistant",
+                        i64::try_from(ordinal).unwrap(),
+                        "fixture message",
+                        kind,
+                    )
+                    .with_timestamp(Some(1_760_000_010))
+                    .with_tool_names((kind != "chat").then_some("Bash"))
+                    .build()
+                })
+                .collect();
+            fixture
+                .host_runtime
+                .upsert_transcript_batch_for_test(
+                    HostAdmissionScope::Project,
+                    session,
+                    &messages,
+                    &format!("agent-usage-fixture:{}", session.session_id),
+                    ParseOffset::default(),
+                )
+                .await
+                .expect("seed agent usage transcript");
+        }
+        for (session_id, branch) in [
+            ("planner-1", "feature/agents"),
+            ("planner-2", "feature/agents"),
+            ("unlabeled-1", "feature/agents"),
+            ("main-1", "main"),
+            ("other-1", "feature/agents"),
+        ] {
+            fixture
+                .host_runtime
+                .record_project_span_for_test(
+                    &SpanObservation {
+                        provider: "codex".to_string(),
+                        session_id: session_id.to_string(),
+                        thread_id: None,
+                        branch: Some(branch.to_string()),
+                        worktree: project_root.display().to_string(),
+                        ts: 1_760_000_020,
+                        source: SpanSource::Ingest,
+                    },
+                    DEFAULT_SPAN_MERGE_GAP_SECS,
+                )
+                .await
+                .expect("record agent usage branch span");
+        }
+
+        let (status, body) = get_json(&agent, &overview_url);
+        assert_eq!(status, 200, "{body}");
+        let usage = &body["payload"]["agent_usage"];
+        let value = &usage["value"];
+        assert_eq!(value["branch"], "feature/agents", "{body}");
+        assert_eq!(
+            value["sessions"], 3,
+            "only this project's branch sessions: {body}"
+        );
+        assert_eq!(value["truncated"], false);
+        let agents = value["agents"].as_array().expect("agent rows");
+        assert_eq!(agents.len(), 2, "{body}");
+        let planner = agents
+            .iter()
+            .find(|row| row["agent"] == "planner")
+            .unwrap_or_else(|| panic!("planner row: {body}"));
+        assert_eq!(planner["provider"], "codex");
+        assert_eq!(planner["sessions"], 2);
+        assert_eq!(
+            planner["tool_calls"], 5,
+            "tool calls and file edits, not chat"
+        );
+        let unlabeled = agents
+            .iter()
+            .find(|row| row["agent"].is_null())
+            .unwrap_or_else(|| panic!("unlabeled row: {body}"));
+        assert_eq!(unlabeled["tool_calls"], 2);
+        // No provider usage was observed for these sessions; the rows say so
+        // instead of reporting zero tokens.
+        for row in agents {
+            assert_eq!(row["sessions_with_usage"], 0, "{body}");
+            assert_eq!(row["usage_complete"], false);
+            assert!(row["counters"]["total_tokens"].is_null(), "{body}");
+        }
+        assert_ne!(value["usage_coverage"], "complete", "{body}");
+        assert_eq!(usage["state"], "partial", "{body}");
     });
 }
 
