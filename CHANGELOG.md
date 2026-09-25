@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.53](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.52...v1.0.0-beta.53) (2026-09-25)
+
+
+### Bug Fixes
+
+* **code-index:** compute the clone census off the status path ([#2017](https://github.com/ScriptedAlchemy/tracedecay/issues/2017)) ([7cf1a4f](https://github.com/ScriptedAlchemy/tracedecay/commit/7cf1a4fff10541d7a91b167ca1b60a0b75d02df5)), closes [#2016](https://github.com/ScriptedAlchemy/tracedecay/issues/2016)
+* **code-index:** stop copying test attribution per ready query ([#2011](https://github.com/ScriptedAlchemy/tracedecay/issues/2011)) ([70c91ca](https://github.com/ScriptedAlchemy/tracedecay/commit/70c91ca9415b4fa4a732dd1399ed649a90f6ef33)), closes [#2001](https://github.com/ScriptedAlchemy/tracedecay/issues/2001)
+* **daemon:** deliver dropped hooks; compact artifact in one write ([#2014](https://github.com/ScriptedAlchemy/tracedecay/issues/2014)) ([16a8914](https://github.com/ScriptedAlchemy/tracedecay/commit/16a891499444a0fbe0089650e1f025ab7c8e6e2d)), closes [#1226](https://github.com/ScriptedAlchemy/tracedecay/issues/1226)
+* **graph-db:** open each serving graph once, never on the read path ([#2015](https://github.com/ScriptedAlchemy/tracedecay/issues/2015)) ([05221f4](https://github.com/ScriptedAlchemy/tracedecay/commit/05221f4232dff3aa6498a0dd8a2c3cbfcbb3cbb0)), closes [#2012](https://github.com/ScriptedAlchemy/tracedecay/issues/2012)
+* **test:** repair full-lane isolation and stale failures ([#2009](https://github.com/ScriptedAlchemy/tracedecay/issues/2009)) ([2e963c5](https://github.com/ScriptedAlchemy/tracedecay/commit/2e963c56cb533e3cb5b5a4d3bc180740c78c1570))
+* **test:** stop two fixtures from hanging until the slow-timeout ([#2007](https://github.com/ScriptedAlchemy/tracedecay/issues/2007)) ([d0bad63](https://github.com/ScriptedAlchemy/tracedecay/commit/d0bad630ab1a9e6e31518746883828b8b479a584)), closes [#2005](https://github.com/ScriptedAlchemy/tracedecay/issues/2005)
+* **update:** request JSON from the post-update profile probe ([#2010](https://github.com/ScriptedAlchemy/tracedecay/issues/2010)) ([0438ed9](https://github.com/ScriptedAlchemy/tracedecay/commit/0438ed9a03cbeac772b48943b664108d20c58d35))
+
 ## [1.0.0-beta.52](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.51...v1.0.0-beta.52) (2026-09-25)
 
 

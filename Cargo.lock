@@ -5372,7 +5372,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.52"
+version = "1.0.0-beta.53"
 dependencies = [
  "axum",
  "constant_time_eq",
@@ -5640,7 +5640,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.52"
+version = "1.0.0-beta.53"
 dependencies = [
  "axum",
  "clap",
@@ -6390,7 +6390,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.52"
+version = "1.0.0-beta.53"
 dependencies = [
  "hotpath",
  "rusqlite",
