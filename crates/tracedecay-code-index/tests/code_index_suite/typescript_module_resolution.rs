@@ -363,6 +363,60 @@ fn test_titles_and_out_of_scope_helpers_do_not_shadow_imports() {
 }
 
 #[test]
+fn default_and_namespace_imports_bind_every_call_site() {
+    let generation = published_fixture();
+    let defaults = "apps/web/src/consumers.ts::consumeDefaults".to_owned();
+    let namespaces = "apps/web/src/consumers.ts::consumeNamespaces".to_owned();
+
+    // Default imports: `export default function` (directly and through
+    // `relay.ts`, which default-exports its own default import of it),
+    // `export default <name>`, `export { impl as default }`, and
+    // `export { default as welcome } from` reached both by name and as a
+    // namespace member of the barrel.
+    for (target, expected) in [
+        ("apps/web/src/defaults/greet.ts::greet", 2),
+        ("apps/web/src/defaults/farewell.ts::farewell", 1),
+        ("apps/web/src/defaults/aliased.ts::aliasedImpl", 1),
+        ("apps/web/src/defaults/welcome.ts::welcome", 2),
+    ] {
+        assert_eq!(
+            resolved_callers(&generation, &symbol(&generation, target)),
+            BTreeMap::from([(defaults.clone(), expected)]),
+            "{target}"
+        );
+    }
+
+    // Namespace members: a relative `import * as`, a nested `export * as`
+    // namespace behind a workspace package, and a named import of that
+    // namespace.
+    for target in [
+        "apps/web/src/tools.ts::sharpen",
+        "packages/shared/src/strings.ts::upper",
+        "packages/shared/src/strings.ts::lower",
+    ] {
+        assert_eq!(
+            resolved_callers(&generation, &symbol(&generation, target)),
+            BTreeMap::from([(namespaces.clone(), 1)]),
+            "{target}"
+        );
+    }
+
+    // `export * from` never forwards `default`, a namespace without the
+    // member binds nothing, and a member of an external namespace is not
+    // bound to the same-named project decoy.
+    for target in [
+        "packages/shared/src/defaulted.ts::defaulted",
+        "apps/web/src/decoys.ts::absentMember",
+        "apps/web/src/decoys.ts::useState",
+    ] {
+        assert!(
+            resolved_callers(&generation, &symbol(&generation, target)).is_empty(),
+            "{target} binds nothing"
+        );
+    }
+}
+
+#[test]
 fn file_dependents_list_every_importing_file_and_disclose_unbound_imports() {
     let generation = published_fixture();
     let reader = reader(&generation);
@@ -401,7 +455,14 @@ fn file_dependents_list_every_importing_file_and_disclose_unbound_imports() {
         unresolved,
         "unbound project imports must surface as a coverage gap"
     );
-    for (name, expected) in [("missing", true), ("gone", true), ("useState", false)] {
+    // `consumers.ts` adds a namespace without the member (`absentMember`) and
+    // an external namespace member (`React.useState`).
+    for (name, expected) in [
+        ("missing", true),
+        ("gone", true),
+        ("absentMember", true),
+        ("useState", false),
+    ] {
         let target = symbol(&generation, &format!("apps/web/src/decoys.ts::{name}"));
         assert_eq!(
             reader
@@ -411,6 +472,26 @@ fn file_dependents_list_every_importing_file_and_disclose_unbound_imports() {
             "{name}"
         );
     }
+
+    for file in [
+        "apps/web/src/defaults/welcome.ts",
+        "apps/web/src/tools.ts",
+        "packages/shared/src/strings.ts",
+    ] {
+        let (dependents, unresolved) = file_dependents(&reader, file);
+        assert_eq!(
+            dependents,
+            BTreeSet::from(["apps/web/src/consumers.ts".to_owned()]),
+            "{file}"
+        );
+        assert!(!unresolved, "{file}");
+    }
+
+    // A default import through a barrel's `export *` names project code that
+    // does not export it: no dependent, disclosed as a gap.
+    let (dependents, unresolved) = file_dependents(&reader, "packages/shared/src/defaulted.ts");
+    assert!(dependents.is_empty());
+    assert!(unresolved);
 }
 
 #[test]
@@ -422,5 +503,20 @@ fn sealed_replay_recomputes_identical_typescript_edges() {
         restored.unresolved_typescript_import_calls(),
         generation.unresolved_typescript_import_calls()
     );
-    assert_eq!(generation.unresolved_typescript_import_calls().len(), 3);
+    let mut unresolved = generation
+        .unresolved_typescript_import_calls()
+        .into_iter()
+        .map(|reference| reference.reference_name)
+        .collect::<Vec<_>>();
+    unresolved.sort();
+    assert_eq!(
+        unresolved,
+        [
+            "defaulted",
+            "gone",
+            "missing",
+            "relayedMissing",
+            "tools.absentMember"
+        ]
+    );
 }

@@ -6,6 +6,7 @@ use rayon::prelude::*;
 
 use crate::chunks::{
     CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1, published_symbol_spans,
+    typescript_family_path,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::CodeIndexPublishedGenerationV1;
@@ -89,8 +90,13 @@ pub fn build_published_code_graph_manifest_checked(
         }
     }
     let mut unresolved_calls = Vec::new();
-    for (_, reference) in generation.unresolved_references() {
+    for (logical_path, reference) in generation.unresolved_references() {
         check()?;
+        // TypeScript member calls are retained only through an imported
+        // namespace; the module resolver below decides which are gaps.
+        if typescript_family_path(logical_path) {
+            continue;
+        }
         // An enclosing-symbol fallback is not exact call-site proof, even
         // when another relation carries the same broad source span.
         let resolved_method_token =

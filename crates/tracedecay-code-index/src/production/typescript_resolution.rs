@@ -11,7 +11,10 @@
 //! workspace packages by their manifest `name` (`exports`, `main`, `module`,
 //! `types`, `source`, then the conventional `index`/`src/index`), and
 //! `export … from` chains through barrels, including same-module
-//! `export { a as b }` clauses that forward a declaration or a local import.
+//! `export { a as b }` clauses and `export default <name>` that forward a
+//! declaration or a local import (`export *` never forwards `default`), and
+//! member calls through module namespaces (`import * as ns`, `export * as
+//! ns`).
 //!
 //! A specifier that matches no alias and no workspace package is an external
 //! dependency and binds nothing. A specifier that names a project module but
@@ -56,6 +59,18 @@ pub(super) enum ImportBindingOutcomeV1<'a> {
     /// The specifier names project code the seal cannot reach or that does
     /// not define the imported name; the call site is a disclosed gap.
     Unresolved,
+    /// A member call on an imported value (an object or class), not on a
+    /// module namespace; module resolution makes no claim about it.
+    ValueMember,
+}
+
+/// What an exported name denotes when a member is read from it.
+enum NamespaceTargetV1 {
+    /// A module namespace (`import * as`, `export * as`).
+    Module(usize),
+    External,
+    /// No namespace by that name.
+    Missing,
 }
 
 /// One `compilerOptions.paths` rule anchored to its base directory.
@@ -236,15 +251,88 @@ impl TypeScriptModuleIndexV1 {
             ModuleTargetV1::External => return ImportBindingOutcomeV1::External,
             ModuleTargetV1::Unresolved => return ImportBindingOutcomeV1::Unresolved,
         };
+        self.exported_symbol(files, by_simple_name, target, imported_name, kind)
+    }
+
+    /// The defining symbol behind a member call through an imported module
+    /// namespace: `ns.f()` for `import * as ns`, `ns.sub.f()` through
+    /// `export * as sub`, and `sub.f()` for `import { sub }` of such a
+    /// namespace. `members` is the dotted path after the import's local name.
+    pub(super) fn resolve_member_call<'a, T>(
+        &self,
+        files: &'a [T],
+        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        binding: &CodeIndexImportEvidenceV1,
+        members: &str,
+        kind: RelationEdgeKindV1,
+    ) -> ImportBindingOutcomeV1<'a>
+    where
+        T: AsRef<FileGenerationArtifactsV1>,
+    {
+        let Some(imported_name) = binding.imported_name.as_deref() else {
+            return ImportBindingOutcomeV1::Unresolved;
+        };
+        let mut module =
+            match self.resolve_specifier(&binding.logical_path, &binding.module_specifier) {
+                ModuleTargetV1::File(index) => index,
+                ModuleTargetV1::External => return ImportBindingOutcomeV1::External,
+                ModuleTargetV1::Unresolved => return ImportBindingOutcomeV1::Unresolved,
+            };
+        let (namespaces, member) = members.rsplit_once('.').unwrap_or(("", members));
+        let namespaces = (imported_name != "*")
+            .then_some(imported_name)
+            .into_iter()
+            .chain(namespaces.split('.').filter(|segment| !segment.is_empty()));
+        for namespace in namespaces {
+            let mut visited = HashSet::new();
+            module = match self.namespace_export(
+                files,
+                by_simple_name,
+                module,
+                namespace,
+                &mut visited,
+                0,
+            ) {
+                NamespaceTargetV1::Module(next) => next,
+                NamespaceTargetV1::External => return ImportBindingOutcomeV1::External,
+                // `Uses` admits every symbol kind: any binding by that name is
+                // a value whose members module resolution cannot see.
+                NamespaceTargetV1::Missing => {
+                    return match self.exported_symbol(
+                        files,
+                        by_simple_name,
+                        module,
+                        namespace,
+                        RelationEdgeKindV1::Uses,
+                    ) {
+                        ImportBindingOutcomeV1::Bound(..) => ImportBindingOutcomeV1::ValueMember,
+                        _ => ImportBindingOutcomeV1::Unresolved,
+                    };
+                }
+            };
+        }
+        self.exported_symbol(files, by_simple_name, module, member, kind)
+    }
+
+    fn exported_symbol<'a, T>(
+        &self,
+        files: &'a [T],
+        by_simple_name: &HashMap<&str, Vec<(usize, &'a LineageSymbolRecordV1)>>,
+        module: usize,
+        name: &str,
+        kind: RelationEdgeKindV1,
+    ) -> ImportBindingOutcomeV1<'a>
+    where
+        T: AsRef<FileGenerationArtifactsV1>,
+    {
         let mut found = Vec::new();
-        let mut visited = HashSet::new();
         self.collect_exported_symbols(
             files,
             by_simple_name,
-            target,
-            imported_name,
+            module,
+            name,
             kind,
-            &mut visited,
+            &mut HashSet::new(),
             0,
             &mut found,
         );
@@ -253,6 +341,121 @@ impl TypeScriptModuleIndexV1 {
         match found.as_slice() {
             [(index, symbol)] => ImportBindingOutcomeV1::Bound(*index, symbol),
             _ => ImportBindingOutcomeV1::Unresolved,
+        }
+    }
+
+    /// The module namespace `name` denotes as an export of `file_index`, with
+    /// the precedence [`Self::collect_exported_symbols`] applies: an export
+    /// clause, then a declaration (never a namespace), then `export *`.
+    fn namespace_export<T>(
+        &self,
+        files: &[T],
+        by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+        file_index: usize,
+        name: &str,
+        visited: &mut HashSet<(usize, String)>,
+        depth: usize,
+    ) -> NamespaceTargetV1
+    where
+        T: AsRef<FileGenerationArtifactsV1>,
+    {
+        if depth > MAX_REEXPORT_DEPTH || !visited.insert((file_index, name.to_owned())) {
+            return NamespaceTargetV1::Missing;
+        }
+        let file = files[file_index].as_ref();
+        let public = || file.artifacts.imports.iter().filter(|row| row.is_public);
+        let mut forwarding = public()
+            .filter(|row| !row.is_glob && row.local_name.as_deref() == Some(name))
+            .collect::<Vec<_>>();
+        if forwarding.is_empty() {
+            if !defined_symbols(by_simple_name, file_index, name, RelationEdgeKindV1::Uses)
+                .is_empty()
+            {
+                return NamespaceTargetV1::Missing;
+            }
+            if name != "default" {
+                forwarding.extend(public().filter(|row| row.is_glob));
+            }
+        }
+        // A project namespace wins over an `export *` of an external package
+        // that may or may not export the same name.
+        let mut external = false;
+        for binding in forwarding {
+            let forwarded = if binding.is_glob {
+                name
+            } else {
+                match binding.imported_name.as_deref() {
+                    Some(imported) => imported,
+                    None => continue,
+                }
+            };
+            let resolved =
+                match self.resolve_specifier(&binding.logical_path, &binding.module_specifier) {
+                    ModuleTargetV1::File(next) if forwarded == "*" && !binding.is_glob => {
+                        NamespaceTargetV1::Module(next)
+                    }
+                    ModuleTargetV1::File(next) if next == file_index => self.local_namespace(
+                        files,
+                        by_simple_name,
+                        file_index,
+                        forwarded,
+                        visited,
+                        depth + 1,
+                    ),
+                    ModuleTargetV1::File(next) => self.namespace_export(
+                        files,
+                        by_simple_name,
+                        next,
+                        forwarded,
+                        visited,
+                        depth + 1,
+                    ),
+                    ModuleTargetV1::External => NamespaceTargetV1::External,
+                    ModuleTargetV1::Unresolved => NamespaceTargetV1::Missing,
+                };
+            match resolved {
+                NamespaceTargetV1::Module(_) => return resolved,
+                NamespaceTargetV1::External => external = true,
+                NamespaceTargetV1::Missing => {}
+            }
+        }
+        if external {
+            NamespaceTargetV1::External
+        } else {
+            NamespaceTargetV1::Missing
+        }
+    }
+
+    /// The module namespace a same-module export clause forwards: the module
+    /// a local `import * as name` names, or a namespace another module
+    /// exports under the name a local import binds.
+    fn local_namespace<T>(
+        &self,
+        files: &[T],
+        by_simple_name: &HashMap<&str, Vec<(usize, &LineageSymbolRecordV1)>>,
+        file_index: usize,
+        name: &str,
+        visited: &mut HashSet<(usize, String)>,
+        depth: usize,
+    ) -> NamespaceTargetV1
+    where
+        T: AsRef<FileGenerationArtifactsV1>,
+    {
+        let Some(binding) =
+            unique_local_import(files[file_index].as_ref(), name, RelationEdgeKindV1::Uses)
+        else {
+            return NamespaceTargetV1::Missing;
+        };
+        let Some(imported) = binding.imported_name.as_deref() else {
+            return NamespaceTargetV1::Missing;
+        };
+        match self.resolve_specifier(&binding.logical_path, &binding.module_specifier) {
+            ModuleTargetV1::File(next) if imported == "*" => NamespaceTargetV1::Module(next),
+            ModuleTargetV1::File(next) => {
+                self.namespace_export(files, by_simple_name, next, imported, visited, depth)
+            }
+            ModuleTargetV1::External => NamespaceTargetV1::External,
+            ModuleTargetV1::Unresolved => NamespaceTargetV1::Missing,
         }
     }
 
@@ -277,7 +480,8 @@ impl TypeScriptModuleIndexV1 {
         let public = || file.artifacts.imports.iter().filter(|row| row.is_public);
         // An export clause naming `name` is the export itself; a same-named
         // declaration beside `export { a as name }` is a different binding.
-        // Either one shadows whatever `export *` forwards.
+        // Either one shadows whatever `export *` forwards, and `export *`
+        // never forwards `default`.
         let mut forwarding = public()
             .filter(|row| !row.is_glob && row.local_name.as_deref() == Some(name))
             .collect::<Vec<_>>();
@@ -287,7 +491,9 @@ impl TypeScriptModuleIndexV1 {
                 found.extend(defined);
                 return;
             }
-            forwarding.extend(public().filter(|row| row.is_glob));
+            if name != "default" {
+                forwarding.extend(public().filter(|row| row.is_glob));
+            }
         }
         for binding in forwarding {
             let forwarded = if binding.is_glob {
