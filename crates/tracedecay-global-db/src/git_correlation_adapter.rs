@@ -24,10 +24,10 @@ use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
     BoundedGitControl, CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth,
     CorrelationIndexPresence, DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, GitCorrelationError,
-    GitCorrelationSessionStore, GitEvidenceGraphHead, GitEvidenceGraphView,
-    GitEvidenceProjectionStore, GitReflogSource, SessionGitCorrelationHit, SessionGitSpan,
-    SessionsForQuery, SpanObservation, git_evidence_projection_identity,
-    open_git_evidence_graph_view, pending_git_evidence_publication_count, read_meta_value,
+    GitCorrelationSessionStore, GitEvidenceGraphView, GitEvidenceProjectionStore,
+    GitReflogSource, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
+    git_evidence_projection_identity, open_git_evidence_graph_view,
+    pending_git_evidence_publication_count, read_meta_value, rebuild_pre_index_git_evidence,
     recover_git_evidence_projection, replay_pending_git_evidence_publications,
     replay_pending_git_evidence_publications_outcome, run_bounded_history_index_page,
     run_incremental_backfill, run_incremental_backfill_outcome,
@@ -67,12 +67,17 @@ pub struct GitEvidenceConvergenceStats {
     /// Conservative signal: a full page means another retained-history page
     /// may exist and callers must not describe this pass as fully drained.
     pub backfill_page_saturated: bool,
+    /// The verified head predated the indexed projector; this pass replaced it
+    /// and rewound the history frontier so backfill republishes from Git.
+    pub rebuilt_pre_index_head: bool,
 }
 
 impl GitEvidenceConvergenceStats {
     /// Whether this pass durably changed Git evidence or its session frontier.
     pub fn committed_progress(&self) -> bool {
-        self.replayed_publications > 0 || self.backfill.committed_progress()
+        self.rebuilt_pre_index_head
+            || self.replayed_publications > 0
+            || self.backfill.committed_progress()
     }
 }
 
@@ -265,57 +270,57 @@ where
             "Git evidence convergence replay limit must be positive".to_owned(),
         ));
     }
-    let replay =
-        replay_pending_git_evidence_publications_outcome(session_store, publication_replay_limit)
-            .await?;
+    // Replay and backfill both merge onto the recovered head, which a
+    // pre-index generation cannot serve, so its rebuild comes first.
+    let rebuilt_pre_index_head = rebuild_pre_index_git_evidence(session_store).await?;
+    let unsettled = |replayed_publications, pending_publications| GitEvidenceConvergenceStats {
+        replayed_publications,
+        pending_publications,
+        backfill: BackfillStats::default(),
+        backfill_page_saturated: false,
+        rebuilt_pre_index_head,
+    };
+    let replay = match replay_pending_git_evidence_publications_outcome(
+        session_store,
+        publication_replay_limit,
+    )
+    .await
+    {
+        Ok(replay) => replay,
+        Err(error) => return settle_git_evidence_convergence(unsettled(0, None), Some(error)),
+    };
     let replayed_publications = replay.replayed_publications;
     let pending_publications = match pending_git_evidence_publication_count(session_store).await {
         Ok(pending) => Some(pending),
-        Err(error) if replayed_publications > 0 => {
-            return Ok(GitEvidenceConvergenceOutcome::Partial {
-                progress: GitEvidenceConvergenceStats {
-                    replayed_publications,
-                    pending_publications: None,
-                    backfill: BackfillStats::default(),
-                    backfill_page_saturated: false,
-                },
-                later_failure: error,
-            });
+        Err(error) => {
+            return settle_git_evidence_convergence(
+                unsettled(replayed_publications, None),
+                Some(error),
+            );
         }
-        Err(error) => return Err(error),
     };
     if let Some(later_failure) = replay.later_failure {
         return settle_git_evidence_convergence(
-            GitEvidenceConvergenceStats {
-                replayed_publications,
-                pending_publications,
-                backfill: BackfillStats::default(),
-                backfill_page_saturated: false,
-            },
+            unsettled(replayed_publications, pending_publications),
             Some(later_failure),
         );
     }
     let backfill_outcome =
         match run_incremental_backfill_outcome(session_store, git, backfill_session_limit).await {
             Ok(outcome) => outcome,
-            Err(error) if replayed_publications > 0 => {
-                return Ok(GitEvidenceConvergenceOutcome::Partial {
-                    progress: GitEvidenceConvergenceStats {
-                        replayed_publications,
-                        pending_publications,
-                        backfill: BackfillStats::default(),
-                        backfill_page_saturated: false,
-                    },
-                    later_failure: error,
-                });
+            Err(error) => {
+                return settle_git_evidence_convergence(
+                    unsettled(replayed_publications, pending_publications),
+                    Some(error),
+                );
             }
-            Err(error) => return Err(error),
         };
     let progress = GitEvidenceConvergenceStats {
         replayed_publications,
         pending_publications,
         backfill_page_saturated: backfill_outcome.stats.sessions_scanned == backfill_session_limit,
         backfill: backfill_outcome.stats,
+        rebuilt_pre_index_head,
     };
     settle_git_evidence_convergence(progress, backfill_outcome.later_failure)
 }
@@ -491,21 +496,16 @@ where
     }
 
     /// Opens the bounded, generation-bound query view without decoding any
-    /// span or commit payload. `Ok(None)` is the never-published empty start.
+    /// span or commit payload. `Ok(None)` is the never-published empty start;
+    /// a pre-index head is typed unavailable until convergence rebuilds it.
     #[hotpath::measure(label = "global_db.git_correlation.graph_view")]
     pub fn git_evidence_graph_view(
         &self,
     ) -> Result<Option<GitEvidenceGraphView>, GitCorrelationError> {
         let identity =
             git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
-        match open_git_evidence_graph_view(
-            self.graph_runtime()?,
-            &identity,
-            Arc::new(NeverCancelled),
-        )? {
-            GitEvidenceGraphHead::Indexed(view) => Ok(Some(view)),
-            GitEvidenceGraphHead::Unpublished => Ok(None),
-        }
+        open_git_evidence_graph_view(self.graph_runtime()?, &identity, Arc::new(NeverCancelled))?
+            .into_indexed()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -907,8 +907,8 @@ mod tests {
     use tokio::sync::Notify;
     use tracedecay_domain::ProjectId;
     use tracedecay_graph_db::{
-        GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
-        NeverCancelled, VerifiedGraphSnapshot,
+        GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
+        GraphProjectionIdentity, GraphProjectorRevision, NeverCancelled, VerifiedGraphSnapshot,
     };
     use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
     use tracedecay_runtime_core::db::{
@@ -918,8 +918,11 @@ mod tests {
     use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_sessions::runtime::SessionRecord;
     use tracedecay_sessions::runtime::git_correlation::{
-        CommitRelationFilter, GitCorrelationError, GitRefFilter, GitScopeFilter, SessionsForQuery,
-        SpanObservation, SpanSource, SystemGit,
+        AUTO_BACKFILL_WATERMARK_KEY, CommitRelationFilter, GIT_EVIDENCE_PROJECTOR_REVISION,
+        GitCorrelationError, GitCorrelationWriteTxn, GitEvidenceProjectionV1, GitRefFilter,
+        GitReflogSource, GitScopeFilter, SessionGitSpan, SessionsForQuery, SpanObservation,
+        SpanSource, SystemGit, build_git_evidence_manifest_checked, git_evidence_generation_id,
+        git_evidence_projection_identity, write_meta_value,
     };
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -1162,6 +1165,7 @@ mod tests {
             pending_publications: Some(0),
             backfill: Default::default(),
             backfill_page_saturated: false,
+            rebuilt_pre_index_head: false,
         };
         let failure = GitCorrelationError::Unavailable("git log failed".to_owned());
 
@@ -1288,6 +1292,178 @@ mod tests {
                 "session.git-evidence-runtime".to_owned()
             )])
         );
+    }
+
+    /// Git with no branch switches: every session window is one `main` segment.
+    struct SingleBranchGit;
+
+    impl GitReflogSource for SingleBranchGit {
+        fn reflog(&self, _worktree: &std::path::Path) -> Option<String> {
+            Some(String::new())
+        }
+
+        fn current_branch(&self, _worktree: &std::path::Path) -> Option<String> {
+            Some("main".to_owned())
+        }
+
+        fn commit_reference_exists(
+            &self,
+            _worktree: &std::path::Path,
+            _reference: &str,
+        ) -> Result<bool, GitCorrelationError> {
+            Ok(true)
+        }
+
+        fn commit_log(
+            &self,
+            _worktree: &std::path::Path,
+            _branch: &str,
+            _since: i64,
+        ) -> Option<String> {
+            Some(String::new())
+        }
+    }
+
+    /// The pre-index projector's generation for `projection`: projection
+    /// metadata records only the watermark, under the pre-index identity.
+    fn pre_index_manifest(projection: &GitEvidenceProjectionV1) -> GraphGenerationManifest {
+        let identity =
+            git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
+        let current =
+            GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
+        let mut manifest =
+            build_git_evidence_manifest_checked(identity, projection, &current, &|| Ok(())).unwrap();
+        let pre_index =
+            GraphProjectorRevision::try_from("session-git-evidence-projector.v1".to_owned())
+                .unwrap();
+        manifest.generation = git_evidence_generation_id(projection, &pre_index).unwrap();
+        for entity in &mut manifest.entities {
+            if entity.identity.as_str() == "projection:session-git-evidence" {
+                entity
+                    .properties
+                    .retain(|name, _| name.as_str() == "projection-record");
+            }
+        }
+        manifest
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn convergence_rebuilds_a_pre_index_head_from_session_history() {
+        let fixture =
+            GitEvidenceRuntimeFixture::open("pre-index-head", released_snapshot_gate(), false)
+                .await;
+        let repo = fixture._root.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo_path = repo.to_string_lossy().into_owned();
+        assert!(
+            fixture
+                .store
+                .db()
+                .upsert_session(&SessionRecord {
+                    provider: "codex".to_owned(),
+                    session_id: "session.rebuilt".to_owned(),
+                    project_key: repo_path.clone(),
+                    project_path: repo_path.clone(),
+                    title: None,
+                    started_at: Some(1_000),
+                    ended_at: Some(2_000),
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                })
+                .await
+        );
+
+        // A store whose evidence never changes again: the pre-index head holds
+        // rows no session history reproduces, and the frontier is past every
+        // retained session.
+        let stale = GitEvidenceProjectionV1::new(
+            "pre-index-watermark",
+            vec![SessionGitSpan {
+                span_id: "span.pre-index".to_owned(),
+                provider: "codex".to_owned(),
+                session_id: "session.pre-index".to_owned(),
+                thread_id: None,
+                branch: Some("main".to_owned()),
+                worktree: repo_path.clone(),
+                first_ts: 100,
+                last_ts: 200,
+                event_count: 2,
+                source: SpanSource::Backfill,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        let pre_index = pre_index_manifest(&stale);
+        fixture
+            .runtime
+            .publish_verified_manifest(
+                &pre_index,
+                GraphIdempotencyKey::new("pre-index-head").unwrap(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let transaction = fixture.store.open_write_transaction().await.unwrap();
+        write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, 10_000)
+            .await
+            .unwrap();
+        GitCorrelationWriteTxn::commit(transaction).await.unwrap();
+
+        let refused = fixture
+            .store
+            .sessions_for_with_relation(&branch_query("main"), CommitRelationFilter::All)
+            .await;
+        assert!(
+            matches!(&refused, Err(GitCorrelationError::Unavailable(detail))
+                if detail.contains("predates the indexed projector")),
+            "{refused:?}"
+        );
+
+        let convergence = fixture
+            .store
+            .converge_session_git_evidence(&SingleBranchGit, 50, 50)
+            .await
+            .unwrap();
+        assert_eq!(convergence.later_failure(), None);
+        assert!(convergence.stats().rebuilt_pre_index_head);
+        assert_eq!(convergence.stats().backfill.sessions_scanned, 1);
+
+        let hits = fixture
+            .store
+            .sessions_for_with_relation(&branch_query("main"), CommitRelationFilter::All)
+            .await
+            .unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session.rebuilt"],
+            "the head is republished from session history, not converted"
+        );
+        let health = fixture.store.correlation_index_health().await.unwrap();
+        assert!(health.projection_available);
+        assert_eq!((health.span_count, health.commit_count), (1, 0));
+        assert_ne!(
+            health.generation.as_deref(),
+            Some(pre_index.generation.as_str())
+        );
+
+        let settled = fixture
+            .store
+            .converge_session_git_evidence(&SingleBranchGit, 50, 50)
+            .await
+            .unwrap();
+        assert!(!settled.stats().rebuilt_pre_index_head);
+        assert_eq!(settled.stats().backfill.sessions_scanned, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

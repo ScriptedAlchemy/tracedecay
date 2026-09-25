@@ -77,7 +77,7 @@ use tracedecay_query::retrieval::evidence_lanes::{
 };
 use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_sessions::runtime::git_correlation::{
-    GitCorrelationError, GitEvidenceGraphHead, GitScopeFilter, git_evidence_projection_identity,
+    GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
     open_git_evidence_graph_view,
 };
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
@@ -148,14 +148,13 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         // Absence is not an authoritative empty projection. Until Git
         // evidence has been published, callers cannot prove that no durable
         // session holds a matching worktree.
-        let view = match open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))?
-        {
-            GitEvidenceGraphHead::Indexed(view) => view,
-            GitEvidenceGraphHead::Unpublished => {
-                return Err(GitCorrelationError::Unavailable(
-                    "verified Git-evidence projection has not been published".to_owned(),
-                ));
-            }
+        let Some(view) =
+            open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))?
+                .into_indexed()?
+        else {
+            return Err(GitCorrelationError::Unavailable(
+                "verified Git-evidence projection has not been published".to_owned(),
+            ));
         };
         let session_ids = match maximum {
             Some(maximum) => view.session_ids_for_scope_bounded(filter, maximum),

@@ -1,15 +1,19 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use tracedecay_graph_db::{GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision};
+use tracedecay_graph_db::{
+    GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision, NeverCancelled,
+};
 use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
 
 use super::{
-    CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION,
-    GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionStore,
-    GitEvidenceProjectionV1, SessionGitSpan, SpanObservation, SpanOverlapKind, digest_bytes,
-    git_evidence_projection_identity, normalize_worktree, observation_extends_span,
-    providers_compatible, publish_git_evidence_projection, recover_git_evidence_projection,
+    AUTO_BACKFILL_WATERMARK_KEY, CommitEvidence, CommitRelation, CommitSessionRecord,
+    GIT_EVIDENCE_PROJECTOR_REVISION, GIT_HISTORY_ROWID_FRONTIER_KEY, GitCorrelationError,
+    GitCorrelationSessionStore, GitCorrelationWriteTxn, GitEvidenceGraphHead,
+    GitEvidenceProjectionStore, GitEvidenceProjectionV1, SessionGitSpan, SpanObservation,
+    SpanOverlapKind, digest_bytes, git_evidence_projection_identity, normalize_worktree,
+    observation_extends_span, open_git_evidence_graph_view, providers_compatible,
+    publish_git_evidence_projection, recover_git_evidence_projection, write_meta_value,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
@@ -378,6 +382,53 @@ fn publish_graph_evidence_locked(
         new_commits,
         cancelled,
     )
+}
+
+/// Replaces a pre-index head with an empty indexed generation and rewinds the
+/// retained-history frontier so bounded backfill republishes the evidence from
+/// session history and Git. Nothing is converted from the pre-index rows.
+///
+/// The frontier rewinds first: an interruption before the head is replaced
+/// leaves the pre-index head in place, and the next pass rebuilds again.
+/// Returns whether a pre-index head was found.
+pub async fn rebuild_pre_index_git_evidence<S: GitCorrelationSessionStore>(
+    session_store: &S,
+) -> Result<bool, GitCorrelationError> {
+    session_store.require_project_sessions_authority()?;
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
+    let is_pre_index = |runtime: &dyn VerifiedGraphRuntimePortV1| {
+        open_git_evidence_graph_view(runtime, &identity, Arc::new(NeverCancelled))
+            .map(|head| matches!(head, GitEvidenceGraphHead::PreIndex { .. }))
+    };
+    if !is_pre_index(session_store.graph_runtime()?)? {
+        return Ok(false);
+    }
+    let transaction = session_store.open_write_transaction().await?;
+    write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, 0).await?;
+    write_meta_value(&transaction, GIT_HISTORY_ROWID_FRONTIER_KEY, 0).await?;
+    GitCorrelationWriteTxn::commit(transaction).await?;
+
+    let publication_lock = session_store.git_evidence_publication_lock()?;
+    let _publication = publication_lock.lock().map_err(|_| {
+        GitCorrelationError::Unavailable(
+            "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
+        )
+    })?;
+    let runtime = session_store.graph_runtime()?;
+    if is_pre_index(runtime)? {
+        publish_merged_graph_evidence(
+            runtime,
+            identity.clone(),
+            "pre-index-rebuild",
+            Vec::new(),
+            Vec::new(),
+            0,
+            &[],
+            Arc::new(AtomicBool::new(false)),
+        )?;
+    }
+    Ok(true)
 }
 
 #[allow(clippy::too_many_arguments)]
