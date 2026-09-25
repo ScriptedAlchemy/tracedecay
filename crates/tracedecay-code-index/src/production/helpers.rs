@@ -8,12 +8,12 @@ use tracedecay_domain::{EdgeAuthorityV1, RelationEdgeKindV1, SymbolOccurrenceId}
 
 use crate::chunks::{
     CROSS_FILE_REFERENCE_BLOCKLIST, cross_file_reference_name_is_blocklisted,
-    relation_target_kind_is_compatible, rust_qualified_name_is_ufcs_trait_impl,
-    rust_type_path_alias_for_trait_impl_method,
+    is_typescript_family, relation_target_kind_is_compatible,
+    rust_qualified_name_is_ufcs_trait_impl, rust_type_path_alias_for_trait_impl_method,
 };
 use crate::lineage::LineageSymbolRecordV1;
 use crate::production::typescript_resolution::{
-    ImportBindingOutcomeV1, TypeScriptModuleIndexV1, is_typescript_family, unique_local_import,
+    ImportBindingOutcomeV1, TypeScriptModuleIndexV1, unique_local_import,
 };
 
 pub(crate) struct StagedGenerationV1 {
@@ -454,7 +454,8 @@ where
 /// Retained TypeScript-family call sites whose import binding names project
 /// code the seal could not bind: a relative, aliased, or workspace-package
 /// specifier that reaches no indexed file, or a module that does not define
-/// the imported name (a default import, a local `export { x }` hop). These
+/// the imported name (a default import, an `export { x }` of a name the
+/// module neither declares nor imports from project code). These
 /// are the sites `callers` and `file_dependents` must disclose as gaps; an
 /// import of an external dependency is not one of them.
 pub(crate) fn unresolved_typescript_import_calls<T>(
