@@ -3353,7 +3353,6 @@ const settingsPayload: Record<string, unknown> = {
       telemetry: { timings: false },
       sync: { auto_track_pr_branches: true, auto_track_pr_poll_secs: 120 },
     },
-    tracedecay_dir_gitignored: true,
     pr_autotrack: { tracked: [] },
   },
   user: {

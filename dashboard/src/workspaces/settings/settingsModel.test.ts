@@ -114,7 +114,7 @@ describe('Settings read model', () => {
     expect(kind('config_path')).toBeUndefined();
     const storageRows = model.sections.find((s) => s.id === 'storage')?.rows ?? [];
     expect(storageRows.find((row) => row.id === 'store_root')?.kind).toBe('path');
-    expect(kind('tracedecay_dir_gitignored')).toBe('boolean');
+    expect(kind('config.git_ignore')).toBe('boolean');
     expect(kind('config.max_file_size')).toBe('number');
     expect(kind('config.include')).toBe('list');
     expect(kind('config')).toBe('group');

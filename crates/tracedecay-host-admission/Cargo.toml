@@ -21,17 +21,17 @@ serde_json = "1"
 sha2 = "0.11"
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tracing = "0.1"
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
+tracedecay-store = { path = "../tracedecay-store" }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }

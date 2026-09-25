@@ -11,7 +11,7 @@ use tracedecay_domain::configuration::{
 };
 
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeTraceDecayConfig};
-use tracedecay_configuration::{SyncConfig, TelemetryConfig, is_in_gitignore};
+use tracedecay_configuration::{SyncConfig, TelemetryConfig};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::configuration::contracts::ports::{
     ConfigurationControlStore, ConfigurationCurrentStateV1,
@@ -118,10 +118,6 @@ impl tracedecay_dashboard_api::config::DashboardConfigurationReadPort
         project_root: &Path,
     ) -> Result<tracedecay_dashboard_api::config::PinnedRuntimeConfiguration> {
         self.for_root(project_root)
-    }
-
-    fn is_in_gitignore(&self, project_root: &Path) -> bool {
-        is_in_gitignore(project_root)
     }
 }
 

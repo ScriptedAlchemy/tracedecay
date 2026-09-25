@@ -214,7 +214,6 @@ function settingsPayload() {
       configuration_revision_id: 'revision-1',
       configuration_snapshot_id: 'snapshot-1',
       pr_autotrack: { tracked: [] },
-      tracedecay_dir_gitignored: true,
     },
     restart_recommended: null,
     resync_recommended: null,

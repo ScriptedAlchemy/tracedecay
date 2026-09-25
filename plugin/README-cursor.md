@@ -74,9 +74,13 @@ TraceDecay does not install or claim ownership of `rust-analyzer`,
 
 For compiler output Cursor already captured, call `tracedecay_diagnose` first:
 it maps the supplied `cargo`/`clippy` stderr to symbols and callers without
-starting a toolchain. Use `tracedecay_diagnostics` only when fresh structured
-diagnostics are needed; it runs the relevant type checker, so respect Cursor's
-approval/run mode even though the tool does not edit the workspace.
+starting a toolchain, and publishes the findings for the current indexed
+generation. `tracedecay_diagnostics` reads those published diagnostics; it
+never runs a compiler itself. A TypeScript project with `tsconfig.json` and
+its own `node_modules/.bin/tsc` is checked automatically by the daemon after
+each complete index generation, so its read is populated without a paste; for
+any other toolchain, or before `npm install`, the read is a typed problem that
+names the exact next step.
 
 `tracedecay lsp servers [--json]` is the separate CLI discovery command
 for supported local language servers and install hints. It is informational:
@@ -289,9 +293,10 @@ Notes:
   are deliberately excluded so they keep going through review. The listed Work
   reads include execution `topology`; use them to inspect Work before choosing
   a mutation.
-- Two borderline entries: `tracedecay_diagnostics` runs your toolchain
-  (cargo/tsc/pyright) and `tracedecay_dashboard` starts a localhost server.
-  Both are non-destructive, but remove those lines if you want a prompt first.
+- One borderline entry: `tracedecay_dashboard` starts a localhost server. It
+  is non-destructive, but remove that line if you want a prompt first.
+  `tracedecay_diagnostics` is a read; the daemon runs a TypeScript project's
+  own `tsc` in the background regardless of this list.
 - `tracedecay_retrieve` only dereferences the required `handle` from a
   project-local truncated MCP response. Use it for one omitted span; do not
   reassemble the stored body into the conversation. It does not re-run the

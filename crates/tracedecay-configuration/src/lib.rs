@@ -12,7 +12,7 @@ pub mod test_support;
 
 pub use config::model::{
     MIN_AUTO_TRACK_PR_POLL_SECS, RetentionConfig, SyncConfig, TelemetryConfig, brand_env,
-    is_generated_path_segment, is_in_gitignore, resolve_path, resolve_path_with_discovery,
+    is_generated_path_segment, resolve_path, resolve_path_with_discovery,
 };
 pub use config::{
     OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, PinnedRuntimeConfigurationCachePort,

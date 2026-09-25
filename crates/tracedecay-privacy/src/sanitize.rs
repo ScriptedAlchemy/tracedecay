@@ -40,7 +40,7 @@ pub enum PrivacySanitizerError {
     CanonicalProviderMismatch,
     #[error("canonical observation structural identity protection failed")]
     StructuralIdentityProtection,
-    #[error("privacy domain contract rejected sanitizer output")]
+    #[error("privacy domain contract rejected sanitizer output: {0}")]
     DomainContract(#[source] ObservationContractError),
 }
 

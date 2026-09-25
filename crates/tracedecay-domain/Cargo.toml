@@ -11,7 +11,13 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 hotpath.workspace = true
 schemars.workspace = true
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: observation identities and payload digests are derived
+# from values before they cross a JSON boundary and re-derived after. Without
+# it serde_json's default float parser does not reproduce every f64 (about
+# one in eight Hermes SQLite REAL timestamps), so the two derivations disagree
+# and the record is refused as an identity mismatch. Every binary that links
+# this crate inherits the feature through unification.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.11"
 thiserror = "2"
 url = "2"

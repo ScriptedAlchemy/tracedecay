@@ -46,27 +46,27 @@ tracing = "0.1"
 url = "2"
 webpki-roots = "1"
 
-tracedecay-contracts = { path = "../tracedecay-contracts", version = "0.1.0" }
-tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
-tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
-tracedecay-hooks = { path = "../tracedecay-hooks", version = "0.1.0" }
-tracedecay-policy = { path = "../tracedecay-policy", version = "0.1.0" }
-tracedecay-privacy = { path = "../tracedecay-privacy", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
-tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store", version = "0.1.0" }
-tracedecay-lcm = { path = "../tracedecay-lcm", version = "0.1.0" }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
-tracedecay-session-memory = { path = "../tracedecay-session-memory", version = "0.1.0" }
+tracedecay-contracts = { path = "../tracedecay-contracts" }
+tracedecay-automation = { path = "../tracedecay-automation" }
+tracedecay-domain = { path = "../tracedecay-domain" }
+tracedecay-global-db = { path = "../tracedecay-global-db" }
+tracedecay-hooks = { path = "../tracedecay-hooks" }
+tracedecay-policy = { path = "../tracedecay-policy" }
+tracedecay-privacy = { path = "../tracedecay-privacy" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
+tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-store = { path = "../tracedecay-store" }
+tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
+tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
+tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 # Dev-only cycle: materialization tests bind the production host-config write
 # surface that agent-hosts registers at process start.
-tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
-tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
+tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }

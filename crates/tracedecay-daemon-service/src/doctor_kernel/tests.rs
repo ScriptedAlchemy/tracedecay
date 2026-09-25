@@ -6,7 +6,8 @@
 
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, HostConformanceV1, HostIntegrationReadV1, IngestRefusalCountV1,
-    LanguageServerReadV1, LanguageServerStateV1, ObservabilityReadV1, ObservabilityStateV1,
+    LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityReadV1, ObservabilityStateV1,
 };
 use tracedecay_contracts::{
     ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
@@ -134,28 +135,120 @@ fn synchronous_table_growth_is_bounded_by_observed_store_size() {
     ));
 }
 
+fn engine_status(
+    language: &str,
+    command: &str,
+    state: tracedecay_lsp::analyzer::broker::EngineState,
+    install: &str,
+    active: bool,
+) -> tracedecay_lsp::analyzer::broker::ResolvedEngineStatus {
+    tracedecay_lsp::analyzer::broker::ResolvedEngineStatus {
+        status: tracedecay_lsp::analyzer::broker::EngineStatus {
+            language: language.to_owned(),
+            language_id: language.to_owned(),
+            command: command.to_owned(),
+            default_command: command.to_owned(),
+            args: Vec::new(),
+            enabled: true,
+            state,
+            install_options: vec![tracedecay_lsp::analyzer::adapters::LspInstallOption {
+                label: "npm".to_owned(),
+                command: install.to_owned(),
+                notes: None,
+            }],
+            last_error: None,
+            last_diagnostic_update: None,
+        },
+        active,
+        executable_found: state != tracedecay_lsp::analyzer::broker::EngineState::Unavailable,
+    }
+}
+
+/// The Doctor read is the broker's own view: the aggregate grades only
+/// project-active analyzers, and a degraded finding names the exact
+/// executable and its install step instead of "at least one analyzer".
 #[test]
-fn language_server_engine_states_preserve_live_degradation() {
+fn language_server_engine_statuses_name_the_missing_active_analyzer() {
     use tracedecay_lsp::analyzer::broker::EngineState;
 
     assert_eq!(
-        language_server_read_from_engine_states([]),
-        LanguageServerReadV1::Absent
-    );
-    assert_eq!(
-        language_server_read_from_engine_states([EngineState::Ready]),
-        LanguageServerReadV1::Observed {
-            state: LanguageServerStateV1::Ready,
-            coverage: DoctorCoverageCompletenessV1::Complete,
+        language_server_read_from_engine_statuses([]),
+        LanguageServerReadV1::Absent {
+            analyzers: Vec::new()
         }
     );
+    // Only inactive languages: nothing is graded, but the daemon's view of
+    // the inactive analyzer is still carried for `lsp servers`.
+    let inactive_only = language_server_read_from_engine_statuses([engine_status(
+        "go",
+        "gopls",
+        EngineState::Unavailable,
+        "go install gopls",
+        false,
+    )]);
+    assert!(matches!(
+        &inactive_only,
+        LanguageServerReadV1::Absent { analyzers }
+            if analyzers.len() == 1
+                && analyzers[0].state == LanguageServerAnalyzerStateV1::Inactive
+                && !analyzers[0].executable_found
+    ));
+
+    let read = language_server_read_from_engine_statuses([
+        engine_status(
+            "rust",
+            "rust-analyzer",
+            EngineState::Ready,
+            "rustup component add rust-analyzer",
+            true,
+        ),
+        engine_status(
+            "typescript",
+            "typescript-language-server",
+            EngineState::Unavailable,
+            "npm install -g typescript typescript-language-server",
+            true,
+        ),
+        // A disabled override outlives the language leaving the project; it
+        // must not grade the project as degraded.
+        engine_status(
+            "go",
+            "gopls",
+            EngineState::Disabled,
+            "go install gopls",
+            false,
+        ),
+    ]);
+    let LanguageServerReadV1::Observed {
+        state,
+        coverage,
+        analyzers,
+    } = &read
+    else {
+        panic!("active analyzers must be observed: {read:?}");
+    };
+    assert_eq!(*state, LanguageServerStateV1::Unavailable);
+    assert_eq!(*coverage, DoctorCoverageCompletenessV1::Complete);
     assert_eq!(
-        language_server_read_from_engine_states([EngineState::Ready, EngineState::Crashed]),
-        LanguageServerReadV1::Observed {
-            state: LanguageServerStateV1::Crashed,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        }
+        analyzers
+            .iter()
+            .map(|analyzer| (analyzer.language.as_str(), analyzer.state))
+            .collect::<Vec<_>>(),
+        vec![
+            ("rust", LanguageServerAnalyzerStateV1::Ready),
+            ("typescript", LanguageServerAnalyzerStateV1::Unavailable),
+            ("go", LanguageServerAnalyzerStateV1::Inactive),
+        ]
     );
+
+    let finding = tracedecay_contracts::doctor::language_server_finding(&read).expect("finding");
+    let statement = finding.coverage().statement();
+    assert!(
+        statement.contains("typescript (typescript-language-server; install: npm install -g typescript typescript-language-server)"),
+        "{statement}"
+    );
+    assert!(!statement.contains("gopls"), "{statement}");
+    assert!(!statement.contains("rust-analyzer"), "{statement}");
 }
 
 #[test]
@@ -316,6 +409,7 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         language_server: LanguageServerReadV1::Observed {
             state: LanguageServerStateV1::Ready,
             coverage: DoctorCoverageCompletenessV1::Complete,
+            analyzers: Vec::new(),
         },
         code_index: CodeIndexMountReadV1::Observed {
             state: CodeIndexMountStateV1::Mounted,

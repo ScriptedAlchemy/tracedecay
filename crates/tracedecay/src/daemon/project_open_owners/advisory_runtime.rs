@@ -109,6 +109,8 @@ use tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 
 mod deferred;
 mod model;
+
+pub(super) use deferred::wait_for_generation_change;
 pub(crate) use model::ProjectOpenDependentOwnerState;
 use model::advisory_monotonic_deadline;
 #[cfg(test)]
