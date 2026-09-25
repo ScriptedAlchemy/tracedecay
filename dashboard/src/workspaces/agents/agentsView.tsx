@@ -102,6 +102,7 @@ export function markHandlers(mark: TopologyMark, interaction: TopologyInteractio
   const inspect = () => interaction.onInspect(mark.id);
   return {
     onMouseEnter: inspect,
+    onMouseLeave: () => interaction.onInspect(null),
     onFocus: inspect,
     onClick: () =>
       mark.kind === 'bundle' ? interaction.onToggleExpanded(mark.id) : interaction.onSelect(mark.id),

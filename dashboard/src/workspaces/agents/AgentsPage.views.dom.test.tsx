@@ -112,4 +112,14 @@ describe('agents views', () => {
     expect(document.querySelector('[data-agents-view]')!.getAttribute('data-agents-view')).toBe('timeline');
     expect(document.querySelector('[data-delegation-timeline]')).not.toBeNull();
   });
+
+  it('timeline ends inspection when the pointer moves off a row onto the empty field', async () => {
+    await renderAgents('/agents?view=timeline');
+    const child = control('codex:session.codex.child');
+    fireEvent.mouseEnter(child);
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('inspecting');
+    const ground = screen.getByRole('group', { name: 'Delegation timeline field' }).querySelector('svg')!;
+    fireEvent.mouseLeave(child, { relatedTarget: ground });
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('default');
+  });
 });

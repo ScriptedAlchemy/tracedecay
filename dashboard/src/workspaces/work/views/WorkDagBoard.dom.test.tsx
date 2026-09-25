@@ -232,6 +232,22 @@ describe('the task dependency board', () => {
     expect(card(container, 'side').getAttribute('data-work-dag-card')).toBe('lit');
   });
 
+  it('ends inspection when the pointer moves off a card onto the empty field', async () => {
+    const container = await drawn();
+    fireEvent.pointerEnter(card(container, 'middle'));
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-dag-inspected="middle"]')).not.toBeNull(),
+    );
+    expect(card(container, 'side').getAttribute('data-work-dag-card')).toBe('dimmed');
+
+    // The pointer stays inside the field, on the board's empty ground.
+    fireEvent.pointerLeave(card(container, 'middle'), {
+      relatedTarget: container.querySelector('[data-work-dag-fitted]'),
+    });
+    await waitFor(() => expect(container.querySelector('[data-work-dag-inspected]')).toBeNull());
+    expect(card(container, 'side').getAttribute('data-work-dag-card')).toBe('lit');
+  });
+
   it('traverses the graph with the arrow keys and selects with Enter', async () => {
     const user = userEvent.setup();
     const container = await drawn();

@@ -545,18 +545,22 @@ export const createPointField: FieldRendererFactory = ({
     const body = picked?.kind === 'body' ? picked.body : null;
     const cluster = picked?.kind === 'cluster' ? picked.cluster.id : null;
     canvas.style.cursor = picked != null && (picked.kind === 'cluster' || picked.body.role === 'body') ? 'pointer' : 'default';
-    if ((body?.id ?? null) === hovered && cluster === hoveredCluster) return;
-    hovered = body?.id ?? null;
+    const next = body?.id ?? null;
+    if (next === hovered && cluster === hoveredCluster) return;
+    const bodyChanged = next !== hovered;
+    hovered = next;
     hoveredCluster = cluster;
     dirty = true;
-    if (body) onHover(body.id);
+    if (bodyChanged) onHover(next);
     repaint();
   };
   const pointerLeave = (): void => {
     if (hovered == null && hoveredCluster == null) return;
+    const hadBody = hovered != null;
     hovered = null;
     hoveredCluster = null;
     dirty = true;
+    if (hadBody) onHover(null);
     repaint();
   };
   const click = (event: MouseEvent): void => {

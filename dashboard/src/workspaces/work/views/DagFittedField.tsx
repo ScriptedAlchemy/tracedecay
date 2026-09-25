@@ -106,6 +106,7 @@ export function FittedCard({
       onFocus={wiring.onFocus}
       onBlur={wiring.onBlur}
       onPointerEnter={wiring.onPointerEnter}
+      onPointerLeave={wiring.onPointerLeave}
       onKeyDown={wiring.onKeyDown}
       className={cn(
         'absolute flex min-h-[44px] flex-col gap-0.5 border px-2.5 py-1.5 text-left rounded-[var(--radius-panel)]',
