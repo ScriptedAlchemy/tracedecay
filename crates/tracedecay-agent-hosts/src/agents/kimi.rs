@@ -504,8 +504,19 @@ fn kimi_official_lifecycle_unavailable(
              TraceDecay made no current plugin registration changes. Open Kimi Code and run \
              `{command}`, then re-run repair to verify registration"
         ),
-        staged_paths: staged_dir.into_iter().map(Path::to_path_buf).collect(),
+        command,
     }
+}
+
+/// Doctor's line for a staged source Kimi Code has not yet installed, so the
+/// operator step stays visible until Kimi's own manager records it.
+fn pending_plugins_install_notice(home: &Path) -> String {
+    let action =
+        kimi_official_lifecycle_unavailable("install", Some(&kimi_staged_plugin_dir(home)));
+    format!(
+        "pending operator action: open Kimi Code and run `{}`, then re-run doctor",
+        action.command
+    )
 }
 
 fn render_kimi_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> {
@@ -576,6 +587,13 @@ fn uninstall_prompt_rules(agents_md: &Path) -> Result<()> {
 fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Path) {
     let installed_path = kimi_installed_json_path(kimi_code_home);
     if !installed_json_has_tracedecay(kimi_code_home) {
+        if kimi_staged_plugin_dir(home)
+            .join(KIMI_PLUGIN_MANIFEST_RELATIVE)
+            .is_file()
+        {
+            dc.warn(&pending_plugins_install_notice(home));
+            return;
+        }
         dc.warn(&format!(
             "no tracedecay entry in {}, run `tracedecay install --agent kimi` if you use Kimi Code CLI",
             installed_path.display()
@@ -589,9 +607,10 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, kimi_code_home: &Pa
 
     match kimi_managed_bundle_matches_staged(home, kimi_code_home) {
         Ok(true) => dc.pass("Kimi Code CLI managed plugin matches its staged source"),
-        Ok(false) => dc.fail(
-            "Kimi Code CLI managed plugin is stale, run the staged `/plugins install` action",
-        ),
+        Ok(false) => dc.fail(&format!(
+            "Kimi Code CLI managed plugin is stale; {}",
+            pending_plugins_install_notice(home)
+        )),
         Err(error) => dc.fail(&format!(
             "could not verify Kimi Code CLI managed plugin: {error}"
         )),
