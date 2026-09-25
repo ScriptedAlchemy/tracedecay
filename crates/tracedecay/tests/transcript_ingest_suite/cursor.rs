@@ -4,6 +4,7 @@ use std::io::Write;
 use tempfile::TempDir;
 #[cfg(unix)]
 use tracedecay_agent_hosts::hooks::cursor_pre_compact_via_daemon;
+use tracedecay_global_db::observation::ObservationRefusalCensusV1;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::hosts::cursor::{
@@ -14,7 +15,6 @@ use tracedecay_sessions::runtime::hosts::cursor::{
     ingest_cursor_user_transcript_event_capped_with_registered_roots,
     try_ingest_cursor_project_sweep_capped as try_ingest_cursor_project_sweep_capped_for_project,
 };
-use tracedecay_global_db::observation::ObservationRefusalCensusV1;
 use tracedecay_sessions::runtime::source::{TranscriptIngestResult, TranscriptSource};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK};
@@ -1406,7 +1406,9 @@ async fn cursor_sweep_skips_toplevel_duplicate_whose_subagent_copy_is_past_the_w
         !paths.iter().any(|path| path.starts_with(&parent_dir)),
         "the parent directory must fall past the walk cap"
     );
-    try_ingest_source(&db, &sweep, &project, None).await.unwrap();
+    try_ingest_source(&db, &sweep, &project, None)
+        .await
+        .unwrap();
 
     let census = db
         .runtime()
@@ -1434,7 +1436,7 @@ async fn cursor_sweep_skips_toplevel_duplicate_whose_subagent_copy_is_past_the_w
     assert!(child.is_subagent);
     assert_eq!(child.parent_session_id.as_deref(), Some(parent.as_str()));
     assert!(
-        db.search_session_messages("cursor", None, "Drifted truncation", 10)
+        db.search_session_messages("cursor", None, "Drifted", 10)
             .await
             .is_empty()
     );
