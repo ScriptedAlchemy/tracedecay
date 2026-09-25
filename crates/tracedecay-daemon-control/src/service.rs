@@ -1459,6 +1459,7 @@ fn installed_service_status_snapshot(
     DaemonSocketState,
     DaemonProtocolState,
 )> {
+    const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     let service_path = service_unit_path()?;
     if !service_unit_exists(&service_path)? {
         let socket_path = default_socket_path()?;
@@ -1472,7 +1473,6 @@ fn installed_service_status_snapshot(
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     // launchd's liveness is a socket connect, so the authenticated readiness
     // probe doubles as that observation instead of the daemon seeing an extra
     // bare connection ahead of it.
