@@ -41,6 +41,7 @@ pub(crate) struct LcmSummaryConvergencePage {
     pub(crate) has_more: bool,
     pub(crate) next_retry_delay: Option<Duration>,
     pub(crate) backfill_rows_scanned: usize,
+    pub(crate) parked_rows_requeued: usize,
     pub(crate) predecessor_range_rows_rewritten: usize,
     pub(crate) relation_receipts_processed: usize,
 }
@@ -58,6 +59,7 @@ pub(crate) async fn run_summary_convergence_page(
             .recover_retained_relation_projection_page()
             .await?;
     let backfill = backfill_queue(&database).await?;
+    let parked_requeue = requeue_parked_sessions(&database).await?;
     let predecessor_range_rewrite = rewrite_predecessor_ranges(&database).await?;
     let now_unix_ms = unix_millis()?;
     let page_limit = page_limit.max(1);
@@ -86,6 +88,7 @@ pub(crate) async fn run_summary_convergence_page(
         })
         .transpose()?;
     let has_more = backfill.has_more
+        || parked_requeue.has_more
         || predecessor_range_rewrite.has_more
         || !sessions.is_empty()
         || relation_recovery.has_more;
@@ -94,6 +97,7 @@ pub(crate) async fn run_summary_convergence_page(
         has_more,
         next_retry_delay,
         backfill_rows_scanned: backfill.rows_scanned,
+        parked_rows_requeued: parked_requeue.rows_requeued,
         predecessor_range_rows_rewritten: predecessor_range_rewrite.rows_rewritten,
         relation_receipts_processed: relation_recovery.processed,
     })
@@ -138,6 +142,43 @@ async fn backfill_queue(
         .map_err(|error| LcmError::Db(error.to_string()))?;
     let page = tracedecay_lcm::summary_convergence::backfill_queue_page(
         &transaction,
+        tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    Ok(page)
+}
+
+/// Returns sessions parked without a summarizer to the queue once the shard's
+/// summarizer binding differs from the one they were parked under.
+///
+/// The binding is read on every pass, so a configuration change or a newly
+/// published pin resumes parked sessions through the same queue and admission
+/// as any other convergence work, without a restart or new raw messages.
+async fn requeue_parked_sessions(
+    database: &RegisteredGlobalDbLeaseV1,
+) -> Result<tracedecay_lcm::summary_convergence::LcmParkedRequeuePage, LcmError> {
+    let binding = crate::lcm_summarization::summarizer_binding_identity(database)?;
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let has_work =
+        tracedecay_lcm::summary_convergence::parked_requeue_has_work(&snapshot, &binding).await?;
+    drop(snapshot);
+    if !has_work {
+        return Ok(tracedecay_lcm::summary_convergence::LcmParkedRequeuePage::default());
+    }
+    let transaction = database
+        .begin_write_transaction()
+        .await
+        .map_err(|error| LcmError::Db(error.to_string()))?;
+    let page = tracedecay_lcm::summary_convergence::requeue_parked_page(
+        &transaction,
+        &binding,
         tracedecay_lcm::LCM_SCAN_PAGE_ROWS as usize,
     )
     .await?;

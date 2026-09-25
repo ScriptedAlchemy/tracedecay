@@ -242,7 +242,10 @@ pub struct LcmBoundedCompressionResponse {
     pub has_more: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum LcmSummaryConvergenceQueueState {
     Pending,
     Retryable,
@@ -259,6 +262,19 @@ impl LcmSummaryConvergenceQueueState {
             Self::Current => "current",
             Self::Unavailable => "unavailable",
             Self::Permanent => "permanent",
+        }
+    }
+
+    pub(crate) fn parse(state: &str) -> Result<Self, LcmError> {
+        match state {
+            "pending" => Ok(Self::Pending),
+            "retryable" => Ok(Self::Retryable),
+            "current" => Ok(Self::Current),
+            "unavailable" => Ok(Self::Unavailable),
+            "permanent" => Ok(Self::Permanent),
+            other => Err(LcmError::Db(format!(
+                "unknown LCM summary convergence queue state {other:?}"
+            ))),
         }
     }
 }
@@ -931,6 +947,111 @@ pub async fn require_candidate_revision(
         });
     }
     Ok(())
+}
+
+/// Summarizer binding the parked-session requeue last drained for.
+const PARKED_REQUEUE_BINDING_KEY: &str = "summary_convergence_parked_binding_v1";
+/// Keyset cursor of that drain: the last requeued `queue_id` while pages
+/// remain, then [`PARKED_REQUEUE_COMPLETE`].
+const PARKED_REQUEUE_CURSOR_KEY: &str = "summary_convergence_parked_cursor_v1";
+const PARKED_REQUEUE_COMPLETE: &str = "complete";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LcmParkedRequeuePage {
+    pub rows_requeued: usize,
+    pub has_more: bool,
+}
+
+/// The requeue cursor owed under `binding`, or `None` once every session
+/// parked before that binding took effect has been requeued.
+async fn parked_requeue_cursor(
+    conn: &(impl QueryExecutor + ?Sized),
+    binding: &str,
+) -> Result<Option<i64>, LcmError> {
+    if schema::get_gc_meta(conn, PARKED_REQUEUE_BINDING_KEY)
+        .await?
+        .as_deref()
+        != Some(binding)
+    {
+        return Ok(Some(0));
+    }
+    match schema::get_gc_meta(conn, PARKED_REQUEUE_CURSOR_KEY).await? {
+        Some(journaled) if journaled == PARKED_REQUEUE_COMPLETE => Ok(None),
+        Some(journaled) => journaled.parse::<i64>().map(Some).map_err(|error| {
+            LcmError::Db(format!("decode LCM parked summary requeue cursor: {error}"))
+        }),
+        None => Ok(Some(0)),
+    }
+}
+
+/// Read-side probe: were sessions parked `unavailable` under a summarizer
+/// binding other than `binding`? An idle pass skips the writer on `false`.
+pub async fn parked_requeue_has_work(
+    conn: &(impl QueryExecutor + ?Sized),
+    binding: &str,
+) -> Result<bool, LcmError> {
+    Ok(parked_requeue_cursor(conn, binding).await?.is_some())
+}
+
+/// Bounded page returning parked sessions to `pending` after the summarizer
+/// binding changed.
+///
+/// A session parks `unavailable` when no authoritative summarizer could run
+/// for it, and only new raw rows would otherwise requeue it. A configured,
+/// published, or changed binding is what can make that outcome different, so
+/// each binding drains the parked set once, by `queue_id` keyset, and journals
+/// its cursor with the page. A binding change mid-drain restarts from the
+/// first parked row.
+pub async fn requeue_parked_page(
+    conn: &(impl Executor + ?Sized),
+    binding: &str,
+    page_limit: usize,
+) -> Result<LcmParkedRequeuePage, LcmError> {
+    let Some(cursor) = parked_requeue_cursor(conn, binding).await? else {
+        return Ok(LcmParkedRequeuePage::default());
+    };
+    schema::set_gc_meta(conn, PARKED_REQUEUE_BINDING_KEY, binding).await?;
+    let page_limit_usize = page_limit.max(1);
+    let page_limit = i64::try_from(page_limit_usize)
+        .map_err(|_| LcmError::Db("LCM parked summary requeue page limit overflow".to_string()))?;
+    let mut rows = conn
+        .query(
+            "SELECT queue_id FROM lcm_summary_convergence_queue
+             WHERE state = 'unavailable' AND queue_id > ?1
+             ORDER BY queue_id
+             LIMIT ?2",
+            params![cursor, page_limit],
+        )
+        .await?;
+    let mut rows_requeued = 0_usize;
+    let mut last_queue_id = None;
+    while let Some(row) = rows.next().await? {
+        last_queue_id = Some(row.get::<i64>(0)?);
+        rows_requeued += 1;
+    }
+    drop(rows);
+    if let Some(last_queue_id) = last_queue_id {
+        conn.execute(
+            "UPDATE lcm_summary_convergence_queue
+             SET state = 'pending',
+                 failure_code = NULL,
+                 failure_count = 0,
+                 next_attempt_at_ms = 0
+             WHERE state = 'unavailable' AND queue_id > ?1 AND queue_id <= ?2",
+            params![cursor, last_queue_id],
+        )
+        .await?;
+    }
+    let has_more = rows_requeued == page_limit_usize;
+    let journaled = match (has_more, last_queue_id) {
+        (true, Some(last_queue_id)) => last_queue_id.to_string(),
+        _ => PARKED_REQUEUE_COMPLETE.to_string(),
+    };
+    schema::set_gc_meta(conn, PARKED_REQUEUE_CURSOR_KEY, &journaled).await?;
+    Ok(LcmParkedRequeuePage {
+        rows_requeued,
+        has_more,
+    })
 }
 
 pub async fn next_retry_at_ms(

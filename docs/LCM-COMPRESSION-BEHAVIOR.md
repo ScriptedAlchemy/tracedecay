@@ -53,6 +53,13 @@ leaves the pending page in the typed `cursor_agent_unconfigured` or
 is not published reports `summarizer_configuration_unavailable`. Profile-wide
 session shards have no project configuration, so they stay unconfigured.
 
+A session that could not be summarized parks `unavailable` in the retained
+summary queue. Background convergence compares the shard's summarizer binding
+on every pass, so publishing a pin or changing this setting requeues the
+parked sessions without a daemon restart or new messages. `lcm_status` reports
+the queue under `summary_convergence`: per-state session counts plus
+`reasons`, the recorded reason for each parked or failed group.
+
 Configured paths must be absolute. Set the value on the project layer with
 `tracedecay_configuration_set` or `tracedecay tool configuration_set`. A
 configured entry may also set `model` (the provider default when absent) and

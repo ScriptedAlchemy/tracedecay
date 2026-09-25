@@ -36,7 +36,8 @@ pub use lcm::{
     LcmPayloadGcStatusV1, LcmPayloadStatusV1, LcmRawMessageMetadataV1, LcmRawMessageOverviewV1,
     LcmRawMessageV1, LcmRedactionStatusV1, LcmRetrievalOutcomeV1, LcmSourcePaginationV1,
     LcmSourceRefV1, LcmStatusResultV1, LcmStatusV1, LcmStorageKindV1, LcmStoreStatusV1,
-    LcmStoreTokenCoverageV1, LcmSummaryNodeOverviewV1, LcmSummaryNodeV1, LcmTemporalFieldsV1,
+    LcmStoreTokenCoverageV1, LcmSummaryConvergenceReasonV1, LcmSummaryConvergenceStateV1,
+    LcmSummaryConvergenceStatusV1, LcmSummaryNodeOverviewV1, LcmSummaryNodeV1, LcmTemporalFieldsV1,
 };
 pub use memory::{
     FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1, FactContradictionV1,
