@@ -448,6 +448,44 @@ fn activation_drives_the_hosts_own_marketplace_and_install_commands() {
 
 #[cfg(unix)]
 #[test]
+fn activation_reinstalls_a_same_version_cache_holding_an_older_build() {
+    let home = tempfile::tempdir().unwrap();
+    let bin_dir = tempfile::tempdir().unwrap();
+    let log = bin_dir.path().join("invocations.log");
+    let claude = bin_dir.path().join("claude");
+    deploy_rendered_bundle(home.path(), "/bin/tracedecay");
+    write_native_activation(home.path(), "/bin/tracedecay");
+    fake_claude_cli(&claude, &log, "exit 0");
+
+    claude_plugin_activate_with(&claude, home.path())
+        .expect("a current cache activates without an uninstall");
+    let deploy = plugin_deploy_dir(home.path());
+    let install = vec![
+        format!("plugin marketplace add {}", deploy.display()),
+        "plugin install tracedecay@tracedecay".to_string(),
+    ];
+    assert_eq!(recorded_invocations(&log), install);
+
+    std::fs::remove_file(&log).unwrap();
+    std::fs::write(
+        claude_current_cached_plugin_root(home.path()).join(".mcp.json"),
+        "{\"from\":\"an older build of the same version\"}\n",
+    )
+    .unwrap();
+    claude_plugin_activate_with(&claude, home.path())
+        .expect("a stale same-version cache is replaced through the host CLI");
+    assert_eq!(
+        recorded_invocations(&log),
+        std::iter::once("plugin uninstall tracedecay".to_string())
+            .chain(install)
+            .collect::<Vec<_>>(),
+        "`plugin install` skips an installed version, so the stale cache must be \
+         uninstalled first"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn removal_drives_the_hosts_own_uninstall_by_plugin_selection_name() {
     let home = tempfile::tempdir().unwrap();
     let bin_dir = tempfile::tempdir().unwrap();
