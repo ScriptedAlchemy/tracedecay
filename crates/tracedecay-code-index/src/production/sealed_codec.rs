@@ -4,13 +4,16 @@ use std::sync::{Arc, OnceLock};
 use serde::{Deserialize, Serialize};
 use tracedecay_code_extraction::ExtractedSchemaEvidenceV1;
 use tracedecay_domain::{
-    BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-    CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, ExactTechnicalTermKindV1,
-    ExactTechnicalTermV1, LanguageDescriptorRevision, SensitivityDecision, SourceSpan,
+    BoundedSanitizedText, ChunkLogicalIdentityV1, ChunkerRevision, CodeSearchChunkAnchorV1,
+    CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, ComplexityAnalysisV1,
+    ContentDigest, ExactTechnicalTermKindV1, ExactTechnicalTermV1, FileIdentityDigest,
+    LanguageDescriptorRevision, SensitivityDecision, SourceSpan, SymbolIdentityDigest,
+    SymbolOccurrenceId,
 };
 
 use crate::chunks::{
-    CodeFileChunksV1, CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1, CodeSearchEligibilityV1,
+    CodeFileChunksV1, CodeIndexUnresolvedReferenceV1, CodeSearchDocumentV1,
+    CodeSearchEligibilityV1, code_chunk_id, code_file_identity, published_symbol_spans,
 };
 use crate::extract::ExtractionBatchV1;
 use crate::intake::content_digest;
@@ -40,7 +43,7 @@ use super::*;
 /// from source rather than migrated. Revisions through eight also predate
 /// required clone-body source rows, so the rebuild keeps them from reading as
 /// successful empty clone evidence.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 15;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 16;
 
 /// The typed refusal for a sealed generation this build no longer reads.
 pub fn superseded_sealed_generation_revision(revision: u32) -> CodeIndexProductionErrorV1 {
@@ -79,6 +82,14 @@ pub(super) struct PersistedFileGenerationArtifactsV1 {
 /// its chunks cover once ([`ChunkTextBaseV1`]) and rows keep only spans. A
 /// chunk's content digest is the digest of that text and is recomputed. Clone
 /// bodies use the row form in [`super::clone_rows`].
+///
+/// Identities and digests are stored once. A chunk id, a symbol's file
+/// identity, and a symbol's content digest are omitted where they equal what
+/// the segment already determines (the chunk id recipe over the file, the
+/// row's symbol, and an empty split path; the file's identity; the digest of
+/// the stored text its chunks span). A symbol's identity is the one its
+/// occurrence key names, and a WholeSymbol term's occurrence is its chunk's.
+/// Each is written only when it differs, so the form stays lossless.
 #[derive(Serialize)]
 pub(super) struct PersistedFileGenerationArtifactsRefV2<'a> {
     authority: PersistedFileAuthorityRefV1<'a>,
@@ -145,7 +156,8 @@ struct PersistedFileAuthorityV1 {
 #[derive(Serialize)]
 struct PersistedFileIndexArtifactsRefV2<'a> {
     chunks: PersistedFileChunksRefV2<'a>,
-    symbols: &'a [Arc<LineageSymbolRecordV1>],
+    /// In symbol identity order, which is also their occurrence key order.
+    symbols: Vec<PersistedSymbolRefV1<'a>>,
     edges: &'a [CanonicalRelationEdgeV1],
     edge_abstentions: &'a [CodeIndexEdgeAbstentionV1],
     imports: &'a [CodeIndexImportEvidenceV1],
@@ -159,7 +171,7 @@ struct PersistedFileIndexArtifactsRefV2<'a> {
 #[serde(deny_unknown_fields)]
 struct PersistedFileIndexArtifactsV2 {
     chunks: PersistedFileChunksV2,
-    symbols: Vec<Arc<LineageSymbolRecordV1>>,
+    symbols: Vec<PersistedSymbolV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     imports: Vec<CodeIndexImportEvidenceV1>,
@@ -335,7 +347,8 @@ impl<'a> ChunkTextSlicesV1<'a> {
     }
 }
 
-/// An exact term row: its bytes are the chunk text at `span`.
+/// An exact term row: its bytes are the chunk text at `span`, and a
+/// WholeSymbol term without an occurrence names its chunk's symbol.
 #[derive(Serialize)]
 struct PersistedExactTermRefV1<'a> {
     kind: ExactTechnicalTermKindV1,
@@ -368,12 +381,162 @@ impl<'a> PersistedExactTermRefV1<'a> {
                 "sealed chunk exact term is not its chunk text at its span".to_owned(),
             ));
         }
+        let symbol_occurrence_id = term.symbol_occurrence_id().filter(|occurrence| {
+            term.kind() != ExactTechnicalTermKindV1::WholeSymbol
+                || chunk.anchor.symbol_occurrence_id.as_ref() != Some(*occurrence)
+        });
         Ok(Self {
             kind: term.kind(),
             span: term.span(),
-            symbol_occurrence_id: term.symbol_occurrence_id(),
+            symbol_occurrence_id,
         })
     }
+}
+
+/// A symbol row: the record without the facts the segment already holds.
+/// See [`PersistedFileGenerationArtifactsRefV2`].
+#[derive(Serialize)]
+struct PersistedSymbolRefV1<'a> {
+    occurrence: &'a SymbolOccurrenceId,
+    qualified_name: &'a str,
+    simple_name: &'a str,
+    kind: &'a str,
+    visibility: &'a str,
+    branches: u32,
+    loops: u32,
+    max_nesting: u32,
+    #[serde(skip_serializing_if = "ComplexityAnalysisV1::is_complete")]
+    complexity_analysis: ComplexityAnalysisV1,
+    line_span: u32,
+    start_line: u32,
+    signature: Option<&'a str>,
+    docstring: Option<&'a str>,
+    is_async: bool,
+    derives: &'a [String],
+    skip_test_coverage: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_identity: Option<&'a FileIdentityDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_digest: Option<&'a ContentDigest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedSymbolV1 {
+    occurrence: SymbolOccurrenceId,
+    qualified_name: String,
+    simple_name: String,
+    kind: String,
+    visibility: String,
+    branches: u32,
+    loops: u32,
+    max_nesting: u32,
+    #[serde(default)]
+    complexity_analysis: ComplexityAnalysisV1,
+    line_span: u32,
+    start_line: u32,
+    #[serde(deserialize_with = "Option::deserialize")]
+    signature: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    docstring: Option<String>,
+    is_async: bool,
+    derives: Vec<String>,
+    skip_test_coverage: bool,
+    #[serde(default)]
+    file_identity: Option<FileIdentityDigest>,
+    #[serde(default)]
+    content_digest: Option<ContentDigest>,
+}
+
+impl<'a> PersistedSymbolRefV1<'a> {
+    fn new(
+        symbol: &'a LineageSymbolRecordV1,
+        file_identity: &FileIdentityDigest,
+        span_digest: Option<&ContentDigest>,
+    ) -> Self {
+        Self {
+            occurrence: &symbol.occurrence,
+            qualified_name: &symbol.qualified_name,
+            simple_name: &symbol.simple_name,
+            kind: &symbol.kind,
+            visibility: &symbol.visibility,
+            branches: symbol.branches,
+            loops: symbol.loops,
+            max_nesting: symbol.max_nesting,
+            complexity_analysis: symbol.complexity_analysis,
+            line_span: symbol.line_span,
+            start_line: symbol.start_line,
+            signature: symbol.signature.as_deref(),
+            docstring: symbol.docstring.as_deref(),
+            is_async: symbol.is_async,
+            derives: &symbol.derives,
+            skip_test_coverage: symbol.skip_test_coverage,
+            file_identity: (file_identity != &symbol.file_identity)
+                .then_some(&symbol.file_identity),
+            content_digest: (span_digest != Some(&symbol.content_digest))
+                .then_some(&symbol.content_digest),
+        }
+    }
+}
+
+impl PersistedSymbolV1 {
+    fn expand(
+        self,
+        identity: SymbolIdentityDigest,
+        file_identity: &FileIdentityDigest,
+        span_digest: Option<ContentDigest>,
+    ) -> Result<LineageSymbolRecordV1, CodeIndexProductionErrorV1> {
+        let omitted = |field: &str| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "sealed file segment symbol omits {field} without a derivation"
+            ))
+        };
+        Ok(LineageSymbolRecordV1 {
+            occurrence: self.occurrence,
+            identity,
+            qualified_name: self.qualified_name,
+            simple_name: self.simple_name,
+            kind: self.kind,
+            visibility: self.visibility,
+            branches: self.branches,
+            loops: self.loops,
+            max_nesting: self.max_nesting,
+            complexity_analysis: self.complexity_analysis,
+            line_span: self.line_span,
+            start_line: self.start_line,
+            signature: self.signature,
+            docstring: self.docstring,
+            is_async: self.is_async,
+            derives: self.derives,
+            skip_test_coverage: self.skip_test_coverage,
+            file_identity: self.file_identity.unwrap_or_else(|| file_identity.clone()),
+            content_digest: match self.content_digest {
+                Some(explicit) => explicit,
+                None => span_digest.ok_or_else(|| omitted("content_digest"))?,
+            },
+        })
+    }
+}
+
+/// The id [`code_chunk_id`] mints for a chunk of this file with an empty
+/// split path, which every chunk has unless the chunker windowed it or placed
+/// it in a gap.
+fn derived_chunk_id(
+    scope: &FileScopeIdentityV1,
+    file_identity: &FileIdentityDigest,
+    symbol_identity: Option<&SymbolIdentityDigest>,
+    grain: CodeSearchChunkGrainV1,
+    chunker_revision: &ChunkerRevision,
+) -> Result<CodeSearchChunkId, CodeIndexProductionErrorV1> {
+    code_chunk_id(ChunkLogicalIdentityV1 {
+        repository: scope.repository_id.clone(),
+        file_identity: file_identity.clone(),
+        symbol_identity: symbol_identity.cloned(),
+        grain,
+        split_path: Vec::new(),
+        chunker_revision: chunker_revision.clone(),
+    })
+    .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
 }
 
 fn term_bytes(text: &str, chunk_span: SourceSpan, term_span: SourceSpan) -> Option<&[u8]> {
@@ -401,7 +564,9 @@ struct PersistedChunkDefaultsV2 {
 
 #[derive(Serialize)]
 struct PersistedChunkRefV2<'a> {
-    id: &'a CodeSearchChunkId,
+    /// Present only when it is not [`derived_chunk_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a CodeSearchChunkId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symbol_occurrence_id: Option<&'a SymbolOccurrenceId>,
     /// Index of the parent row within this file; a parent outside the file
@@ -434,7 +599,8 @@ struct PersistedChunkRefV2<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedChunkV2 {
-    id: CodeSearchChunkId,
+    #[serde(default)]
+    id: Option<CodeSearchChunkId>,
     #[serde(default)]
     symbol_occurrence_id: Option<SymbolOccurrenceId>,
     #[serde(default)]
@@ -491,6 +657,22 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
             .enumerate()
             .map(|(index, chunk)| (&chunk.id, index))
             .collect::<HashMap<_, _>>();
+        let file_identity =
+            code_file_identity(scope.repository_id.as_str(), &authority.logical_path)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let symbol_identities = artifacts
+            .symbols
+            .iter()
+            .map(|symbol| (&symbol.occurrence, &symbol.identity))
+            .collect::<HashMap<_, _>>();
+        let text_slices = ChunkTextSlicesV1::new(&text.text_ranges, &text.text)?;
+        let span_digests = published_symbol_spans(rows.iter().map(Arc::as_ref))
+            .into_iter()
+            .filter_map(|(occurrence, span)| {
+                let text = text_slices.slice(span).ok()?;
+                Some((occurrence, content_digest(text.as_bytes())))
+            })
+            .collect::<HashMap<_, _>>();
         let chunks = rows
             .iter()
             .zip(derived_text)
@@ -501,8 +683,29 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
                     .as_ref()
                     .and_then(|parent| row_index.get(parent))
                     .and_then(|index| u32::try_from(*index).ok());
+                let derived_id = match &chunk.anchor.symbol_occurrence_id {
+                    None => Some(derived_chunk_id(
+                        scope,
+                        &file_identity,
+                        None,
+                        chunk.anchor.grain,
+                        &chunk.chunker_revision,
+                    )?),
+                    Some(occurrence) => symbol_identities
+                        .get(occurrence)
+                        .map(|identity| {
+                            derived_chunk_id(
+                                scope,
+                                &file_identity,
+                                Some(identity),
+                                chunk.anchor.grain,
+                                &chunk.chunker_revision,
+                            )
+                        })
+                        .transpose()?,
+                };
                 Ok(PersistedChunkRefV2 {
-                    id: &chunk.id,
+                    id: (derived_id.as_ref() != Some(&chunk.id)).then_some(&chunk.id),
                     symbol_occurrence_id: chunk.anchor.symbol_occurrence_id.as_ref(),
                     parent,
                     parent_chunk_id: if parent.is_none() {
@@ -546,6 +749,21 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
                 })
             })
             .collect::<Result<_, CodeIndexProductionErrorV1>>()?;
+        let mut symbols = artifacts
+            .symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.identity.as_str(),
+                    PersistedSymbolRefV1::new(
+                        symbol,
+                        &file_identity,
+                        span_digests.get(&symbol.occurrence),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        symbols.sort_by(|left, right| left.0.cmp(right.0));
         Ok(Self {
             authority: PersistedFileAuthorityRefV1 {
                 logical_path: &authority.logical_path,
@@ -562,7 +780,7 @@ impl<'a> PersistedFileGenerationArtifactsRefV2<'a> {
                     text,
                     chunks,
                 },
-                symbols: &artifacts.symbols,
+                symbols: symbols.into_iter().map(|(_, symbol)| symbol).collect(),
                 edges: &artifacts.edges,
                 edge_abstentions: &artifacts.edge_abstentions,
                 imports: &artifacts.imports,
@@ -613,9 +831,14 @@ impl PersistedFileGenerationArtifactsV2 {
     /// Expand the row form back into the full file record. Rows are rebuilt
     /// exactly as the chunker emitted them; the caller's chunk validation
     /// then decides whether the expanded file is admissible.
+    ///
+    /// `symbol_occurrences` are the segment's occurrence keys bound to this
+    /// file occurrence, in the order of `symbol_identities`.
     pub(super) fn expand(
         self,
         scope: &FileScopeIdentityV1,
+        symbol_occurrences: &[SymbolOccurrenceId],
+        symbol_identities: &[SymbolIdentityDigest],
     ) -> Result<PersistedFileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
         let authority = ReceiptBoundCodeFileAuthorityV1 {
             project_id: scope.project_id.clone(),
@@ -632,18 +855,53 @@ impl PersistedFileGenerationArtifactsV2 {
         let file = artifacts.chunks;
         let defaults = file.chunk_defaults;
         let text = ChunkTextSlicesV1::new(&file.text_ranges, &file.text)?;
-        let ids = file
-            .chunks
-            .iter()
-            .map(|chunk| chunk.id.clone())
-            .collect::<Vec<_>>();
         let missing_default = |field: &str| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed file segment chunk omits {field} without a file default"
             ))
         };
+        let file_identity =
+            code_file_identity(scope.repository_id.as_str(), &authority.logical_path)
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let identities = symbol_occurrences
+            .iter()
+            .zip(symbol_identities)
+            .collect::<HashMap<_, _>>();
+        let ids = file
+            .chunks
+            .iter()
+            .map(|chunk| match &chunk.id {
+                Some(explicit) => Ok(explicit.clone()),
+                None => {
+                    let symbol_identity = chunk
+                        .symbol_occurrence_id
+                        .as_ref()
+                        .map(|occurrence| {
+                            identities.get(occurrence).copied().ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "sealed file segment chunk omits its id for a symbol outside its file"
+                                        .to_owned(),
+                                )
+                            })
+                        })
+                        .transpose()?;
+                    let chunker_revision = chunk
+                        .chunker_revision
+                        .as_ref()
+                        .or_else(|| defaults.as_ref().map(|defaults| &defaults.chunker_revision))
+                        .ok_or_else(|| missing_default("chunker_revision"))?;
+                    derived_chunk_id(
+                        scope,
+                        &file_identity,
+                        symbol_identity,
+                        chunk.grain,
+                        chunker_revision,
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut chunks = Vec::with_capacity(file.chunks.len());
-        for chunk in file.chunks {
+        for (chunk, id) in file.chunks.into_iter().zip(&ids) {
             let parent_chunk_id = match (chunk.parent, chunk.parent_chunk_id) {
                 (Some(index), None) => Some(ids.get(index as usize).cloned().ok_or_else(|| {
                     CodeIndexProductionErrorV1::Contract(
@@ -672,17 +930,26 @@ impl PersistedFileGenerationArtifactsV2 {
                             "sealed chunk exact term span is outside its chunk text".to_owned(),
                         )
                     })?;
+                    let symbol_occurrence_id = match term.symbol_occurrence_id {
+                        None if term.kind == ExactTechnicalTermKindV1::WholeSymbol => {
+                            chunk.symbol_occurrence_id.clone()
+                        }
+                        explicit => explicit,
+                    };
                     ExactTechnicalTermV1::from_persisted_parts(
                         term.kind,
                         bytes.to_vec(),
                         term.span,
-                        term.symbol_occurrence_id,
+                        symbol_occurrence_id,
                     )
                     .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let content_digest = chunk
+                .content_digest
+                .unwrap_or_else(|| content_digest(sanitized_text.as_str().as_bytes()));
             chunks.push(Arc::new(CodeSearchChunkV1 {
-                id: chunk.id,
+                id: id.clone(),
                 anchor: CodeSearchChunkAnchorV1 {
                     generation_id: file.generation_id.clone(),
                     file_occurrence_id: file.file_occurrence_id.clone(),
@@ -692,9 +959,7 @@ impl PersistedFileGenerationArtifactsV2 {
                     grain: chunk.grain,
                     ordinal: chunk.ordinal,
                 },
-                content_digest: chunk
-                    .content_digest
-                    .unwrap_or_else(|| content_digest(sanitized_text.as_str().as_bytes())),
+                content_digest,
                 language_descriptor_revision: chunk
                     .language_descriptor_revision
                     .or_else(|| {
@@ -732,6 +997,28 @@ impl PersistedFileGenerationArtifactsV2 {
                 sanitized_text,
             }));
         }
+        let symbol_spans = published_symbol_spans(chunks.iter().map(Arc::as_ref));
+        let symbols = artifacts
+            .symbols
+            .into_iter()
+            .map(|symbol| {
+                let identity = identities
+                    .get(&symbol.occurrence)
+                    .map(|identity| (*identity).clone())
+                    .ok_or_else(|| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed file segment symbol has no identity key".to_owned(),
+                        )
+                    })?;
+                let span_digest = symbol_spans
+                    .get(&symbol.occurrence)
+                    .and_then(|span| text.slice(*span).ok())
+                    .map(|text| content_digest(text.as_bytes()));
+                symbol
+                    .expand(identity, &file_identity, span_digest)
+                    .map(Arc::new)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(PersistedFileGenerationArtifactsV1 {
             authority,
             extraction: self.extraction,
@@ -746,7 +1033,7 @@ impl PersistedFileGenerationArtifactsV2 {
                     },
                     chunks,
                 },
-                symbols: artifacts.symbols,
+                symbols,
                 edges: artifacts.edges,
                 edge_abstentions: artifacts.edge_abstentions,
                 imports: artifacts.imports,
