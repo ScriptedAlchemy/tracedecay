@@ -969,7 +969,10 @@ async fn dashboard_freshness_reports_a_pending_clone_census_without_computing_it
         "coverage is unknown until the census lands"
     );
     assert!(observation.resources.bytes_on_disk.is_some());
-    assert!(elapsed < Duration::from_millis(500), "status took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "status took {elapsed:?}"
+    );
 
     drop(held_census);
     let tracedecay_contracts::code_index_freshness::CodeCloneIndexStatusV1::Ready { observation } =

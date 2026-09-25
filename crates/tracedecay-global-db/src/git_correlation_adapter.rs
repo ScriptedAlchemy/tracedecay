@@ -24,8 +24,8 @@ use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
     BoundedGitControl, CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth,
     CorrelationIndexPresence, DEFAULT_GIT_EVIDENCE_PUBLICATION_REPLAY_LIMIT, GitCorrelationError,
-    GitCorrelationSessionStore, GitEvidenceGraphView, GitEvidenceProjectionStore,
-    GitReflogSource, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
+    GitCorrelationSessionStore, GitEvidenceGraphView, GitEvidenceProjectionStore, GitReflogSource,
+    SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
     git_evidence_projection_identity, open_git_evidence_graph_view,
     pending_git_evidence_publication_count, read_meta_value, rebuild_pre_index_git_evidence,
     recover_git_evidence_projection, replay_pending_git_evidence_publications,
@@ -1332,7 +1332,8 @@ mod tests {
         let current =
             GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION.to_owned()).unwrap();
         let mut manifest =
-            build_git_evidence_manifest_checked(identity, projection, &current, &|| Ok(())).unwrap();
+            build_git_evidence_manifest_checked(identity, projection, &current, &|| Ok(()))
+                .unwrap();
         let pre_index =
             GraphProjectorRevision::try_from("session-git-evidence-projector.v1".to_owned())
                 .unwrap();
