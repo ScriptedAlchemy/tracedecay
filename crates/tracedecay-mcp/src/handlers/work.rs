@@ -1,10 +1,10 @@
-//! MCP adapter for the canonical Work application owner.
+//! Tool adapter for the canonical Work application owner.
 //!
-//! Work owns a typed HTTP envelope already. MCP builds that exact request and
-//! returns the owner's envelope as JSON content, so request decoding, binding
-//! lookup, cancellation policy, result contracts, and failure taxonomy cannot
-//! drift between the two transports. The composition root supplies the
-//! daemon-owned invoke; this crate never imports that owner.
+//! Work owns a typed HTTP envelope already. MCP and `tracedecay tool` build
+//! that exact request and return the owner's envelope as JSON content, so
+//! request decoding, binding lookup, cancellation policy, result contracts, and
+//! failure taxonomy cannot drift between transports. The composition root
+//! supplies the daemon-owned invoke; this crate never imports that owner.
 
 use std::future::Future;
 

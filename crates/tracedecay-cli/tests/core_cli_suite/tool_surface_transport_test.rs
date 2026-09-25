@@ -572,3 +572,126 @@ fn application_surface_tools_do_not_invent_a_project_outside_a_checkout() {
         outcome.stdout
     );
 }
+
+/// The executable binding id and result schema a Work or Workflow tool's
+/// typed envelope must carry.
+fn family_binding(
+    registry: &tracedecay_tool_catalog::ExecutableBindingRegistryV1,
+    operation_id: &str,
+) -> (String, String) {
+    let operation_id = tracedecay_tool_catalog::OperationId::new(operation_id.to_owned()).unwrap();
+    let binding = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .unwrap_or_else(|| panic!("{} is not executable", operation_id.as_str()));
+    let (binding_id, _) = binding
+        .public_route()
+        .unwrap_or_else(|| panic!("{} has no public route", operation_id.as_str()));
+    (
+        binding_id.as_str().to_owned(),
+        binding
+            .result_schema()
+            .schema_ref()
+            .schema_id()
+            .as_str()
+            .to_owned(),
+    )
+}
+
+fn assert_cli_family_envelope(
+    outcome: &SurfaceOutcome,
+    tool: &str,
+    kind: &str,
+    schema_id: &str,
+    binding_id: Option<&str>,
+) -> Value {
+    let payload = outcome.payload();
+    assert_eq!(
+        payload["kind"], kind,
+        "`tracedecay tool {tool}` must answer with the family's typed envelope\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    let value = &payload["value"];
+    assert_eq!(value["contract"]["schema_id"], schema_id, "{tool}");
+    assert_eq!(value["binding_id"].as_str(), binding_id, "{tool}");
+    let request_id = value["request_id"].as_str().unwrap_or_default();
+    assert!(
+        request_id.starts_with("request.cli."),
+        "`tracedecay tool {tool}` must reach the owner as a CLI request, not a daemon MCP \
+         tool call; request_id was {request_id:?}"
+    );
+    payload
+}
+
+/// `tracedecay tool` runs Work and Workflow through their canonical owner over
+/// the daemon socket: the answer is the family's typed envelope, bound to its
+/// executable result contract, under the CLI's own request identity.
+#[test]
+fn work_and_workflow_tools_answer_through_their_typed_owner() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let work = tracedecay_contracts::work_executable_binding_registry().unwrap();
+    let workflow = tracedecay_contracts::workflow_executable_binding_registry().unwrap();
+
+    let listed = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "tracedecay_work_list_attempts",
+        r#"{"page_size":10}"#,
+    );
+    assert!(
+        listed.success,
+        "stdout:\n{}\nstderr:\n{}",
+        listed.stdout, listed.stderr
+    );
+    let (binding_id, schema_id) = family_binding(work, "operation.work.list_attempts");
+    assert_cli_family_envelope(
+        &listed,
+        "tracedecay_work_list_attempts",
+        "success",
+        &schema_id,
+        Some(&binding_id),
+    );
+
+    let definitions =
+        run_surface_tool_from(&home_path, &project_path, "workflow_list_definitions", "{}");
+    assert!(
+        definitions.success,
+        "stdout:\n{}\nstderr:\n{}",
+        definitions.stdout, definitions.stderr
+    );
+    let (binding_id, schema_id) = family_binding(workflow, "operation.workflow.list_definitions");
+    assert_cli_family_envelope(
+        &definitions,
+        "workflow_list_definitions",
+        "success",
+        &schema_id,
+        Some(&binding_id),
+    );
+
+    // An unknown definition is a concealed denial: it keeps the operation's
+    // result contract but withholds the binding, and fails the process.
+    let concealed = run_surface_tool_from(
+        &home_path,
+        &project_path,
+        "tracedecay_workflow_get_definition",
+        r#"{"definition_id":"workflow.absent","definition_version":1}"#,
+    );
+    assert!(
+        !concealed.success,
+        "a typed Workflow problem must fail the process\nstdout:\n{}",
+        concealed.stdout
+    );
+    let (_, schema_id) = family_binding(workflow, "operation.workflow.get_definition");
+    let concealed = assert_cli_family_envelope(
+        &concealed,
+        "tracedecay_workflow_get_definition",
+        "problem",
+        &schema_id,
+        None,
+    );
+    assert_eq!(
+        concealed["value"]["problem"]["kind"],
+        "not_found_or_not_authorized"
+    );
+}
