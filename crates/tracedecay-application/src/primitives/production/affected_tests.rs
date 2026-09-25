@@ -80,7 +80,7 @@ impl tracedecay_contracts::AffectedTestsRetrievalPort for TraceDecayAffectedTest
         attributed_tests_outcome(
             request,
             context.request.scope().clone(),
-            attribution.read_test_attribution(&request.generation),
+            &attribution.read_test_attribution(&request.generation),
             finished_at,
         )
     }
@@ -89,7 +89,7 @@ impl tracedecay_contracts::AffectedTestsRetrievalPort for TraceDecayAffectedTest
 pub(super) fn attributed_tests_outcome(
     request: &AffectedTestsRequest,
     scope: ResolvedScope,
-    read: GenerationProviderReadV1<GenerationTestJoinV1>,
+    read: &GenerationProviderReadV1<GenerationTestJoinV1>,
     finished_at: UtcMicros,
 ) -> RetrievalPortOutcome<AffectedTestsResult> {
     if read.validate().is_err() {
@@ -153,7 +153,7 @@ pub(super) fn attributed_tests_outcome(
         }
     }
 
-    let Some(join) = read.evidence else {
+    let Some(join) = &read.evidence else {
         return affected_tests_unavailable(
             request,
             finished_at,

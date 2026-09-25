@@ -7,15 +7,14 @@ use super::{CodeIndexSchedulerRegistryV1, unique_mounted_for_scope};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
+    /// Record which serving generation answers attribution reads for a root.
+    /// Constant-time on the query path: attribution is built on first read.
     pub(super) async fn install_test_attribution_authority(
         &self,
         project_root: &Path,
         latest: &LatestCompleteCodeIndexV1,
     ) -> bool {
         let Ok(project_root) = canonical_existing_identity(project_root) else {
-            return false;
-        };
-        let Ok(authority) = latest.test_attribution_authority() else {
             return false;
         };
         let serving_generation = {
@@ -25,22 +24,21 @@ impl CodeIndexSchedulerRegistryV1 {
             };
             Arc::clone(&worktree.serving_generation)
         };
-        let serving = serving_generation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation_id = latest.generation.manifest().generation_id.clone();
-        if serving
+        let Some(seated) = serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(LatestCompleteCodeIndexV1::generation)
-            .map(|generation| &generation.manifest().generation_id)
-            != Some(&generation_id)
-        {
+            .map(|serving| &serving.generation)
+            .filter(|generation| generation.manifest().generation_id == generation_id)
+            .map(Arc::downgrade)
+        else {
             return false;
-        }
+        };
         self.test_attribution_authorities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(project_root, (generation_id, authority));
+            .insert(project_root, (generation_id, seated));
         true
     }
 

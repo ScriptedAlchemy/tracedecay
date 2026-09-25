@@ -1075,7 +1075,7 @@ fn published_generation_serves_current_conservative_test_attribution() {
         read.provider_state,
         ProviderEvaluationStateV1::SupportedCompletedComplete | ProviderEvaluationStateV1::Partial
     ));
-    let join = read.evidence.expect("generation attribution");
+    let join = read.evidence.as_ref().expect("generation attribution");
     assert_eq!(join.generation_id, generation.manifest().generation_id);
     assert_eq!(
         join.test_watermark.snapshot_digest,
@@ -1157,7 +1157,7 @@ fn root_feedback_entry_test() {
         .expect("attribution authority");
 
     let read = authority.read_test_attribution(&generation.manifest().generation_id);
-    let join = read.evidence.expect("generation attribution");
+    let join = read.evidence.as_ref().expect("generation attribution");
     let inline_test = generation
         .symbols()
         .symbols
@@ -2395,16 +2395,12 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
         .test_attribution_authority()
         .expect("repeat attribution read is amortized");
     let generation_id = restored.manifest().generation_id.clone();
-    assert_eq!(
-        format!(
-            "{:?}",
-            first_attribution.read_test_attribution(&generation_id)
+    assert!(
+        Arc::ptr_eq(
+            &first_attribution.read_test_attribution(&generation_id),
+            &second_attribution.read_test_attribution(&generation_id),
         ),
-        format!(
-            "{:?}",
-            second_attribution.read_test_attribution(&generation_id)
-        ),
-        "amortized attribution must return the same evidence as the first read"
+        "amortized attribution must share the first read's evidence, not copy it"
     );
 }
 

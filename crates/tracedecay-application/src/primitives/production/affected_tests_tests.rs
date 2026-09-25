@@ -46,9 +46,9 @@ impl GenerationTestAttributionJoinReadPort for AttributionFixture {
     fn read_test_attribution(
         &self,
         _generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
+    ) -> Arc<GenerationProviderReadV1<GenerationTestJoinV1>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.read.clone()
+        Arc::new(self.read.clone())
     }
 }
 
@@ -61,16 +61,18 @@ impl GenerationTestAttributionJoinReadPort for GenerationSwitchingFixture {
     fn read_test_attribution(
         &self,
         generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
+    ) -> Arc<GenerationProviderReadV1<GenerationTestJoinV1>> {
         if generation == &self.current {
-            self.read.clone()
+            Arc::new(self.read.clone())
         } else {
-            GenerationProviderReadV1::new(
-                ProviderEvaluationStateV1::Unavailable,
-                GenerationProviderCoverageV1::Unavailable,
-                None,
+            Arc::new(
+                GenerationProviderReadV1::new(
+                    ProviderEvaluationStateV1::Unavailable,
+                    GenerationProviderCoverageV1::Unavailable,
+                    None,
+                )
+                .expect("unavailable provider read"),
             )
-            .expect("unavailable provider read")
         }
     }
 }

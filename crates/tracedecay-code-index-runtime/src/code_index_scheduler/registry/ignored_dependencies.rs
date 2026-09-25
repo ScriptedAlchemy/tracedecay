@@ -705,15 +705,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 return Err(error);
             }
         }
-        if let Ok(authority) = build.latest.test_attribution_authority() {
-            self.test_attribution_authorities
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    project_root.to_path_buf(),
-                    (build.outcome.generation_id.clone(), authority),
-                );
-        }
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project_root.to_path_buf(),
+                (
+                    build.outcome.generation_id.clone(),
+                    Arc::downgrade(&build.latest.generation),
+                ),
+            );
         // The swap above already installed this candidate in the serving
         // slot, so the broadcast follows a witnessed seat.
         Self::broadcast_generation_publication(

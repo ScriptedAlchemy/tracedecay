@@ -1206,7 +1206,7 @@ impl CodeIndexPublishedGenerationV1 {
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         Ok(PublishedGenerationTestAttributionAuthorityV1 {
             generation_id: self.manifest.generation_id.clone(),
-            read,
+            read: Arc::new(read),
         })
     }
 
