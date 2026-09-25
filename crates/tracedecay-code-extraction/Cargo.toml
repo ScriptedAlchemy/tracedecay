@@ -30,7 +30,7 @@ test-helpers = []
 # indexing its documentation. Its grammar is the dedicated `tree-sitter-md`
 # crate (byte-identical parser/scanner sources to the copy vendored in the
 # large bundle), so `lite` never links the large bundle.
-lite = ["medium-grammars", "lang-markdown"]
+lite = ["medium-grammars", "lang-markdown", "lang-json"]
 # The two grammar bundles are the only compile-time registration points: every
 # `lang-*` feature names the bundle that ships its grammar, and `ts_provider`
 # builds the lookup from whichever bundles are enabled.
@@ -65,6 +65,10 @@ lang-hlsl = ["dep:tree-sitter-hlsl"]
 # ships that grammar, so the adapter never needs the large bundle.
 lang-metal = ["medium-grammars"]
 lang-markdown = ["dep:tree-sitter-md"]
+# JSON rides in `lite` because TypeScript does: `package.json` and `tsconfig`
+# are the module-resolution authority the TypeScript cross-file resolver reads
+# from the sealed file set, exactly as Rust reads `Cargo.toml` through TOML.
+lang-json = ["dep:tree-sitter-json"]
 lang-r = ["large-grammars"]
 lang-sql = ["large-grammars"]
 lang-julia = ["large-grammars"]
@@ -86,6 +90,7 @@ tracedecay-large-treesitters = { package = "tokensave-large-treesitters", versio
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
 tree-sitter = "0.26"
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
 tree-sitter-md = { version = "=0.5.3", default-features = false, optional = true }
 tree-sitter-language = "0.1"
 # Resolved through the workspace [patch.crates-io] git pin, which carries the

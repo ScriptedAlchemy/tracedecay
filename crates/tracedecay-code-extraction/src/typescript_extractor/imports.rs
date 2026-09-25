@@ -91,6 +91,7 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
             state,
             &module_specifier,
             (None, None),
+            BindingShape::IMPORT,
             ImportNamespaceV1::SideEffect,
             module_kind,
             node,
@@ -111,6 +112,7 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
                     state,
                     &module_specifier,
                     (Some("default".to_owned()), Some(local_name)),
+                    BindingShape::IMPORT,
                     statement_namespace,
                     module_kind,
                     child,
@@ -129,6 +131,98 @@ pub(super) fn visit_import(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
                 &module_specifier,
                 statement_namespace,
                 module_kind,
+            ),
+            _ => {}
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+/// `export … from "m"` forwards another module's bindings without binding
+/// them locally. Each forwarded name is public import evidence so the seal's
+/// re-export walk can follow a barrel to the defining file: `export { a as b }
+/// from` keeps `a` as the imported name and `b` as the exported (local) name,
+/// `export * from` is a public glob, and `export * as ns from` exports the
+/// namespace under `ns`.
+pub(super) fn visit_reexport(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
+    let Some(module_specifier) = extract_module_specifier(state, node) else {
+        return;
+    };
+    let Some(module_kind) = import_module_kind("typescript", &module_specifier) else {
+        return;
+    };
+    let namespace = if has_unnamed_child_kind(node, "type") {
+        ImportNamespaceV1::Type
+    } else {
+        ImportNamespaceV1::Value
+    };
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+    loop {
+        let child = cursor.node();
+        match child.kind() {
+            "export_clause" => {
+                let mut specifiers = child.walk();
+                if specifiers.goto_first_child() {
+                    loop {
+                        let specifier = specifiers.node();
+                        if specifier.kind() == "export_specifier"
+                            && let Some(name_node) = specifier.child_by_field_name("name")
+                        {
+                            let imported_name = binding_name(state, name_node);
+                            let exported_name = match specifier.child_by_field_name("alias") {
+                                Some(alias) => binding_name(state, alias),
+                                None => imported_name.clone(),
+                            };
+                            let namespace = if namespace == ImportNamespaceV1::Type
+                                || has_unnamed_child_kind(specifier, "type")
+                            {
+                                ImportNamespaceV1::Type
+                            } else {
+                                ImportNamespaceV1::Value
+                            };
+                            push_evidence(
+                                state,
+                                &module_specifier,
+                                (Some(imported_name), Some(exported_name)),
+                                BindingShape::REEXPORT,
+                                namespace,
+                                module_kind,
+                                specifier,
+                            );
+                        }
+                        if !specifiers.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+            }
+            "namespace_export" => {
+                if let Some(local) = find_direct_child_by_kind(child, "identifier") {
+                    let exported_name = state.node_text(local).to_string();
+                    push_evidence(
+                        state,
+                        &module_specifier,
+                        (Some("*".to_owned()), Some(exported_name)),
+                        BindingShape::REEXPORT,
+                        namespace,
+                        module_kind,
+                        child,
+                    );
+                }
+            }
+            "*" => push_evidence(
+                state,
+                &module_specifier,
+                (Some("*".to_owned()), None),
+                BindingShape::REEXPORT_GLOB,
+                namespace,
+                module_kind,
+                node,
             ),
             _ => {}
         }
@@ -171,6 +265,7 @@ fn visit_named_imports(
                 state,
                 module_specifier,
                 (Some(imported_name), Some(local_name)),
+                BindingShape::IMPORT,
                 namespace,
                 module_kind,
                 specifier,
@@ -197,16 +292,41 @@ fn visit_namespace_import(
         state,
         module_specifier,
         (Some("*".to_owned()), Some(local_name)),
+        BindingShape::IMPORT,
         namespace,
         module_kind,
         namespace_import,
     );
 }
 
+/// Whether a binding row is a local import or a forwarded re-export, and
+/// whether it names every export of its module.
+#[derive(Clone, Copy)]
+struct BindingShape {
+    is_public: bool,
+    is_glob: bool,
+}
+
+impl BindingShape {
+    const IMPORT: Self = Self {
+        is_public: false,
+        is_glob: false,
+    };
+    const REEXPORT: Self = Self {
+        is_public: true,
+        is_glob: false,
+    };
+    const REEXPORT_GLOB: Self = Self {
+        is_public: true,
+        is_glob: true,
+    };
+}
+
 fn push_evidence(
     state: &mut ExtractionState<'_>,
     module_specifier: &str,
     names: (Option<String>, Option<String>),
+    shape: BindingShape,
     namespace: ImportNamespaceV1,
     module_kind: ImportModuleKindV1,
     evidence_node: TsNode<'_>,
@@ -219,9 +339,9 @@ fn push_evidence(
         module_specifier: module_specifier.to_owned(),
         imported_name: names.0,
         local_name: names.1,
-        is_public: false,
+        is_public: shape.is_public,
         reexport_scope: None,
-        is_glob: false,
+        is_glob: shape.is_glob,
         namespace,
         module_kind,
         span,

@@ -219,14 +219,17 @@ impl StaticLanguageRegistry {
             // callee. Only re-extraction removes the poisoned record. Rust v13
             // retains unresolved receiver-call evidence at the parser's member
             // token; re-extracting Rust does not perturb other languages' rows.
+            // TypeScript v7 records `export … from` forwarding as public
+            // import evidence and retains explicitly imported ubiquitous names
+            // as cross-file candidates, so barrels and workspace packages bind.
             // The C-comment docstring languages moved one revision when a
             // docstring stopped absorbing trailing or blank-line-detached
             // comments and `///` lost its stray `/`; QBasic dialects moved when
             // CONST names stopped losing their text before an underscore.
             let extractor_revision = match language.as_str() {
                 "rust" => 13,
-                "protobuf" => 7,
-                "typescript" | "sql" => 6,
+                "protobuf" | "typescript" => 7,
+                "sql" => 6,
                 "c" | "cpp" | "metal" | "objc" | "go" | "glsl" | "pascal" | "qbasic"
                 | "quickbasic" => 6,
                 _ => 5,
@@ -501,6 +504,7 @@ mod tests {
                 "haskell",
                 "hlsl",
                 "java",
+                "json",
                 "julia",
                 "kotlin",
                 "lean",
